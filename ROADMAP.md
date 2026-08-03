@@ -47,7 +47,7 @@ Full design rationale and the original-system code map live at `~/.claude/plans/
 - ⬜ Overview (small multiples) + multi-range detail (3h/30h/10d/400d) + unison scaling in the SPA
 - ⬜ Top-N "charts" (worst by loss/median/stddev) and alternate menu hierarchies
 - ⬜ Drag-to-zoom time range (refetch, not image swap); in-app dark-mode toggle persistence
-- ⬜ Prometheus metrics export (median/loss) for Grafana-native users
+- ✅ Prometheus metrics export (`/metrics`: median/loss/up per target) for Grafana-native users
 - ⬜ Availability/SLA reporting (the tSmoke equivalent)
 
 ## Notes / decisions

@@ -5,8 +5,10 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"math"
 	"net/http"
+	"strings"
 
 	"smokeping-modern/internal/probe"
 	"smokeping-modern/internal/store"
@@ -24,6 +26,7 @@ func (srv *Server) Routes() *http.ServeMux {
 	mux.HandleFunc("GET /api/probes", srv.probes)
 	mux.HandleFunc("GET /api/targets", srv.targets)
 	mux.HandleFunc("GET /api/series", srv.series)
+	mux.HandleFunc("GET /metrics", srv.metrics)
 	if srv.webDir != "" {
 		// Serve the SPA/static assets at the root (same-origin with the API).
 		mux.Handle("GET /", http.FileServer(http.Dir(srv.webDir)))
@@ -122,4 +125,45 @@ func (srv *Server) series(w http.ResponseWriter, r *http.Request) {
 		rounds = append(rounds, rd)
 	}
 	writeJSON(w, map[string]any{"target": key, "rounds": rounds})
+}
+
+// metrics exposes the latest per-target values in Prometheus text format so
+// Grafana/Alertmanager-native setups can scrape and alert on them.
+func (srv *Server) metrics(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	var b strings.Builder
+	b.WriteString("# HELP smokeping_probe_median_seconds Median round-trip time of the most recent round.\n")
+	b.WriteString("# TYPE smokeping_probe_median_seconds gauge\n")
+	b.WriteString("# HELP smokeping_probe_loss_ratio Fraction of pings lost in the most recent round (0..1).\n")
+	b.WriteString("# TYPE smokeping_probe_loss_ratio gauge\n")
+	b.WriteString("# HELP smokeping_probe_up 1 if the most recent round got at least one reply, else 0.\n")
+	b.WriteString("# TYPE smokeping_probe_up gauge\n")
+	for _, k := range srv.store.Keys() {
+		o, ok := srv.store.Latest(k)
+		if !ok {
+			continue
+		}
+		lbl := fmt.Sprintf(`{target=%q,probe=%q}`, escapeLabel(o.Target.Name), escapeLabel(o.ProbeName))
+		median := o.Computed.Median
+		if math.IsNaN(median) {
+			fmt.Fprintf(&b, "smokeping_probe_median_seconds%s NaN\n", lbl)
+		} else {
+			fmt.Fprintf(&b, "smokeping_probe_median_seconds%s %g\n", lbl, median)
+		}
+		fmt.Fprintf(&b, "smokeping_probe_loss_ratio%s %g\n", lbl, o.Computed.LossFraction())
+		up := 0
+		if o.Computed.Loss < o.Computed.Pings {
+			up = 1
+		}
+		fmt.Fprintf(&b, "smokeping_probe_up%s %d\n", lbl, up)
+	}
+	_, _ = w.Write([]byte(b.String()))
+}
+
+// escapeLabel escapes a Prometheus label value (backslash, double-quote, newline).
+func escapeLabel(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `"`, `\"`)
+	s = strings.ReplaceAll(s, "\n", `\n`)
+	return s
 }

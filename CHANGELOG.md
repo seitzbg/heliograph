@@ -49,6 +49,9 @@ active development, so everything currently lives under _Unreleased_.
   including the loss-colored median on real persisted loss data.
 - Graceful shutdown: `smoked` cancels in-flight probes and shuts the HTTP server down
   cleanly on SIGINT/SIGTERM (signal-aware context). Verified (clean exit 0 on SIGTERM).
+- Prometheus `/metrics` endpoint (dependency-free text exposition): per-target/probe
+  `smokeping_probe_median_seconds`, `smokeping_probe_loss_ratio`, `smokeping_probe_up`.
+  Lets Grafana/Alertmanager-native setups scrape and alert. Unit-tested + live-verified.
 
 ### CI
 - GitLab CI pipeline (`.gitlab-ci.yml`): `go vet` + `go build` + `go test` on `golang:1.26`,
