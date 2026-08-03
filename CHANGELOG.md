@@ -1,10 +1,19 @@
 # Changelog
 
 All notable changes to **smokeping-modern** are recorded here. The format follows
-[Keep a Changelog](https://keepachangelog.com/); this project is pre-1.0 and under
-active development, so everything currently lives under _Unreleased_.
+[Keep a Changelog](https://keepachangelog.com/) and the project aims to follow
+[Semantic Versioning](https://semver.org/). Pre-1.0, minor versions may carry
+breaking changes.
 
 ## [Unreleased]
+
+## [0.1.0] - 2026-08-03
+
+First tagged release: a working, non-Perl SmokePing core. A fast parallel poller
+with pluggable probes, TimescaleDB persistence with a downsampling tier, a canvas
+smoke-graph dashboard, YAML config with inheritance, an alert engine, Prometheus
+metrics, and one-command Docker bring-up. All three founding requirements met —
+the smoke-graph look, a fast/parallel poller, and probes as plugins.
 
 ### Added — MVP collector core (2026-08-03)
 - Plugin `Probe` interface + registry (`internal/probe`); probes self-register via `init()`.
@@ -73,3 +82,6 @@ active development, so everything currently lives under _Unreleased_.
 - `CHANGELOG.md` and `ROADMAP.md` added to track progress and the plan.
 - Full re-implementation reference / code map maintained outside the repo at
   `~/.claude/plans/smokeping-codemap/`.
+
+[Unreleased]: https://git.fiber.house/munro/smokeping-modern/-/compare/v0.1.0...main
+[0.1.0]: https://git.fiber.house/munro/smokeping-modern/-/tags/v0.1.0

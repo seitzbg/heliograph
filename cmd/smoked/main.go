@@ -37,7 +37,12 @@ import (
 	_ "smokeping-modern/internal/probe/tcpconnect"
 )
 
+// version is the smoked release version. Overridable at build time with
+//   go build -ldflags "-X main.version=$(git describe --tags)"
+var version = "0.1.0"
+
 func main() {
+	showVersion := flag.Bool("version", false, "print version and exit")
 	rounds := flag.Int("rounds", 2, "number of measurement rounds to run")
 	pings := flag.Int("pings", 10, "pings per round (N)")
 	workers := flag.Int("workers", 50, "max concurrent probes")
@@ -52,7 +57,12 @@ func main() {
 	webhook := flag.String("webhook", "", "webhook URL for alerts named 'to: [webhook]'")
 	flag.Parse()
 
-	fmt.Printf("registered probe plugins: %s\n\n", strings.Join(probe.Registered(), ", "))
+	if *showVersion {
+		fmt.Printf("smoked %s\n", version)
+		return
+	}
+
+	fmt.Printf("smoked %s — registered probe plugins: %s\n\n", version, strings.Join(probe.Registered(), ", "))
 
 	notifiers := map[string]alert.Notifier{"log": alert.LogNotifier{W: os.Stdout}}
 	if *webhook != "" {
