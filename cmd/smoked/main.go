@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"smokeping-modern/internal/api"
+	"smokeping-modern/internal/config"
 	"smokeping-modern/internal/model"
 	"smokeping-modern/internal/probe"
 	"smokeping-modern/internal/scheduler"
@@ -39,11 +40,29 @@ func main() {
 	addr := flag.String("addr", ":8087", "API listen address when -serve")
 	webdir := flag.String("webdir", "web", "directory of static web assets to serve at /")
 	dsn := flag.String("dsn", "", "TimescaleDB/PostgreSQL DSN; if set, persist there instead of in-memory")
+	configPath := flag.String("config", "", "path to a YAML target-tree config; if set, replaces the built-in demo targets")
 	flag.Parse()
 
 	fmt.Printf("registered probe plugins: %s\n\n", strings.Join(probe.Registered(), ", "))
 
-	monitors := demoMonitors(*pings, *step)
+	// Targets come from a YAML config (with inheritance) if -config is given,
+	// else from the built-in demo set.
+	var monitors []model.Monitor
+	var probeCfgs map[string]map[string]string
+	if *configPath != "" {
+		cfg, err := config.Load(*configPath)
+		if err != nil {
+			log.Fatalf("config: %v", err)
+		}
+		monitors, err = cfg.Monitors()
+		if err != nil {
+			log.Fatalf("%v", err)
+		}
+		probeCfgs = cfg.Probes
+		fmt.Printf("config: %d targets from %s\n", len(monitors), *configPath)
+	} else {
+		monitors = demoMonitors(*pings, *step)
+	}
 
 	// Build probe instances once per (kind,config); reuse across rounds/targets.
 	probes := map[string]probe.Probe{}
@@ -52,7 +71,7 @@ func main() {
 		p, ok := probes[m.ProbeKind]
 		if !ok {
 			var err error
-			p, err = probe.New(m.ProbeKind, nil)
+			p, err = probe.New(m.ProbeKind, probeCfgs[m.ProbeKind])
 			if err != nil {
 				log.Fatalf("probe %s: %v", m.ProbeKind, err)
 			}

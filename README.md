@@ -18,6 +18,7 @@ Goal: reproduce SmokePing's features and its signature **smoke graphs**, with a 
 - **SmokePing sample math** — median, loss (= missing samples), and the "centered" array that makes smoke bands render symmetrically (`internal/sample`, unit-tested against SmokePing's `rrdupdate_string` semantics).
 - **JSON API** — `/api/probes`, `/api/targets`, `/api/series?target=NAME`. `series` returns the raw per-round sample array (the input a client-side smoke chart needs).
 - **Live web dashboard** (`web/index.html`) — fetches `/api/series` and renders each target with the shared canvas smoke renderer (`web/smoke.js`), auto-refreshing; light/dark theme-aware. Served same-origin by the collector.
+- **YAML config with inheritance** (`internal/config`, `config.example.yaml`) — a target tree where `probe`/`pings`/`step`/`params` set on a node apply to everything beneath it until overridden (SmokePing's key ergonomic). Each leaf is validated against its probe's `Schema()` — the modern stand-in for SmokePing's per-probe dynamic grammar. `-config file.yaml` replaces the built-in demo targets.
 - **Pluggable store** — a `store.Store` interface with two implementations:
   - `MemStore` — in-memory (default; for dev/tests).
   - `pgstore` — **TimescaleDB**: one row per round in a `samples` hypertable keeping the raw per-round sample array (loss gaps stored as SQL `NULL`), so smoke bands come from the real distribution. Verified end-to-end against a live TimescaleDB.
@@ -33,6 +34,9 @@ curl 'localhost:8087/api/series?target=Cloudflare%20DNS%20(ICMP)'
 
 # Persist to TimescaleDB instead of memory:
 go run ./cmd/smoked -serve -dsn 'postgres://user:pass@host:5432/smoke?sslmode=disable'
+
+# Load targets from a YAML tree (with inheritance) instead of the demo set:
+go run ./cmd/smoked -serve -config config.example.yaml
 ```
 
 ### TimescaleDB (dev + integration test)
@@ -72,6 +76,7 @@ internal/
     fping/       fping(8) wrapper probe (own process group; killed as a group on timeout)
   sample/        median / loss / centered-smoke-array math (+ tests)
   scheduler/     parallel worker pool, per-target timeout, phase-aligned NextDelay (+ tests)
+  config/        YAML target-tree loader + inheritance resolver (+ tests)
   model/         Monitor (a configured leaf target)
   store/         store.Store interface + MemStore (in-memory)
     pgstore/     TimescaleDB implementation (samples hypertable, raw sample arrays)
