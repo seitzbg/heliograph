@@ -1,7 +1,7 @@
-// Package store is a minimal in-memory time-series sink for the MVP. It keeps
-// the latest outcome plus a bounded history per target key. In production this
-// is replaced by TimescaleDB (raw N samples per round; smoke bands computed as
-// SQL quantiles at query time) — see codemap 07 §4.
+// Package store defines the time-series sink interface and an in-memory
+// implementation. The persistent implementation lives in store/pgstore
+// (TimescaleDB). Keeping raw per-round samples is deliberate: the smoke bands
+// are computed from the distribution, not just the median (see codemap 07 §4).
 package store
 
 import (
@@ -10,7 +10,18 @@ import (
 	"smokeping-modern/internal/scheduler"
 )
 
-type Store struct {
+// Store is the sink the collector writes each round's outcomes to, and the API
+// reads series back from.
+type Store interface {
+	Add(outcomes []scheduler.Outcome)
+	Keys() []string
+	Latest(key string) (scheduler.Outcome, bool)
+	History(key string) []scheduler.Outcome
+}
+
+// MemStore is the in-memory implementation: latest + bounded history per target.
+// Used by default and in tests; not durable.
+type MemStore struct {
 	mu      sync.RWMutex
 	latest  map[string]scheduler.Outcome
 	history map[string][]scheduler.Outcome
@@ -18,19 +29,18 @@ type Store struct {
 	cap     int
 }
 
-func New(historyCap int) *Store {
+func NewMem(historyCap int) *MemStore {
 	if historyCap <= 0 {
 		historyCap = 512
 	}
-	return &Store{
+	return &MemStore{
 		latest:  map[string]scheduler.Outcome{},
 		history: map[string][]scheduler.Outcome{},
 		cap:     historyCap,
 	}
 }
 
-// Add records a round's outcomes.
-func (s *Store) Add(outcomes []scheduler.Outcome) {
+func (s *MemStore) Add(outcomes []scheduler.Outcome) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, o := range outcomes {
@@ -47,8 +57,7 @@ func (s *Store) Add(outcomes []scheduler.Outcome) {
 	}
 }
 
-// Keys returns target keys in first-seen order.
-func (s *Store) Keys() []string {
+func (s *MemStore) Keys() []string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out := make([]string, len(s.keys))
@@ -56,14 +65,14 @@ func (s *Store) Keys() []string {
 	return out
 }
 
-func (s *Store) Latest(key string) (scheduler.Outcome, bool) {
+func (s *MemStore) Latest(key string) (scheduler.Outcome, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	o, ok := s.latest[key]
 	return o, ok
 }
 
-func (s *Store) History(key string) []scheduler.Outcome {
+func (s *MemStore) History(key string) []scheduler.Outcome {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	h := s.history[key]
@@ -71,3 +80,6 @@ func (s *Store) History(key string) []scheduler.Outcome {
 	copy(out, h)
 	return out
 }
+
+// compile-time check
+var _ Store = (*MemStore)(nil)

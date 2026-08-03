@@ -13,11 +13,11 @@ import (
 )
 
 type Server struct {
-	store  *store.Store
+	store  store.Store
 	webDir string
 }
 
-func New(s *store.Store, webDir string) *Server { return &Server{store: s, webDir: webDir} }
+func New(s store.Store, webDir string) *Server { return &Server{store: s, webDir: webDir} }
 
 func (srv *Server) Routes() *http.ServeMux {
 	mux := http.NewServeMux()

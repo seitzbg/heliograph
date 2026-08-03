@@ -18,7 +18,9 @@ Goal: reproduce SmokePing's features and its signature **smoke graphs**, with a 
 - **SmokePing sample math** — median, loss (= missing samples), and the "centered" array that makes smoke bands render symmetrically (`internal/sample`, unit-tested against SmokePing's `rrdupdate_string` semantics).
 - **JSON API** — `/api/probes`, `/api/targets`, `/api/series?target=NAME`. `series` returns the raw per-round sample array (the input a client-side smoke chart needs).
 - **Live web dashboard** (`web/index.html`) — fetches `/api/series` and renders each target with the shared canvas smoke renderer (`web/smoke.js`), auto-refreshing; light/dark theme-aware. Served same-origin by the collector.
-- **In-memory store** — placeholder for TimescaleDB (which will keep raw N samples/round; bands = SQL quantiles at query time).
+- **Pluggable store** — a `store.Store` interface with two implementations:
+  - `MemStore` — in-memory (default; for dev/tests).
+  - `pgstore` — **TimescaleDB**: one row per round in a `samples` hypertable keeping the raw per-round sample array (loss gaps stored as SQL `NULL`), so smoke bands come from the real distribution. Verified end-to-end against a live TimescaleDB.
 
 ## Run it
 
@@ -28,7 +30,24 @@ go run ./cmd/smoked -rounds 2 -pings 10    # measure a demo target set, print a 
 go run ./cmd/smoked -serve -addr :8087     # serve the live dashboard + JSON API (polls forever)
 #   -> open http://localhost:8087/  for the live smoke graphs
 curl 'localhost:8087/api/series?target=Cloudflare%20DNS%20(ICMP)'
+
+# Persist to TimescaleDB instead of memory:
+go run ./cmd/smoked -serve -dsn 'postgres://user:pass@host:5432/smoke?sslmode=disable'
 ```
+
+### TimescaleDB (dev + integration test)
+
+```sh
+# ephemeral instance for local dev/testing
+podman run -d --name sp-ts -e POSTGRES_USER=smoke -e POSTGRES_PASSWORD=smoke \
+  -e POSTGRES_DB=smoke -p 127.0.0.1:5433:5432 docker.io/timescale/timescaledb:latest-pg16
+
+# the pgstore integration test is skipped unless a DSN is provided:
+SMOKE_TEST_DSN='postgres://smoke:smoke@127.0.0.1:5433/smoke?sslmode=disable' \
+  go test ./internal/store/pgstore
+```
+
+The schema (one `samples` hypertable) is created automatically on first connect.
 
 Example output:
 
@@ -54,7 +73,8 @@ internal/
   sample/        median / loss / centered-smoke-array math (+ tests)
   scheduler/     parallel worker pool, per-target timeout, phase-aligned NextDelay (+ tests)
   model/         Monitor (a configured leaf target)
-  store/         in-memory time-series sink (TimescaleDB placeholder)
+  store/         store.Store interface + MemStore (in-memory)
+    pgstore/     TimescaleDB implementation (samples hypertable, raw sample arrays)
   api/           JSON HTTP API + static file serving (SmokePing CGI replacement)
     probe/dns/       native DNS probe (miekg/dns)
     probe/httpprobe/ native HTTP TTFB probe (net/http + httptrace)
