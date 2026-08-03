@@ -1,6 +1,7 @@
-# compiled binaries / build output
+# compiled binary (built to repo root by `go build ./cmd/smoked`)
 /smoked
-smoked
+
+# go test/build artifacts
 *.exe
 *.test
 *.out
