@@ -26,7 +26,7 @@ Full design rationale and the original-system code map live at `~/.claude/plans/
 - ✅ Alert engine (hysteresis matchers + pattern DSL, edge-trigger, log/webhook notifiers)
 
 ## Phase 3 — Production-readiness 🚧
-- 🚧 CI pipeline (GitLab CI: vet + build + test) — config lint-valid; pipeline pending a runner
+- ✅ CI pipeline (GitLab CI: vet + build + test) — green on the `ubuntu-26.04-amd64` runner
 - ✅ Live dashboard verified rendering from the TimescaleDB store (raw-sample path)
 - ✅ Continuous-aggregate downsampling tier (hourly) + refresh + 30-day retention policy
 - 🚧 API serves downsampled long ranges — `/api/rollup` (hourly) done ✅; SPA range selector that switches raw ↔ hourly ⬜
