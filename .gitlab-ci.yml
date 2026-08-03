@@ -4,6 +4,8 @@ stages:
 test:
   stage: test
   image: golang:1.26
+  tags:
+    - ubuntu-26.04-amd64
   variables:
     GOPATH: "$CI_PROJECT_DIR/.gocache"
   cache:

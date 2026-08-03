@@ -36,7 +36,8 @@ Full design rationale and the original-system code map live at `~/.claude/plans/
 - ⬜ Structured logging + basic operational metrics (round duration, per-probe timings)
 - ⬜ Preserve alert firing state across config reload
 
-## Phase 4 — Federation (multi-vantage) ⬜
+## Phase 4 — Federation (multi-vantage) — deferred (followup if users want it)
+Not planned for now; pick up only if multi-vantage measurement is requested.
 - ⬜ Agent binary that pulls its assignment and pushes results
 - ⬜ gRPC transport + mutual TLS (no eval of server-sent config)
 - ⬜ Per-vantage series (the `~slave` equivalent) + overlay graphs
