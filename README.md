@@ -9,11 +9,13 @@ Goal: reproduce SmokePing's features and its signature **smoke graphs**, with a 
 ## What works today (verified)
 
 - **Smoke-graph renderer** (`web/smoke-poc.html`) — a self-contained canvas re-implementation of SmokePing's signature chart: nested percentile bands darkening toward the median + the 8-bucket loss-colored median line, light/dark theme-aware, across four latency scenarios. This de-risks the "keep the look & feel" requirement. Open it in a browser, or view the published version at the artifact URL noted in the session.
-- **Plugin probes** — a `Probe` interface + registry; probes self-register via `init()`. Four shipped, all live-tested against real hosts:
+- **Plugin probes** — a `Probe` interface + registry; probes self-register via `init()`. Six shipped (the lean v1 set), all live-tested against real hosts:
   - `FPing` — wraps `fping(8)` for ICMP echo RTT (CLI-wrapper style).
   - `TCPConnect` — native TCP-connect timing, no external binary.
   - `DNS` — native resolver query timing via `miekg/dns` (no external `dig`).
   - `HTTP` — native HTTP(S) time-to-first-byte (minus DNS) via `net/http` + `httptrace` (no external `curl`).
+  - `SSH` — native SSH-banner-read timing, no external binary.
+  - `IRTT` — wraps `irtt(1)` for UDP round-trip / jitter (needs an irtt server).
 - **Fast, parallel scheduler** — a bounded goroutine worker pool runs all probes concurrently, each under its own timeout. One slow/hung target cannot block the others (proven by `scheduler_test.go`).
 - **SmokePing sample math** — median, loss (= missing samples), and the "centered" array that makes smoke bands render symmetrically (`internal/sample`, unit-tested against SmokePing's `rrdupdate_string` semantics).
 - **JSON API** — `/api/probes`, `/api/targets`, `/api/series?target=NAME`. `series` returns the raw per-round sample array (the input a client-side smoke chart needs).
@@ -85,6 +87,8 @@ internal/
   api/           JSON HTTP API + static file serving (SmokePing CGI replacement)
     probe/dns/       native DNS probe (miekg/dns)
     probe/httpprobe/ native HTTP TTFB probe (net/http + httptrace)
+    probe/sshprobe/  native SSH banner-timing probe
+    probe/irttprobe/ irtt(1) UDP round-trip/jitter wrapper (+ parser test)
 cmd/smoked/      the collector binary
 web/
   smoke.js       shared canvas smoke renderer (bands + loss-coloured median)

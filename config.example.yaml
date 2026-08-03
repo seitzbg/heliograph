@@ -13,6 +13,8 @@ probes:            # probe-instance (probe-level) settings
   TCPConnect: {}
   DNS: {}
   HTTP: {}
+  SSH: {}
+  IRTT: {}         # needs the irtt binary + an irtt server on the target
 
 alerts:            # named alert definitions (attach to targets via `alerts:`)
   loss:            # a matcher-style alert with hysteresis
@@ -70,6 +72,12 @@ targets:
           probe: TCPConnect
           host: 192.0.2.1        # TEST-NET-1: always fails -> triggers the loss alert
           params: { port: "9" }
+
+    Servers:
+      probe: SSH           # this branch measures SSH responsiveness
+      children:
+        github.com:
+          host: github.com
 
     Local:
       children:

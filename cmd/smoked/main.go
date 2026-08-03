@@ -29,6 +29,8 @@ import (
 	_ "smokeping-modern/internal/probe/dns"
 	_ "smokeping-modern/internal/probe/fping"
 	_ "smokeping-modern/internal/probe/httpprobe"
+	_ "smokeping-modern/internal/probe/irttprobe"
+	_ "smokeping-modern/internal/probe/sshprobe"
 	_ "smokeping-modern/internal/probe/tcpconnect"
 )
 
@@ -73,6 +75,8 @@ func main() {
 	}
 
 	// Build probe instances once per (kind,config); reuse across rounds/targets.
+	// A probe whose binary/deps are unavailable is skipped (with a warning), not
+	// fatal — so a missing optional tool (e.g. irtt) doesn't take the collector down.
 	probes := map[string]probe.Probe{}
 	var jobs []scheduler.Job
 	for _, m := range monitors {
@@ -81,9 +85,13 @@ func main() {
 			var err error
 			p, err = probe.New(m.ProbeKind, probeCfgs[m.ProbeKind])
 			if err != nil {
-				log.Fatalf("probe %s: %v", m.ProbeKind, err)
+				log.Printf("skipping probe %s: %v", m.ProbeKind, err)
+				p = nil
 			}
-			probes[m.ProbeKind] = p
+			probes[m.ProbeKind] = p // cache success or failure (nil)
+		}
+		if p == nil {
+			continue // this kind is unavailable; drop its targets
 		}
 		jobs = append(jobs, scheduler.Job{
 			Probe:   p,
@@ -182,6 +190,8 @@ func demoMonitors(pings int, step time.Duration) []model.Monitor {
 		{Name: "Google resolver (DNS)", ProbeKind: "DNS", Host: "8.8.8.8", Pings: pings, Step: step, Params: map[string]string{"lookup": "example.com"}},
 		{Name: "example.com (HTTP TTFB)", ProbeKind: "HTTP", Host: "example.com", Pings: pings, Step: step},
 		{Name: "cloudflare.com (HTTP TTFB)", ProbeKind: "HTTP", Host: "www.cloudflare.com", Pings: pings, Step: step},
+		{Name: "github.com (SSH banner)", ProbeKind: "SSH", Host: "github.com", Pings: pings, Step: step},
+		{Name: "localhost (IRTT, needs irtt server)", ProbeKind: "IRTT", Host: "127.0.0.1", Pings: pings, Step: step, Params: map[string]string{"port": "2112"}},
 	}
 }
 
