@@ -37,6 +37,10 @@ active development, so everything currently lives under _Unreleased_.
   first push could not build; narrowed to `/smoked` (the root-built binary only).
 - IRTT parser: irtt emits `lost` as the JSON string `"false"` (not a boolean); the parser
   and its test fixture were corrected after a live run exposed 100% phantom loss.
+- Config validation no longer requires probe binaries to be installed: a registered probe
+  whose external binary is absent (e.g. `fping` on a CI image) is allowed through — the
+  collector already skips it at runtime with a warning. Only an unknown probe kind is a
+  config error. (Caught by CI, which lacks `fping`.)
 
 ### Added — Phase 3 (production-readiness) (2026-08-03)
 - TimescaleDB downsampling: `pgstore.EnableDownsampling` creates an hourly continuous

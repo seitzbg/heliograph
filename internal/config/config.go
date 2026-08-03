@@ -8,6 +8,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -220,9 +221,16 @@ func validate(path string, m model.Monitor, getSchema func(string) (map[string]p
 	if m.ProbeKind == "" {
 		return fmt.Errorf("%s: no probe set (and none inherited)", path)
 	}
+	if !slices.Contains(probe.Registered(), m.ProbeKind) {
+		return fmt.Errorf("%s: unknown probe kind %q", path, m.ProbeKind)
+	}
 	schema, err := getSchema(m.ProbeKind)
 	if err != nil {
-		return fmt.Errorf("%s: %v", path, err)
+		// The kind is registered but couldn't be constructed here — typically its
+		// external binary (fping, irtt, ...) isn't installed on this machine. That
+		// must not fail config validation: the collector skips such targets at
+		// runtime with a warning. We just can't check target vars without a schema.
+		return nil
 	}
 	for name, spec := range schema {
 		if spec.Scope == probe.TargetVar && spec.Mandatory {
