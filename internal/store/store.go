@@ -5,7 +5,9 @@
 package store
 
 import (
+	"context"
 	"sync"
+	"time"
 
 	"smokeping-modern/internal/scheduler"
 )
@@ -17,6 +19,23 @@ type Store interface {
 	Keys() []string
 	Latest(key string) (scheduler.Outcome, bool)
 	History(key string) []scheduler.Outcome
+}
+
+// RollupPoint is one downsampled (hourly) bucket for a target. Median values are
+// NaN for buckets that were entirely lost.
+type RollupPoint struct {
+	Bucket    time.Time
+	MedianAvg float64
+	MedianMin float64
+	MedianMax float64
+	LossFrac  float64
+	Rounds    int
+}
+
+// Rollupper is implemented by stores that support downsampled reads (the hourly
+// continuous aggregate). The API exposes it at /api/rollup when available.
+type Rollupper interface {
+	Rollup(ctx context.Context, target string) ([]RollupPoint, error)
 }
 
 // MemStore is the in-memory implementation: latest + bounded history per target.

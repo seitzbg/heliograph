@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"smokeping-modern/internal/scheduler"
+	"smokeping-modern/internal/store"
 )
 
 type PGStore struct {
@@ -78,7 +79,7 @@ func (s *PGStore) migrate(ctx context.Context) error {
 // downsampling statements (each must run outside an explicit transaction).
 var downsampleStmts = []string{
 	`CREATE MATERIALIZED VIEW IF NOT EXISTS samples_hourly
-	 WITH (timescaledb.continuous) AS
+	 WITH (timescaledb.continuous, timescaledb.materialized_only = false) AS
 	 SELECT time_bucket('1 hour', ts) AS bucket,
 	        target,
 	        avg(median_seconds) AS median_avg,
@@ -267,9 +268,46 @@ func sortedNonNaN(c []float64) []float64 {
 	return out
 }
 
+// Rollup returns the hourly downsampled buckets for a target (from the
+// samples_hourly continuous aggregate). Requires EnableDownsampling to have run.
+func (s *PGStore) Rollup(ctx context.Context, target string) ([]store.RollupPoint, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT bucket, median_avg, median_min, median_max, loss_frac, rounds
+		   FROM samples_hourly WHERE target=$1 ORDER BY bucket`, target)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []store.RollupPoint
+	for rows.Next() {
+		var (
+			p                      store.RollupPoint
+			mAvg, mMin, mMax, loss *float64
+		)
+		if err := rows.Scan(&p.Bucket, &mAvg, &mMin, &mMax, &loss, &p.Rounds); err != nil {
+			return nil, err
+		}
+		p.MedianAvg = nanIfNil(mAvg)
+		p.MedianMin = nanIfNil(mMin)
+		p.MedianMax = nanIfNil(mMax)
+		p.LossFrac = nanIfNil(loss)
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+func nanIfNil(p *float64) float64 {
+	if p == nil {
+		return math.NaN()
+	}
+	return *p
+}
+
 var _ interface {
 	Add([]scheduler.Outcome)
 	Keys() []string
 	Latest(string) (scheduler.Outcome, bool)
 	History(string) []scheduler.Outcome
 } = (*PGStore)(nil)
+
+var _ store.Rollupper = (*PGStore)(nil)

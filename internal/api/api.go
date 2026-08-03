@@ -26,6 +26,7 @@ func (srv *Server) Routes() *http.ServeMux {
 	mux.HandleFunc("GET /api/probes", srv.probes)
 	mux.HandleFunc("GET /api/targets", srv.targets)
 	mux.HandleFunc("GET /api/series", srv.series)
+	mux.HandleFunc("GET /api/rollup", srv.rollup)
 	mux.HandleFunc("GET /metrics", srv.metrics)
 	if srv.webDir != "" {
 		// Serve the SPA/static assets at the root (same-origin with the API).
@@ -125,6 +126,55 @@ func (srv *Server) series(w http.ResponseWriter, r *http.Request) {
 		rounds = append(rounds, rd)
 	}
 	writeJSON(w, map[string]any{"target": key, "rounds": rounds})
+}
+
+type rollupDTO struct {
+	Bucket      string   `json:"bucket"`
+	MedianAvgMs *float64 `json:"median_avg_ms"`
+	MedianMinMs *float64 `json:"median_min_ms"`
+	MedianMaxMs *float64 `json:"median_max_ms"`
+	LossPct     float64  `json:"loss_pct"`
+	Rounds      int      `json:"rounds"`
+}
+
+func msPtr(seconds float64) *float64 {
+	if math.IsNaN(seconds) || math.IsInf(seconds, 0) {
+		return nil
+	}
+	ms := seconds * 1000
+	return &ms
+}
+
+// rollup returns the hourly downsampled buckets for a target (the coarse tier a
+// long-range view reads). Requires a store that implements Rollupper (pgstore).
+func (srv *Server) rollup(w http.ResponseWriter, r *http.Request) {
+	key := r.URL.Query().Get("target")
+	if key == "" {
+		http.Error(w, `{"error":"missing target param"}`, http.StatusBadRequest)
+		return
+	}
+	rp, ok := srv.store.(store.Rollupper)
+	if !ok {
+		http.Error(w, `{"error":"rollup requires the TimescaleDB store (run with -dsn -downsample)"}`, http.StatusNotImplemented)
+		return
+	}
+	points, err := rp.Rollup(r.Context(), key)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusServiceUnavailable)
+		return
+	}
+	buckets := make([]rollupDTO, 0, len(points))
+	for _, p := range points {
+		buckets = append(buckets, rollupDTO{
+			Bucket:      p.Bucket.UTC().Format("2006-01-02T15:04:05Z"),
+			MedianAvgMs: msPtr(p.MedianAvg),
+			MedianMinMs: msPtr(p.MedianMin),
+			MedianMaxMs: msPtr(p.MedianMax),
+			LossPct:     p.LossFrac * 100,
+			Rounds:      p.Rounds,
+		})
+	}
+	writeJSON(w, map[string]any{"target": key, "resolution": "1h", "buckets": buckets})
 }
 
 // metrics exposes the latest per-target values in Prometheus text format so

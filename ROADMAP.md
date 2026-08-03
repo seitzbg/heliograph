@@ -29,7 +29,7 @@ Full design rationale and the original-system code map live at `~/.claude/plans/
 - 🚧 CI pipeline (GitLab CI: vet + build + test) — config lint-valid; pipeline pending a runner
 - ✅ Live dashboard verified rendering from the TimescaleDB store (raw-sample path)
 - ✅ Continuous-aggregate downsampling tier (hourly) + refresh + 30-day retention policy
-- ⬜ API serves downsampled long ranges (switch raw ↔ hourly by range) + SPA range selector
+- 🚧 API serves downsampled long ranges — `/api/rollup` (hourly) done ✅; SPA range selector that switches raw ↔ hourly ⬜
 - ✅ Dockerfile + compose (smoked + TimescaleDB) for one-command bring-up
 - ✅ Graceful shutdown (SIGINT/SIGTERM: cancel in-flight probes + clean HTTP shutdown)
 - ✅ Config reload without restart (SIGHUP; atomic runtime swap, keeps running config on error)

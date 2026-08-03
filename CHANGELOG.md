@@ -56,6 +56,9 @@ active development, so everything currently lives under _Unreleased_.
   pointer and rebuilt from the config on SIGHUP; a bad edit keeps the running config.
   Verified live (added a target, SIGHUP, it began measuring). Note: alert firing state
   currently resets on reload.
+- `/api/rollup?target=…` endpoint: hourly downsampled buckets (median avg/min/max + loss)
+  from the continuous aggregate, with real-time aggregation so the current hour is
+  included. Returns 501 on the in-memory store. Verified live against TimescaleDB.
 
 ### CI
 - GitLab CI pipeline (`.gitlab-ci.yml`): `go vet` + `go build` + `go test` on `golang:1.26`,
