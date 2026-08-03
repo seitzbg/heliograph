@@ -1,0 +1,412 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Smoke Graph — fidelity proof-of-concept</title>
+<style>
+  :root {
+    --bg: #e9edf1; --surface: #ffffff; --plot-bg: #ffffff;
+    --plot-grid: #e4e9ee; --plot-axis: #97a4b0; --plot-frame: #d3dae1;
+    --ink: #14222e; --ink-soft: #566573; --ink-faint: #8493a0;
+    --border: #dbe1e8; --accent: #0d9488; --accent-soft: #0d948820;
+    --median-base: #202020;
+    --shadow: 0 1px 2px rgba(20,34,46,.06), 0 8px 24px rgba(20,34,46,.05);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0a0f14; --surface: #111a22; --plot-bg: #0d151c;
+      --plot-grid: #1c2833; --plot-axis: #48586a; --plot-frame: #223140;
+      --ink: #dde8f0; --ink-soft: #8b9aa8; --ink-faint: #64768a;
+      --border: #1f2d3a; --accent: #2dd4bf; --accent-soft: #2dd4bf22;
+      --median-base: #c9d6df;
+      --shadow: 0 1px 2px rgba(0,0,0,.4), 0 10px 30px rgba(0,0,0,.35);
+    }
+  }
+  :root[data-theme="light"] {
+    --bg: #e9edf1; --surface: #ffffff; --plot-bg: #ffffff;
+    --plot-grid: #e4e9ee; --plot-axis: #97a4b0; --plot-frame: #d3dae1;
+    --ink: #14222e; --ink-soft: #566573; --ink-faint: #8493a0;
+    --border: #dbe1e8; --accent: #0d9488; --accent-soft: #0d948820;
+    --median-base: #202020;
+    --shadow: 0 1px 2px rgba(20,34,46,.06), 0 8px 24px rgba(20,34,46,.05);
+  }
+  :root[data-theme="dark"] {
+    --bg: #0a0f14; --surface: #111a22; --plot-bg: #0d151c;
+    --plot-grid: #1c2833; --plot-axis: #48586a; --plot-frame: #223140;
+    --ink: #dde8f0; --ink-soft: #8b9aa8; --ink-faint: #64768a;
+    --border: #1f2d3a; --accent: #2dd4bf; --accent-soft: #2dd4bf22;
+    --median-base: #c9d6df;
+    --shadow: 0 1px 2px rgba(0,0,0,.4), 0 10px 30px rgba(0,0,0,.35);
+  }
+
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    line-height: 1.55; -webkit-font-smoothing: antialiased;
+  }
+  .mono { font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace; }
+  .wrap { max-width: 1160px; margin: 0 auto; padding: 28px 22px 64px; }
+
+  header.top { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; flex-wrap: wrap; margin-bottom: 8px; }
+  .eyebrow { font-family: ui-monospace, Menlo, monospace; font-size: 11px; letter-spacing: .18em; text-transform: uppercase; color: var(--accent); font-weight: 600; }
+  h1 { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: clamp(24px, 3.4vw, 34px); line-height: 1.1; margin: 8px 0 6px; letter-spacing: -.01em; text-wrap: balance; }
+  .lede { color: var(--ink-soft); max-width: 68ch; font-size: 15px; }
+  .lede code { font-family: ui-monospace, Menlo, monospace; font-size: 12.5px; background: var(--accent-soft); color: var(--accent); padding: 1px 6px; border-radius: 5px; }
+
+  .theme-toggle {
+    flex: 0 0 auto; display: inline-flex; align-items: center; gap: 8px;
+    font-family: ui-monospace, Menlo, monospace; font-size: 12px; color: var(--ink-soft);
+    background: var(--surface); border: 1px solid var(--border); border-radius: 999px;
+    padding: 7px 13px; cursor: pointer;
+  }
+  .theme-toggle:hover { border-color: var(--accent); color: var(--ink); }
+  .theme-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  .legend {
+    display: flex; align-items: center; gap: 4px 16px; flex-wrap: wrap;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+    padding: 12px 16px; margin: 22px 0 6px; box-shadow: var(--shadow);
+  }
+  .legend .grp { display: flex; align-items: center; gap: 8px; }
+  .legend .lbl { font-family: ui-monospace, Menlo, monospace; font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-faint); }
+  .swatch { display: inline-flex; align-items: center; gap: 5px; font-family: ui-monospace, Menlo, monospace; font-size: 11.5px; color: var(--ink-soft); }
+  .swatch i { width: 13px; height: 13px; border-radius: 3px; display: inline-block; box-shadow: inset 0 0 0 1px rgba(0,0,0,.12); }
+  .smoke-key { display: inline-flex; align-items: center; gap: 2px; }
+  .smoke-key i { width: 9px; height: 15px; display: inline-block; }
+
+  .grid { display: grid; grid-template-columns: 1fr; gap: 18px; margin-top: 18px; }
+  .grid.small { grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+
+  .panel { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 14px 16px 10px; box-shadow: var(--shadow); }
+  .panel h2 { font-size: 15px; margin: 0; display: flex; align-items: baseline; gap: 9px; flex-wrap: wrap; }
+  .panel h2 .probe { font-family: ui-monospace, Menlo, monospace; font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--accent); border: 1px solid var(--accent); border-radius: 5px; padding: 1px 6px; }
+  .panel .sub { color: var(--ink-faint); font-size: 12.5px; margin: 2px 0 10px; }
+  .stats { display: flex; gap: 18px; flex-wrap: wrap; margin: 2px 0 12px; }
+  .stat { font-family: ui-monospace, Menlo, monospace; }
+  .stat .k { font-size: 10px; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-faint); display: block; }
+  .stat .v { font-size: 15px; color: var(--ink); font-variant-numeric: tabular-nums; }
+  .stat .v.loss.warn { color: #d9822b; } .stat .v.loss.bad { color: #d64545; }
+  canvas { width: 100%; display: block; border-radius: 8px; }
+
+  .note { margin-top: 30px; color: var(--ink-soft); font-size: 13.5px; border-left: 2px solid var(--accent); padding: 4px 0 4px 16px; max-width: 74ch; }
+  .note strong { color: var(--ink); }
+  footer { margin-top: 34px; color: var(--ink-faint); font-family: ui-monospace, Menlo, monospace; font-size: 11.5px; }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div>
+      <div class="eyebrow">Fidelity proof-of-concept · smokeping-modern</div>
+      <h1>The smoke graph, rebuilt on canvas</h1>
+      <p class="lede">Reproducing SmokePing's signature latency-distribution chart from a modern client-side renderer. Each vertical slice shows the spread of <em>N</em> pings that round — the dark cloud is jitter, the colored line is the median tinted by packet loss. Rendered here from the same sorted per-round sample arrays the Go collector already returns from <code>/api/series</code>.</p>
+    </div>
+    <button class="theme-toggle" id="themeBtn" aria-label="Toggle light/dark theme">
+      <span id="themeIcon">◑</span><span id="themeLabel">Theme</span>
+    </button>
+  </header>
+
+  <div class="legend" aria-label="How to read the graph">
+    <div class="grp">
+      <span class="lbl">Jitter</span>
+      <span class="smoke-key" id="smokeKey" aria-hidden="true"></span>
+      <span class="swatch" style="color:var(--ink-faint)">min → median → max spread</span>
+    </div>
+    <div class="grp" id="lossLegend">
+      <span class="lbl">Loss</span>
+    </div>
+  </div>
+
+  <div class="grid" id="heroGrid"></div>
+  <div class="grid small" id="smallGrid"></div>
+
+  <p class="note"><strong>What to check:</strong> the dense dark core = tightly-clustered pings (low jitter); a tall fuzzy cloud = high variance; the median line changes color where pings are lost. This is the exact algorithm from the code map (§05): nested percentile bands darkening toward the median, an 8-bucket green→red loss ramp on the median, and unison Y-scaling. In the production build this same renderer reads live data and is fully theme-aware — the graphs adapt to dark mode instead of being baked light like the current Perl/RRDtool SVGs.</p>
+
+  <footer>smokeping-modern · smoke renderer v0 · deterministic sample data for demonstration</footer>
+</div>
+
+<script>
+// ---------- deterministic PRNG (stable screenshots) ----------
+function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;};}
+function gauss(rng){let u=0,v=0;while(u===0)u=rng();while(v===0)v=rng();return Math.sqrt(-2*Math.log(u))*Math.cos(2*Math.PI*v);}
+
+// ---------- SmokePing loss colour ramp (by count lost of N), §05 ----------
+const LOSS_COLORS = [
+  {maxpct:0,   color:'#26ff00', label:'0'},
+  {maxpct:1,   color:'#00b8ff', label:'≤1%'},
+  {maxpct:5,   color:'#0059ff', label:'≤5%'},
+  {maxpct:10,  color:'#7e00ff', label:'≤10%'},
+  {maxpct:25,  color:'#ff00ff', label:'≤25%'},
+  {maxpct:50,  color:'#ff5500', label:'≤50%'},
+  {maxpct:99.9,color:'#ff0000', label:'<100%'},
+  {maxpct:100, color:'#a00000', label:'100%'},
+];
+function lossColor(lost, N){
+  if(lost<=0) return LOSS_COLORS[0].color;
+  const pct = lost/N*100;
+  if(pct>=100) return '#a00000';
+  for(const b of LOSS_COLORS){ if(pct<=b.maxpct) return b.color; }
+  return '#ff0000';
+}
+
+// ---------- data generation ----------
+function genSeries(cfg){
+  const rng = mulberry32(cfg.seed);
+  const N = cfg.pings, buckets = [];
+  for(let t=0;t<cfg.n;t++){
+    const base = cfg.base(t, cfg.n);
+    const jit = cfg.jitter(t, cfg.n);
+    const lossP = cfg.loss ? cfg.loss(t, cfg.n, rng) : 0;
+    const raw = [];
+    let lost = 0;
+    for(let i=0;i<N;i++){
+      if(rng() < lossP){ lost++; continue; }
+      let v = base + Math.abs(gauss(rng))*jit;
+      if(cfg.spike && rng() < cfg.spike.p) v += cfg.spike.mag*(0.5+rng());
+      raw.push(Math.max(0.05, v));
+    }
+    raw.sort((a,b)=>a-b);
+    // centered array length N: floor(lost/2) NaNs, samples, rest NaN
+    const centered = new Array(N).fill(NaN);
+    const lead = Math.floor(lost/2);
+    for(let i=0;i<raw.length;i++) centered[lead+i] = raw[i];
+    const median = raw.length ? raw[Math.floor(raw.length/2)] : NaN;
+    buckets.push({centered, samples:raw, lost, median});
+  }
+  return {buckets, N};
+}
+
+const SERIES = {
+  fiber: genSeries({ seed:11, n:150, pings:20,
+    base:()=>5.0, jitter:()=>0.55,
+    spike:{p:0.01, mag:2.5}, loss:()=> 0.001 }),
+  wifi: genSeries({ seed:23, n:150, pings:20,
+    base:()=>17, jitter:()=>7,
+    spike:{p:0.05, mag:20}, loss:()=>0.008 }),
+  congested: genSeries({ seed:7, n:150, pings:20,
+    base:(t,n)=> 8 + 36*Math.pow(t/n, 2.0),
+    jitter:(t,n)=> 2.5 + 12*Math.pow(t/n, 1.4),
+    spike:{p:0.03, mag:14}, loss:(t,n)=> t/n>0.65 ? 0.10*((t/n-0.65)/0.35) : 0 }),
+  flaky: genSeries({ seed:42, n:150, pings:20,
+    base:()=>12, jitter:()=>3.0, spike:{p:0.015, mag:12},
+    loss:(t)=>{ const c=t%34; return (c>=6&&c<12)? (0.30+0.4*Math.abs(Math.sin(c))) : 0.002; } }),
+};
+
+// ---------- stats (GPRINT-like) ----------
+function seriesStats(s){
+  let msum=0,mmax=0,mn=0, lsum=0;
+  for(const b of s.buckets){
+    if(!isNaN(b.median)){ msum+=b.median; mmax=Math.max(mmax,b.median); mn++; }
+    lsum += b.lost;
+  }
+  return { medAvg: mn?msum/mn:NaN, medMax:mmax, lossAvg: lsum/(s.buckets.length*s.N)*100 };
+}
+
+// ---------- smoke renderer ----------
+function readVars(){
+  const cs = getComputedStyle(document.documentElement);
+  const dark = (document.documentElement.getAttribute('data-theme')||
+    (matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light')) === 'dark';
+  return {
+    plotBg: cs.getPropertyValue('--plot-bg').trim(),
+    grid: cs.getPropertyValue('--plot-grid').trim(),
+    axis: cs.getPropertyValue('--plot-axis').trim(),
+    frame: cs.getPropertyValue('--plot-frame').trim(),
+    medianBase: cs.getPropertyValue('--median-base').trim(),
+    dark
+  };
+}
+function smokeGray(k, half, dark){
+  // SmokePing ramp: int(190/half*(half-k))+50  -> outer light(~240), centre dark(~50)
+  let g = Math.round(190/half*(half-k))+50;
+  if(!dark) return `rgb(${g},${g},${g})`;
+  const d = 255-g;                    // invert for dark ground: centre light, outer ~bg
+  return `rgb(${Math.round(d*0.86)},${Math.round(d*0.94)},${d})`;
+}
+function robustMax(s){
+  const all=[];
+  for(const b of s.buckets) for(const v of b.samples) all.push(v);
+  all.sort((a,b)=>a-b);
+  if(!all.length) return 1;
+  const p = all[Math.min(all.length-1, Math.floor(all.length*0.965))];
+  return Math.max(1, p*1.18);
+}
+function niceStep(range, target){
+  const raw = range/target, mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  const n = raw/mag; let s = n<1.5?1:n<3?2:n<7?5:10;
+  return s*mag;
+}
+function render(canvas, s, opts){
+  const V = readVars();
+  const dpr = Math.max(1, window.devicePixelRatio||1);
+  const cssW = canvas.clientWidth, cssH = opts.height;
+  canvas.style.height = cssH+'px';
+  canvas.width = Math.round(cssW*dpr); canvas.height = Math.round(cssH*dpr);
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  ctx.clearRect(0,0,cssW,cssH);
+
+  const mL=48, mR=12, mT=10, mB=22;
+  const pw = cssW-mL-mR, ph = cssH-mT-mB;
+  const n = s.buckets.length, N = s.N, half = Math.floor(N/2);
+  const yMax = opts.yMax;
+  const X = i => mL + pw*(i/(n-1));
+  const Y = v => mT + ph*(1 - Math.min(v,yMax)/yMax);
+  const colW = Math.ceil(pw/(n-1))+1;
+
+  // plot bg + frame
+  ctx.fillStyle = V.plotBg; ctx.fillRect(mL,mT,pw,ph);
+
+  // gridlines + y labels
+  const step = niceStep(yMax, 4);
+  ctx.font = '10px ui-monospace, Menlo, monospace';
+  ctx.textBaseline='middle';
+  for(let g=0; g<=yMax+0.001; g+=step){
+    const y = Y(g);
+    ctx.strokeStyle = V.grid; ctx.lineWidth=1;
+    ctx.beginPath(); ctx.moveTo(mL,Math.round(y)+.5); ctx.lineTo(mL+pw,Math.round(y)+.5); ctx.stroke();
+    ctx.fillStyle = V.axis; ctx.textAlign='right';
+    ctx.fillText(g>=100?g.toFixed(0):g.toFixed(g<10?1:0)+'', mL-6, y);
+  }
+  // y unit
+  ctx.save(); ctx.translate(11, mT+ph/2); ctx.rotate(-Math.PI/2);
+  ctx.textAlign='center'; ctx.fillStyle=V.axis; ctx.fillText('ms', 0, 0); ctx.restore();
+
+  // smoke bands: nested percentile pairs, outer(k=1, light)->inner(k=half, dark).
+  // Each pair k is the filled area between cp_k and cp_{N+1-k} across time; drawn
+  // as smooth polygons over contiguous runs (loss breaks a run, thinning the smoke).
+  for(let k=1;k<=half;k++){
+    ctx.fillStyle = smokeGray(k, half, V.dark);
+    let run=[];
+    const flush=()=>{
+      if(run.length>=2){
+        ctx.beginPath();
+        ctx.moveTo(run[0].x, run[0].yHi);
+        for(let p=1;p<run.length;p++) ctx.lineTo(run[p].x, run[p].yHi);
+        for(let p=run.length-1;p>=0;p--) ctx.lineTo(run[p].x, run[p].yLo);
+        ctx.closePath(); ctx.fill();
+      } else if(run.length===1){
+        ctx.fillRect(run[0].x-colW/2, run[0].yHi, colW, Math.max(1, run[0].yLo-run[0].yHi));
+      }
+      run=[];
+    };
+    for(let i=0;i<n;i++){
+      const c = s.buckets[i].centered;
+      const lo = c[k-1], hi = c[N-k]; // cp_k and cp_{N+1-k} (0-indexed)
+      if(isNaN(lo)||isNaN(hi)){ flush(); continue; }
+      run.push({x:X(i), yLo:Y(lo), yHi:Y(hi)});
+    }
+    flush();
+  }
+
+  // median base line
+  ctx.lineWidth=1.4; ctx.strokeStyle=V.medianBase; ctx.beginPath();
+  let started=false;
+  for(let i=0;i<n;i++){ const m=s.buckets[i].median; if(isNaN(m)){started=false;continue;}
+    const x=X(i), y=Y(m); if(!started){ctx.moveTo(x,y);started=true;} else ctx.lineTo(x,y); }
+  ctx.stroke();
+
+  // median coloured by loss (2px), per segment
+  ctx.lineWidth=2.2;
+  for(let i=1;i<n;i++){
+    const a=s.buckets[i-1], b=s.buckets[i];
+    if(isNaN(a.median)||isNaN(b.median)) continue;
+    const lost = Math.max(a.lost,b.lost);
+    if(lost<=0) continue; // leave clean median for zero-loss (base line shows)
+    ctx.strokeStyle = lossColor(lost, N);
+    ctx.beginPath(); ctx.moveTo(X(i-1),Y(a.median)); ctx.lineTo(X(i),Y(b.median)); ctx.stroke();
+  }
+  // mark zero-loss median in green dots-free: overlay thin green where lost==0 to echo legend
+  ctx.lineWidth=2.2; ctx.strokeStyle=lossColor(0,N);
+  for(let i=1;i<n;i++){ const a=s.buckets[i-1],b=s.buckets[i];
+    if(isNaN(a.median)||isNaN(b.median)) continue;
+    if(Math.max(a.lost,b.lost)>0) continue;
+    ctx.beginPath(); ctx.moveTo(X(i-1),Y(a.median)); ctx.lineTo(X(i),Y(b.median)); ctx.stroke(); }
+
+  // 100%-loss ticks at baseline
+  ctx.fillStyle='#a00000';
+  for(let i=0;i<n;i++){ if(s.buckets[i].lost>=N){ ctx.fillRect(Math.round(X(i))-1, mT+ph-3, 2, 3); } }
+
+  // frame
+  ctx.strokeStyle=V.frame; ctx.lineWidth=1; ctx.strokeRect(mL+.5,mT+.5,pw-1,ph-1);
+
+  // x labels (relative time)
+  ctx.fillStyle=V.axis; ctx.textAlign='center'; ctx.textBaseline='top';
+  const xlabels=['-3h','-2h','-1h','now'];
+  for(let j=0;j<xlabels.length;j++){ const x=mL+pw*(j/(xlabels.length-1));
+    ctx.fillText(xlabels[j], Math.min(Math.max(x,mL+12),mL+pw-12), mT+ph+5); }
+}
+
+// ---------- build panels ----------
+function fmt(v,d){ return isNaN(v)?'--':v.toFixed(d); }
+function panelEl(title, probe, sub, s){
+  const st = seriesStats(s);
+  const el = document.createElement('div'); el.className='panel';
+  const lossCls = st.lossAvg>2 ? 'bad' : st.lossAvg>0.5 ? 'warn' : '';
+  el.innerHTML =
+    '<h2>'+title+' <span class="probe">'+probe+'</span></h2>'+
+    '<div class="sub">'+sub+'</div>'+
+    '<div class="stats">'+
+      '<span class="stat"><span class="k">median avg</span><span class="v">'+fmt(st.medAvg,1)+' ms</span></span>'+
+      '<span class="stat"><span class="k">median max</span><span class="v">'+fmt(st.medMax,1)+' ms</span></span>'+
+      '<span class="stat"><span class="k">loss avg</span><span class="v loss '+lossCls+'">'+fmt(st.lossAvg,2)+' %</span></span>'+
+    '</div>'+
+    '<canvas></canvas>';
+  el.__series = s;
+  return el;
+}
+
+const HERO = [
+  panelEl('Congested uplink', 'FPing', 'ICMP echo · 20 pings/round · latency and jitter climbing over the window', SERIES.congested),
+];
+const SMALL = [
+  panelEl('Steady fiber', 'FPing', 'Rock-steady 5 ms, negligible jitter', SERIES.fiber),
+  panelEl('Wi-Fi jitter', 'TCPConnect', 'Wide smoke cloud — high variance', SERIES.wifi),
+  panelEl('Flaky link', 'FPing', 'Periodic loss bursts colour the median', SERIES.flaky),
+];
+const heroGrid=document.getElementById('heroGrid'), smallGrid=document.getElementById('smallGrid');
+HERO.forEach(e=>heroGrid.appendChild(e));
+SMALL.forEach(e=>smallGrid.appendChild(e));
+
+function renderAll(){
+  for(const e of HERO){ const s=e.__series; e.__yMax=robustMax(s); render(e.querySelector('canvas'), s, {height:230, yMax:e.__yMax}); }
+  for(const e of SMALL){ const s=e.__series; e.__yMax=robustMax(s); render(e.querySelector('canvas'), s, {height:170, yMax:e.__yMax}); }
+}
+
+// ---------- legend swatches ----------
+(function buildLegend(){
+  const ll=document.getElementById('lossLegend');
+  for(const b of LOSS_COLORS){
+    const s=document.createElement('span'); s.className='swatch';
+    s.innerHTML='<i style="background:'+b.color+'"></i>'+b.label;
+    ll.appendChild(s);
+  }
+  const sk=document.getElementById('smokeKey');
+  for(let k=1;k<=6;k++){ const i=document.createElement('i');
+    i.style.background=smokeGray(k,6,readVars().dark); sk.appendChild(i); }
+})();
+function refreshSmokeKey(){
+  const sk=document.getElementById('smokeKey'); const dark=readVars().dark;
+  [...sk.children].forEach((i,idx)=> i.style.background=smokeGray(idx+1,6,dark));
+}
+
+// ---------- theme ----------
+const btn=document.getElementById('themeBtn');
+function currentTheme(){ return document.documentElement.getAttribute('data-theme') ||
+  (matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light'); }
+function applyThemeLabel(){ const d=currentTheme()==='dark';
+  document.getElementById('themeIcon').textContent = d?'☾':'☀';
+  document.getElementById('themeLabel').textContent = d?'Dark':'Light'; }
+btn.addEventListener('click', ()=>{ const next=currentTheme()==='dark'?'light':'dark';
+  document.documentElement.setAttribute('data-theme', next); applyThemeLabel(); refreshSmokeKey(); renderAll(); });
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change', ()=>{ applyThemeLabel(); refreshSmokeKey(); renderAll(); });
+
+let rt; window.addEventListener('resize', ()=>{ clearTimeout(rt); rt=setTimeout(renderAll,120); });
+applyThemeLabel(); renderAll();
+</script>
+</body>
+</html>

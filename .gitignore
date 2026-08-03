@@ -1,0 +1,16 @@
+# compiled binaries / build output
+/smoked
+smoked
+*.exe
+*.test
+*.out
+
+# go workspace
+go.work
+go.work.sum
+
+# editor / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/

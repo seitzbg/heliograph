@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>smokeping-modern — live</title>
+<style>
+  :root {
+    --bg: #e9edf1; --surface: #ffffff; --plot-bg: #ffffff;
+    --plot-grid: #e4e9ee; --plot-axis: #97a4b0; --plot-frame: #d3dae1;
+    --ink: #14222e; --ink-soft: #566573; --ink-faint: #8493a0;
+    --border: #dbe1e8; --accent: #0d9488; --accent-soft: #0d948820;
+    --median-base: #202020; --ok: #178a5a;
+    --shadow: 0 1px 2px rgba(20,34,46,.06), 0 8px 24px rgba(20,34,46,.05);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0a0f14; --surface: #111a22; --plot-bg: #0d151c;
+      --plot-grid: #1c2833; --plot-axis: #48586a; --plot-frame: #223140;
+      --ink: #dde8f0; --ink-soft: #8b9aa8; --ink-faint: #64768a;
+      --border: #1f2d3a; --accent: #2dd4bf; --accent-soft: #2dd4bf22;
+      --median-base: #c9d6df; --ok: #34d399;
+      --shadow: 0 1px 2px rgba(0,0,0,.4), 0 10px 30px rgba(0,0,0,.35);
+    }
+  }
+  :root[data-theme="light"] {
+    --bg: #e9edf1; --surface: #ffffff; --plot-bg: #ffffff;
+    --plot-grid: #e4e9ee; --plot-axis: #97a4b0; --plot-frame: #d3dae1;
+    --ink: #14222e; --ink-soft: #566573; --ink-faint: #8493a0;
+    --border: #dbe1e8; --accent: #0d9488; --accent-soft: #0d948820;
+    --median-base: #202020; --ok: #178a5a;
+    --shadow: 0 1px 2px rgba(20,34,46,.06), 0 8px 24px rgba(20,34,46,.05);
+  }
+  :root[data-theme="dark"] {
+    --bg: #0a0f14; --surface: #111a22; --plot-bg: #0d151c;
+    --plot-grid: #1c2833; --plot-axis: #48586a; --plot-frame: #223140;
+    --ink: #dde8f0; --ink-soft: #8b9aa8; --ink-faint: #64768a;
+    --border: #1f2d3a; --accent: #2dd4bf; --accent-soft: #2dd4bf22;
+    --median-base: #c9d6df; --ok: #34d399;
+    --shadow: 0 1px 2px rgba(0,0,0,.4), 0 10px 30px rgba(0,0,0,.35);
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; line-height: 1.55; -webkit-font-smoothing: antialiased; }
+  .wrap { max-width: 1240px; margin: 0 auto; padding: 26px 22px 64px; }
+  header.top { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; flex-wrap: wrap; }
+  .eyebrow { font-family: ui-monospace, Menlo, monospace; font-size: 11px; letter-spacing: .18em; text-transform: uppercase; color: var(--accent); font-weight: 600; }
+  h1 { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: clamp(22px, 3vw, 30px); line-height: 1.1; margin: 8px 0 5px; letter-spacing: -.01em; }
+  .lede { color: var(--ink-soft); max-width: 70ch; font-size: 14.5px; }
+  .status { font-family: ui-monospace, Menlo, monospace; font-size: 12px; color: var(--ink-soft); display: inline-flex; align-items: center; gap: 7px; margin-top: 8px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 25%, transparent); }
+  .theme-toggle { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 8px; font-family: ui-monospace, Menlo, monospace; font-size: 12px; color: var(--ink-soft); background: var(--surface); border: 1px solid var(--border); border-radius: 999px; padding: 7px 13px; cursor: pointer; }
+  .theme-toggle:hover { border-color: var(--accent); color: var(--ink); }
+  .theme-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .legend { display: flex; align-items: center; gap: 4px 16px; flex-wrap: wrap; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 11px 16px; margin: 20px 0 4px; box-shadow: var(--shadow); }
+  .legend .lbl { font-family: ui-monospace, Menlo, monospace; font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-faint); }
+  .swatch { display: inline-flex; align-items: center; gap: 5px; font-family: ui-monospace, Menlo, monospace; font-size: 11.5px; color: var(--ink-soft); }
+  .swatch i { width: 13px; height: 13px; border-radius: 3px; display: inline-block; box-shadow: inset 0 0 0 1px rgba(0,0,0,.12); }
+  .smoke-key { display: inline-flex; } .smoke-key i { width: 9px; height: 15px; display: inline-block; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); gap: 18px; margin-top: 18px; }
+  .panel { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 14px 16px 10px; box-shadow: var(--shadow); }
+  .panel h2 { font-size: 14.5px; margin: 0; display: flex; align-items: baseline; gap: 9px; flex-wrap: wrap; }
+  .panel h2 .probe { font-family: ui-monospace, Menlo, monospace; font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--accent); border: 1px solid var(--accent); border-radius: 5px; padding: 1px 6px; }
+  .stats { display: flex; gap: 18px; flex-wrap: wrap; margin: 8px 0 10px; }
+  .stat { font-family: ui-monospace, Menlo, monospace; }
+  .stat .k { font-size: 10px; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-faint); display: block; }
+  .stat .v { font-size: 15px; color: var(--ink); font-variant-numeric: tabular-nums; }
+  .stat .v.loss.warn { color: #d9822b; } .stat .v.loss.bad { color: #d64545; }
+  canvas { width: 100%; display: block; border-radius: 8px; }
+  .empty { color: var(--ink-faint); font-family: ui-monospace, Menlo, monospace; font-size: 12px; padding: 40px 0; text-align: center; }
+  footer { margin-top: 30px; color: var(--ink-faint); font-family: ui-monospace, Menlo, monospace; font-size: 11.5px; }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div>
+      <div class="eyebrow">smokeping-modern · live</div>
+      <h1>Latency monitor</h1>
+      <p class="lede">Live smoke graphs rendered client-side from the Go collector's <code>/api/series</code>. Each panel is a real target measured by a plugin probe; the smoke cloud is per-round jitter, the line is the median tinted by packet loss.</p>
+      <div class="status"><span class="dot"></span><span id="statusText">connecting…</span></div>
+    </div>
+    <button class="theme-toggle" id="themeBtn" aria-label="Toggle light/dark theme"><span id="themeIcon">◑</span><span id="themeLabel">Theme</span></button>
+  </header>
+
+  <div class="legend" aria-label="How to read the graph">
+    <span class="lbl">Jitter</span>
+    <span class="smoke-key" id="smokeKey" aria-hidden="true"></span>
+    <span class="swatch" style="color:var(--ink-faint)">min → median → max</span>
+    <span class="lbl" style="margin-left:8px">Loss</span>
+    <span id="lossLegend" style="display:inline-flex;gap:12px;flex-wrap:wrap"></span>
+  </div>
+
+  <div class="grid" id="grid"><div class="empty">Waiting for the collector…</div></div>
+  <footer id="foot">smokeping-modern · live smoke renderer</footer>
+</div>
+
+<script src="smoke.js"></script>
+<script>
+const grid = document.getElementById('grid');
+const panels = new Map(); // name -> {el, canvas, statsEl, series}
+
+function fmt(v, d) { return (v == null || isNaN(v)) ? '--' : v.toFixed(d); }
+
+function ensurePanel(t) {
+  let p = panels.get(t.name);
+  if (p) return p;
+  if (panels.size === 0) grid.innerHTML = '';
+  const el = document.createElement('div'); el.className = 'panel';
+  el.innerHTML =
+    '<h2>' + escapeHtml(t.name) + ' <span class="probe">' + escapeHtml(t.probe) + '</span></h2>' +
+    '<div class="stats"></div><canvas></canvas>';
+  grid.appendChild(el);
+  p = { el, canvas: el.querySelector('canvas'), statsEl: el.querySelector('.stats'), series: null };
+  panels.set(t.name, p);
+  return p;
+}
+
+function updateStats(p, s) {
+  const st = Smoke.seriesStats(s);
+  const cls = st.lossAvg > 2 ? 'bad' : st.lossAvg > 0.5 ? 'warn' : '';
+  p.statsEl.innerHTML =
+    '<span class="stat"><span class="k">median</span><span class="v">' + fmt(st.medAvg, 1) + ' ms</span></span>' +
+    '<span class="stat"><span class="k">max</span><span class="v">' + fmt(st.medMax, 1) + ' ms</span></span>' +
+    '<span class="stat"><span class="k">loss</span><span class="v loss ' + cls + '">' + fmt(st.lossAvg, 2) + ' %</span></span>' +
+    '<span class="stat"><span class="k">rounds</span><span class="v">' + s.buckets.length + '</span></span>';
+}
+
+async function refresh() {
+  let targets;
+  try {
+    const r = await fetch('/api/targets', { cache: 'no-store' });
+    targets = (await r.json()).targets || [];
+  } catch (e) {
+    document.getElementById('statusText').textContent = 'collector unreachable';
+    return;
+  }
+  await Promise.all(targets.map(async (t) => {
+    const p = ensurePanel(t);
+    try {
+      const r = await fetch('/api/series?target=' + encodeURIComponent(t.name), { cache: 'no-store' });
+      const s = Smoke.fromApiSeries(await r.json());
+      p.series = s;
+      updateStats(p, s);
+      renderPanel(p);
+    } catch (e) { /* transient */ }
+  }));
+  const now = new Date();
+  document.getElementById('statusText').textContent =
+    targets.length + ' targets · updated ' + now.toLocaleTimeString();
+}
+
+function renderPanel(p) {
+  if (!p.series) return;
+  if (p.series.buckets.length < 2) {
+    const ctx = p.canvas.getContext('2d');
+    p.canvas.style.height = '190px'; p.canvas.width = p.canvas.clientWidth; p.canvas.height = 190;
+    ctx.clearRect(0, 0, p.canvas.width, p.canvas.height);
+    ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--ink-faint');
+    ctx.font = '12px ui-monospace, monospace'; ctx.textAlign = 'center';
+    ctx.fillText('collecting… (' + p.series.buckets.length + ' round)', p.canvas.clientWidth / 2, 95);
+    return;
+  }
+  Smoke.render(p.canvas, p.series, { height: 190, xlabels: ['', '', '', 'now'] });
+}
+function renderAll() { for (const p of panels.values()) renderPanel(p); }
+
+function escapeHtml(s) { return s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+
+// legend
+(function buildLegend() {
+  const ll = document.getElementById('lossLegend');
+  for (const b of Smoke.LOSS_COLORS) {
+    const s = document.createElement('span'); s.className = 'swatch';
+    s.innerHTML = '<i style="background:' + b.color + '"></i>' + b.label;
+    ll.appendChild(s);
+  }
+  refreshSmokeKey();
+})();
+function refreshSmokeKey() {
+  const sk = document.getElementById('smokeKey'); sk.innerHTML = '';
+  const dark = Smoke.readVars().dark;
+  for (let k = 1; k <= 6; k++) { const i = document.createElement('i'); i.style.background = Smoke.smokeGray(k, 6, dark); sk.appendChild(i); }
+}
+
+// theme
+const btn = document.getElementById('themeBtn');
+function currentTheme() { return document.documentElement.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'); }
+function applyThemeLabel() { const d = currentTheme() === 'dark'; document.getElementById('themeIcon').textContent = d ? '☾' : '☀'; document.getElementById('themeLabel').textContent = d ? 'Dark' : 'Light'; }
+btn.addEventListener('click', () => { document.documentElement.setAttribute('data-theme', currentTheme() === 'dark' ? 'light' : 'dark'); applyThemeLabel(); refreshSmokeKey(); renderAll(); });
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { applyThemeLabel(); refreshSmokeKey(); renderAll(); });
+
+let rt; window.addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(renderAll, 120); });
+applyThemeLabel();
+refresh();
+setInterval(refresh, 3000);
+</script>
+</body>
+</html>
