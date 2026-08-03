@@ -32,8 +32,9 @@ Full design rationale and the original-system code map live at `~/.claude/plans/
 - ⬜ API serves downsampled long ranges (switch raw ↔ hourly by range) + SPA range selector
 - ✅ Dockerfile + compose (smoked + TimescaleDB) for one-command bring-up
 - ✅ Graceful shutdown (SIGINT/SIGTERM: cancel in-flight probes + clean HTTP shutdown)
-- ⬜ Config reload without restart (SIGHUP)
+- ✅ Config reload without restart (SIGHUP; atomic runtime swap, keeps running config on error)
 - ⬜ Structured logging + basic operational metrics (round duration, per-probe timings)
+- ⬜ Preserve alert firing state across config reload
 
 ## Phase 4 — Federation (multi-vantage) ⬜
 - ⬜ Agent binary that pulls its assignment and pushes results

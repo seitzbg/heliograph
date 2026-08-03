@@ -52,6 +52,10 @@ active development, so everything currently lives under _Unreleased_.
 - Prometheus `/metrics` endpoint (dependency-free text exposition): per-target/probe
   `smokeping_probe_median_seconds`, `smokeping_probe_loss_ratio`, `smokeping_probe_up`.
   Lets Grafana/Alertmanager-native setups scrape and alert. Unit-tested + live-verified.
+- Config reload on SIGHUP: the runtime (jobs + alert engine) is held behind an atomic
+  pointer and rebuilt from the config on SIGHUP; a bad edit keeps the running config.
+  Verified live (added a target, SIGHUP, it began measuring). Note: alert firing state
+  currently resets on reload.
 
 ### CI
 - GitLab CI pipeline (`.gitlab-ci.yml`): `go vet` + `go build` + `go test` on `golang:1.26`,

@@ -15,6 +15,7 @@ import (
 	"os/signal"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -53,92 +54,44 @@ func main() {
 
 	fmt.Printf("registered probe plugins: %s\n\n", strings.Join(probe.Registered(), ", "))
 
-	// Targets come from a YAML config (with inheritance) if -config is given,
-	// else from the built-in demo set.
-	var monitors []model.Monitor
-	var probeCfgs map[string]map[string]string
-	var alertDefs map[string]*alert.Alert
-	if *configPath != "" {
-		cfg, err := config.Load(*configPath)
-		if err != nil {
-			log.Fatalf("config: %v", err)
-		}
-		monitors, err = cfg.Monitors()
-		if err != nil {
-			log.Fatalf("%v", err)
-		}
-		alertDefs, err = cfg.BuildAlerts()
-		if err != nil {
-			log.Fatalf("%v", err)
-		}
-		probeCfgs = cfg.Probes
-		fmt.Printf("config: %d targets from %s\n", len(monitors), *configPath)
-	} else {
-		monitors = demoMonitors(*pings, *step)
-	}
-
-	// Build probe instances once per (kind,config); reuse across rounds/targets.
-	// A probe whose binary/deps are unavailable is skipped (with a warning), not
-	// fatal — so a missing optional tool (e.g. irtt) doesn't take the collector down.
-	probes := map[string]probe.Probe{}
-	var jobs []scheduler.Job
-	for _, m := range monitors {
-		p, ok := probes[m.ProbeKind]
-		if !ok {
-			var err error
-			p, err = probe.New(m.ProbeKind, probeCfgs[m.ProbeKind])
-			if err != nil {
-				log.Printf("skipping probe %s: %v", m.ProbeKind, err)
-				p = nil
-			}
-			probes[m.ProbeKind] = p // cache success or failure (nil)
-		}
-		if p == nil {
-			continue // this kind is unavailable; drop its targets
-		}
-		jobs = append(jobs, scheduler.Job{
-			Probe:   p,
-			Target:  probe.Target{Name: m.Name, Host: m.Host, Params: m.Params},
-			Pings:   m.Pings,
-			Timeout: *timeout,
-		})
-	}
-
-	// Alerting: build the engine from config alerts (if any) + a per-target
-	// alert-name map so each round's results can be evaluated.
-	alertsByTarget := map[string][]string{}
-	for _, m := range monitors {
-		if len(m.Alerts) > 0 {
-			alertsByTarget[m.Name] = m.Alerts
-		}
-	}
 	notifiers := map[string]alert.Notifier{"log": alert.LogNotifier{W: os.Stdout}}
 	if *webhook != "" {
 		notifiers["webhook"] = alert.WebhookNotifier{URL: *webhook}
 	}
-	var engine *alert.Engine
-	if len(alertDefs) > 0 {
-		engine = alert.NewEngine(alertDefs, notifiers)
-		fmt.Printf("alerts: %d defined, %d target(s) monitored\n", len(alertDefs), len(alertsByTarget))
+
+	// The runtime (jobs + alert engine) is built from config (or the demo set) and
+	// held behind an atomic pointer so it can be swapped on SIGHUP reload.
+	rt, err := buildRuntime(*configPath, *pings, *step, *timeout, notifiers)
+	if err != nil {
+		log.Fatalf("%v", err)
 	}
-	evalAlerts := func(out []scheduler.Outcome) {
-		if engine == nil {
-			return
-		}
-		for _, o := range out {
-			names := alertsByTarget[o.Target.Name]
-			if len(names) == 0 {
-				continue
-			}
-			evs := engine.Evaluate(o.Target.Name, names,
-				o.Computed.LossFraction()*100, o.Computed.Median, o.When)
-			engine.Dispatch(evs)
-		}
+	var current atomic.Pointer[runtime]
+	current.Store(rt)
+	if *configPath != "" {
+		fmt.Printf("config: %d targets from %s\n", len(rt.jobs), *configPath)
 	}
 
 	// Cancel in-flight probes and the HTTP server on SIGINT/SIGTERM.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// SIGHUP reloads the config; on error the running config is kept (a bad edit
+	// can't take the collector down). Alert firing state resets on reload.
+	if *configPath != "" {
+		hup := make(chan os.Signal, 1)
+		signal.Notify(hup, syscall.SIGHUP)
+		go func() {
+			for range hup {
+				nrt, err := buildRuntime(*configPath, *pings, *step, *timeout, notifiers)
+				if err != nil {
+					log.Printf("reload failed, keeping running config: %v", err)
+					continue
+				}
+				current.Store(nrt)
+				log.Printf("config reloaded from %s: %d targets", *configPath, len(nrt.jobs))
+			}
+		}()
+	}
 
 	var st store.Store
 	if *dsn != "" {
@@ -162,10 +115,11 @@ func main() {
 	}
 
 	for r := 1; r <= *rounds && ctx.Err() == nil; r++ {
+		rt := current.Load()
 		start := time.Now()
-		out := scheduler.RunRound(ctx, jobs, *workers)
+		out := scheduler.RunRound(ctx, rt.jobs, *workers)
 		st.Add(out)
-		evalAlerts(out)
+		rt.eval(out)
 		printRound(r, time.Since(start), out)
 		if r < *rounds {
 			select {
@@ -187,9 +141,10 @@ func main() {
 					return
 				case <-time.After(scheduler.NextDelay(time.Now(), *step, 0)):
 				}
-				out := scheduler.RunRound(ctx, jobs, *workers)
+				rt := current.Load()
+				out := scheduler.RunRound(ctx, rt.jobs, *workers)
 				st.Add(out)
-				evalAlerts(out)
+				rt.eval(out)
 			}
 		}()
 		// graceful shutdown on signal
@@ -204,6 +159,88 @@ func main() {
 		}
 		fmt.Println("shutdown complete")
 	}
+}
+
+// runtime is the swappable set of work: the probe jobs and the alert engine.
+// It is rebuilt (and atomically swapped) on SIGHUP config reload.
+type runtime struct {
+	jobs           []scheduler.Job
+	engine         *alert.Engine
+	alertsByTarget map[string][]string
+}
+
+// eval runs the alert engine over a round's outcomes and dispatches notifications.
+func (rt *runtime) eval(out []scheduler.Outcome) {
+	if rt.engine == nil {
+		return
+	}
+	for _, o := range out {
+		names := rt.alertsByTarget[o.Target.Name]
+		if len(names) == 0 {
+			continue
+		}
+		rt.engine.Dispatch(rt.engine.Evaluate(o.Target.Name, names,
+			o.Computed.LossFraction()*100, o.Computed.Median, o.When))
+	}
+}
+
+// buildRuntime loads targets (from YAML config, or the demo set) and builds the
+// probe jobs and alert engine. A probe whose binary/deps are unavailable is
+// skipped with a warning, not fatal.
+func buildRuntime(configPath string, demoPings int, demoStep, timeout time.Duration, notifiers map[string]alert.Notifier) (*runtime, error) {
+	var monitors []model.Monitor
+	var probeCfgs map[string]map[string]string
+	var alertDefs map[string]*alert.Alert
+	if configPath != "" {
+		cfg, err := config.Load(configPath)
+		if err != nil {
+			return nil, fmt.Errorf("config: %w", err)
+		}
+		if monitors, err = cfg.Monitors(); err != nil {
+			return nil, err
+		}
+		if alertDefs, err = cfg.BuildAlerts(); err != nil {
+			return nil, err
+		}
+		probeCfgs = cfg.Probes
+	} else {
+		monitors = demoMonitors(demoPings, demoStep)
+	}
+
+	probes := map[string]probe.Probe{}
+	var jobs []scheduler.Job
+	for _, m := range monitors {
+		p, ok := probes[m.ProbeKind]
+		if !ok {
+			var err error
+			if p, err = probe.New(m.ProbeKind, probeCfgs[m.ProbeKind]); err != nil {
+				log.Printf("skipping probe %s: %v", m.ProbeKind, err)
+				p = nil
+			}
+			probes[m.ProbeKind] = p // cache success or failure (nil)
+		}
+		if p == nil {
+			continue
+		}
+		jobs = append(jobs, scheduler.Job{
+			Probe:   p,
+			Target:  probe.Target{Name: m.Name, Host: m.Host, Params: m.Params},
+			Pings:   m.Pings,
+			Timeout: timeout,
+		})
+	}
+
+	alertsByTarget := map[string][]string{}
+	for _, m := range monitors {
+		if len(m.Alerts) > 0 {
+			alertsByTarget[m.Name] = m.Alerts
+		}
+	}
+	var engine *alert.Engine
+	if len(alertDefs) > 0 {
+		engine = alert.NewEngine(alertDefs, notifiers)
+	}
+	return &runtime{jobs: jobs, engine: engine, alertsByTarget: alertsByTarget}, nil
 }
 
 func demoMonitors(pings int, step time.Duration) []model.Monitor {
