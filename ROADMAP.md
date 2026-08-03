@@ -31,7 +31,8 @@ Full design rationale and the original-system code map live at `~/.claude/plans/
 - ✅ Continuous-aggregate downsampling tier (hourly) + refresh + 30-day retention policy
 - ⬜ API serves downsampled long ranges (switch raw ↔ hourly by range) + SPA range selector
 - ✅ Dockerfile + compose (smoked + TimescaleDB) for one-command bring-up
-- ⬜ Graceful shutdown (SIGINT/SIGTERM) and config reload (SIGHUP)
+- ✅ Graceful shutdown (SIGINT/SIGTERM: cancel in-flight probes + clean HTTP shutdown)
+- ⬜ Config reload without restart (SIGHUP)
 - ⬜ Structured logging + basic operational metrics (round duration, per-probe timings)
 
 ## Phase 4 — Federation (multi-vantage) ⬜

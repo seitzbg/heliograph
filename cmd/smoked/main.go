@@ -12,8 +12,10 @@ import (
 	"math"
 	"net/http"
 	"os"
+	"os/signal"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"smokeping-modern/internal/alert"
@@ -134,7 +136,9 @@ func main() {
 		}
 	}
 
-	ctx := context.Background()
+	// Cancel in-flight probes and the HTTP server on SIGINT/SIGTERM.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
 	var st store.Store
 	if *dsn != "" {
@@ -157,32 +161,48 @@ func main() {
 		fmt.Printf("store: in-memory (pass -dsn to persist to TimescaleDB)\n")
 	}
 
-	for r := 1; r <= *rounds; r++ {
+	for r := 1; r <= *rounds && ctx.Err() == nil; r++ {
 		start := time.Now()
 		out := scheduler.RunRound(ctx, jobs, *workers)
 		st.Add(out)
 		evalAlerts(out)
 		printRound(r, time.Since(start), out)
 		if r < *rounds {
-			time.Sleep(*step)
+			select {
+			case <-ctx.Done():
+			case <-time.After(*step):
+			}
 		}
 	}
 
-	if *serve {
+	if *serve && ctx.Err() == nil {
 		srv := api.New(st, *webdir)
+		httpSrv := &http.Server{Addr: *addr, Handler: srv.Routes()}
 		fmt.Printf("\nserving web UI + JSON API on %s  (/, /api/targets, /api/series?target=NAME, /api/probes)\n", *addr)
 		// keep polling in the background while serving
 		go func() {
 			for {
-				time.Sleep(scheduler.NextDelay(time.Now(), *step, 0))
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(scheduler.NextDelay(time.Now(), *step, 0)):
+				}
 				out := scheduler.RunRound(ctx, jobs, *workers)
 				st.Add(out)
 				evalAlerts(out)
 			}
 		}()
-		if err := http.ListenAndServe(*addr, srv.Routes()); err != nil {
+		// graceful shutdown on signal
+		go func() {
+			<-ctx.Done()
+			shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = httpSrv.Shutdown(shutCtx)
+		}()
+		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatal(err)
 		}
+		fmt.Println("shutdown complete")
 	}
 }
 

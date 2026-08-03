@@ -47,6 +47,8 @@ active development, so everything currently lives under _Unreleased_.
   one-command bring-up) + `.dockerignore`. Image builds and runs (verified).
 - Verified the live dashboard renders **from TimescaleDB** (not just the in-memory store),
   including the loss-colored median on real persisted loss data.
+- Graceful shutdown: `smoked` cancels in-flight probes and shuts the HTTP server down
+  cleanly on SIGINT/SIGTERM (signal-aware context). Verified (clean exit 0 on SIGTERM).
 
 ### CI
 - GitLab CI pipeline (`.gitlab-ci.yml`): `go vet` + `go build` + `go test` on `golang:1.26`,
