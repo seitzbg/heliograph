@@ -14,6 +14,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"smokeping-modern/internal/alert"
 	"smokeping-modern/internal/model"
 	"smokeping-modern/internal/probe"
 )
@@ -37,7 +38,18 @@ func (d *Duration) UnmarshalYAML(n *yaml.Node) error {
 type Config struct {
 	Database Database                     `yaml:"database"`
 	Probes   map[string]map[string]string `yaml:"probes"` // probe kind -> probe-level params
+	Alerts   map[string]AlertDef          `yaml:"alerts"` // name -> alert definition
 	Targets  *Node                        `yaml:"targets"`
+}
+
+// AlertDef is the YAML shape of one alert.
+type AlertDef struct {
+	Type        string   `yaml:"type"`        // "loss" | "rtt" | "matcher"
+	Pattern     string   `yaml:"pattern"`     // for loss/rtt: ">50%,>50%" or ">200,>200" (ms)
+	Matcher     string   `yaml:"matcher"`     // for matcher: "CheckLoss(l=50,x=3)"
+	Comment     string   `yaml:"comment"`
+	EdgeTrigger bool     `yaml:"edgetrigger"`
+	To          []string `yaml:"to"`          // notifier names; defaults to ["log"]
 }
 
 type Database struct {
@@ -54,7 +66,36 @@ type Node struct {
 	Pings    int               `yaml:"pings"`
 	Step     Duration          `yaml:"step"`
 	Params   map[string]string `yaml:"params"`
+	Alerts   []string          `yaml:"alerts"` // alert names; inherited down the tree
 	Children map[string]*Node  `yaml:"children"`
+}
+
+// BuildAlerts compiles the alert definitions into runnable alerts.
+func (c *Config) BuildAlerts() (map[string]*alert.Alert, error) {
+	out := map[string]*alert.Alert{}
+	for name, d := range c.Alerts {
+		var m alert.Matcher
+		var err error
+		switch d.Type {
+		case "loss":
+			m, err = alert.ParsePattern("loss", d.Pattern)
+		case "rtt":
+			m, err = alert.ParsePattern("rtt", d.Pattern)
+		case "matcher":
+			m, err = alert.ParseMatcher(d.Matcher)
+		default:
+			err = fmt.Errorf("alert %q: unknown type %q (want loss|rtt|matcher)", name, d.Type)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("alert %q: %w", name, err)
+		}
+		to := d.To
+		if len(to) == 0 {
+			to = []string{"log"}
+		}
+		out[name] = &alert.Alert{Name: name, Matcher: m, EdgeTrigger: d.EdgeTrigger, Comment: d.Comment, To: to}
+	}
+	return out, nil
 }
 
 // Load reads and parses a YAML config file.
@@ -90,6 +131,7 @@ type inherited struct {
 	pings  int
 	step   time.Duration
 	params map[string]string
+	alerts []string
 }
 
 func mergeParams(parent, child map[string]string) map[string]string {
@@ -131,20 +173,30 @@ func (c *Config) Monitors() ([]model.Monitor, error) {
 
 	var walk func(path string, n *Node, inh inherited)
 	walk = func(path string, n *Node, inh inherited) {
+		alerts := inh.alerts
+		if len(n.Alerts) > 0 {
+			alerts = n.Alerts
+		}
 		eff := inherited{
 			probe:  firstNonEmpty(n.Probe, inh.probe),
 			pings:  firstNonZero(n.Pings, inh.pings),
 			step:   firstNonZeroDur(time.Duration(n.Step), inh.step),
 			params: mergeParams(inh.params, n.Params),
+			alerts: alerts,
 		}
 		if n.Host != "" {
 			m := model.Monitor{
 				Name: path, ProbeKind: eff.probe, Host: n.Host,
-				Pings: eff.pings, Step: eff.step, Params: eff.params,
+				Pings: eff.pings, Step: eff.step, Params: eff.params, Alerts: eff.alerts,
 			}
 			if err := validate(path, m, getSchema); err != nil {
 				problems = append(problems, err.Error())
 			} else {
+				for _, an := range m.Alerts {
+					if _, ok := c.Alerts[an]; !ok {
+						problems = append(problems, fmt.Sprintf("%s: references undefined alert %q", path, an))
+					}
+				}
 				out = append(out, m)
 			}
 		}

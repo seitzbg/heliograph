@@ -13,4 +13,5 @@ type Monitor struct {
 	Pings     int               // samples per round (N)
 	Step      time.Duration     // polling interval
 	Params    map[string]string // per-target probe params (port, packetsize, ...)
+	Alerts    []string          // names of alerts to evaluate for this target
 }

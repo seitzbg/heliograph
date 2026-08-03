@@ -11,10 +11,12 @@ import (
 	"log"
 	"math"
 	"net/http"
+	"os"
 	"sort"
 	"strings"
 	"time"
 
+	"smokeping-modern/internal/alert"
 	"smokeping-modern/internal/api"
 	"smokeping-modern/internal/config"
 	"smokeping-modern/internal/model"
@@ -41,6 +43,7 @@ func main() {
 	webdir := flag.String("webdir", "web", "directory of static web assets to serve at /")
 	dsn := flag.String("dsn", "", "TimescaleDB/PostgreSQL DSN; if set, persist there instead of in-memory")
 	configPath := flag.String("config", "", "path to a YAML target-tree config; if set, replaces the built-in demo targets")
+	webhook := flag.String("webhook", "", "webhook URL for alerts named 'to: [webhook]'")
 	flag.Parse()
 
 	fmt.Printf("registered probe plugins: %s\n\n", strings.Join(probe.Registered(), ", "))
@@ -49,12 +52,17 @@ func main() {
 	// else from the built-in demo set.
 	var monitors []model.Monitor
 	var probeCfgs map[string]map[string]string
+	var alertDefs map[string]*alert.Alert
 	if *configPath != "" {
 		cfg, err := config.Load(*configPath)
 		if err != nil {
 			log.Fatalf("config: %v", err)
 		}
 		monitors, err = cfg.Monitors()
+		if err != nil {
+			log.Fatalf("%v", err)
+		}
+		alertDefs, err = cfg.BuildAlerts()
 		if err != nil {
 			log.Fatalf("%v", err)
 		}
@@ -85,6 +93,38 @@ func main() {
 		})
 	}
 
+	// Alerting: build the engine from config alerts (if any) + a per-target
+	// alert-name map so each round's results can be evaluated.
+	alertsByTarget := map[string][]string{}
+	for _, m := range monitors {
+		if len(m.Alerts) > 0 {
+			alertsByTarget[m.Name] = m.Alerts
+		}
+	}
+	notifiers := map[string]alert.Notifier{"log": alert.LogNotifier{W: os.Stdout}}
+	if *webhook != "" {
+		notifiers["webhook"] = alert.WebhookNotifier{URL: *webhook}
+	}
+	var engine *alert.Engine
+	if len(alertDefs) > 0 {
+		engine = alert.NewEngine(alertDefs, notifiers)
+		fmt.Printf("alerts: %d defined, %d target(s) monitored\n", len(alertDefs), len(alertsByTarget))
+	}
+	evalAlerts := func(out []scheduler.Outcome) {
+		if engine == nil {
+			return
+		}
+		for _, o := range out {
+			names := alertsByTarget[o.Target.Name]
+			if len(names) == 0 {
+				continue
+			}
+			evs := engine.Evaluate(o.Target.Name, names,
+				o.Computed.LossFraction()*100, o.Computed.Median, o.When)
+			engine.Dispatch(evs)
+		}
+	}
+
 	ctx := context.Background()
 
 	var st store.Store
@@ -105,6 +145,7 @@ func main() {
 		start := time.Now()
 		out := scheduler.RunRound(ctx, jobs, *workers)
 		st.Add(out)
+		evalAlerts(out)
 		printRound(r, time.Since(start), out)
 		if r < *rounds {
 			time.Sleep(*step)
@@ -118,7 +159,9 @@ func main() {
 		go func() {
 			for {
 				time.Sleep(scheduler.NextDelay(time.Now(), *step, 0))
-				st.Add(scheduler.RunRound(ctx, jobs, *workers))
+				out := scheduler.RunRound(ctx, jobs, *workers)
+				st.Add(out)
+				evalAlerts(out)
 			}
 		}()
 		if err := http.ListenAndServe(*addr, srv.Routes()); err != nil {
