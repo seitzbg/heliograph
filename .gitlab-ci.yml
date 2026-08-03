@@ -1,0 +1,20 @@
+stages:
+  - test
+
+test:
+  stage: test
+  image: golang:1.26
+  variables:
+    GOPATH: "$CI_PROJECT_DIR/.gocache"
+  cache:
+    key: gomod
+    paths:
+      - .gocache/pkg/mod
+  before_script:
+    - go version
+  script:
+    - go vet ./...
+    - go build ./...
+    - go test ./...
+  # pgstore integration test is skipped unless SMOKE_TEST_DSN is set, so no DB
+  # service is required here; the irtt test is a pure JSON-parser test.

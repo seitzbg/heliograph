@@ -38,6 +38,11 @@ active development, so everything currently lives under _Unreleased_.
 - IRTT parser: irtt emits `lost` as the JSON string `"false"` (not a boolean); the parser
   and its test fixture were corrected after a live run exposed 100% phantom loss.
 
+### CI
+- GitLab CI pipeline (`.gitlab-ci.yml`): `go vet` + `go build` + `go test` on `golang:1.26`,
+  with a cached module directory. No DB service needed (the pgstore integration test skips
+  without `SMOKE_TEST_DSN`).
+
 ### Docs
 - `CHANGELOG.md` and `ROADMAP.md` added to track progress and the plan.
 - Full re-implementation reference / code map maintained outside the repo at
