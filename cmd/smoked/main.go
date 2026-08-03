@@ -44,6 +44,7 @@ func main() {
 	addr := flag.String("addr", ":8087", "API listen address when -serve")
 	webdir := flag.String("webdir", "web", "directory of static web assets to serve at /")
 	dsn := flag.String("dsn", "", "TimescaleDB/PostgreSQL DSN; if set, persist there instead of in-memory")
+	downsample := flag.Bool("downsample", false, "with -dsn: enable the hourly continuous aggregate + retention policies")
 	configPath := flag.String("config", "", "path to a YAML target-tree config; if set, replaces the built-in demo targets")
 	webhook := flag.String("webhook", "", "webhook URL for alerts named 'to: [webhook]'")
 	flag.Parse()
@@ -142,8 +143,15 @@ func main() {
 			log.Fatalf("store: %v", err)
 		}
 		defer pg.Close()
+		if *downsample {
+			if err := pg.EnableDownsampling(ctx); err != nil {
+				log.Fatalf("store: %v", err)
+			}
+			fmt.Printf("store: TimescaleDB (downsampling enabled)\n")
+		} else {
+			fmt.Printf("store: TimescaleDB\n")
+		}
 		st = pg
-		fmt.Printf("store: TimescaleDB\n")
 	} else {
 		st = store.NewMem(1024)
 		fmt.Printf("store: in-memory (pass -dsn to persist to TimescaleDB)\n")

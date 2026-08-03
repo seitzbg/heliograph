@@ -77,3 +77,51 @@ func TestPGStoreRoundTrip(t *testing.T) {
 		t.Errorf("round0 unexpected err: %v", hist[0].Err)
 	}
 }
+
+func TestEnableDownsampling(t *testing.T) {
+	dsn := os.Getenv("SMOKE_TEST_DSN")
+	if dsn == "" {
+		t.Skip("set SMOKE_TEST_DSN to run the TimescaleDB integration test")
+	}
+	ctx := context.Background()
+	s, err := New(ctx, dsn, 100, func(e error) { t.Errorf("store error: %v", e) })
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.pool.Exec(ctx, "DROP MATERIALIZED VIEW IF EXISTS samples_hourly CASCADE"); err != nil {
+		t.Fatalf("drop cagg: %v", err)
+	}
+	if _, err := s.pool.Exec(ctx, "TRUNCATE samples"); err != nil {
+		t.Fatalf("truncate: %v", err)
+	}
+	s.Add([]scheduler.Outcome{{
+		Target: probe.Target{Name: "d", Host: "h"}, ProbeName: "FPing",
+		Computed: sample.Compute(5, []float64{0.01, 0.02, 0.03, 0.04, 0.05}),
+		When:     time.Unix(1_700_000_000, 0).UTC(),
+	}})
+
+	if err := s.EnableDownsampling(ctx); err != nil {
+		t.Fatalf("EnableDownsampling: %v", err)
+	}
+	// second call must be a no-op (idempotent)
+	if err := s.EnableDownsampling(ctx); err != nil {
+		t.Fatalf("EnableDownsampling (2nd): %v", err)
+	}
+
+	if _, err := s.pool.Exec(ctx, "CALL refresh_continuous_aggregate('samples_hourly', NULL, NULL)"); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	var rounds int
+	var medAvg float64
+	if err := s.pool.QueryRow(ctx,
+		"SELECT rounds, median_avg FROM samples_hourly WHERE target='d'").Scan(&rounds, &medAvg); err != nil {
+		t.Fatalf("query aggregate: %v", err)
+	}
+	if rounds != 1 {
+		t.Errorf("aggregate rounds = %d, want 1", rounds)
+	}
+	if medAvg != 0.03 { // median of the 5 samples
+		t.Errorf("aggregate median_avg = %v, want 0.03", medAvg)
+	}
+}

@@ -1,0 +1,8 @@
+.git
+.gitignore
+*.md
+!config.example.yaml
+/smoked
+.gocache
+.idea
+.vscode

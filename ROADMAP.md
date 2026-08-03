@@ -26,12 +26,13 @@ Full design rationale and the original-system code map live at `~/.claude/plans/
 - ✅ Alert engine (hysteresis matchers + pattern DSL, edge-trigger, log/webhook notifiers)
 
 ## Phase 3 — Production-readiness 🚧
-- 🚧 CI pipeline (GitLab CI: vet + build + test)
-- ⬜ API reads long ranges from TimescaleDB; live dashboard verified on the DB store
-- ⬜ Continuous-aggregate downsampling tiers (the RRA equivalent) + retention policy
+- 🚧 CI pipeline (GitLab CI: vet + build + test) — config lint-valid; pipeline pending a runner
+- ✅ Live dashboard verified rendering from the TimescaleDB store (raw-sample path)
+- ✅ Continuous-aggregate downsampling tier (hourly) + refresh + 30-day retention policy
+- ⬜ API serves downsampled long ranges (switch raw ↔ hourly by range) + SPA range selector
+- ✅ Dockerfile + compose (smoked + TimescaleDB) for one-command bring-up
 - ⬜ Graceful shutdown (SIGINT/SIGTERM) and config reload (SIGHUP)
 - ⬜ Structured logging + basic operational metrics (round duration, per-probe timings)
-- ⬜ Dockerfile + compose (smoked + TimescaleDB) for one-command bring-up
 
 ## Phase 4 — Federation (multi-vantage) ⬜
 - ⬜ Agent binary that pulls its assignment and pushes results

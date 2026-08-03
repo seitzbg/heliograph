@@ -1,0 +1,39 @@
+# One-command bring-up: TimescaleDB + the smoked collector serving the dashboard.
+#   docker compose up --build   ->   http://localhost:8087/
+services:
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    environment:
+      POSTGRES_USER: smoke
+      POSTGRES_PASSWORD: smoke
+      POSTGRES_DB: smoke
+    volumes:
+      - tsdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U smoke -d smoke"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  smoked:
+    build: .
+    cap_add:
+      - NET_RAW          # fping ICMP
+    command:
+      - "-serve"
+      - "-addr"
+      - ":8087"
+      - "-webdir"
+      - "/web"
+      - "-config"
+      - "/etc/smokeping/config.yaml"
+      - "-dsn"
+      - "postgres://smoke:smoke@timescaledb:5432/smoke?sslmode=disable"
+    ports:
+      - "8087:8087"
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+
+volumes:
+  tsdata: {}

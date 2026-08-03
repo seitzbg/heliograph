@@ -75,6 +75,41 @@ func (s *PGStore) migrate(ctx context.Context) error {
 	return nil
 }
 
+// downsampling statements (each must run outside an explicit transaction).
+var downsampleStmts = []string{
+	`CREATE MATERIALIZED VIEW IF NOT EXISTS samples_hourly
+	 WITH (timescaledb.continuous) AS
+	 SELECT time_bucket('1 hour', ts) AS bucket,
+	        target,
+	        avg(median_seconds) AS median_avg,
+	        min(median_seconds) AS median_min,
+	        max(median_seconds) AS median_max,
+	        avg(loss::float / NULLIF(pings, 0)) AS loss_frac,
+	        count(*) AS rounds
+	 FROM samples
+	 GROUP BY bucket, target
+	 WITH NO DATA`,
+	`SELECT add_continuous_aggregate_policy('samples_hourly',
+	        start_offset => INTERVAL '3 days',
+	        end_offset => INTERVAL '1 hour',
+	        schedule_interval => INTERVAL '1 hour',
+	        if_not_exists => TRUE)`,
+	`SELECT add_retention_policy('samples', INTERVAL '30 days', if_not_exists => TRUE)`,
+}
+
+// EnableDownsampling creates the hourly continuous aggregate (median avg/min/max
+// + loss per target per hour — the coarse tier a long-range view reads, akin to
+// SmokePing's RRAs), a refresh policy, and a 30-day retention policy on the raw
+// samples. Idempotent.
+func (s *PGStore) EnableDownsampling(ctx context.Context) error {
+	for _, q := range downsampleStmts {
+		if _, err := s.pool.Exec(ctx, q); err != nil {
+			return fmt.Errorf("pgstore: downsampling: %w", err)
+		}
+	}
+	return nil
+}
+
 // nanToNil converts NaN -> nil so lost/median gaps are stored as SQL NULL.
 func nanToNil(v float64) *float64 {
 	if math.IsNaN(v) {
