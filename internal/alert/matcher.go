@@ -5,8 +5,11 @@
 // Two matcher styles are provided:
 //   - hysteresis matchers (CheckLoss, CheckLatency): raise after X consecutive
 //     samples past a threshold, clear after X consecutive back under it;
-//   - pattern matchers: a comma-separated sequence of comparisons matched
-//     against the tail of the window (SmokePing's shape-matching DSL).
+//   - pattern matchers: SmokePing's shape-matching DSL — a comma-separated
+//     sequence of per-sample comparisons matched right-anchored against the
+//     newest end of the window, with `*` (one arbitrary sample), `*N*` (skip
+//     0..N samples), and `==U`/`!=U` (the unknown value: a lost round's missing
+//     rtt median). The `S` startup sentinel is intentionally not supported.
 package alert
 
 import (
@@ -95,43 +98,111 @@ func hysteresis(series []float64, x int, prev bool, pred func(float64) bool) boo
 
 // ---- pattern matcher ----
 
-type cmp struct {
-	op  string
-	val float64
+// stepKind distinguishes the three token shapes a pattern can hold.
+type stepKind int
+
+const (
+	stepCmp  stepKind = iota // a comparison against exactly one sample
+	stepAny                  // bare `*`: exactly one arbitrary sample
+	stepSkip                 // `*N*`: 0..N arbitrary samples
+)
+
+// step is one compiled pattern token.
+type step struct {
+	kind stepKind
+	op   string  // stepCmp: comparison operator
+	val  float64 // stepCmp: numeric threshold (rtt in seconds, loss in percent)
+	isU  bool    // stepCmp: matches the unknown value U (NaN); op is == or !=
+	max  int     // stepSkip: maximum samples to skip
 }
 
-// Pattern matches a sequence of comparisons against the tail of the window,
-// aligned oldest->newest. Field is "loss" (values are percent) or "rtt" (values
-// are seconds). It is a shape match and does not use hysteresis.
+func (s step) matchValue(v float64) bool {
+	if s.isU {
+		if s.op == "==" {
+			return math.IsNaN(v) // ==U: true iff unknown
+		}
+		return !math.IsNaN(v) // !=U: true iff known
+	}
+	return compare(v, s.op, s.val)
+}
+
+// Pattern is SmokePing's shape-matching DSL: a sequence of steps matched
+// right-anchored against the newest end of the window (oldest->newest), with
+// `*N*` skips allowing bounded gaps between hard comparisons. Field is "loss"
+// (percent) or "rtt" (seconds). It does not use hysteresis.
 type Pattern struct {
 	Field string
-	Seq   []cmp
+	Steps []step
 	Src   string
 }
 
-func (p Pattern) Length() int      { return len(p.Seq) }
 func (p Pattern) Describe() string { return p.Field + " pattern " + p.Src }
+
+// Length is the maximum number of trailing samples the pattern can inspect —
+// hard/wildcard slots plus every skip's full allowance. It drives how deep the
+// engine's per-target window must be, so a `*N*` pattern can actually align (the
+// bug the Perl original shipped: too-shallow history made documented patterns
+// like `>0%,*12*,>0%` silently never match).
+func (p Pattern) Length() int {
+	n := 0
+	for _, s := range p.Steps {
+		switch s.kind {
+		case stepSkip:
+			n += s.max
+		default:
+			n++
+		}
+	}
+	if n < 1 {
+		n = 1
+	}
+	return n
+}
+
 func (p Pattern) Test(w Window, _ bool) bool {
 	series := w.RTT
 	if p.Field == "loss" {
 		series = w.Loss
 	}
-	n := len(p.Seq)
-	if n == 0 || len(series) < n {
+	if len(p.Steps) == 0 {
 		return false
 	}
-	tail := series[len(series)-n:]
-	for i, c := range p.Seq {
-		if !compare(tail[i], c.op, c.val) {
-			return false
-		}
+	return matchSteps(p.Steps, len(p.Steps)-1, series, len(series)-1)
+}
+
+// matchSteps matches steps[0..si] against the samples ending at index pos,
+// walking newest->oldest (steps and samples both consumed from the right, so the
+// pattern is anchored to the most recent sample). Samples older than the matched
+// run are irrelevant (the pattern floats on the left, bounded by Length). A skip
+// tries every allowance 0..max; a comparison/wildcard consumes exactly one.
+func matchSteps(steps []step, si int, series []float64, pos int) bool {
+	if si < 0 {
+		return true // every step satisfied
 	}
-	return true
+	s := steps[si]
+	if s.kind == stepSkip {
+		for k := 0; k <= s.max; k++ {
+			if pos-k < -1 {
+				break // not enough samples left to skip k
+			}
+			if matchSteps(steps, si-1, series, pos-k) {
+				return true
+			}
+		}
+		return false
+	}
+	if pos < 0 {
+		return false // a hard/wildcard slot with no sample to fill it
+	}
+	if s.kind == stepAny || s.matchValue(series[pos]) {
+		return matchSteps(steps, si-1, series, pos-1)
+	}
+	return false
 }
 
 func compare(a float64, op string, b float64) bool {
 	if math.IsNaN(a) {
-		return false
+		return false // an unknown sample satisfies no numeric comparison (only ==U)
 	}
 	switch op {
 	case ">":
@@ -150,8 +221,16 @@ func compare(a float64, op string, b float64) bool {
 	return false
 }
 
-// ParsePattern compiles "==0%,>20%,>20%" (field "loss", values percent) or
-// ">200,>200" (field "rtt", values milliseconds -> seconds).
+// ParsePattern compiles the shape DSL. Examples:
+//
+//	==0%,>20%,>20%      loss shape (values are percent)
+//	>200,>200           rtt shape (values are milliseconds -> seconds)
+//	>0%,*12*,>0%        loss > 0 now and again within the previous 12 samples
+//	>200,*,==U          high rtt, any sample, then a fully-lost round
+//
+// `*` matches one arbitrary sample; `*N*` skips 0..N; `==U`/`!=U` match the
+// unknown value (a lost round has no rtt median), valid only on the rtt field.
+// The `S` startup sentinel is deliberately unsupported (see parseToken).
 func ParsePattern(field, src string) (Pattern, error) {
 	p := Pattern{Field: field, Src: src}
 	for _, tok := range strings.Split(src, ",") {
@@ -159,29 +238,76 @@ func ParsePattern(field, src string) (Pattern, error) {
 		if tok == "" {
 			continue
 		}
-		op := ""
-		for _, o := range []string{">=", "<=", "==", "!=", ">", "<"} {
-			if strings.HasPrefix(tok, o) {
-				op = o
-				break
-			}
-		}
-		if op == "" {
-			return p, fmt.Errorf("pattern token %q: missing comparison operator", tok)
-		}
-		rest := strings.TrimSpace(strings.TrimPrefix(tok, op))
-		rest = strings.TrimSuffix(rest, "%")
-		v, err := strconv.ParseFloat(rest, 64)
+		st, err := parseToken(field, tok)
 		if err != nil {
-			return p, fmt.Errorf("pattern token %q: %w", tok, err)
+			return p, err
 		}
-		if field == "rtt" {
-			v /= 1000 // ms -> seconds
-		}
-		p.Seq = append(p.Seq, cmp{op: op, val: v})
+		p.Steps = append(p.Steps, st)
 	}
-	if len(p.Seq) == 0 {
+	if len(p.Steps) == 0 {
 		return p, fmt.Errorf("empty pattern")
 	}
+	// A pattern of only skips/wildcards asserts nothing and would fire on any
+	// history — reject it rather than ship a silently always-on alert.
+	hard := 0
+	for _, s := range p.Steps {
+		if s.kind == stepCmp {
+			hard++
+		}
+	}
+	if hard == 0 {
+		return p, fmt.Errorf("pattern %q has no comparison tokens (it would match any history)", src)
+	}
 	return p, nil
+}
+
+func parseToken(field, tok string) (step, error) {
+	// `*N*` skip (also catches `**` as an error). Bare `*` (len 1) falls through.
+	if len(tok) >= 2 && strings.HasPrefix(tok, "*") && strings.HasSuffix(tok, "*") {
+		inner := tok[1 : len(tok)-1]
+		n, err := strconv.Atoi(inner)
+		if err != nil || n < 0 {
+			return step{}, fmt.Errorf("pattern token %q: skip must be *N* with N a non-negative integer", tok)
+		}
+		return step{kind: stepSkip, max: n}, nil
+	}
+	if tok == "*" {
+		return step{kind: stepAny}, nil
+	}
+	op := ""
+	for _, o := range []string{">=", "<=", "==", "!=", ">", "<"} {
+		if strings.HasPrefix(tok, o) {
+			op = o
+			break
+		}
+	}
+	if op == "" {
+		return step{}, fmt.Errorf("pattern token %q: missing comparison operator", tok)
+	}
+	rest := strings.TrimSpace(strings.TrimPrefix(tok, op))
+	switch rest {
+	case "S":
+		// The startup sentinel exists in SmokePing only because alert state was
+		// in-memory and lost on restart. smokeping-modern keeps a durable store, so
+		// "already bad at startup" is answered from real history — the sentinel is
+		// dropped by design (blueprint §07) rather than reintroduced as a dead token.
+		return step{}, fmt.Errorf("pattern token %q: the S startup sentinel is not supported in smokeping-modern", tok)
+	case "U":
+		if op != "==" && op != "!=" {
+			return step{}, fmt.Errorf("pattern token %q: U is only valid with == or !=", tok)
+		}
+		if field != "rtt" {
+			return step{}, fmt.Errorf("pattern token %q: U (unknown) applies to rtt; loss is always a known percentage", tok)
+		}
+		return step{kind: stepCmp, op: op, isU: true}, nil
+	}
+	rest = strings.TrimSuffix(rest, "%")
+	v, err := strconv.ParseFloat(rest, 64)
+	if err != nil {
+		return step{}, fmt.Errorf("pattern token %q: %w", tok, err)
+	}
+	if field == "rtt" {
+		v /= 1000 // ms -> seconds
+	}
+	return step{kind: stepCmp, op: op, val: v}, nil
 }

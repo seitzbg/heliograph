@@ -43,14 +43,18 @@ Not planned for now; pick up only if multi-vantage measurement is requested.
 - ⬜ Per-vantage series (the `~slave` equivalent) + overlay graphs
 - ⬜ Store-and-forward buffering on the agent
 
-## Phase 5 — Parity & polish ⬜
-- ⬜ Richer alert DSL: `*N*` skip, `U`/`S` tokens, priority suppression, per-target `alertee`
-  - ⚠ When building this, avoid two bugs the Perl original shipped (verified in a correctness
-    review): the `*N*` skip-wildcard alignment was wrong, so documented patterns like
-    `>0%,*12*,>0%` silently never matched; and unknown loss (`U`) was recorded as 0%, so an
-    outage read as clean history and `==U` could never fire. Drive the matcher with
-    table-driven tests over both, and keep unknown rounds distinct from 0% (today an errored
-    round is 100% loss and an unavailable probe is a gap — never silently 0%).
+## Phase 5 — Parity & polish 🚧
+- 🚧 Richer alert DSL — pattern `*N*` skip, bare `*`, `U` token done ✅; priority
+  suppression + per-target `alertee` ⬜
+  - ✅ Both Perl bugs avoided (table-driven tests): `*N*` alignment is correct
+    (`>0%,*12*,>0%` matches; patterns are right-anchored to the newest sample and the
+    window retains the full skip allowance), and `==U` fires on a lost round's unknown
+    rtt, kept distinct from 0% loss (an errored round is 100% loss; a lost round's median
+    is NaN = U; an unavailable probe is a gap — never silently 0%).
+  - `S` (startup sentinel): dropped by design, not implemented. It only existed because
+    SmokePing's alert state was in-memory; the durable store answers "already bad at
+    startup" from real history (blueprint §07). `==S`/`!=S` are rejected at parse time.
+    Follow-up for the same use case: warm-start the alert window from the store on boot.
 - ⬜ Emit each probe's config as JSON Schema (docs + validation from one source)
 - ⬜ Overview (small multiples) + multi-range detail (3h/30h/10d/400d) + unison scaling in the SPA
 - ⬜ Top-N "charts" (worst by loss/median/stddev) and alternate menu hierarchies

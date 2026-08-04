@@ -84,3 +84,105 @@ func TestParseAndMatchPattern(t *testing.T) {
 		t.Errorf("rtt pattern should not match tail [0.1,0.3]")
 	}
 }
+
+// nan is a readable NaN for building loss/rtt windows in tests.
+func nan() float64 { return math.NaN() }
+
+// The `*N*` skip must align the surrounding hard tokens correctly — the bug the
+// Perl original shipped, where `>0%,*12*,>0%` silently never matched. The pattern
+// is right-anchored: the newest sample must satisfy the final token, and a skip
+// of 0..N samples sits between the hard comparisons.
+func TestPatternSkipAlignment(t *testing.T) {
+	p, err := ParsePattern("loss", ">0%,*12*,>0%")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if p.Length() != 14 { // 1 + 12 + 1
+		t.Fatalf("Length = %d, want 14", p.Length())
+	}
+	cases := []struct {
+		name string
+		loss []float64
+		want bool
+	}{
+		{"adjacent loss (skip=0)", []float64{5, 5}, true},
+		{"gap of 1 clean sample", []float64{5, 0, 5}, true},
+		{"gap of exactly 12 clean samples", []float64{5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5}, true},
+		{"gap of 13 clean samples (exceeds *12*)", []float64{5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5}, false},
+		{"newest is clean -> not right-anchored", []float64{5, 0, 5, 0}, false},
+		{"only one loss sample", []float64{0, 0, 5}, false},
+		{"no loss at all", []float64{0, 0, 0}, false},
+	}
+	for _, c := range cases {
+		if got := p.Test(Window{Loss: c.loss}, false); got != c.want {
+			t.Errorf("%s: Test(%v) = %v, want %v", c.name, c.loss, got, c.want)
+		}
+	}
+}
+
+// The unknown value U must be matchable and distinct from 0% — the second Perl
+// pitfall, where a lost round was recorded as 0% so `==U` could never fire and an
+// outage read as clean history.
+func TestPatternUnknownToken(t *testing.T) {
+	// A high-latency round followed by a fully-lost (unknown-rtt) round.
+	p, err := ParsePattern("rtt", ">200,==U")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if p.Length() != 2 {
+		t.Fatalf("Length = %d, want 2", p.Length())
+	}
+	if !p.Test(Window{RTT: []float64{0.3, nan()}}, false) {
+		t.Errorf("==U should match a lost (NaN) newest round after a >200ms round")
+	}
+	if p.Test(Window{RTT: []float64{0.3, 0.3}}, false) {
+		t.Errorf("==U must not match a known (0.3s) round — unknown is distinct from a value")
+	}
+	// A zero-latency round is a *known* value, so ==U (unknown) must be false,
+	// and !=U (known) must be true — proving U is not conflated with 0.
+	pne, _ := ParsePattern("rtt", "!=U")
+	if !pne.Test(Window{RTT: []float64{0.0}}, false) {
+		t.Errorf("!=U should match a known 0ms round")
+	}
+	if pne.Test(Window{RTT: []float64{nan()}}, false) {
+		t.Errorf("!=U must not match an unknown round")
+	}
+}
+
+// A bare `*` consumes exactly one arbitrary sample.
+func TestPatternBareWildcard(t *testing.T) {
+	p, err := ParsePattern("loss", ">50%,*,>50%")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if p.Length() != 3 {
+		t.Fatalf("Length = %d, want 3", p.Length())
+	}
+	if !p.Test(Window{Loss: []float64{60, 0, 60}}, false) {
+		t.Errorf("should match: loss, one arbitrary sample, loss")
+	}
+	if p.Test(Window{Loss: []float64{60, 60}}, false) {
+		t.Errorf("bare * is a mandatory slot: [60,60] has no middle sample to fill it")
+	}
+}
+
+func TestParsePatternRejectsBadTokens(t *testing.T) {
+	cases := []struct{ field, src, why string }{
+		{"loss", "==S", "S startup sentinel is dropped"},
+		{"rtt", "==S", "S startup sentinel is dropped"},
+		{"loss", "==U", "U is not valid on the loss field"},
+		{"rtt", ">U", "U requires == or !="},
+		{"rtt", "<U", "U requires == or !="},
+		{"loss", "*5*", "only skips -> matches anything"},
+		{"loss", "*,*3*", "only wildcards/skips -> matches anything"},
+		{"loss", "*x*", "non-integer skip count"},
+		{"loss", "*-3*", "negative skip count"},
+		{"loss", "50%", "missing comparison operator"},
+		{"loss", "", "empty pattern"},
+	}
+	for _, c := range cases {
+		if _, err := ParsePattern(c.field, c.src); err == nil {
+			t.Errorf("ParsePattern(%q, %q): expected error (%s), got nil", c.field, c.src, c.why)
+		}
+	}
+}
