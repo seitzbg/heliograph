@@ -8,6 +8,11 @@ breaking changes.
 ## [Unreleased]
 
 ### Added
+- Top-N "charts" (worst offenders): `GET /api/charts?by=loss|median|stddev&n=N` ranks
+  targets by their most recent round (loss %, median latency, or per-round jitter/stddev);
+  targets with no value for the chosen key (a fully-lost round has no median/stddev) are
+  excluded from that chart rather than ranked as best. A "Worst targets" panel in the
+  dashboard renders it with a Loss/Latency/Jitter toggle.
 - Probe config as JSON Schema: `GET /api/probes/schema` emits each probe's config
   variables as JSON Schema (draft 2020-12) — probe-level and per-target vars as separate
   closed objects — generated from the same `VarSpec` source that drives runtime validation,

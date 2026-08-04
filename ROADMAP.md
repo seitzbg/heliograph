@@ -63,7 +63,8 @@ Not planned for now; pick up only if multi-vantage measurement is requested.
   probe-level + per-target vars as separate closed objects, from the same VarSpec source
   as runtime validation)
 - ⬜ Overview (small multiples) + multi-range detail (3h/30h/10d/400d) + unison scaling in the SPA
-- ⬜ Top-N "charts" (worst by loss/median/stddev) and alternate menu hierarchies
+- 🚧 Top-N "charts" (worst by loss/median/stddev) done ✅ (`/api/charts` + dashboard
+  "Worst targets" panel); alternate menu hierarchies ⬜
 - ⬜ Drag-to-zoom time range (refetch, not image swap); in-app dark-mode toggle persistence
 - ✅ Prometheus metrics export (`/metrics`: median/loss/up per target) for Grafana-native users
 - ⬜ Availability/SLA reporting (the tSmoke equivalent)
