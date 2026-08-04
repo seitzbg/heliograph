@@ -1,6 +1,7 @@
 package alert
 
 import (
+	"math"
 	"testing"
 	"time"
 )
@@ -65,6 +66,32 @@ func TestNonEdgeEmitsWhileFiring(t *testing.T) {
 	}
 }
 
+func TestCheckLatencyNoSpuriousResolveOnHardDown(t *testing.T) {
+	cap := &capture{}
+	alerts := map[string]*Alert{
+		"lat": {Name: "lat", Matcher: CheckLatency{L: 0.2, X: 2}, EdgeTrigger: true, To: []string{"cap"}},
+	}
+	e := NewEngine(alerts, map[string]Notifier{"cap": cap})
+	when := time.Unix(1_700_000_000, 0)
+
+	// Two high-latency rounds raise the alert; then the host goes hard down, so
+	// each round is fully lost and its median is NaN. The latency alert must hold
+	// firing — not emit a spurious RESOLVED while the host is unreachable.
+	rtts := []float64{0.3, 0.3, math.NaN(), math.NaN()}
+	for i, rtt := range rtts {
+		lossPct := 0.0
+		if math.IsNaN(rtt) {
+			lossPct = 100
+		}
+		e.Dispatch(e.Evaluate("t", []string{"lat"}, lossPct, rtt, when.Add(time.Duration(i)*time.Minute)))
+	}
+
+	got := statuses(cap.events)
+	if len(got) != 1 || got[0] != "FIRING" {
+		t.Fatalf("events = %v, want exactly [FIRING] (no RESOLVED during hard-down)", got)
+	}
+}
+
 func TestParseMatcher(t *testing.T) {
 	m, err := ParseMatcher("CheckLoss(l=50,x=3)")
 	if err != nil {
@@ -84,5 +111,27 @@ func TestParseMatcher(t *testing.T) {
 	}
 	if _, err := ParseMatcher("Bogus(x=1)"); err == nil {
 		t.Errorf("expected error for unknown matcher")
+	}
+}
+
+func TestParseMatcherRejectsBadArgs(t *testing.T) {
+	// A missing or zero l/x silently produces a broken alert: x=0 never raises
+	// (a dead alert), and l=0 makes the threshold always-true (fires forever).
+	// These must be config errors at parse time, not silent misbehavior.
+	bad := []string{
+		"CheckLoss(l=50)",     // missing x -> X=0, hysteresis never raises
+		"CheckLoss(x=3)",      // missing l -> L=0, "loss >= 0%" always true
+		"CheckLoss(l=50,x=0)", // x=0 -> dead alert
+		"CheckLoss(l=0,x=3)",  // l=0 -> always fires
+		"CheckLoss()",         // nothing set
+		"CheckLatency(l=200)", // missing x
+		"CheckLatency(x=3)",   // missing l
+		"CheckLatency(l=200,x=0)",
+		"CheckLatency(l=0,x=3)",
+	}
+	for _, spec := range bad {
+		if _, err := ParseMatcher(spec); err == nil {
+			t.Errorf("ParseMatcher(%q): expected a config error, got nil", spec)
+		}
 	}
 }

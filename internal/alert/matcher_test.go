@@ -37,6 +37,26 @@ func TestCheckLatencyNaN(t *testing.T) {
 	}
 }
 
+func TestCheckLatencyHoldsThroughHardDown(t *testing.T) {
+	m := CheckLatency{L: 0.2, X: 2} // 200ms
+	// Host goes hard down: both recent rounds are fully lost, so RTT is NaN
+	// (no median). A lost round carries no latency opinion and must NOT clear a
+	// firing latency alert — reporting the 100%-loss condition is the loss
+	// alert's job, not a reason to declare latency "recovered".
+	if !m.Test(Window{RTT: []float64{math.NaN(), math.NaN()}}, true) {
+		t.Errorf("firing latency alert must hold through an all-lost window, not clear")
+	}
+	// A single lost round mixed into an otherwise-recovered window also holds,
+	// rather than clearing on incomplete data.
+	if !m.Test(Window{RTT: []float64{math.NaN(), 0.1}}, true) {
+		t.Errorf("firing latency alert must hold when the window still contains a lost round")
+	}
+	// A genuine recovery (every measured RTT back under threshold) still clears.
+	if m.Test(Window{RTT: []float64{0.1, 0.1}}, true) {
+		t.Errorf("firing latency alert must clear once RTT recovers below threshold")
+	}
+}
+
 func TestParseAndMatchPattern(t *testing.T) {
 	p, err := ParsePattern("loss", ">50%,>50%")
 	if err != nil {

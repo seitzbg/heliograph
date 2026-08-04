@@ -66,6 +66,15 @@ func hysteresis(series []float64, x int, prev bool, pred func(float64) bool) boo
 		return prev
 	}
 	tail := series[len(series)-x:]
+	// An unknown sample (NaN — a fully-lost round has no median) carries no
+	// opinion: it must not by itself raise or clear the alert. Hold the previous
+	// state so a hard-down host cannot clear its own latency alert (that round is
+	// 100% loss, which the loss alert reports instead of latency "recovering").
+	for _, v := range tail {
+		if math.IsNaN(v) {
+			return prev
+		}
+	}
 	if !prev {
 		for _, v := range tail {
 			if !pred(v) {

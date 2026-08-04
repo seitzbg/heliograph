@@ -203,12 +203,42 @@ func ParseMatcher(spec string) (Matcher, error) {
 	}
 	switch name {
 	case "CheckLoss":
-		return CheckLoss{L: args["l"], X: int(args["x"])}, nil
+		l, x, err := requireLX(args)
+		if err != nil {
+			return nil, fmt.Errorf("matcher %q: %w", spec, err)
+		}
+		return CheckLoss{L: l, X: x}, nil
 	case "CheckLatency":
-		return CheckLatency{L: args["l"] / 1000, X: int(args["x"])}, nil
+		l, x, err := requireLX(args)
+		if err != nil {
+			return nil, fmt.Errorf("matcher %q: %w", spec, err)
+		}
+		return CheckLatency{L: l / 1000, X: x}, nil
 	default:
 		return nil, fmt.Errorf("matcher %q: unknown matcher %s", spec, name)
 	}
+}
+
+// requireLX validates the l (threshold) and x (consecutive samples) args common
+// to the hysteresis matchers. A missing or zero arg would otherwise produce a
+// silently broken alert — x=0 never raises (dead), l=0 makes the threshold
+// always-true (fires forever) — so both must be a config error at parse time.
+func requireLX(args map[string]float64) (l float64, x int, err error) {
+	lv, ok := args["l"]
+	if !ok {
+		return 0, 0, fmt.Errorf("missing required arg l")
+	}
+	if lv <= 0 {
+		return 0, 0, fmt.Errorf("arg l must be > 0, got %g", lv)
+	}
+	xv, ok := args["x"]
+	if !ok {
+		return 0, 0, fmt.Errorf("missing required arg x")
+	}
+	if xv < 1 {
+		return 0, 0, fmt.Errorf("arg x must be >= 1, got %g", xv)
+	}
+	return lv, int(xv), nil
 }
 
 func parseArgs(s string) (map[string]float64, error) {
