@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -78,6 +79,79 @@ func TestMetricsEndpoint(t *testing.T) {
 	if strings.Contains(body, "smokeping_rounds_total") {
 		t.Errorf("round metrics emitted without a RoundStats:\n%s", body)
 	}
+}
+
+func TestChartsRanking(t *testing.T) {
+	st := store.NewMem(10)
+	st.Add([]scheduler.Outcome{
+		// low latency, no loss
+		{Target: probe.Target{Name: "fast", Host: "h"}, ProbeName: "FPing",
+			Computed: sample.Compute(4, []float64{0.01, 0.011, 0.012, 0.013})},
+		// high latency, no loss, high jitter
+		{Target: probe.Target{Name: "slow", Host: "h"}, ProbeName: "FPing",
+			Computed: sample.Compute(4, []float64{0.10, 0.20, 0.30, 0.40})},
+		// fully lost -> 100% loss, no median/stddev
+		{Target: probe.Target{Name: "down", Host: "h"}, ProbeName: "TCPConnect",
+			Computed: sample.Compute(4, nil)},
+	})
+	srv := New(st, "")
+
+	get := func(q string) map[string]any {
+		rec := httptest.NewRecorder()
+		srv.Routes().ServeHTTP(rec, httptest.NewRequest("GET", "/api/charts"+q, nil))
+		if rec.Code != 200 {
+			t.Fatalf("%s: status %d", q, rec.Code)
+		}
+		var m map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &m); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+		return m
+	}
+	names := func(m map[string]any) []string {
+		var out []string
+		for _, c := range m["charts"].([]any) {
+			out = append(out, c.(map[string]any)["name"].(string))
+		}
+		return out
+	}
+
+	// by=loss (default): "down" (100%) first.
+	if got := names(get("")); len(got) == 0 || got[0] != "down" {
+		t.Errorf("by=loss: got %v, want down first", got)
+	}
+	// by=median: "down" excluded (no median); "slow" ranks above "fast".
+	got := names(get("?by=median"))
+	if contains(got, "down") {
+		t.Errorf("by=median must exclude the fully-lost target, got %v", got)
+	}
+	if len(got) < 2 || got[0] != "slow" {
+		t.Errorf("by=median: got %v, want slow first", got)
+	}
+	// by=stddev: "slow" (spread 0.1..0.4) beats "fast" (tight); "down" excluded.
+	got = names(get("?by=stddev"))
+	if len(got) == 0 || got[0] != "slow" || contains(got, "down") {
+		t.Errorf("by=stddev: got %v, want slow first, no down", got)
+	}
+	// n caps the result.
+	if got := names(get("?by=loss&n=1")); len(got) != 1 {
+		t.Errorf("n=1: got %d entries, want 1", len(got))
+	}
+	// invalid by -> 400.
+	rec := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(rec, httptest.NewRequest("GET", "/api/charts?by=bogus", nil))
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("by=bogus: status %d, want 400", rec.Code)
+	}
+}
+
+func contains(s []string, want string) bool {
+	for _, v := range s {
+		if v == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestProbeSchemaEndpoint(t *testing.T) {

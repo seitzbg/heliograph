@@ -9,6 +9,8 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
+	"sort"
+	"strconv"
 	"strings"
 
 	"smokeping-modern/internal/probe"
@@ -29,6 +31,7 @@ func (srv *Server) Routes() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/probes", srv.probes)
 	mux.HandleFunc("GET /api/probes/schema", srv.probeSchema)
+	mux.HandleFunc("GET /api/charts", srv.charts)
 	mux.HandleFunc("GET /api/targets", srv.targets)
 	mux.HandleFunc("GET /api/series", srv.series)
 	mux.HandleFunc("GET /api/rollup", srv.rollup)
@@ -99,6 +102,111 @@ func (srv *Server) targets(w http.ResponseWriter, _ *http.Request) {
 		out = append(out, dto)
 	}
 	writeJSON(w, map[string]any{"targets": out})
+}
+
+type chartEntry struct {
+	Name     string   `json:"name"`
+	Probe    string   `json:"probe"`
+	MedianMs *float64 `json:"median_ms"`
+	LossPct  float64  `json:"loss_pct"`
+	StdDevMs *float64 `json:"stddev_ms"`
+	When     string   `json:"when"`
+}
+
+// stddevMs returns the sample standard deviation of a round's received RTTs, in
+// milliseconds; nil if fewer than two samples arrived (undefined jitter).
+func stddevMs(sortedSec []float64) *float64 {
+	if len(sortedSec) < 2 {
+		return nil
+	}
+	var sum float64
+	for _, v := range sortedSec {
+		sum += v
+	}
+	mean := sum / float64(len(sortedSec))
+	var ss float64
+	for _, v := range sortedSec {
+		d := v - mean
+		ss += d * d
+	}
+	sd := math.Sqrt(ss/float64(len(sortedSec)-1)) * 1000
+	return &sd
+}
+
+// charts ranks targets by their most recent round — SmokePing's "charts" (worst
+// offenders). `by` selects the sort key: loss (default), median, or stddev. `n`
+// caps the result (default 10). Targets with no value for the chosen key (a lost
+// round has no median/stddev) are excluded from that chart, not ranked as best.
+func (srv *Server) charts(w http.ResponseWriter, r *http.Request) {
+	by := r.URL.Query().Get("by")
+	if by == "" {
+		by = "loss"
+	}
+	n := 10
+	if v := r.URL.Query().Get("n"); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil && parsed > 0 {
+			n = parsed
+		}
+	}
+
+	type scored struct {
+		e   chartEntry
+		key float64
+	}
+	var rows []scored
+	for _, k := range srv.store.Keys() {
+		o, ok := srv.store.Latest(k)
+		if !ok {
+			continue
+		}
+		e := chartEntry{
+			Name:    o.Target.Name,
+			Probe:   o.ProbeName,
+			LossPct: o.Computed.LossFraction() * 100,
+			When:    o.When.UTC().Format("2006-01-02T15:04:05Z"),
+		}
+		if m := fnum(o.Computed.Median); m != nil {
+			ms := *m * 1000
+			e.MedianMs = &ms
+		}
+		e.StdDevMs = stddevMs(o.Computed.Sorted)
+
+		var key float64
+		switch by {
+		case "median":
+			if e.MedianMs == nil {
+				continue // no latency to rank a fully-lost target by
+			}
+			key = *e.MedianMs
+		case "stddev":
+			if e.StdDevMs == nil {
+				continue
+			}
+			key = *e.StdDevMs
+		case "loss":
+			key = e.LossPct
+		default:
+			http.Error(w, `{"error":"by must be one of loss, median, stddev"}`, http.StatusBadRequest)
+			return
+		}
+		rows = append(rows, scored{e: e, key: key})
+	}
+
+	// Worst first. Ties broken by name so the order is stable/deterministic.
+	sort.SliceStable(rows, func(i, j int) bool {
+		if rows[i].key != rows[j].key {
+			return rows[i].key > rows[j].key
+		}
+		return rows[i].e.Name < rows[j].e.Name
+	})
+	if len(rows) > n {
+		rows = rows[:n]
+	}
+	out := make([]chartEntry, 0, len(rows))
+	for _, s := range rows {
+		out = append(out, s.e)
+	}
+	writeJSON(w, map[string]any{"by": by, "n": n, "charts": out})
 }
 
 type roundDTO struct {
