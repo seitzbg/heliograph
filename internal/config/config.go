@@ -50,7 +50,8 @@ type AlertDef struct {
 	Matcher     string   `yaml:"matcher"` // for matcher: "CheckLoss(l=50,x=3)"
 	Comment     string   `yaml:"comment"`
 	EdgeTrigger bool     `yaml:"edgetrigger"`
-	To          []string `yaml:"to"` // notifier names; defaults to ["log"]
+	To          []string `yaml:"to"`       // notifier names; defaults to ["log"]
+	Priority    int      `yaml:"priority"` // 1 = highest; 0 = unset (never inhibited)
 }
 
 type Database struct {
@@ -67,7 +68,8 @@ type Node struct {
 	Pings    int               `yaml:"pings"`
 	Step     Duration          `yaml:"step"`
 	Params   map[string]string `yaml:"params"`
-	Alerts   []string          `yaml:"alerts"` // alert names; inherited down the tree
+	Alerts   []string          `yaml:"alerts"`  // alert names; inherited down the tree
+	Alertee  []string          `yaml:"alertee"` // extra notifier names; inherited down the tree
 	Children map[string]*Node  `yaml:"children"`
 }
 
@@ -94,7 +96,10 @@ func (c *Config) BuildAlerts() (map[string]*alert.Alert, error) {
 		if len(to) == 0 {
 			to = []string{"log"}
 		}
-		out[name] = &alert.Alert{Name: name, Matcher: m, EdgeTrigger: d.EdgeTrigger, Comment: d.Comment, To: to}
+		if d.Priority < 0 {
+			return nil, fmt.Errorf("alert %q: priority must be >= 1 (or 0/unset), got %d", name, d.Priority)
+		}
+		out[name] = &alert.Alert{Name: name, Matcher: m, EdgeTrigger: d.EdgeTrigger, Comment: d.Comment, To: to, Priority: d.Priority}
 	}
 	return out, nil
 }
@@ -128,11 +133,12 @@ func Parse(b []byte) (*Config, error) {
 }
 
 type inherited struct {
-	probe  string
-	pings  int
-	step   time.Duration
-	params map[string]string
-	alerts []string
+	probe   string
+	pings   int
+	step    time.Duration
+	params  map[string]string
+	alerts  []string
+	alertee []string
 }
 
 func mergeParams(parent, child map[string]string) map[string]string {
@@ -178,17 +184,22 @@ func (c *Config) Monitors() ([]model.Monitor, error) {
 		if len(n.Alerts) > 0 {
 			alerts = n.Alerts
 		}
+		alertee := inh.alertee
+		if len(n.Alertee) > 0 {
+			alertee = n.Alertee
+		}
 		eff := inherited{
-			probe:  firstNonEmpty(n.Probe, inh.probe),
-			pings:  firstNonZero(n.Pings, inh.pings),
-			step:   firstNonZeroDur(time.Duration(n.Step), inh.step),
-			params: mergeParams(inh.params, n.Params),
-			alerts: alerts,
+			probe:   firstNonEmpty(n.Probe, inh.probe),
+			pings:   firstNonZero(n.Pings, inh.pings),
+			step:    firstNonZeroDur(time.Duration(n.Step), inh.step),
+			params:  mergeParams(inh.params, n.Params),
+			alerts:  alerts,
+			alertee: alertee,
 		}
 		if n.Host != "" {
 			m := model.Monitor{
 				Name: path, ProbeKind: eff.probe, Host: n.Host,
-				Pings: eff.pings, Step: eff.step, Params: eff.params, Alerts: eff.alerts,
+				Pings: eff.pings, Step: eff.step, Params: eff.params, Alerts: eff.alerts, Alertee: eff.alertee,
 			}
 			if err := validate(path, m, getSchema); err != nil {
 				problems = append(problems, err.Error())

@@ -22,6 +22,12 @@ type Alert struct {
 	EdgeTrigger bool
 	Comment     string
 	To          []string // notifier names
+	// Priority inhibits noisier alerts: among alerts on the same target, when one
+	// with a priority is firing, lower-priority ones (higher number) are suppressed
+	// that round. 1 is the highest priority; 0 means "no priority" — never
+	// suppressed and never suppresses others. (SmokePing semantics; the modern
+	// analogue is Alertmanager inhibit_rules.)
+	Priority int
 }
 
 // Event is emitted when an alert changes/holds state for a target.
@@ -132,7 +138,18 @@ func (e *Engine) Evaluate(target string, alertNames []string, lossPct, rttSec fl
 	w.Loss = appendCap(w.Loss, lossPct, cap)
 	w.RTT = appendCap(w.RTT, rttSec, cap)
 
-	var events []Event
+	// First pass: update every alert's firing state and decide whether it would
+	// emit an event this round. State must update for all alerts regardless of
+	// priority, so hysteresis stays correct even for suppressed alerts.
+	type pending struct {
+		a      *Alert
+		emit   bool
+		firing bool
+	}
+	var pend []pending
+	// Highest priority (lowest number >= 1) currently firing on this target —
+	// the inhibitor. 0 means none, so nothing is suppressed.
+	topFiring := 0
 	for _, name := range alertNames {
 		a := e.alerts[name]
 		if a == nil {
@@ -144,32 +161,53 @@ func (e *Engine) Evaluate(target string, alertNames []string, lossPct, rttSec fl
 		e.state[key] = now
 
 		emit := false
-		firing := now
 		if a.EdgeTrigger {
 			emit = now != prev // only on transition
 		} else {
-			// non-edge: emit while firing, plus one resolved on the clearing edge
-			emit = now || prev
+			emit = now || prev // while firing, plus one resolved on the clearing edge
 		}
-		if emit {
-			rttms := rttSec * 1000
-			events = append(events, Event{
-				Target: target, Alert: name, Comment: a.Comment, Firing: firing,
-				LossPct: lossPct, RTTms: rttms, When: when,
-			})
+		pend = append(pend, pending{a: a, emit: emit, firing: now})
+		if now && a.Priority >= 1 && (topFiring == 0 || a.Priority < topFiring) {
+			topFiring = a.Priority
 		}
+	}
+
+	// Second pass: emit events, applying priority inhibition. A FIRING event is
+	// suppressed when a strictly-higher-priority alert is firing on the same
+	// target. RESOLVED events are never suppressed, so a raised alert always gets
+	// its close-out even after a higher-priority one takes over.
+	var events []Event
+	rttms := rttSec * 1000
+	for _, p := range pend {
+		if !p.emit {
+			continue
+		}
+		if p.firing && p.a.Priority >= 1 && topFiring != 0 && p.a.Priority > topFiring {
+			continue // inhibited by a higher-priority firing alert
+		}
+		events = append(events, Event{
+			Target: target, Alert: p.a.Name, Comment: p.a.Comment, Firing: p.firing,
+			LossPct: lossPct, RTTms: rttms, When: when,
+		})
 	}
 	return events
 }
 
-// Dispatch routes each event to the notifiers named in its alert's To list.
-func (e *Engine) Dispatch(events []Event) {
+// Dispatch routes each event to its alert's To notifiers, plus any extra
+// per-target recipients (a target's alertee). Each distinct recipient is
+// notified at most once per event.
+func (e *Engine) Dispatch(events []Event, extra ...string) {
 	for _, ev := range events {
 		a := e.alerts[ev.Alert]
 		if a == nil {
 			continue
 		}
-		for _, name := range a.To {
+		seen := map[string]bool{}
+		for _, name := range append(append([]string{}, a.To...), extra...) {
+			if seen[name] {
+				continue
+			}
+			seen[name] = true
 			if n := e.notifiers[name]; n != nil {
 				n.Notify(ev)
 			}

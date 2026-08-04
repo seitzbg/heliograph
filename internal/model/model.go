@@ -14,4 +14,5 @@ type Monitor struct {
 	Step      time.Duration     // polling interval
 	Params    map[string]string // per-target probe params (port, packetsize, ...)
 	Alerts    []string          // names of alerts to evaluate for this target
+	Alertee   []string          // extra notifier names for this target's alert events
 }
