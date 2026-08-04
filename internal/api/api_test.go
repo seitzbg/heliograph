@@ -1,6 +1,9 @@
 package api
 
 import (
+	"context"
+	"errors"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -10,6 +13,34 @@ import (
 	"smokeping-modern/internal/scheduler"
 	"smokeping-modern/internal/store"
 )
+
+// rollupInternalErr stands in for a raw database error carrying internal detail
+// (table names, driver internals) that must not reach an API caller.
+const rollupInternalErr = `pq: relation "samples_hourly" does not exist`
+
+// errRollupStore is a Rollupper whose Rollup always fails with an internal error.
+type errRollupStore struct{ *store.MemStore }
+
+func (errRollupStore) Rollup(context.Context, string) ([]store.RollupPoint, error) {
+	return nil, errors.New(rollupInternalErr)
+}
+
+func TestRollupHidesInternalError(t *testing.T) {
+	srv := New(errRollupStore{store.NewMem(10)}, "")
+	rec := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(rec, httptest.NewRequest("GET", "/api/rollup?target=x", nil))
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", rec.Code)
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, rollupInternalErr) {
+		t.Errorf("response leaked the internal DB error to the client:\n%s", body)
+	}
+	if !strings.Contains(body, "rollup unavailable") {
+		t.Errorf("expected a generic error message, got:\n%s", body)
+	}
+}
 
 func TestMetricsEndpoint(t *testing.T) {
 	st := store.NewMem(10)

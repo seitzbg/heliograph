@@ -45,6 +45,12 @@ Not planned for now; pick up only if multi-vantage measurement is requested.
 
 ## Phase 5 — Parity & polish ⬜
 - ⬜ Richer alert DSL: `*N*` skip, `U`/`S` tokens, priority suppression, per-target `alertee`
+  - ⚠ When building this, avoid two bugs the Perl original shipped (verified in a correctness
+    review): the `*N*` skip-wildcard alignment was wrong, so documented patterns like
+    `>0%,*12*,>0%` silently never matched; and unknown loss (`U`) was recorded as 0%, so an
+    outage read as clean history and `==U` could never fire. Drive the matcher with
+    table-driven tests over both, and keep unknown rounds distinct from 0% (today an errored
+    round is 100% loss and an unavailable probe is a gap — never silently 0%).
 - ⬜ Emit each probe's config as JSON Schema (docs + validation from one source)
 - ⬜ Overview (small multiples) + multi-range detail (3h/30h/10d/400d) + unison scaling in the SPA
 - ⬜ Top-N "charts" (worst by loss/median/stddev) and alternate menu hierarchies

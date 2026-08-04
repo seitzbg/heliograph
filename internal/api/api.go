@@ -6,6 +6,7 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"math"
 	"net/http"
 	"strings"
@@ -160,7 +161,10 @@ func (srv *Server) rollup(w http.ResponseWriter, r *http.Request) {
 	}
 	points, err := rp.Rollup(r.Context(), key)
 	if err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusServiceUnavailable)
+		// Log the real cause server-side; return a generic message so internal
+		// detail (table names, driver internals) never reaches the client.
+		log.Printf("api: rollup %q: %v", key, err)
+		http.Error(w, `{"error":"rollup unavailable"}`, http.StatusServiceUnavailable)
 		return
 	}
 	buckets := make([]rollupDTO, 0, len(points))
