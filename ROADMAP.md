@@ -59,7 +59,9 @@ Not planned for now; pick up only if multi-vantage measurement is requested.
     SmokePing's alert state was in-memory; the durable store answers "already bad at
     startup" from real history (blueprint §07). `==S`/`!=S` are rejected at parse time.
     Follow-up for the same use case: warm-start the alert window from the store on boot.
-- ⬜ Emit each probe's config as JSON Schema (docs + validation from one source)
+- ✅ Emit each probe's config as JSON Schema (`GET /api/probes/schema`; draft 2020-12,
+  probe-level + per-target vars as separate closed objects, from the same VarSpec source
+  as runtime validation)
 - ⬜ Overview (small multiples) + multi-range detail (3h/30h/10d/400d) + unison scaling in the SPA
 - ⬜ Top-N "charts" (worst by loss/median/stddev) and alternate menu hierarchies
 - ⬜ Drag-to-zoom time range (refetch, not image swap); in-app dark-mode toggle persistence

@@ -28,6 +28,7 @@ func New(s store.Store, webDir string) *Server { return &Server{store: s, webDir
 func (srv *Server) Routes() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/probes", srv.probes)
+	mux.HandleFunc("GET /api/probes/schema", srv.probeSchema)
 	mux.HandleFunc("GET /api/targets", srv.targets)
 	mux.HandleFunc("GET /api/series", srv.series)
 	mux.HandleFunc("GET /api/rollup", srv.rollup)
@@ -53,6 +54,13 @@ func fnum(v float64) *float64 {
 
 func (srv *Server) probes(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, map[string]any{"probes": probe.Registered()})
+}
+
+// probeSchema emits each probe's config variables as JSON Schema (draft 2020-12),
+// generated from the same VarSpec source that drives runtime validation — so docs
+// and external validators never drift from what the collector actually accepts.
+func (srv *Server) probeSchema(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, map[string]any{"probes": probe.AllSchemas()})
 }
 
 type targetDTO struct {

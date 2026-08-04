@@ -90,6 +90,71 @@ func Registered() []string {
 	return out
 }
 
+// JSONSchema renders a probe's config variables as JSON Schema (draft 2020-12) —
+// the same VarSpec source that drives runtime validation, emitted for docs and
+// external validation. Probe-level vars (the `probes.<Kind>` block) and per-target
+// vars (a target's `params`) configure different surfaces, so each gets its own
+// schema. Config values are strings, so every property is typed "string".
+func JSONSchema(p Probe) map[string]any {
+	probeProps, targetProps := map[string]any{}, map[string]any{}
+	var probeReq, targetReq []string
+	for name, spec := range p.Schema() {
+		prop := map[string]any{"type": "string"}
+		if spec.Doc != "" {
+			prop["description"] = spec.Doc
+		}
+		if spec.Default != "" {
+			prop["default"] = spec.Default
+		}
+		if spec.Scope == TargetVar {
+			targetProps[name] = prop
+			if spec.Mandatory && spec.Default == "" {
+				targetReq = append(targetReq, name)
+			}
+		} else {
+			probeProps[name] = prop
+			if spec.Mandatory && spec.Default == "" {
+				probeReq = append(probeReq, name)
+			}
+		}
+	}
+	return map[string]any{
+		"name":          p.Name(),
+		"describe":      p.Describe(),
+		"probe_config":  schemaObject(probeProps, probeReq),
+		"target_params": schemaObject(targetProps, targetReq),
+	}
+}
+
+func schemaObject(props map[string]any, required []string) map[string]any {
+	sort.Strings(required)
+	obj := map[string]any{
+		"$schema":              "https://json-schema.org/draft/2020-12/schema",
+		"type":                 "object",
+		"additionalProperties": false,
+		"properties":           props,
+	}
+	if len(required) > 0 {
+		obj["required"] = required
+	}
+	return obj
+}
+
+// AllSchemas returns JSONSchema for every registered probe kind that can be
+// instantiated, sorted by name. A kind whose instance can't be built (e.g. a
+// missing external binary) is skipped rather than failing the whole set.
+func AllSchemas() []map[string]any {
+	var out []map[string]any
+	for _, kind := range Registered() {
+		p, err := New(kind, nil)
+		if err != nil {
+			continue
+		}
+		out = append(out, JSONSchema(p))
+	}
+	return out
+}
+
 // Param returns a per-target param with a fallback default.
 func (t Target) Param(key, def string) string {
 	if t.Params != nil {

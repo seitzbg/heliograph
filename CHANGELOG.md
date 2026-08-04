@@ -8,6 +8,10 @@ breaking changes.
 ## [Unreleased]
 
 ### Added
+- Probe config as JSON Schema: `GET /api/probes/schema` emits each probe's config
+  variables as JSON Schema (draft 2020-12) — probe-level and per-target vars as separate
+  closed objects — generated from the same `VarSpec` source that drives runtime validation,
+  so docs and external validators can't drift from what the collector accepts.
 - Alert priority inhibition and per-target `alertee` (`internal/alert`, config): a per-alert
   `priority` (1 = highest) suppresses lower-priority alerts on the same target while it
   fires (Alertmanager-style inhibition; RESOLVED events are never suppressed); a per-target

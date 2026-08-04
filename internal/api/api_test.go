@@ -80,6 +80,30 @@ func TestMetricsEndpoint(t *testing.T) {
 	}
 }
 
+func TestProbeSchemaEndpoint(t *testing.T) {
+	srv := New(store.NewMem(1), "")
+	rec := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(rec, httptest.NewRequest("GET", "/api/probes/schema", nil))
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	// The real probes are registered by cmd/smoked's blank imports, not here, so
+	// this test asserts the envelope + JSON Schema markers are emitted; the shape
+	// of an individual probe's schema is covered by probe.TestJSONSchemaShape.
+	for _, want := range []string{`"probes"`, "application/json"} {
+		if want == "application/json" {
+			if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, want) {
+				t.Errorf("Content-Type = %q, want %s", ct, want)
+			}
+			continue
+		}
+		if !strings.Contains(body, want) {
+			t.Errorf("schema response missing %s:\n%s", want, body)
+		}
+	}
+}
+
 func TestMetricsPerProbeDurationAndRoundStats(t *testing.T) {
 	st := store.NewMem(10)
 	st.Add([]scheduler.Outcome{
