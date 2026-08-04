@@ -259,9 +259,10 @@ func logRound(round int, dur time.Duration, out []scheduler.Outcome) {
 // runtime is the swappable set of work: the probe jobs and the alert engine.
 // It is rebuilt (and atomically swapped) on SIGHUP config reload.
 type runtime struct {
-	jobs           []scheduler.Job
-	engine         *alert.Engine
-	alertsByTarget map[string][]string
+	jobs            []scheduler.Job
+	engine          *alert.Engine
+	alertsByTarget  map[string][]string
+	alerteeByTarget map[string][]string
 }
 
 // eval runs the alert engine over a round's outcomes and dispatches notifications.
@@ -274,8 +275,9 @@ func (rt *runtime) eval(out []scheduler.Outcome) {
 		if len(names) == 0 {
 			continue
 		}
-		rt.engine.Dispatch(rt.engine.Evaluate(o.Target.Name, names,
-			o.Computed.LossFraction()*100, o.Computed.Median, o.When))
+		events := rt.engine.Evaluate(o.Target.Name, names,
+			o.Computed.LossFraction()*100, o.Computed.Median, o.When)
+		rt.engine.Dispatch(events, rt.alerteeByTarget[o.Target.Name]...)
 	}
 }
 
@@ -326,16 +328,20 @@ func buildRuntime(configPath string, demoPings int, demoStep, timeout time.Durat
 	}
 
 	alertsByTarget := map[string][]string{}
+	alerteeByTarget := map[string][]string{}
 	for _, m := range monitors {
 		if len(m.Alerts) > 0 {
 			alertsByTarget[m.Name] = m.Alerts
+		}
+		if len(m.Alertee) > 0 {
+			alerteeByTarget[m.Name] = m.Alertee
 		}
 	}
 	var engine *alert.Engine
 	if len(alertDefs) > 0 {
 		engine = alert.NewEngine(alertDefs, notifiers)
 	}
-	return &runtime{jobs: jobs, engine: engine, alertsByTarget: alertsByTarget}, nil
+	return &runtime{jobs: jobs, engine: engine, alertsByTarget: alertsByTarget, alerteeByTarget: alerteeByTarget}, nil
 }
 
 func demoMonitors(pings int, step time.Duration) []model.Monitor {

@@ -153,6 +153,78 @@ func TestInheritStateDropsStaleTargets(t *testing.T) {
 	}
 }
 
+// evSummary renders events as "alert/STATUS" for order-independent assertions.
+func evSummary(evs []Event) []string {
+	out := make([]string, len(evs))
+	for i, e := range evs {
+		out[i] = e.Alert + "/" + e.Status()
+	}
+	return out
+}
+
+// Priority inhibition: while a higher-priority alert fires on a target, a
+// lower-priority one is suppressed; when the inhibitor clears, the lower one
+// surfaces (non-edge alerts).
+func TestPriorityInhibitionNonEdge(t *testing.T) {
+	alerts := map[string]*Alert{
+		"crit": {Name: "crit", Matcher: CheckLoss{L: 50, X: 1}, Priority: 1, To: []string{"log"}},
+		"warn": {Name: "warn", Matcher: CheckLoss{L: 10, X: 1}, Priority: 2, To: []string{"log"}},
+	}
+	e := NewEngine(alerts, map[string]Notifier{})
+	when := time.Unix(1_700_000_000, 0)
+
+	// 60% loss: both would fire; only the higher-priority crit is emitted.
+	got := evSummary(e.Evaluate("t", []string{"crit", "warn"}, 60, math.NaN(), when))
+	if len(got) != 1 || got[0] != "crit/FIRING" {
+		t.Fatalf("round1 = %v, want [crit/FIRING] (warn inhibited)", got)
+	}
+	// 20% loss: crit clears, warn still over its threshold -> warn now surfaces.
+	got = evSummary(e.Evaluate("t", []string{"crit", "warn"}, 20, math.NaN(), when.Add(time.Minute)))
+	if len(got) != 2 || !containsStr(got, "crit/RESOLVED") || !containsStr(got, "warn/FIRING") {
+		t.Fatalf("round2 = %v, want crit/RESOLVED + warn/FIRING", got)
+	}
+}
+
+// An alert with no priority (0) is never inhibited, even when a higher-priority
+// alert is firing on the same target.
+func TestPriorityUnsetAlwaysNotifies(t *testing.T) {
+	alerts := map[string]*Alert{
+		"crit": {Name: "crit", Matcher: CheckLoss{L: 50, X: 1}, Priority: 1, EdgeTrigger: true, To: []string{"log"}},
+		"any":  {Name: "any", Matcher: CheckLoss{L: 10, X: 1}, Priority: 0, EdgeTrigger: true, To: []string{"log"}},
+	}
+	e := NewEngine(alerts, map[string]Notifier{})
+	got := evSummary(e.Evaluate("t", []string{"crit", "any"}, 60, math.NaN(), time.Unix(1_700_000_000, 0)))
+	if len(got) != 2 || !containsStr(got, "crit/FIRING") || !containsStr(got, "any/FIRING") {
+		t.Fatalf("got %v, want both crit/FIRING and any/FIRING (unset priority not inhibited)", got)
+	}
+}
+
+// Dispatch delivers to the alert's To notifiers plus the per-target alertee,
+// each recipient exactly once even when it appears in both lists.
+func TestDispatchAlertee(t *testing.T) {
+	primary, extra := &capture{}, &capture{}
+	alerts := map[string]*Alert{"a": {Name: "a", To: []string{"primary", "extra"}}}
+	e := NewEngine(alerts, map[string]Notifier{"primary": primary, "extra": extra})
+	ev := Event{Target: "t", Alert: "a", Firing: true}
+	// "extra" is in both To and the alertee list -> must still fire only once.
+	e.Dispatch([]Event{ev}, "extra")
+	if len(primary.events) != 1 {
+		t.Errorf("primary got %d events, want 1", len(primary.events))
+	}
+	if len(extra.events) != 1 {
+		t.Errorf("extra (in To and alertee) got %d events, want 1 (deduped)", len(extra.events))
+	}
+}
+
+func containsStr(s []string, want string) bool {
+	for _, v := range s {
+		if v == want {
+			return true
+		}
+	}
+	return false
+}
+
 func TestParseMatcher(t *testing.T) {
 	m, err := ParseMatcher("CheckLoss(l=50,x=3)")
 	if err != nil {

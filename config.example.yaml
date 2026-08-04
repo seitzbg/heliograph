@@ -23,11 +23,16 @@ alerts:            # named alert definitions (attach to targets via `alerts:`)
     comment: sustained packet loss
     edgetrigger: true                 # notify only on raise/clear transitions
     to: [log]                         # notifier names (log is always available)
+    priority: 1                       # 1 = highest; while this fires it inhibits
+                                      # lower-priority (higher-number) alerts on the
+                                      # same target. Omit/0 = never inhibited.
   slow:            # a pattern-style rtt alert (values in ms)
     type: rtt
     pattern: ">150,>150,>150"
     comment: latency over 150ms for 3 rounds
     edgetrigger: true
+    priority: 2                       # lower priority than `loss`: suppressed while
+                                      # `loss` is firing on the same target
   # The pattern DSL is a right-anchored shape match, newest sample last:
   #   >0%,*12*,>0%   loss now AND again within the previous 12 samples (`*N*` skips 0..N)
   #   >200,*,==U     rtt over 200ms, any sample, then a fully-lost round (`==U` = unknown)
@@ -71,6 +76,8 @@ targets:
     Websites:
       probe: HTTP          # this branch defaults to HTTP
       alerts: [loss, slow] # override: these targets get both loss and latency alerts
+      alertee: [webhook]   # extra recipient for this subtree, on top of each alert's
+                           # own `to` (inherited by children; needs -webhook set)
       children:
         example.com:
           host: example.com

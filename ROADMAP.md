@@ -44,8 +44,12 @@ Not planned for now; pick up only if multi-vantage measurement is requested.
 - ⬜ Store-and-forward buffering on the agent
 
 ## Phase 5 — Parity & polish 🚧
-- 🚧 Richer alert DSL — pattern `*N*` skip, bare `*`, `U` token done ✅; priority
-  suppression + per-target `alertee` ⬜
+- ✅ Richer alert DSL — pattern `*N*` skip, bare `*`, `U` token, priority suppression,
+  per-target `alertee` (all done)
+  - Priority: `priority: 1` (highest) inhibits lower-priority alerts on the same target
+    while firing; unset (0) is never inhibited; RESOLVED events are never suppressed
+    (Alertmanager-style inhibition). `alertee` adds per-target recipients, inherited down
+    the tree and deduped against each alert's `to` at dispatch.
   - ✅ Both Perl bugs avoided (table-driven tests): `*N*` alignment is correct
     (`>0%,*12*,>0%` matches; patterns are right-anchored to the newest sample and the
     window retains the full skip allowance), and `==U` fires on a lost round's unknown
