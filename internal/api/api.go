@@ -6,7 +6,7 @@ package api
 import (
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"math"
 	"net/http"
 	"strings"
@@ -18,6 +18,9 @@ import (
 type Server struct {
 	store  store.Store
 	webDir string
+	// Rounds, if set, adds collector round-level metrics (duration, size, error
+	// count) to /metrics. Optional; nil in tests and pure-API use.
+	Rounds *RoundStats
 }
 
 func New(s store.Store, webDir string) *Server { return &Server{store: s, webDir: webDir} }
@@ -163,7 +166,7 @@ func (srv *Server) rollup(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// Log the real cause server-side; return a generic message so internal
 		// detail (table names, driver internals) never reaches the client.
-		log.Printf("api: rollup %q: %v", key, err)
+		slog.Error("rollup query failed", "target", key, "err", err)
 		http.Error(w, `{"error":"rollup unavailable"}`, http.StatusServiceUnavailable)
 		return
 	}
@@ -192,6 +195,8 @@ func (srv *Server) metrics(w http.ResponseWriter, _ *http.Request) {
 	b.WriteString("# TYPE smokeping_probe_loss_ratio gauge\n")
 	b.WriteString("# HELP smokeping_probe_up 1 if the most recent round got at least one reply, else 0.\n")
 	b.WriteString("# TYPE smokeping_probe_up gauge\n")
+	b.WriteString("# HELP smokeping_probe_duration_seconds Wall-clock the most recent measurement of this target took.\n")
+	b.WriteString("# TYPE smokeping_probe_duration_seconds gauge\n")
 	for _, k := range srv.store.Keys() {
 		o, ok := srv.store.Latest(k)
 		if !ok {
@@ -210,8 +215,34 @@ func (srv *Server) metrics(w http.ResponseWriter, _ *http.Request) {
 			up = 1
 		}
 		fmt.Fprintf(&b, "smokeping_probe_up%s %d\n", lbl, up)
+		fmt.Fprintf(&b, "smokeping_probe_duration_seconds%s %g\n", lbl, o.Duration.Seconds())
 	}
+	srv.writeRoundMetrics(&b)
 	_, _ = w.Write([]byte(b.String()))
+}
+
+// writeRoundMetrics appends collector round-level operational metrics, if the
+// server was given a RoundStats and at least one round has completed.
+func (srv *Server) writeRoundMetrics(b *strings.Builder) {
+	rs, ok := srv.Rounds.snapshot()
+	if !ok {
+		return
+	}
+	b.WriteString("# HELP smokeping_rounds_total Measurement rounds completed since start.\n")
+	b.WriteString("# TYPE smokeping_rounds_total counter\n")
+	fmt.Fprintf(b, "smokeping_rounds_total %d\n", rs.total)
+	b.WriteString("# HELP smokeping_round_duration_seconds Wall-clock of the most recent round.\n")
+	b.WriteString("# TYPE smokeping_round_duration_seconds gauge\n")
+	fmt.Fprintf(b, "smokeping_round_duration_seconds %g\n", rs.duration.Seconds())
+	b.WriteString("# HELP smokeping_round_targets Targets measured in the most recent round.\n")
+	b.WriteString("# TYPE smokeping_round_targets gauge\n")
+	fmt.Fprintf(b, "smokeping_round_targets %d\n", rs.targets)
+	b.WriteString("# HELP smokeping_round_errors Targets that errored in the most recent round.\n")
+	b.WriteString("# TYPE smokeping_round_errors gauge\n")
+	fmt.Fprintf(b, "smokeping_round_errors %d\n", rs.errs)
+	b.WriteString("# HELP smokeping_last_round_timestamp_seconds Start time of the most recent round.\n")
+	b.WriteString("# TYPE smokeping_last_round_timestamp_seconds gauge\n")
+	fmt.Fprintf(b, "smokeping_last_round_timestamp_seconds %d\n", rs.lastUnix)
 }
 
 // escapeLabel escapes a Prometheus label value (backslash, double-quote, newline).

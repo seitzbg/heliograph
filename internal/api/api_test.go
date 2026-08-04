@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"smokeping-modern/internal/probe"
 	"smokeping-modern/internal/sample"
@@ -67,6 +68,39 @@ func TestMetricsEndpoint(t *testing.T) {
 		`smokeping_probe_loss_ratio{target="down",probe="TCPConnect"} 1`,
 		`smokeping_probe_up{target="down",probe="TCPConnect"} 0`,
 		"# TYPE smokeping_probe_median_seconds gauge",
+	}
+	for _, s := range want {
+		if !strings.Contains(body, s) {
+			t.Errorf("metrics output missing line:\n  %s\n--- got ---\n%s", s, body)
+		}
+	}
+	// Without a RoundStats, no round metrics are emitted.
+	if strings.Contains(body, "smokeping_rounds_total") {
+		t.Errorf("round metrics emitted without a RoundStats:\n%s", body)
+	}
+}
+
+func TestMetricsPerProbeDurationAndRoundStats(t *testing.T) {
+	st := store.NewMem(10)
+	st.Add([]scheduler.Outcome{
+		{Target: probe.Target{Name: "a", Host: "h"}, ProbeName: "FPing",
+			Computed: sample.Compute(2, []float64{0.01, 0.02}), Duration: 250 * time.Millisecond},
+	})
+	srv := New(st, "")
+	srv.Rounds = &RoundStats{}
+	srv.Rounds.Observe(1500*time.Millisecond, 12, 3, time.Unix(1_700_000_000, 0))
+
+	rec := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
+	body := rec.Body.String()
+
+	want := []string{
+		`smokeping_probe_duration_seconds{target="a",probe="FPing"} 0.25`,
+		"smokeping_rounds_total 1",
+		"smokeping_round_duration_seconds 1.5",
+		"smokeping_round_targets 12",
+		"smokeping_round_errors 3",
+		"smokeping_last_round_timestamp_seconds 1700000000",
 	}
 	for _, s := range want {
 		if !strings.Contains(body, s) {
