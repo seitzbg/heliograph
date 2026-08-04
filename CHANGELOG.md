@@ -7,6 +7,31 @@ breaking changes.
 
 ## [Unreleased]
 
+### Added
+- Richer alert pattern DSL (`internal/alert`): `*N*` skip (0..N arbitrary samples
+  between hard comparisons), bare `*` (one arbitrary sample), and `==U`/`!=U` for the
+  unknown value (a lost round's missing rtt median). Patterns are right-anchored to the
+  newest sample. Table-driven tests cover the two bugs the Perl original shipped —
+  `*N*` alignment (documented patterns like `>0%,*12*,>0%` now match) and unknown-vs-0%
+  loss. Degenerate patterns (no comparison, `U` on loss, `U` with `<`/`>`) are rejected
+  at parse time.
+- Structured logging (`log/slog`) with `-log-format` (text|json) and `-log-level`, plus a
+  per-round `"round complete"` record.
+- Operational metrics on `/metrics`: per-probe timing (`smokeping_probe_duration_seconds`)
+  and round-level `smokeping_rounds_total`, `_round_duration_seconds`, `_round_targets`,
+  `_round_errors`, `_last_round_timestamp_seconds`.
+- SPA raw↔hourly resolution selector: the hourly view renders the downsampled min→max
+  envelope with the avg median; degrades gracefully when the store has no rollup tier.
+
+### Changed
+- Config reload (SIGHUP) now preserves alert firing state and sample windows, so a reload
+  no longer re-fires firing alerts or drops the history a hysteresis alert needs.
+
+### Note
+- The SmokePing `S` startup sentinel is intentionally not supported. It existed only
+  because SmokePing's alert state was in-memory and lost on restart; with a durable store,
+  "already bad at startup" is answered from real history (blueprint §07).
+
 ## [0.1.0] - 2026-08-03
 
 First tagged release: a working, non-Perl SmokePing core. A fast parallel poller

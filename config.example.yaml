@@ -28,6 +28,17 @@ alerts:            # named alert definitions (attach to targets via `alerts:`)
     pattern: ">150,>150,>150"
     comment: latency over 150ms for 3 rounds
     edgetrigger: true
+  # The pattern DSL is a right-anchored shape match, newest sample last:
+  #   >0%,*12*,>0%   loss now AND again within the previous 12 samples (`*N*` skips 0..N)
+  #   >200,*,==U     rtt over 200ms, any sample, then a fully-lost round (`==U` = unknown)
+  #   *              a single arbitrary sample (mandatory slot)
+  # `U` (unknown = a lost round's missing rtt median) is valid only on `type: rtt`
+  # with == / !=. The SmokePing `S` startup sentinel is not supported.
+  flaky:           # recurring loss over roughly the last two hours
+    type: loss
+    pattern: ">0%,*12*,>0%,*12*,>0%"
+    comment: intermittent loss (3 lossy rounds within ~2h)
+    edgetrigger: true
 
 targets:
   probe: FPing     # default probe for the whole tree; leaves inherit it
