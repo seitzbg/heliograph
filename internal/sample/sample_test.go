@@ -59,6 +59,11 @@ func TestComputeTotalLoss(t *testing.T) {
 	if c.Loss != 3 {
 		t.Errorf("loss = %d, want 3", c.Loss)
 	}
+	// A fully-lost round is 100% loss, never silently 0% (SmokePing's "U"->0%
+	// trap): the alert engine must see this as a down target, not clean history.
+	if c.LossFraction() != 1.0 {
+		t.Errorf("loss fraction = %v, want 1.0", c.LossFraction())
+	}
 	if !nan(c.Median) {
 		t.Errorf("median = %v, want NaN", c.Median)
 	}
