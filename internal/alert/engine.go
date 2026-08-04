@@ -63,6 +63,52 @@ func NewEngine(alerts map[string]*Alert, notifiers map[string]Notifier) *Engine 
 	}
 }
 
+// InheritStateFrom seeds this engine with the firing state and sample windows of
+// a previous engine, so a config reload (which builds a fresh engine) does not
+// reset alert hysteresis. Without this a reload would (a) re-emit FIRING for an
+// alert that is already firing, spamming notifiers, and (b) drop the windowed
+// loss/RTT history, so a currently-firing alert reads as not-firing until X new
+// samples re-accumulate — silently resolving mid-outage, then re-raising later.
+//
+// Only state for targets in validTargets and alerts still defined in this engine
+// is carried over, so removed targets/alerts don't leak across reloads. Pass a
+// nil validTargets to carry everything (used in tests). prev may be nil.
+func (e *Engine) InheritStateFrom(prev *Engine, validTargets map[string]bool) {
+	if prev == nil {
+		return
+	}
+	// Lock both engines. Order is fixed (prev then e) for all callers; a reload
+	// builds a brand-new e that no other goroutine can reach yet, so this can't
+	// deadlock against a concurrent InheritStateFrom in the other direction.
+	prev.mu.Lock()
+	defer prev.mu.Unlock()
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	for target, w := range prev.win {
+		if validTargets != nil && !validTargets[target] {
+			continue
+		}
+		e.win[target] = &Window{
+			Loss: append([]float64(nil), w.Loss...),
+			RTT:  append([]float64(nil), w.RTT...),
+		}
+	}
+	for key, firing := range prev.state {
+		target, name, ok := strings.Cut(key, "\x00")
+		if !ok {
+			continue
+		}
+		if _, defined := e.alerts[name]; !defined {
+			continue
+		}
+		if validTargets != nil && !validTargets[target] {
+			continue
+		}
+		e.state[key] = firing
+	}
+}
+
 // Evaluate pushes a new sample for target, runs the attached alerts, updates
 // state, and returns any events produced this round.
 func (e *Engine) Evaluate(target string, alertNames []string, lossPct, rttSec float64, when time.Time) []Event {

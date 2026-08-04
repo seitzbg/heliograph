@@ -92,6 +92,67 @@ func TestCheckLatencyNoSpuriousResolveOnHardDown(t *testing.T) {
 	}
 }
 
+// A config reload builds a fresh engine. Without inheriting the prior state, an
+// already-firing edge-trigger alert re-emits FIRING (notifier spam) and loses its
+// sample window. InheritStateFrom must prevent both.
+func TestInheritStateAcrossReloadNoSpuriousRefire(t *testing.T) {
+	newEng := func(cap Notifier) *Engine {
+		return NewEngine(map[string]*Alert{
+			"loss": {Name: "loss", Matcher: CheckLoss{L: 50, X: 2}, EdgeTrigger: true, To: []string{"cap"}},
+		}, map[string]Notifier{"cap": cap})
+	}
+	when := time.Unix(1_700_000_000, 0)
+
+	// Drive the first engine into the firing state.
+	cap1 := &capture{}
+	e1 := newEng(cap1)
+	for i, loss := range []float64{60, 60} { // two rounds >= 50% -> FIRING
+		e1.Dispatch(e1.Evaluate("t", []string{"loss"}, loss, math.NaN(), when.Add(time.Duration(i)*time.Minute)))
+	}
+	if got := statuses(cap1.events); len(got) != 1 || got[0] != "FIRING" {
+		t.Fatalf("pre-reload events = %v, want [FIRING]", got)
+	}
+
+	// Reload: fresh engine inherits state, then the outage continues.
+	cap2 := &capture{}
+	e2 := newEng(cap2)
+	e2.InheritStateFrom(e1, map[string]bool{"t": true})
+	e2.Dispatch(e2.Evaluate("t", []string{"loss"}, 60, math.NaN(), when.Add(2*time.Minute)))
+	if got := statuses(cap2.events); len(got) != 0 {
+		t.Fatalf("post-reload while still down emitted %v, want none (no re-fire)", got)
+	}
+
+	// Recovery must still produce exactly one RESOLVED — proving the window
+	// history carried over (X=2 low samples clear it).
+	for i, loss := range []float64{0, 0} {
+		e2.Dispatch(e2.Evaluate("t", []string{"loss"}, loss, 0.01, when.Add(time.Duration(3+i)*time.Minute)))
+	}
+	if got := statuses(cap2.events); len(got) != 1 || got[0] != "RESOLVED" {
+		t.Fatalf("post-reload events = %v, want [RESOLVED]", got)
+	}
+}
+
+// State for targets/alerts absent from the reloaded config must not be carried.
+func TestInheritStateDropsStaleTargets(t *testing.T) {
+	mk := func() *Engine {
+		return NewEngine(map[string]*Alert{
+			"loss": {Name: "loss", Matcher: CheckLoss{L: 50, X: 1}, EdgeTrigger: true, To: []string{"cap"}},
+		}, map[string]Notifier{"cap": &capture{}})
+	}
+	when := time.Unix(1_700_000_000, 0)
+	e1 := mk()
+	e1.Evaluate("gone", []string{"loss"}, 60, math.NaN(), when) // firing on a target dropped in the new config
+
+	e2 := mk()
+	e2.InheritStateFrom(e1, map[string]bool{"kept": true}) // "gone" not in valid set
+	if _, ok := e2.state["gone\x00loss"]; ok {
+		t.Errorf("state for removed target was carried over")
+	}
+	if _, ok := e2.win["gone"]; ok {
+		t.Errorf("window for removed target was carried over")
+	}
+}
+
 func TestParseMatcher(t *testing.T) {
 	m, err := ParseMatcher("CheckLoss(l=50,x=3)")
 	if err != nil {

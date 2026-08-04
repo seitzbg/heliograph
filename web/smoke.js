@@ -181,5 +181,26 @@ window.Smoke = (function () {
     return { buckets, N: N || (buckets[0] ? buckets[0].centered.length : 0) };
   }
 
-  return { LOSS_COLORS, lossColor, smokeGray, robustMax, render, seriesStats, readVars, fromApiSeries };
+  // Adapt an /api/rollup response into a series. The hourly tier has no per-round
+  // distribution — only the median's avg/min/max and a loss fraction per bucket —
+  // so each bucket becomes a single min→max band (N=2) with the avg as the median
+  // line. loss_pct is mapped onto "lost of N=2" so lossColor tints it identically
+  // to the raw view. This mirrors SmokePing's long-range RRD min/max consolidation.
+  function fromApiRollup(resp) {
+    const raw = resp.buckets || [];
+    const buckets = raw.map((x) => {
+      const lo = x.median_min_ms == null ? NaN : x.median_min_ms;
+      const hi = x.median_max_ms == null ? NaN : x.median_max_ms;
+      const centered = [lo, hi];
+      return {
+        centered,
+        samples: centered.filter((v) => !isNaN(v)),
+        lost: (x.loss_pct || 0) / 50, // 0..100% -> 0..2 lost of N=2
+        median: x.median_avg_ms == null ? NaN : x.median_avg_ms,
+      };
+    });
+    return { buckets, N: 2, resolution: resp.resolution || '1h' };
+  }
+
+  return { LOSS_COLORS, lossColor, smokeGray, robustMax, render, seriesStats, readVars, fromApiSeries, fromApiRollup };
 })();

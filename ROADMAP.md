@@ -25,16 +25,16 @@ Full design rationale and the original-system code map live at `~/.claude/plans/
 - ✅ YAML target tree with inheritance + per-probe schema validation
 - ✅ Alert engine (hysteresis matchers + pattern DSL, edge-trigger, log/webhook notifiers)
 
-## Phase 3 — Production-readiness 🚧
+## Phase 3 — Production-readiness ✅
 - ✅ CI pipeline (GitLab CI: vet + build + test) — green on the `ubuntu-26.04-amd64` runner
 - ✅ Live dashboard verified rendering from the TimescaleDB store (raw-sample path)
 - ✅ Continuous-aggregate downsampling tier (hourly) + refresh + 30-day retention policy
-- 🚧 API serves downsampled long ranges — `/api/rollup` (hourly) done ✅; SPA range selector that switches raw ↔ hourly ⬜
+- ✅ API serves downsampled long ranges — `/api/rollup` (hourly) done; SPA range selector switches raw ↔ hourly (min/avg/max band; degrades gracefully when no TimescaleDB)
 - ✅ Dockerfile + compose (smoked + TimescaleDB) for one-command bring-up
 - ✅ Graceful shutdown (SIGINT/SIGTERM: cancel in-flight probes + clean HTTP shutdown)
 - ✅ Config reload without restart (SIGHUP; atomic runtime swap, keeps running config on error)
-- ⬜ Structured logging + basic operational metrics (round duration, per-probe timings)
-- ⬜ Preserve alert firing state across config reload
+- ✅ Structured logging (slog; `-log-format` text/json) + operational metrics (round duration/size/errors + per-probe timings on `/metrics`)
+- ✅ Preserve alert firing state across config reload (reload inherits firing state + sample windows, so alerts don't re-fire or lose hysteresis history)
 
 ## Phase 4 — Federation (multi-vantage) — deferred (followup if users want it)
 Not planned for now; pick up only if multi-vantage measurement is requested.

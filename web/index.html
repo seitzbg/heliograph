@@ -52,6 +52,12 @@
   .theme-toggle { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 8px; font-family: ui-monospace, Menlo, monospace; font-size: 12px; color: var(--ink-soft); background: var(--surface); border: 1px solid var(--border); border-radius: 999px; padding: 7px 13px; cursor: pointer; }
   .theme-toggle:hover { border-color: var(--accent); color: var(--ink); }
   .theme-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .controls { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .seg { display: inline-flex; background: var(--surface); border: 1px solid var(--border); border-radius: 999px; padding: 3px; }
+  .seg button { font-family: ui-monospace, Menlo, monospace; font-size: 12px; color: var(--ink-soft); background: transparent; border: 0; border-radius: 999px; padding: 5px 12px; cursor: pointer; }
+  .seg button[aria-pressed="true"] { background: var(--accent-soft); color: var(--ink); box-shadow: inset 0 0 0 1px var(--accent); }
+  .seg button:disabled { opacity: .45; cursor: not-allowed; }
+  .seg button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   .legend { display: flex; align-items: center; gap: 4px 16px; flex-wrap: wrap; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 11px 16px; margin: 20px 0 4px; box-shadow: var(--shadow); }
   .legend .lbl { font-family: ui-monospace, Menlo, monospace; font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-faint); }
   .swatch { display: inline-flex; align-items: center; gap: 5px; font-family: ui-monospace, Menlo, monospace; font-size: 11.5px; color: var(--ink-soft); }
@@ -81,7 +87,13 @@
       <p class="lede">Live smoke graphs rendered client-side from the Go collector's <code>/api/series</code>. Each panel is a real target measured by a plugin probe; the smoke cloud is per-round jitter, the line is the median tinted by packet loss.</p>
       <div class="status"><span class="dot"></span><span id="statusText">connecting…</span></div>
     </div>
-    <button class="theme-toggle" id="themeBtn" aria-label="Toggle light/dark theme"><span id="themeIcon">◑</span><span id="themeLabel">Theme</span></button>
+    <div class="controls">
+      <div class="seg" id="resSeg" role="group" aria-label="Time resolution">
+        <button id="resRaw" aria-pressed="true" title="Recent per-round samples (full smoke distribution)">Raw</button>
+        <button id="resHourly" aria-pressed="false" title="Hourly downsampled min/avg/max — requires the TimescaleDB store">Hourly</button>
+      </div>
+      <button class="theme-toggle" id="themeBtn" aria-label="Toggle light/dark theme"><span id="themeIcon">◑</span><span id="themeLabel">Theme</span></button>
+    </div>
   </header>
 
   <div class="legend" aria-label="How to read the graph">
@@ -100,6 +112,9 @@
 <script>
 const grid = document.getElementById('grid');
 const panels = new Map(); // name -> {el, canvas, statsEl, series}
+
+let resolution = 'raw';     // 'raw' | 'hourly'
+let hourlySupported = true;  // flipped false if /api/rollup answers 501 (no TimescaleDB)
 
 function fmt(v, d) { return (v == null || isNaN(v)) ? '--' : v.toFixed(d); }
 
@@ -127,6 +142,21 @@ function updateStats(p, s) {
     '<span class="stat"><span class="k">rounds</span><span class="v">' + s.buckets.length + '</span></span>';
 }
 
+// Fetch and adapt one target's series for the active resolution. Returns the
+// adapted series, or null on a transient error. A 501 on the hourly endpoint
+// (in-memory store) disables the hourly mode process-wide and reverts to raw.
+async function fetchSeries(name) {
+  if (resolution === 'hourly') {
+    const r = await fetch('/api/rollup?target=' + encodeURIComponent(name), { cache: 'no-store' });
+    if (r.status === 501) { hourlySupported = false; setResolution('raw'); return null; }
+    if (!r.ok) return null;
+    return Smoke.fromApiRollup(await r.json());
+  }
+  const r = await fetch('/api/series?target=' + encodeURIComponent(name), { cache: 'no-store' });
+  if (!r.ok) return null;
+  return Smoke.fromApiSeries(await r.json());
+}
+
 async function refresh() {
   let targets;
   try {
@@ -136,19 +166,21 @@ async function refresh() {
     document.getElementById('statusText').textContent = 'collector unreachable';
     return;
   }
+  const mode = resolution; // capture: setResolution may flip it mid-flight on 501
   await Promise.all(targets.map(async (t) => {
     const p = ensurePanel(t);
     try {
-      const r = await fetch('/api/series?target=' + encodeURIComponent(t.name), { cache: 'no-store' });
-      const s = Smoke.fromApiSeries(await r.json());
+      const s = await fetchSeries(t.name);
+      if (!s || mode !== resolution) return;
       p.series = s;
       updateStats(p, s);
       renderPanel(p);
     } catch (e) { /* transient */ }
   }));
   const now = new Date();
+  const res = resolution === 'hourly' ? 'hourly' : 'raw';
   document.getElementById('statusText').textContent =
-    targets.length + ' targets · updated ' + now.toLocaleTimeString();
+    targets.length + ' targets · ' + res + ' · updated ' + now.toLocaleTimeString();
 }
 
 function renderPanel(p) {
@@ -190,6 +222,24 @@ function currentTheme() { return document.documentElement.getAttribute('data-the
 function applyThemeLabel() { const d = currentTheme() === 'dark'; document.getElementById('themeIcon').textContent = d ? '☾' : '☀'; document.getElementById('themeLabel').textContent = d ? 'Dark' : 'Light'; }
 btn.addEventListener('click', () => { document.documentElement.setAttribute('data-theme', currentTheme() === 'dark' ? 'light' : 'dark'); applyThemeLabel(); refreshSmokeKey(); renderAll(); });
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { applyThemeLabel(); refreshSmokeKey(); renderAll(); });
+
+// resolution (raw <-> hourly) segmented control
+const resRawBtn = document.getElementById('resRaw');
+const resHourlyBtn = document.getElementById('resHourly');
+function setResolution(res) {
+  if (res === 'hourly' && !hourlySupported) res = 'raw';
+  const changed = res !== resolution;
+  resolution = res;
+  resRawBtn.setAttribute('aria-pressed', String(res === 'raw'));
+  resHourlyBtn.setAttribute('aria-pressed', String(res === 'hourly'));
+  resHourlyBtn.disabled = !hourlySupported;
+  resHourlyBtn.title = hourlySupported
+    ? 'Hourly downsampled min/avg/max'
+    : 'Hourly needs the TimescaleDB store (run smoked with -dsn -downsample)';
+  if (changed) refresh(); // re-fetch immediately at the new resolution
+}
+resRawBtn.addEventListener('click', () => setResolution('raw'));
+resHourlyBtn.addEventListener('click', () => setResolution('hourly'));
 
 let rt; window.addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(renderAll, 120); });
 applyThemeLabel();

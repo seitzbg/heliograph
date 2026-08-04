@@ -8,7 +8,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"log"
+	"log/slog"
 	"math"
 	"net/http"
 	"os"
@@ -55,12 +55,16 @@ func main() {
 	downsample := flag.Bool("downsample", false, "with -dsn: enable the hourly continuous aggregate + retention policies")
 	configPath := flag.String("config", "", "path to a YAML target-tree config; if set, replaces the built-in demo targets")
 	webhook := flag.String("webhook", "", "webhook URL for alerts named 'to: [webhook]'")
+	logFormat := flag.String("log-format", "text", "operational log format: text or json")
+	logLevel := flag.String("log-level", "info", "operational log level: debug, info, warn, error")
 	flag.Parse()
 
 	if *showVersion {
 		fmt.Printf("smoked %s\n", version)
 		return
 	}
+
+	setupLogger(*logFormat, *logLevel)
 
 	fmt.Printf("smoked %s — registered probe plugins: %s\n\n", version, strings.Join(probe.Registered(), ", "))
 
@@ -73,7 +77,7 @@ func main() {
 	// held behind an atomic pointer so it can be swapped on SIGHUP reload.
 	rt, err := buildRuntime(*configPath, *pings, *step, *timeout, notifiers)
 	if err != nil {
-		log.Fatalf("%v", err)
+		fatal("startup failed", err)
 	}
 	var current atomic.Pointer[runtime]
 	current.Store(rt)
@@ -86,33 +90,43 @@ func main() {
 	defer stop()
 
 	// SIGHUP reloads the config; on error the running config is kept (a bad edit
-	// can't take the collector down). Alert firing state resets on reload.
+	// can't take the collector down). Alert firing state and sample windows carry
+	// over from the running engine so a reload doesn't re-fire alerts already
+	// firing or drop the history a hysteresis alert needs (see InheritStateFrom).
 	if *configPath != "" {
 		hup := make(chan os.Signal, 1)
 		signal.Notify(hup, syscall.SIGHUP)
 		go func() {
 			for range hup {
+				old := current.Load()
 				nrt, err := buildRuntime(*configPath, *pings, *step, *timeout, notifiers)
 				if err != nil {
-					log.Printf("reload failed, keeping running config: %v", err)
+					slog.Error("reload failed, keeping running config", "err", err)
 					continue
 				}
+				if nrt.engine != nil && old.engine != nil {
+					valid := make(map[string]bool, len(nrt.alertsByTarget))
+					for t := range nrt.alertsByTarget {
+						valid[t] = true
+					}
+					nrt.engine.InheritStateFrom(old.engine, valid)
+				}
 				current.Store(nrt)
-				log.Printf("config reloaded from %s: %d targets", *configPath, len(nrt.jobs))
+				slog.Info("config reloaded", "path", *configPath, "targets", len(nrt.jobs))
 			}
 		}()
 	}
 
 	var st store.Store
 	if *dsn != "" {
-		pg, err := pgstore.New(ctx, *dsn, 1024, func(e error) { log.Printf("store: %v", e) })
+		pg, err := pgstore.New(ctx, *dsn, 1024, func(e error) { slog.Error("store error", "err", e) })
 		if err != nil {
-			log.Fatalf("store: %v", err)
+			fatal("store init failed", err)
 		}
 		defer pg.Close()
 		if *downsample {
 			if err := pg.EnableDownsampling(ctx); err != nil {
-				log.Fatalf("store: %v", err)
+				fatal("enabling downsampling failed", err)
 			}
 			fmt.Printf("store: TimescaleDB (downsampling enabled)\n")
 		} else {
@@ -124,13 +138,18 @@ func main() {
 		fmt.Printf("store: in-memory (pass -dsn to persist to TimescaleDB)\n")
 	}
 
+	roundStats := &api.RoundStats{}
+
 	for r := 1; r <= *rounds && ctx.Err() == nil; r++ {
 		rt := current.Load()
 		start := time.Now()
 		out := scheduler.RunRound(ctx, rt.jobs, *workers)
+		dur := time.Since(start)
 		st.Add(out)
 		rt.eval(out)
-		printRound(r, time.Since(start), out)
+		roundStats.Observe(dur, len(out), countErrs(out), start)
+		logRound(r, dur, out)
+		printRound(r, dur, out)
 		if r < *rounds {
 			select {
 			case <-ctx.Done():
@@ -141,8 +160,10 @@ func main() {
 
 	if *serve && ctx.Err() == nil {
 		srv := api.New(st, *webdir)
+		srv.Rounds = roundStats
 		httpSrv := &http.Server{Addr: *addr, Handler: srv.Routes()}
-		fmt.Printf("\nserving web UI + JSON API on %s  (/, /api/targets, /api/series?target=NAME, /api/probes)\n", *addr)
+		fmt.Printf("\nserving web UI + JSON API on %s  (/, /api/targets, /api/series?target=NAME, /api/probes, /metrics)\n", *addr)
+		slog.Info("serving", "addr", *addr)
 		// keep polling in the background while serving
 		go func() {
 			for {
@@ -152,9 +173,13 @@ func main() {
 				case <-time.After(scheduler.NextDelay(time.Now(), *step, 0)):
 				}
 				rt := current.Load()
+				start := time.Now()
 				out := scheduler.RunRound(ctx, rt.jobs, *workers)
+				dur := time.Since(start)
 				st.Add(out)
 				rt.eval(out)
+				roundStats.Observe(dur, len(out), countErrs(out), start)
+				logRound(0, dur, out)
 			}
 		}()
 		// graceful shutdown on signal
@@ -165,10 +190,69 @@ func main() {
 			_ = httpSrv.Shutdown(shutCtx)
 		}()
 		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatal(err)
+			fatal("http server failed", err)
 		}
+		slog.Info("shutdown complete")
 		fmt.Println("shutdown complete")
 	}
+}
+
+// setupLogger installs the process-wide structured logger for operational events
+// (lifecycle, reloads, errors, per-round summaries). The human-facing round table
+// and startup banner stay on fmt; everything an operator would grep or ship to a
+// log pipeline goes through slog. json is for log aggregators; text for a console.
+func setupLogger(format, level string) {
+	var lvl slog.Level
+	switch strings.ToLower(level) {
+	case "debug":
+		lvl = slog.LevelDebug
+	case "warn":
+		lvl = slog.LevelWarn
+	case "error":
+		lvl = slog.LevelError
+	default:
+		lvl = slog.LevelInfo
+	}
+	opts := &slog.HandlerOptions{Level: lvl}
+	var h slog.Handler
+	if strings.ToLower(format) == "json" {
+		h = slog.NewJSONHandler(os.Stderr, opts)
+	} else {
+		h = slog.NewTextHandler(os.Stderr, opts)
+	}
+	slog.SetDefault(slog.New(h))
+}
+
+// fatal logs a structured error and exits non-zero (slog has no Fatal helper).
+func fatal(msg string, err error) {
+	slog.Error(msg, "err", err)
+	os.Exit(1)
+}
+
+// countErrs returns how many outcomes in a round carried a probe error.
+func countErrs(out []scheduler.Outcome) int {
+	n := 0
+	for _, o := range out {
+		if o.Err != nil {
+			n++
+		}
+	}
+	return n
+}
+
+// logRound emits one structured record summarizing a completed round: its
+// wall-clock, target count, and how many errored. round=0 marks a background
+// (serving-mode) round, which has no sequence number.
+func logRound(round int, dur time.Duration, out []scheduler.Outcome) {
+	attrs := []any{
+		"targets", len(out),
+		"errors", countErrs(out),
+		"duration_ms", float64(dur.Microseconds()) / 1000,
+	}
+	if round > 0 {
+		attrs = append(attrs, "round", round)
+	}
+	slog.Info("round complete", attrs...)
 }
 
 // runtime is the swappable set of work: the probe jobs and the alert engine.
@@ -224,7 +308,7 @@ func buildRuntime(configPath string, demoPings int, demoStep, timeout time.Durat
 		if !ok {
 			var err error
 			if p, err = probe.New(m.ProbeKind, probeCfgs[m.ProbeKind]); err != nil {
-				log.Printf("skipping probe %s: %v", m.ProbeKind, err)
+				slog.Warn("skipping unavailable probe", "probe", m.ProbeKind, "err", err)
 				p = nil
 			}
 			probes[m.ProbeKind] = p // cache success or failure (nil)
