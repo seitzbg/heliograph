@@ -45,12 +45,12 @@ type Config struct {
 
 // AlertDef is the YAML shape of one alert.
 type AlertDef struct {
-	Type        string   `yaml:"type"`        // "loss" | "rtt" | "matcher"
-	Pattern     string   `yaml:"pattern"`     // for loss/rtt: ">50%,>50%" or ">200,>200" (ms)
-	Matcher     string   `yaml:"matcher"`     // for matcher: "CheckLoss(l=50,x=3)"
+	Type        string   `yaml:"type"`    // "loss" | "rtt" | "matcher"
+	Pattern     string   `yaml:"pattern"` // for loss/rtt: ">50%,>50%" or ">200,>200" (ms)
+	Matcher     string   `yaml:"matcher"` // for matcher: "CheckLoss(l=50,x=3)"
 	Comment     string   `yaml:"comment"`
 	EdgeTrigger bool     `yaml:"edgetrigger"`
-	To          []string `yaml:"to"`          // notifier names; defaults to ["log"]
+	To          []string `yaml:"to"` // notifier names; defaults to ["log"]
 }
 
 type Database struct {

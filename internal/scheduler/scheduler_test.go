@@ -16,9 +16,9 @@ type fakeProbe struct {
 	rtt   float64
 }
 
-func (f *fakeProbe) Name() string                        { return f.name }
-func (f *fakeProbe) Describe() string                    { return f.name }
-func (f *fakeProbe) Schema() map[string]probe.VarSpec    { return nil }
+func (f *fakeProbe) Name() string                     { return f.name }
+func (f *fakeProbe) Describe() string                 { return f.name }
+func (f *fakeProbe) Schema() map[string]probe.VarSpec { return nil }
 func (f *fakeProbe) Measure(ctx context.Context, t probe.Target, pings int) (probe.Result, error) {
 	var samples []float64
 	for i := 0; i < pings; i++ {

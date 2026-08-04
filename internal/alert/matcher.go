@@ -26,8 +26,8 @@ type Window struct {
 // Matcher decides whether an alert should be firing given the window and its
 // own previous firing state (which enables hysteresis).
 type Matcher interface {
-	Length() int                    // trailing samples needed
-	Test(w Window, prev bool) bool  // new firing state
+	Length() int                   // trailing samples needed
+	Test(w Window, prev bool) bool // new firing state
 	Describe() string
 }
 
@@ -53,8 +53,10 @@ type CheckLatency struct {
 	X int
 }
 
-func (m CheckLatency) Length() int      { return m.X }
-func (m CheckLatency) Describe() string { return fmt.Sprintf("rtt >= %gms for %d samples", m.L*1000, m.X) }
+func (m CheckLatency) Length() int { return m.X }
+func (m CheckLatency) Describe() string {
+	return fmt.Sprintf("rtt >= %gms for %d samples", m.L*1000, m.X)
+}
 func (m CheckLatency) Test(w Window, prev bool) bool {
 	return hysteresis(w.RTT, m.X, prev, func(v float64) bool { return !math.IsNaN(v) && v >= m.L })
 }

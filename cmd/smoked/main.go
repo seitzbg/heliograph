@@ -38,7 +38,8 @@ import (
 )
 
 // version is the smoked release version. Overridable at build time with
-//   go build -ldflags "-X main.version=$(git describe --tags)"
+//
+//	go build -ldflags "-X main.version=$(git describe --tags)"
 var version = "0.1.0"
 
 func main() {
