@@ -72,10 +72,9 @@ Not planned for now; pick up only if multi-vantage measurement is requested.
   availability % over a window + dashboard "Availability" panel
 
 ## Known limitations / follow-ups (from the 2026-08-04 code review)
-- ⬜ **Per-target polling intervals** — the scheduler runs every target on one global
-  cadence (`-step`); a config/per-node `step` is currently inherited but ignored. SmokePing
-  parity needs a per-target scheduler (each target on its own interval/phase offset). Bigger
-  than a patch — tracked here so the config `step` promise is made real or removed.
+- ✅ **Per-target polling intervals** — while serving, each target fires on its own `step`
+  via `scheduler.Planner` (phase-aligned per target); config/per-node `step` is honored. The
+  `-rounds` foreground demo still runs synchronized rounds at `-step`.
 - 🚧 **Dashboard read amplification at scale** — cheap wins done ✅ (frontend in-flight
   guard; aggregate charts/SLA panels on a 15s cadence, not every 3s). Still ⬜: the raw
   per-target `/api/series` fan-out (one request + store query per target per tick) — needs

@@ -184,24 +184,32 @@ func main() {
 		httpSrv := &http.Server{Addr: *addr, Handler: srv.Routes()}
 		fmt.Printf("\nserving web UI + JSON API on %s  (/, /api/targets, /api/series?target=NAME, /api/probes, /metrics)\n", *addr)
 		slog.Info("serving", "addr", *addr)
-		// keep polling in the background while serving
+		// Keep polling in the background while serving. Each target fires on its own
+		// Step via the Planner (a slow-cadence target no longer polls at the fast
+		// default), and the loop wakes at least once a second so a SIGHUP reload's
+		// new target set is picked up promptly.
 		go func() {
+			planner := scheduler.NewPlanner()
+			const maxSleep = time.Second
 			for {
+				now := time.Now()
+				due, sleep := planner.Tick(current.Load().jobs, now, maxSleep)
+				if len(due) > 0 {
+					start := time.Now()
+					out := scheduler.RunRound(ctx, due, *workers)
+					dur := time.Since(start)
+					st.Add(out)
+					evalMu.Lock()
+					current.Load().eval(out) // eval on the live runtime (may differ after a reload)
+					evalMu.Unlock()
+					roundStats.Observe(dur, len(out), countErrs(out), start)
+					logRound(0, dur, out)
+				}
 				select {
 				case <-ctx.Done():
 					return
-				case <-time.After(scheduler.NextDelay(time.Now(), *step, 0)):
+				case <-time.After(sleep):
 				}
-				rt := current.Load()
-				start := time.Now()
-				out := scheduler.RunRound(ctx, rt.jobs, *workers)
-				dur := time.Since(start)
-				st.Add(out)
-				evalMu.Lock()
-				current.Load().eval(out) // eval on the live runtime (may differ after a reload)
-				evalMu.Unlock()
-				roundStats.Observe(dur, len(out), countErrs(out), start)
-				logRound(0, dur, out)
 			}
 		}()
 		// graceful shutdown on signal
@@ -345,6 +353,7 @@ func buildRuntime(configPath string, demoPings int, demoStep, timeout time.Durat
 			Target:  probe.Target{Name: m.Name, Host: m.Host, Params: m.Params},
 			Pings:   m.Pings,
 			Timeout: timeout,
+			Step:    m.Step,
 		})
 	}
 
