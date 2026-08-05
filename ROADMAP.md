@@ -65,7 +65,8 @@ Not planned for now; pick up only if multi-vantage measurement is requested.
 - ⬜ Overview (small multiples) + multi-range detail (3h/30h/10d/400d) + unison scaling in the SPA
 - 🚧 Top-N "charts" (worst by loss/median/stddev) done ✅ (`/api/charts` + dashboard
   "Worst targets" panel); alternate menu hierarchies ⬜
-- ⬜ Drag-to-zoom time range (refetch, not image swap); in-app dark-mode toggle persistence
+- 🚧 Drag-to-zoom time range (refetch, not image swap) ⬜; in-app dark-mode toggle
+  persistence done ✅ (localStorage, restored before first paint)
 - ✅ Prometheus metrics export (`/metrics`: median/loss/up per target) for Grafana-native users
 - ✅ Availability/SLA reporting (the tSmoke equivalent) — `GET /api/sla?window=…` per-target
   availability % over a window + dashboard "Availability" panel
