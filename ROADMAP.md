@@ -47,9 +47,11 @@ Not planned for now; pick up only if multi-vantage measurement is requested.
 - ✅ Richer alert DSL — pattern `*N*` skip, bare `*`, `U` token, priority suppression,
   per-target `alertee` (all done)
   - Priority: `priority: 1` (highest) inhibits lower-priority alerts on the same target
-    while firing; unset (0) is never inhibited; RESOLVED events are never suppressed
-    (Alertmanager-style inhibition). `alertee` adds per-target recipients, inherited down
-    the tree and deduped against each alert's `to` at dispatch.
+    while firing; unset (0) is never inhibited (Alertmanager-style inhibition). A RESOLVED
+    is emitted only if the matching FIRING was actually delivered — a suppressed alert stays
+    fully silent (no orphan RESOLVED), and one delivered before being inhibited still gets
+    its close-out. `alertee` adds per-target recipients, inherited down the tree and deduped
+    against each alert's `to` at dispatch.
   - ✅ Both Perl bugs avoided (table-driven tests): `*N*` alignment is correct
     (`>0%,*12*,>0%` matches; patterns are right-anchored to the newest sample and the
     window retains the full skip allowance), and `==U` fires on a lost round's unknown
