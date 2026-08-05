@@ -380,13 +380,40 @@ type roundDTO struct {
 	RTTsMs   []*float64 `json:"rtts_ms"` // centered; null in lost slots — ready for smoke bands
 }
 
+// series returns a target's per-round smoke samples. By default it returns the
+// store's recent History (bounded by the store's cap). A `window` (a Go duration,
+// e.g. 30h) requests the full window instead: on a store that implements
+// RangeHistorier (pgstore) it reads every round in the window — so a long raw
+// range like the 30h drill-down isn't silently truncated to the last cap rounds —
+// and falls back to the capped History on stores that can't (MemStore in prod is
+// never that, but a bare in-memory dev store degrades honestly).
 func (srv *Server) series(w http.ResponseWriter, r *http.Request) {
 	key := r.URL.Query().Get("target")
 	if key == "" {
 		http.Error(w, `{"error":"missing target param"}`, http.StatusBadRequest)
 		return
 	}
-	hist := srv.store.History(key)
+	var hist []scheduler.Outcome
+	if v := r.URL.Query().Get("window"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d <= 0 {
+			http.Error(w, `{"error":"window must be a positive Go duration, e.g. 30h"}`, http.StatusBadRequest)
+			return
+		}
+		if rh, ok := srv.store.(store.RangeHistorier); ok {
+			h, err := rh.HistorySince(r.Context(), key, time.Now().Add(-d))
+			if err != nil {
+				slog.Error("series window query failed", "target", key, "err", err)
+				http.Error(w, `{"error":"series unavailable"}`, http.StatusServiceUnavailable)
+				return
+			}
+			hist = h
+		} else {
+			hist = srv.store.History(key) // best-effort: capped, but honest
+		}
+	} else {
+		hist = srv.store.History(key)
+	}
 	rounds := make([]roundDTO, 0, len(hist))
 	for _, o := range hist {
 		rd := roundDTO{

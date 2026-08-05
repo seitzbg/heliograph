@@ -54,3 +54,37 @@ func TestMemStoreAvailability(t *testing.T) {
 		t.Errorf("up (maxloss=10) = %d, want 4", st3.Up)
 	}
 }
+
+// TestMemStoreHistorySince covers the time-bounded read: rounds at or after the
+// cutoff, oldest->newest, and an empty result when the cutoff is past everything.
+func TestMemStoreHistorySince(t *testing.T) {
+	t0 := time.Unix(1_700_000_000, 0)
+	s := NewMem(100)
+	mk := func(off time.Duration) scheduler.Outcome {
+		return scheduler.Outcome{Target: probe.Target{Name: "t"}, When: t0.Add(off), Computed: sample.Compute(2, []float64{.01, .02})}
+	}
+	for i := 0; i < 6; i++ {
+		s.Add([]scheduler.Outcome{mk(time.Duration(i) * time.Minute)})
+	}
+
+	// cutoff at t0+3m -> the rounds at 3,4,5 minutes, oldest first.
+	got, err := s.HistorySince(context.Background(), "t", t0.Add(3*time.Minute))
+	if err != nil {
+		t.Fatalf("HistorySince: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("len = %d, want 3", len(got))
+	}
+	if !got[0].When.Equal(t0.Add(3 * time.Minute)) {
+		t.Errorf("oldest = %v, want t0+3m", got[0].When)
+	}
+	if !got[2].When.Equal(t0.Add(5 * time.Minute)) {
+		t.Errorf("newest = %v, want t0+5m", got[2].When)
+	}
+
+	// cutoff after everything -> empty.
+	empty, _ := s.HistorySince(context.Background(), "t", t0.Add(time.Hour))
+	if len(empty) != 0 {
+		t.Errorf("expected empty, got %d rounds", len(empty))
+	}
+}
