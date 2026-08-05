@@ -91,6 +91,16 @@
   footer { margin-top: 30px; color: var(--ink-faint); font-family: ui-monospace, Menlo, monospace; font-size: 11.5px; }
   @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
 </style>
+<script>
+  // Restore a saved theme before first paint (avoids a light/dark flash). With no
+  // saved choice, the CSS prefers-color-scheme media query decides.
+  try {
+    var savedTheme = localStorage.getItem('theme');
+    if (savedTheme === 'dark' || savedTheme === 'light') {
+      document.documentElement.setAttribute('data-theme', savedTheme);
+    }
+  } catch (e) { /* localStorage unavailable (private mode) — fall back to OS pref */ }
+</script>
 </head>
 <body>
 <div class="wrap">
@@ -308,7 +318,13 @@ function refreshSmokeKey() {
 const btn = document.getElementById('themeBtn');
 function currentTheme() { return document.documentElement.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'); }
 function applyThemeLabel() { const d = currentTheme() === 'dark'; document.getElementById('themeIcon').textContent = d ? '☾' : '☀'; document.getElementById('themeLabel').textContent = d ? 'Dark' : 'Light'; }
-btn.addEventListener('click', () => { document.documentElement.setAttribute('data-theme', currentTheme() === 'dark' ? 'light' : 'dark'); applyThemeLabel(); refreshSmokeKey(); renderAll(); });
+btn.addEventListener('click', () => {
+  const next = currentTheme() === 'dark' ? 'light' : 'dark';
+  document.documentElement.setAttribute('data-theme', next);
+  try { localStorage.setItem('theme', next); } catch (e) { /* private mode: choice won't persist */ }
+  applyThemeLabel(); refreshSmokeKey(); renderAll();
+});
+// Follow OS theme changes only while the user hasn't made an explicit choice.
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { applyThemeLabel(); refreshSmokeKey(); renderAll(); });
 
 // resolution (raw <-> hourly) segmented control

@@ -8,6 +8,8 @@ breaking changes.
 ## [Unreleased]
 
 ### Added
+- Dashboard theme choice persists across reloads (localStorage), restored before first
+  paint to avoid a flash; with no saved choice the page still follows the OS preference.
 - Availability / SLA reporting (the tSmoke equivalent): `GET /api/sla?window=24h` reports
   per-target availability over a time window — rounds measured, rounds up, availability %,
   and mean loss. A round counts as "up" if it got at least one reply (loss < 100%); pass
