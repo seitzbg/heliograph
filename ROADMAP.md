@@ -67,7 +67,8 @@ Not planned for now; pick up only if multi-vantage measurement is requested.
   "Worst targets" panel); alternate menu hierarchies ⬜
 - ⬜ Drag-to-zoom time range (refetch, not image swap); in-app dark-mode toggle persistence
 - ✅ Prometheus metrics export (`/metrics`: median/loss/up per target) for Grafana-native users
-- ⬜ Availability/SLA reporting (the tSmoke equivalent)
+- ✅ Availability/SLA reporting (the tSmoke equivalent) — `GET /api/sla?window=…` per-target
+  availability % over a window + dashboard "Availability" panel
 
 ## Notes / decisions
 - Stack: Go collector · TimescaleDB (raw samples; bands via SQL quantiles) · REST+JSON API ·

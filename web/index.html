@@ -66,6 +66,8 @@
   .charts { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 14px 16px 8px; margin-top: 18px; box-shadow: var(--shadow); }
   .charts-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
   .charts-head h2 { font-size: 14.5px; margin: 0; }
+  .charts-head h2 .sub { color: var(--ink-faint); font-family: ui-monospace, Menlo, monospace; font-size: 11px; font-weight: 400; margin-left: 6px; }
+  .rank .val.ok { color: var(--ok); }
   .rank { list-style: none; margin: 10px 0 4px; padding: 0; display: grid; gap: 2px; }
   .rank li { display: grid; grid-template-columns: 22px 1fr auto; align-items: baseline; gap: 10px; padding: 5px 8px; border-radius: 7px; font-family: ui-monospace, Menlo, monospace; font-size: 12.5px; }
   .rank li:nth-child(odd) { background: color-mix(in srgb, var(--ink) 4%, transparent); }
@@ -126,6 +128,13 @@
       </div>
     </div>
     <ol class="rank" id="rankList"><li class="empty-row">—</li></ol>
+  </section>
+
+  <section class="charts" id="slaPanel" aria-label="Availability">
+    <div class="charts-head">
+      <h2>Availability <span class="sub" id="slaWindow">last 24h</span></h2>
+    </div>
+    <ol class="rank" id="slaList"><li class="empty-row">—</li></ol>
   </section>
 
   <div class="grid" id="grid"><div class="empty">Waiting for the collector…</div></div>
@@ -206,6 +215,24 @@ async function refresh() {
   document.getElementById('statusText').textContent =
     targets.length + ' targets · ' + res + ' · updated ' + now.toLocaleTimeString();
   refreshCharts();
+  refreshSLA();
+}
+
+// ---- Availability (SLA) panel ----
+async function refreshSLA() {
+  const list = document.getElementById('slaList');
+  let rows;
+  try {
+    const r = await fetch('/api/sla?window=24h', { cache: 'no-store' });
+    rows = (await r.json()).targets || [];
+  } catch (e) { return; }
+  if (!rows.length) { list.innerHTML = '<li class="empty-row">no data yet</li>'; return; }
+  list.innerHTML = rows.slice(0, 8).map((s, i) => {
+    const cls = s.availability >= 99.5 ? 'ok' : s.availability >= 95 ? 'warn' : 'bad';
+    return '<li><span class="n">' + (i + 1) + '</span>' +
+      '<span class="who">' + escapeHtml(s.name) + '<span class="pk">' + escapeHtml(s.probe) + '</span></span>' +
+      '<span class="val ' + cls + '">' + fmt(s.availability, 2) + ' % · ' + s.up_rounds + '/' + s.rounds + '</span></li>';
+  }).join('');
 }
 
 // ---- Worst-targets ("charts") panel ----

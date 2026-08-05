@@ -12,8 +12,10 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"smokeping-modern/internal/probe"
+	"smokeping-modern/internal/scheduler"
 	"smokeping-modern/internal/store"
 )
 
@@ -32,6 +34,7 @@ func (srv *Server) Routes() *http.ServeMux {
 	mux.HandleFunc("GET /api/probes", srv.probes)
 	mux.HandleFunc("GET /api/probes/schema", srv.probeSchema)
 	mux.HandleFunc("GET /api/charts", srv.charts)
+	mux.HandleFunc("GET /api/sla", srv.sla)
 	mux.HandleFunc("GET /api/targets", srv.targets)
 	mux.HandleFunc("GET /api/series", srv.series)
 	mux.HandleFunc("GET /api/rollup", srv.rollup)
@@ -207,6 +210,89 @@ func (srv *Server) charts(w http.ResponseWriter, r *http.Request) {
 		out = append(out, s.e)
 	}
 	writeJSON(w, map[string]any{"by": by, "n": n, "charts": out})
+}
+
+type slaEntry struct {
+	Name         string  `json:"name"`
+	Probe        string  `json:"probe"`
+	Rounds       int     `json:"rounds"`       // measured rounds within the window
+	UpRounds     int     `json:"up_rounds"`    // rounds counted as "up"
+	Availability float64 `json:"availability"` // percent: up_rounds / rounds * 100
+	AvgLossPct   float64 `json:"avg_loss_pct"` // mean loss across in-window rounds
+	Latest       string  `json:"latest"`       // timestamp of the newest in-window round
+}
+
+// slaOf reduces one target's history to an availability summary over the rounds
+// at or after cutoff. isUp decides whether a round counts as available from its
+// loss percentage. Pure (cutoff passed in) so it's deterministic to test.
+func slaOf(hist []scheduler.Outcome, cutoff time.Time, isUp func(lossPct float64) bool) (rounds, up int, sumLoss float64, latest time.Time) {
+	for _, o := range hist {
+		if o.When.Before(cutoff) {
+			continue
+		}
+		lossPct := o.Computed.LossFraction() * 100
+		rounds++
+		sumLoss += lossPct
+		if isUp(lossPct) {
+			up++
+		}
+		if o.When.After(latest) {
+			latest = o.When
+		}
+	}
+	return
+}
+
+// sla reports per-target availability over a time window — the tSmoke-style
+// uptime report. `window` is a Go duration (default 24h). By default a round
+// counts as "up" if it got at least one reply (loss < 100%); pass `maxloss` (a
+// percent) for a stricter SLA where up means loss <= maxloss. Targets with no
+// rounds in the window are omitted. Sorted worst (lowest availability) first.
+func (srv *Server) sla(w http.ResponseWriter, r *http.Request) {
+	window := 24 * time.Hour
+	if v := r.URL.Query().Get("window"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d <= 0 {
+			http.Error(w, `{"error":"window must be a positive Go duration, e.g. 24h"}`, http.StatusBadRequest)
+			return
+		}
+		window = d
+	}
+	isUp := func(lossPct float64) bool { return lossPct < 100 }
+	if v := r.URL.Query().Get("maxloss"); v != "" {
+		max, err := strconv.ParseFloat(v, 64)
+		if err != nil || max < 0 {
+			http.Error(w, `{"error":"maxloss must be a non-negative percent"}`, http.StatusBadRequest)
+			return
+		}
+		isUp = func(lossPct float64) bool { return lossPct <= max }
+	}
+
+	cutoff := time.Now().Add(-window)
+	out := make([]slaEntry, 0)
+	for _, k := range srv.store.Keys() {
+		rounds, up, sumLoss, latest := slaOf(srv.store.History(k), cutoff, isUp)
+		if rounds == 0 {
+			continue
+		}
+		o, _ := srv.store.Latest(k)
+		out = append(out, slaEntry{
+			Name:         k,
+			Probe:        o.ProbeName,
+			Rounds:       rounds,
+			UpRounds:     up,
+			Availability: float64(up) / float64(rounds) * 100,
+			AvgLossPct:   sumLoss / float64(rounds),
+			Latest:       latest.UTC().Format("2006-01-02T15:04:05Z"),
+		})
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Availability != out[j].Availability {
+			return out[i].Availability < out[j].Availability // worst first
+		}
+		return out[i].Name < out[j].Name
+	})
+	writeJSON(w, map[string]any{"window": window.String(), "targets": out})
 }
 
 type roundDTO struct {

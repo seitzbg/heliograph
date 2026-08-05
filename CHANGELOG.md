@@ -8,6 +8,11 @@ breaking changes.
 ## [Unreleased]
 
 ### Added
+- Availability / SLA reporting (the tSmoke equivalent): `GET /api/sla?window=24h` reports
+  per-target availability over a time window — rounds measured, rounds up, availability %,
+  and mean loss. A round counts as "up" if it got at least one reply (loss < 100%); pass
+  `maxloss` for a stricter threshold. Sorted worst-first; a dashboard "Availability" panel
+  surfaces the lowest.
 - Top-N "charts" (worst offenders): `GET /api/charts?by=loss|median|stddev&n=N` ranks
   targets by their most recent round (loss %, median latency, or per-round jitter/stddev);
   targets with no value for the chosen key (a fully-lost round has no median/stddev) are

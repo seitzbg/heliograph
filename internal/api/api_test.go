@@ -154,6 +154,103 @@ func contains(s []string, want string) bool {
 	return false
 }
 
+func TestSLAOf(t *testing.T) {
+	t0 := time.Unix(1_700_000_000, 0)
+	mk := func(off time.Duration, lossPct float64, pings int) scheduler.Outcome {
+		lost := int(float64(pings) * lossPct / 100)
+		var rtts []float64
+		for i := 0; i < pings-lost; i++ {
+			rtts = append(rtts, 0.01)
+		}
+		return scheduler.Outcome{When: t0.Add(off), Computed: sample.Compute(pings, rtts)}
+	}
+	hist := []scheduler.Outcome{
+		mk(0, 0, 4),               // t0: up (excluded by cutoff below)
+		mk(1*time.Minute, 100, 4), // down
+		mk(2*time.Minute, 50, 4),  // up (got replies)
+		mk(3*time.Minute, 0, 4),   // up
+	}
+	up := func(lossPct float64) bool { return lossPct < 100 }
+	rounds, upN, sumLoss, latest := slaOf(hist, t0.Add(1*time.Minute), up)
+	if rounds != 3 || upN != 2 {
+		t.Fatalf("rounds=%d up=%d, want 3 and 2", rounds, upN)
+	}
+	if latest != t0.Add(3*time.Minute) {
+		t.Errorf("latest=%v, want t0+3m", latest)
+	}
+	if avg := sumLoss / float64(rounds); avg < 49 || avg > 51 { // (100+50+0)/3 = 50
+		t.Errorf("avg loss = %g, want ~50", avg)
+	}
+}
+
+func TestSLAEndpoint(t *testing.T) {
+	st := store.NewMem(100)
+	now := time.Now()
+	up4 := func(lossPct float64, when time.Time) scheduler.Outcome {
+		var rtts []float64
+		keep := 4 - int(4*lossPct/100)
+		for i := 0; i < keep; i++ {
+			rtts = append(rtts, 0.01)
+		}
+		return scheduler.Outcome{Target: probe.Target{Name: "a", Host: "h"}, ProbeName: "FPing",
+			When: when, Computed: sample.Compute(4, rtts)}
+	}
+	// Target "a": within 24h -> 2 up (0%, 50%) + 1 down (100%); plus one old up round.
+	st.Add([]scheduler.Outcome{up4(0, now.Add(-1*time.Minute))})
+	st.Add([]scheduler.Outcome{up4(50, now.Add(-2*time.Minute))})
+	st.Add([]scheduler.Outcome{up4(100, now.Add(-3*time.Minute))})
+	st.Add([]scheduler.Outcome{up4(0, now.Add(-48*time.Hour))}) // outside 24h window
+	// Target "b": fully down in-window.
+	st.Add([]scheduler.Outcome{{Target: probe.Target{Name: "b", Host: "h"}, ProbeName: "FPing",
+		When: now.Add(-1 * time.Minute), Computed: sample.Compute(4, nil)}})
+	srv := New(st, "")
+
+	get := func(q string) []map[string]any {
+		rec := httptest.NewRecorder()
+		srv.Routes().ServeHTTP(rec, httptest.NewRequest("GET", "/api/sla"+q, nil))
+		if rec.Code != 200 {
+			t.Fatalf("%s: status %d", q, rec.Code)
+		}
+		var m map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &m); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+		var out []map[string]any
+		for _, e := range m["targets"].([]any) {
+			out = append(out, e.(map[string]any))
+		}
+		return out
+	}
+
+	rows := get("?window=24h")
+	byName := map[string]map[string]any{}
+	for _, r := range rows {
+		byName[r["name"].(string)] = r
+	}
+	// "a": 3 in-window rounds, 2 up -> 66.7%; old round excluded.
+	if a := byName["a"]; a["rounds"].(float64) != 3 || a["availability"].(float64) < 66 || a["availability"].(float64) > 67 {
+		t.Errorf("a: rounds=%v avail=%v, want 3 rounds ~66.7%%", a["rounds"], a["availability"])
+	}
+	// "b": fully down -> 0% availability, and sorted first (worst).
+	if rows[0]["name"] != "b" || rows[0]["availability"].(float64) != 0 {
+		t.Errorf("worst-first: got %v (avail %v), want b at 0%%", rows[0]["name"], rows[0]["availability"])
+	}
+	// maxloss=20: the 50%-loss round now counts as down -> a has 1/3 up.
+	a := map[string]map[string]any{}
+	for _, r := range get("?window=24h&maxloss=20") {
+		a[r["name"].(string)] = r
+	}
+	if av := a["a"]["availability"].(float64); av < 33 || av > 34 {
+		t.Errorf("maxloss=20: a availability = %v, want ~33.3%%", av)
+	}
+	// invalid window -> 400.
+	rec := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(rec, httptest.NewRequest("GET", "/api/sla?window=zzz", nil))
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("window=zzz: status %d, want 400", rec.Code)
+	}
+}
+
 func TestProbeSchemaEndpoint(t *testing.T) {
 	srv := New(store.NewMem(1), "")
 	rec := httptest.NewRecorder()
