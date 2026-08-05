@@ -7,6 +7,12 @@ breaking changes.
 
 ## [Unreleased]
 
+### Changed
+- Dashboard refresh is lighter on the collector: an in-flight guard skips a refresh tick
+  while the previous one is still running (no request pile-up on slow links / many targets),
+  and the aggregate panels (worst-targets, availability) poll on a slower 15s cadence rather
+  than every 3s — cutting their per-target store scans ~5×.
+
 ### Fixed
 - Alert priority inhibition no longer emits an orphan RESOLVED: an alert whose FIRING was
   suppressed by a higher-priority one never sends a lone RESOLVED, while an alert that was
