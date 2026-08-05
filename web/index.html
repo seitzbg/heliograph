@@ -200,33 +200,46 @@ async function fetchSeries(name) {
   return Smoke.fromApiSeries(await r.json());
 }
 
+// In-flight guard: a refresh fans out one request per target, so on a slow link
+// (or many targets) a tick could start before the last finished and pile up.
+// Skip a tick while one is still running.
+let refreshing = false;
 async function refresh() {
-  let targets;
+  if (refreshing) return;
+  refreshing = true;
   try {
-    const r = await fetch('/api/targets', { cache: 'no-store' });
-    targets = (await r.json()).targets || [];
-  } catch (e) {
-    document.getElementById('statusText').textContent = 'collector unreachable';
-    return;
-  }
-  const mode = resolution; // capture: setResolution may flip it mid-flight on 501
-  await Promise.all(targets.map(async (t) => {
-    const p = ensurePanel(t);
+    let targets;
     try {
-      const s = await fetchSeries(t.name);
-      if (!s || mode !== resolution) return;
-      p.series = s;
-      updateStats(p, s);
-      renderPanel(p);
-    } catch (e) { /* transient */ }
-  }));
-  const now = new Date();
-  const res = resolution === 'hourly' ? 'hourly' : 'raw';
-  document.getElementById('statusText').textContent =
-    targets.length + ' targets · ' + res + ' · updated ' + now.toLocaleTimeString();
-  refreshCharts();
-  refreshSLA();
+      const r = await fetch('/api/targets', { cache: 'no-store' });
+      targets = (await r.json()).targets || [];
+    } catch (e) {
+      document.getElementById('statusText').textContent = 'collector unreachable';
+      return;
+    }
+    const mode = resolution; // capture: setResolution may flip it mid-flight on 501
+    await Promise.all(targets.map(async (t) => {
+      const p = ensurePanel(t);
+      try {
+        const s = await fetchSeries(t.name);
+        if (!s || mode !== resolution) return;
+        p.series = s;
+        updateStats(p, s);
+        renderPanel(p);
+      } catch (e) { /* transient */ }
+    }));
+    const now = new Date();
+    const res = resolution === 'hourly' ? 'hourly' : 'raw';
+    document.getElementById('statusText').textContent =
+      targets.length + ' targets · ' + res + ' · updated ' + now.toLocaleTimeString();
+  } finally {
+    refreshing = false;
+  }
 }
+
+// The aggregate panels (worst-targets, availability) each scan every target
+// server-side, so they refresh on a slower cadence than the per-target series —
+// they change slowly and this keeps the store query load down at scale.
+function refreshAggregates() { refreshCharts(); refreshSLA(); }
 
 // ---- Availability (SLA) panel ----
 // Humanize a span in seconds so the subtitle reflects the data actually covered
@@ -365,7 +378,9 @@ resHourlyBtn.addEventListener('click', () => setResolution('hourly'));
 let rt; window.addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(renderAll, 120); });
 applyThemeLabel();
 refresh();
+refreshAggregates();
 setInterval(refresh, 3000);
+setInterval(refreshAggregates, 15000);
 </script>
 </body>
 </html>

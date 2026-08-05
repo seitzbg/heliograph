@@ -76,11 +76,10 @@ Not planned for now; pick up only if multi-vantage measurement is requested.
   cadence (`-step`); a config/per-node `step` is currently inherited but ignored. SmokePing
   parity needs a per-target scheduler (each target on its own interval/phase offset). Bigger
   than a patch — tracked here so the config `step` promise is made real or removed.
-- ⬜ **Dashboard read amplification at scale** — a raw-mode refresh fans out one
-  `/api/series` per target plus charts/SLA, and the pgstore path issues ~5N+3 SQL queries
-  every 3s with no in-flight guard. Cheap wins: a frontend in-flight guard and a slower
-  charts/SLA cadence; bigger: bulk store queries + incremental series reads. Do before
-  large-N deployments.
+- 🚧 **Dashboard read amplification at scale** — cheap wins done ✅ (frontend in-flight
+  guard; aggregate charts/SLA panels on a 15s cadence, not every 3s). Still ⬜: the raw
+  per-target `/api/series` fan-out (one request + store query per target per tick) — needs
+  bulk store queries + incremental/since-based series reads before large-N deployments.
 - ⬜ **SLA over long windows on pgstore** — availability is computed from `History()`, which
   is bounded by store retention; a `>` a-few-hours window can be incomplete (the API now
   reports `covered_from` so this is visible). A time-bounded store aggregate would make long
