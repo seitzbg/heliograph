@@ -187,6 +187,17 @@ func main() {
 	if *serve && ctx.Err() == nil {
 		srv := api.New(st, *webdir)
 		srv.Rounds = roundStats
+		// Live views report only currently-configured targets, so a target removed or
+		// renamed on a SIGHUP reload stops showing as healthy (its history stays in
+		// the store but ages out via retention / the bounded cap).
+		srv.Active = func() map[string]bool {
+			jobs := current.Load().jobs
+			m := make(map[string]bool, len(jobs))
+			for _, j := range jobs {
+				m[j.Target.Name] = true
+			}
+			return m
+		}
 		httpSrv := &http.Server{Addr: *addr, Handler: srv.Routes()}
 		fmt.Printf("\nserving web UI + JSON API on %s  (/, /api/targets, /api/series?target=NAME, /api/probes, /metrics)\n", *addr)
 		slog.Info("serving", "addr", *addr)

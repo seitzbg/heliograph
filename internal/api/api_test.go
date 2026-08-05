@@ -44,6 +44,65 @@ func TestRollupHidesInternalError(t *testing.T) {
 	}
 }
 
+// unavailableRollupStore is a Rollupper whose aggregate was never created.
+type unavailableRollupStore struct{ *store.MemStore }
+
+func (unavailableRollupStore) Rollup(context.Context, string) ([]store.RollupPoint, error) {
+	return nil, store.ErrRollupUnavailable
+}
+
+// A missing hourly aggregate (store implements Rollupper but the view isn't
+// there) must answer 501 so the UI disables hourly mode, not 503.
+func TestRollupMissingAggregateReturns501(t *testing.T) {
+	srv := New(unavailableRollupStore{store.NewMem(10)}, "")
+	rec := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(rec, httptest.NewRequest("GET", "/api/rollup?target=x", nil))
+	if rec.Code != http.StatusNotImplemented {
+		t.Fatalf("status = %d, want 501 for a missing hourly aggregate", rec.Code)
+	}
+}
+
+// Live endpoints report only currently-configured targets: one removed on reload
+// (present in the store, absent from Active) must not show as healthy.
+func TestLiveEndpointsFilterToActiveTargets(t *testing.T) {
+	st := store.NewMem(10)
+	st.Add([]scheduler.Outcome{
+		{Target: probe.Target{Name: "kept", Host: "h"}, ProbeName: "FPing",
+			Computed: sample.Compute(2, []float64{0.01, 0.02}), When: time.Unix(1_700_000_000, 0)},
+		{Target: probe.Target{Name: "removed", Host: "h"}, ProbeName: "FPing",
+			Computed: sample.Compute(2, []float64{0.01, 0.02}), When: time.Unix(1_700_000_000, 0)},
+	})
+	srv := New(st, "")
+	srv.Active = func() map[string]bool { return map[string]bool{"kept": true} }
+
+	// /api/targets excludes the removed target.
+	rec := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(rec, httptest.NewRequest("GET", "/api/targets", nil))
+	var tj struct {
+		Targets []struct {
+			Name string `json:"name"`
+		} `json:"targets"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &tj); err != nil {
+		t.Fatalf("targets json: %v", err)
+	}
+	if len(tj.Targets) != 1 || tj.Targets[0].Name != "kept" {
+		t.Errorf("/api/targets = %+v, want only \"kept\"", tj.Targets)
+	}
+
+	// /metrics excludes the removed target's smokeping_probe_up and exports a
+	// last-sample timestamp for the kept one.
+	rec = httptest.NewRecorder()
+	srv.Routes().ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
+	body := rec.Body.String()
+	if strings.Contains(body, `target="removed"`) {
+		t.Errorf("/metrics still exports the removed target:\n%s", body)
+	}
+	if !strings.Contains(body, `smokeping_probe_last_sample_timestamp_seconds{target="kept",probe="FPing"} 1700000000`) {
+		t.Errorf("/metrics missing per-target last-sample timestamp:\n%s", body)
+	}
+}
+
 func TestMetricsEndpoint(t *testing.T) {
 	st := store.NewMem(10)
 	st.Add([]scheduler.Outcome{

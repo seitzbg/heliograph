@@ -5,6 +5,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -25,9 +26,33 @@ type Server struct {
 	// Rounds, if set, adds collector round-level metrics (duration, size, error
 	// count) to /metrics. Optional; nil in tests and pure-API use.
 	Rounds *RoundStats
+	// Active, if set, returns the set of currently-configured target names. The
+	// live endpoints (targets, charts, sla, metrics) filter the store's keys
+	// through it, so a target removed or renamed on a config reload stops being
+	// reported as healthy — its historical rows remain in the store but are no
+	// longer surfaced in the live views. nil means no filtering (tests/pure API).
+	Active func() map[string]bool
 }
 
 func New(s store.Store, webDir string) *Server { return &Server{store: s, webDir: webDir} }
+
+// liveKeys returns the store's target keys filtered to the active set (if Active
+// is configured). Callers iterating current per-target state use this so removed
+// targets are not reported as up.
+func (srv *Server) liveKeys() []string {
+	keys := srv.store.Keys()
+	if srv.Active == nil {
+		return keys
+	}
+	active := srv.Active()
+	out := make([]string, 0, len(keys))
+	for _, k := range keys {
+		if active[k] {
+			out = append(out, k)
+		}
+	}
+	return out
+}
 
 func (srv *Server) Routes() *http.ServeMux {
 	mux := http.NewServeMux()
@@ -82,7 +107,7 @@ type targetDTO struct {
 
 func (srv *Server) targets(w http.ResponseWriter, _ *http.Request) {
 	var out []targetDTO
-	for _, k := range srv.store.Keys() {
+	for _, k := range srv.liveKeys() {
 		o, ok := srv.store.Latest(k)
 		if !ok {
 			continue
@@ -157,7 +182,7 @@ func (srv *Server) charts(w http.ResponseWriter, r *http.Request) {
 		key float64
 	}
 	var rows []scored
-	for _, k := range srv.store.Keys() {
+	for _, k := range srv.liveKeys() {
 		o, ok := srv.store.Latest(k)
 		if !ok {
 			continue
@@ -276,7 +301,7 @@ func (srv *Server) sla(w http.ResponseWriter, r *http.Request) {
 
 	cutoff := time.Now().Add(-window)
 	out := make([]slaEntry, 0)
-	for _, k := range srv.store.Keys() {
+	for _, k := range srv.liveKeys() {
 		rounds, up, sumLoss, oldest, latest := slaOf(srv.store.History(k), cutoff, isUp)
 		if rounds == 0 {
 			continue
@@ -373,6 +398,14 @@ func (srv *Server) rollup(w http.ResponseWriter, r *http.Request) {
 	}
 	points, err := rp.Rollup(r.Context(), key)
 	if err != nil {
+		// A store that implements Rollupper but whose hourly aggregate was never
+		// created (a Compose DB started without -downsample) should look "hourly not
+		// supported", not "temporarily broken" — 501 tells the UI to disable hourly
+		// mode instead of leaving it stuck on failing panels.
+		if errors.Is(err, store.ErrRollupUnavailable) {
+			http.Error(w, `{"error":"hourly rollup not enabled (run with -dsn -downsample)"}`, http.StatusNotImplemented)
+			return
+		}
 		// Log the real cause server-side; return a generic message so internal
 		// detail (table names, driver internals) never reaches the client.
 		slog.Error("rollup query failed", "target", key, "err", err)
@@ -406,7 +439,9 @@ func (srv *Server) metrics(w http.ResponseWriter, _ *http.Request) {
 	b.WriteString("# TYPE smokeping_probe_up gauge\n")
 	b.WriteString("# HELP smokeping_probe_duration_seconds Wall-clock the most recent measurement of this target took.\n")
 	b.WriteString("# TYPE smokeping_probe_duration_seconds gauge\n")
-	for _, k := range srv.store.Keys() {
+	b.WriteString("# HELP smokeping_probe_last_sample_timestamp_seconds Unix time of this target's most recent round (alert on staleness).\n")
+	b.WriteString("# TYPE smokeping_probe_last_sample_timestamp_seconds gauge\n")
+	for _, k := range srv.liveKeys() {
 		o, ok := srv.store.Latest(k)
 		if !ok {
 			continue
@@ -425,6 +460,7 @@ func (srv *Server) metrics(w http.ResponseWriter, _ *http.Request) {
 		}
 		fmt.Fprintf(&b, "smokeping_probe_up%s %d\n", lbl, up)
 		fmt.Fprintf(&b, "smokeping_probe_duration_seconds%s %g\n", lbl, o.Duration.Seconds())
+		fmt.Fprintf(&b, "smokeping_probe_last_sample_timestamp_seconds%s %d\n", lbl, o.When.Unix())
 	}
 	srv.writeRoundMetrics(&b)
 	_, _ = w.Write([]byte(b.String()))
