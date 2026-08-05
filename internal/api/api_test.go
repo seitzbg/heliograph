@@ -23,7 +23,7 @@ const rollupInternalErr = `pq: relation "samples_hourly" does not exist`
 // errRollupStore is a Rollupper whose Rollup always fails with an internal error.
 type errRollupStore struct{ *store.MemStore }
 
-func (errRollupStore) Rollup(context.Context, string) ([]store.RollupPoint, error) {
+func (errRollupStore) Rollup(context.Context, string, string) ([]store.RollupPoint, error) {
 	return nil, errors.New(rollupInternalErr)
 }
 
@@ -47,8 +47,46 @@ func TestRollupHidesInternalError(t *testing.T) {
 // unavailableRollupStore is a Rollupper whose aggregate was never created.
 type unavailableRollupStore struct{ *store.MemStore }
 
-func (unavailableRollupStore) Rollup(context.Context, string) ([]store.RollupPoint, error) {
+func (unavailableRollupStore) Rollup(context.Context, string, string) ([]store.RollupPoint, error) {
 	return nil, store.ErrRollupUnavailable
+}
+
+// resRollupStore records the resolution passed to Rollup, so a test can assert
+// /api/rollup routes ?res to the right tier and echoes it back.
+type resRollupStore struct {
+	*store.MemStore
+	gotRes string
+}
+
+func (rs *resRollupStore) Rollup(_ context.Context, _ string, resolution string) ([]store.RollupPoint, error) {
+	rs.gotRes = resolution
+	return []store.RollupPoint{{Bucket: time.Unix(1_700_000_000, 0), MedianAvg: 0.01, MedianMin: 0.01, MedianMax: 0.02, Rounds: 3}}, nil
+}
+
+// /api/rollup?res selects the tier: default 1h, explicit 1d, anything else -> 400.
+// The chosen resolution is echoed in the response and passed to the store.
+func TestRollupResolution(t *testing.T) {
+	rs := &resRollupStore{MemStore: store.NewMem(10)}
+	srv := New(rs, "")
+	do := func(q string) (int, string) {
+		rec := httptest.NewRecorder()
+		srv.Routes().ServeHTTP(rec, httptest.NewRequest("GET", "/api/rollup"+q, nil))
+		var m struct {
+			Resolution string `json:"resolution"`
+		}
+		_ = json.Unmarshal(rec.Body.Bytes(), &m)
+		return rec.Code, m.Resolution
+	}
+
+	if code, res := do("?target=x"); code != 200 || res != "1h" || rs.gotRes != "1h" {
+		t.Errorf("default: code=%d res=%q gotRes=%q, want 200/1h/1h", code, res, rs.gotRes)
+	}
+	if code, res := do("?target=x&res=1d"); code != 200 || res != "1d" || rs.gotRes != "1d" {
+		t.Errorf("res=1d: code=%d res=%q gotRes=%q, want 200/1d/1d", code, res, rs.gotRes)
+	}
+	if code, _ := do("?target=x&res=bogus"); code != http.StatusBadRequest {
+		t.Errorf("res=bogus: code=%d, want 400", code)
+	}
 }
 
 // A missing hourly aggregate (store implements Rollupper but the view isn't

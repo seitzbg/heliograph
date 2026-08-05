@@ -455,12 +455,22 @@ func msPtr(seconds float64) *float64 {
 	return &ms
 }
 
-// rollup returns the hourly downsampled buckets for a target (the coarse tier a
-// long-range view reads). Requires a store that implements Rollupper (pgstore).
+// rollup returns downsampled buckets for a target (the coarse tiers a long-range
+// view reads). `res` picks the tier: "1h" (default) or "1d" — daily feeds the
+// 400d range, where hourly would be too many buckets. Requires a store that
+// implements Rollupper (pgstore).
 func (srv *Server) rollup(w http.ResponseWriter, r *http.Request) {
 	key := r.URL.Query().Get("target")
 	if key == "" {
 		http.Error(w, `{"error":"missing target param"}`, http.StatusBadRequest)
+		return
+	}
+	res := r.URL.Query().Get("res")
+	if res == "" {
+		res = "1h"
+	}
+	if res != "1h" && res != "1d" {
+		http.Error(w, `{"error":"res must be 1h or 1d"}`, http.StatusBadRequest)
 		return
 	}
 	rp, ok := srv.store.(store.Rollupper)
@@ -468,14 +478,14 @@ func (srv *Server) rollup(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"rollup requires the TimescaleDB store (run with -dsn -downsample)"}`, http.StatusNotImplemented)
 		return
 	}
-	points, err := rp.Rollup(r.Context(), key)
+	points, err := rp.Rollup(r.Context(), key, res)
 	if err != nil {
 		// A store that implements Rollupper but whose hourly aggregate was never
 		// created (a Compose DB started without -downsample) should look "hourly not
 		// supported", not "temporarily broken" — 501 tells the UI to disable hourly
 		// mode instead of leaving it stuck on failing panels.
 		if errors.Is(err, store.ErrRollupUnavailable) {
-			http.Error(w, `{"error":"hourly rollup not enabled (run with -dsn -downsample)"}`, http.StatusNotImplemented)
+			http.Error(w, `{"error":"rollup not enabled (run with -dsn -downsample)"}`, http.StatusNotImplemented)
 			return
 		}
 		// Log the real cause server-side; return a generic message so internal
@@ -495,7 +505,7 @@ func (srv *Server) rollup(w http.ResponseWriter, r *http.Request) {
 			Rounds:      p.Rounds,
 		})
 	}
-	writeJSON(w, map[string]any{"target": key, "resolution": "1h", "buckets": buckets})
+	writeJSON(w, map[string]any{"target": key, "resolution": res, "buckets": buckets})
 }
 
 // metrics exposes the latest per-target values in Prometheus text format so

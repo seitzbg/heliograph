@@ -97,13 +97,33 @@ var downsampleStmts = []string{
 	        end_offset => INTERVAL '1 hour',
 	        schedule_interval => INTERVAL '1 hour',
 	        if_not_exists => TRUE)`,
+	`CREATE MATERIALIZED VIEW IF NOT EXISTS samples_daily
+	 WITH (timescaledb.continuous, timescaledb.materialized_only = false) AS
+	 SELECT time_bucket('1 day', ts) AS bucket,
+	        target,
+	        avg(median_seconds) AS median_avg,
+	        min(median_seconds) AS median_min,
+	        max(median_seconds) AS median_max,
+	        avg(loss::float / NULLIF(pings, 0)) AS loss_frac,
+	        count(*) AS rounds
+	 FROM samples
+	 GROUP BY bucket, target
+	 WITH NO DATA`,
+	// Refresh the trailing 30 days of daily buckets hourly, so each day is
+	// materialized well before the 30-day raw retention drops its source rows —
+	// the daily tier then persists for the 400d range even though raw does not.
+	`SELECT add_continuous_aggregate_policy('samples_daily',
+	        start_offset => INTERVAL '30 days',
+	        end_offset => INTERVAL '1 hour',
+	        schedule_interval => INTERVAL '1 hour',
+	        if_not_exists => TRUE)`,
 	`SELECT add_retention_policy('samples', INTERVAL '30 days', if_not_exists => TRUE)`,
 }
 
-// EnableDownsampling creates the hourly continuous aggregate (median avg/min/max
-// + loss per target per hour — the coarse tier a long-range view reads, akin to
-// SmokePing's RRAs), a refresh policy, and a 30-day retention policy on the raw
-// samples. Idempotent.
+// EnableDownsampling creates the hourly and daily continuous aggregates (median
+// avg/min/max + loss per target per bucket — the coarse tiers a long-range view
+// reads, akin to SmokePing's RRAs; daily feeds the 400d range), their refresh
+// policies, and a 30-day retention policy on the raw samples. Idempotent.
 func (s *PGStore) EnableDownsampling(ctx context.Context) error {
 	for _, q := range downsampleStmts {
 		if _, err := s.pool.Exec(ctx, q); err != nil {
@@ -280,12 +300,25 @@ func sortedNonNaN(c []float64) []float64 {
 	return out
 }
 
-// Rollup returns the hourly downsampled buckets for a target (from the
-// samples_hourly continuous aggregate). Requires EnableDownsampling to have run.
-func (s *PGStore) Rollup(ctx context.Context, target string) ([]store.RollupPoint, error) {
+// Rollup returns the downsampled buckets for a target from the continuous
+// aggregate selected by resolution ("1h" default, or "1d"). Requires
+// EnableDownsampling to have run.
+func (s *PGStore) Rollup(ctx context.Context, target, resolution string) ([]store.RollupPoint, error) {
+	// Map resolution to a fixed view name here — never interpolate caller input
+	// into the query. Unknown resolutions are a programming error (the API
+	// validates the param before reaching this point).
+	var view string
+	switch resolution {
+	case "", "1h":
+		view = "samples_hourly"
+	case "1d":
+		view = "samples_daily"
+	default:
+		return nil, fmt.Errorf("pgstore: unknown rollup resolution %q", resolution)
+	}
 	rows, err := s.pool.Query(ctx,
 		`SELECT bucket, median_avg, median_min, median_max, loss_frac, rounds
-		   FROM samples_hourly WHERE target=$1 ORDER BY bucket`, target)
+		   FROM `+view+` WHERE target=$1 ORDER BY bucket`, target)
 	if err != nil {
 		// The continuous aggregate was never created (started without -downsample):
 		// report it as "not available" so the API answers 501, not a generic 503.
