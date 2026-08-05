@@ -358,7 +358,9 @@ function renderPanel(p) {
     ctx.fillText('collecting… (' + p.series.buckets.length + ' round)', p.canvas.clientWidth / 2, 95);
     return;
   }
-  Smoke.render(p.canvas, p.series, { height: 190, xlabels: ['', '', '', 'now'] });
+  // Aggregated (rollup) series carry a `resolution` and only a min/avg/max per
+  // bucket — render them as a soft range-area, not the dense smoke stack.
+  Smoke.render(p.canvas, p.series, { height: 190, xlabels: ['', '', '', 'now'], band: !!p.series.resolution });
 }
 function renderAll() { for (const p of panels.values()) renderPanel(p); }
 
