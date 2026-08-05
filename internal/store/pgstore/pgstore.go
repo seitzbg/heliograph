@@ -321,6 +321,39 @@ func nanIfNil(p *float64) float64 {
 	return *p
 }
 
+// Availability aggregates availability over the window [cutoff, now) directly in
+// SQL, so it covers the full requested window regardless of the History cap.
+func (s *PGStore) Availability(ctx context.Context, target string, cutoff time.Time, maxLossPct *float64) (store.AvailabilityStat, error) {
+	// "up" is at least one reply by default; a maxLossPct tightens it to a loss
+	// ceiling. Both forms are fixed strings chosen here (no user input), with the
+	// threshold passed as a bound parameter.
+	upCond := "loss < pings"
+	args := []any{target, cutoff.UTC()}
+	if maxLossPct != nil {
+		upCond = "loss * 100.0 <= $3 * pings"
+		args = append(args, *maxLossPct)
+	}
+	q := `SELECT count(*),
+	             count(*) FILTER (WHERE ` + upCond + `),
+	             coalesce(sum(loss::float / NULLIF(pings,0) * 100), 0),
+	             min(ts), max(ts)
+	        FROM samples WHERE target=$1 AND ts >= $2`
+	var (
+		st             store.AvailabilityStat
+		oldest, latest *time.Time
+	)
+	if err := s.pool.QueryRow(ctx, q, args...).Scan(&st.Measured, &st.Up, &st.SumLossPct, &oldest, &latest); err != nil {
+		return store.AvailabilityStat{}, err
+	}
+	if oldest != nil {
+		st.Oldest = *oldest
+	}
+	if latest != nil {
+		st.Latest = *latest
+	}
+	return st, nil
+}
+
 var _ interface {
 	Add([]scheduler.Outcome)
 	Keys() []string
@@ -328,4 +361,7 @@ var _ interface {
 	History(string) []scheduler.Outcome
 } = (*PGStore)(nil)
 
-var _ store.Rollupper = (*PGStore)(nil)
+var _ interface {
+	store.Rollupper
+	store.Availabler
+} = (*PGStore)(nil)

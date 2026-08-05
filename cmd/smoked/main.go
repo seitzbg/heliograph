@@ -198,6 +198,15 @@ func main() {
 			}
 			return m
 		}
+		// Per-target step drives /api/sla's coverage (expected rounds = window/step).
+		srv.Steps = func() map[string]time.Duration {
+			jobs := current.Load().jobs
+			m := make(map[string]time.Duration, len(jobs))
+			for _, j := range jobs {
+				m[j.Target.Name] = j.Step
+			}
+			return m
+		}
 		// Defensive timeouts so a slow or idle client can't tie up a connection
 		// indefinitely (the read endpoints are expensive). WriteTimeout is generous
 		// because an aggregate scan over many targets can take a little while.

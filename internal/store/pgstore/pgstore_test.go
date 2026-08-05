@@ -81,6 +81,82 @@ func TestPGStoreRoundTrip(t *testing.T) {
 	}
 }
 
+// The whole point of #8: availability is computed over the full requested window,
+// not just the last histCap stored rounds. Here histCap=10 but the window holds
+// 60 rounds — History truncates to 10, Availability must see all 60.
+func TestPGStoreAvailabilityIgnoresHistoryCap(t *testing.T) {
+	dsn := os.Getenv("SMOKE_TEST_DSN")
+	if dsn == "" {
+		t.Skip("set SMOKE_TEST_DSN to run the TimescaleDB integration test")
+	}
+	ctx := context.Background()
+	s, err := New(ctx, dsn, 10, func(e error) { t.Errorf("store error: %v", e) }) // deliberately small cap
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.pool.Exec(ctx, "TRUNCATE samples"); err != nil {
+		t.Fatalf("truncate: %v", err)
+	}
+
+	base := time.Unix(1_700_100_000, 0).UTC()
+	const N = 60
+	var outs []scheduler.Outcome
+	for i := 0; i < N; i++ {
+		var rtts []float64
+		if i%10 == 9 {
+			rtts = nil // every 10th round fully lost -> down
+		} else {
+			rtts = []float64{0.01, 0.02, 0.03, 0.04}
+		}
+		outs = append(outs, scheduler.Outcome{
+			Target: probe.Target{Name: "t", Host: "h"}, ProbeName: "FPing",
+			When: base.Add(time.Duration(i) * time.Minute), Computed: sample.Compute(4, rtts),
+		})
+	}
+	s.Add(outs)
+
+	// The History-based path the old SLA used is capped — the truncation being fixed.
+	if h := s.History("t"); len(h) != 10 {
+		t.Fatalf("History len = %d, want 10 (the cap that truncated SLA)", len(h))
+	}
+
+	// Availability spans the whole window regardless of the cap.
+	st, err := s.Availability(ctx, "t", base, nil)
+	if err != nil {
+		t.Fatalf("Availability: %v", err)
+	}
+	if st.Measured != N {
+		t.Errorf("measured = %d, want %d (must ignore the history cap of 10)", st.Measured, N)
+	}
+	down := N / 10
+	if st.Up != N-down {
+		t.Errorf("up = %d, want %d", st.Up, N-down)
+	}
+	if !st.Oldest.Equal(base) || !st.Latest.Equal(base.Add(time.Duration(N-1)*time.Minute)) {
+		t.Errorf("oldest/latest = %v / %v", st.Oldest, st.Latest)
+	}
+
+	// cutoff filters to the in-window subset.
+	st2, err := s.Availability(ctx, "t", base.Add(30*time.Minute), nil)
+	if err != nil {
+		t.Fatalf("Availability (cutoff): %v", err)
+	}
+	if st2.Measured != N-30 {
+		t.Errorf("measured after cutoff = %d, want %d", st2.Measured, N-30)
+	}
+
+	// maxLossPct=10: the fully-lost rounds are down; the healthy rounds (0% loss) stay up.
+	maxLoss := 10.0
+	st3, err := s.Availability(ctx, "t", base, &maxLoss)
+	if err != nil {
+		t.Fatalf("Availability (maxloss): %v", err)
+	}
+	if st3.Up != N-down {
+		t.Errorf("up (maxloss=10) = %d, want %d", st3.Up, N-down)
+	}
+}
+
 func TestMsToDuration(t *testing.T) {
 	cases := []struct {
 		ms   float64
