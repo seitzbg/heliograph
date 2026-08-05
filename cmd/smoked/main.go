@@ -198,7 +198,17 @@ func main() {
 			}
 			return m
 		}
-		httpSrv := &http.Server{Addr: *addr, Handler: srv.Routes()}
+		// Defensive timeouts so a slow or idle client can't tie up a connection
+		// indefinitely (the read endpoints are expensive). WriteTimeout is generous
+		// because an aggregate scan over many targets can take a little while.
+		httpSrv := &http.Server{
+			Addr:              *addr,
+			Handler:           srv.Routes(),
+			ReadHeaderTimeout: 5 * time.Second,
+			ReadTimeout:       10 * time.Second,
+			WriteTimeout:      30 * time.Second,
+			IdleTimeout:       120 * time.Second,
+		}
 		fmt.Printf("\nserving web UI + JSON API on %s  (/, /api/targets, /api/series?target=NAME, /api/probes, /metrics)\n", *addr)
 		slog.Info("serving", "addr", *addr)
 		// Keep polling in the background while serving. Each target fires on its own
