@@ -157,6 +157,62 @@ func TestPGStoreAvailabilityIgnoresHistoryCap(t *testing.T) {
 	}
 }
 
+// The 30h raw drill-down needs the full window, not just the last histCap rounds.
+// Here histCap=10 but the window holds 60 rounds — History truncates to 10,
+// HistorySince must return all 60 (oldest->newest), and honour the cutoff.
+func TestPGStoreHistorySinceIgnoresHistoryCap(t *testing.T) {
+	dsn := os.Getenv("SMOKE_TEST_DSN")
+	if dsn == "" {
+		t.Skip("set SMOKE_TEST_DSN to run the TimescaleDB integration test")
+	}
+	ctx := context.Background()
+	s, err := New(ctx, dsn, 10, func(e error) { t.Errorf("store error: %v", e) }) // deliberately small cap
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.pool.Exec(ctx, "TRUNCATE samples"); err != nil {
+		t.Fatalf("truncate: %v", err)
+	}
+
+	base := time.Unix(1_700_200_000, 0).UTC()
+	const N = 60
+	var outs []scheduler.Outcome
+	for i := 0; i < N; i++ {
+		outs = append(outs, scheduler.Outcome{
+			Target: probe.Target{Name: "t", Host: "h"}, ProbeName: "FPing",
+			When: base.Add(time.Duration(i) * time.Minute), Computed: sample.Compute(4, []float64{0.01, 0.02, 0.03, 0.04}),
+		})
+	}
+	s.Add(outs)
+
+	// History is capped — the truncation being fixed.
+	if h := s.History("t"); len(h) != 10 {
+		t.Fatalf("History len = %d, want 10 (the cap that truncated the 30h view)", len(h))
+	}
+
+	// HistorySince spans the whole window regardless of the cap, oldest->newest.
+	got, err := s.HistorySince(ctx, "t", base)
+	if err != nil {
+		t.Fatalf("HistorySince: %v", err)
+	}
+	if len(got) != N {
+		t.Fatalf("HistorySince len = %d, want %d (must ignore the history cap of 10)", len(got), N)
+	}
+	if !got[0].When.Equal(base) || !got[N-1].When.Equal(base.Add(time.Duration(N-1)*time.Minute)) {
+		t.Errorf("oldest/newest = %v / %v, want %v / %v", got[0].When, got[N-1].When, base, base.Add(time.Duration(N-1)*time.Minute))
+	}
+
+	// cutoff filters to the in-window subset.
+	got2, err := s.HistorySince(ctx, "t", base.Add(30*time.Minute))
+	if err != nil {
+		t.Fatalf("HistorySince (cutoff): %v", err)
+	}
+	if len(got2) != N-30 {
+		t.Errorf("HistorySince after cutoff = %d, want %d", len(got2), N-30)
+	}
+}
+
 func TestMsToDuration(t *testing.T) {
 	cases := []struct {
 		ms   float64

@@ -434,3 +434,81 @@ func TestMetricsPerProbeDurationAndRoundStats(t *testing.T) {
 		}
 	}
 }
+
+// rangeStore is a RangeHistorier that records the cutoff it was asked for and
+// returns a single fixed round, so a test can distinguish the windowed path
+// (HistorySince) from the capped History path (via the embedded MemStore).
+type rangeStore struct {
+	*store.MemStore
+	called    bool
+	gotCutoff time.Time
+}
+
+func (rs *rangeStore) HistorySince(_ context.Context, target string, cutoff time.Time) ([]scheduler.Outcome, error) {
+	rs.called = true
+	rs.gotCutoff = cutoff
+	return []scheduler.Outcome{
+		{Target: probe.Target{Name: target}, When: time.Unix(1_700_000_000, 0), Computed: sample.Compute(2, []float64{0.01, 0.02})},
+	}, nil
+}
+
+// /api/series?window= must read the full window via HistorySince (fixing the
+// 1024-round truncation of the 30h view); without window it keeps the capped
+// History path; a bad window is a 400.
+func TestSeriesWindow(t *testing.T) {
+	base := store.NewMem(1024)
+	now := time.Now()
+	base.Add([]scheduler.Outcome{
+		{Target: probe.Target{Name: "t"}, When: now.Add(-2 * time.Minute), Computed: sample.Compute(2, []float64{0.01, 0.02})},
+		{Target: probe.Target{Name: "t"}, When: now.Add(-1 * time.Minute), Computed: sample.Compute(2, []float64{0.01, 0.02})},
+	})
+	rs := &rangeStore{MemStore: base}
+	srv := New(rs, "")
+
+	rounds := func(rec *httptest.ResponseRecorder) int {
+		var resp struct {
+			Rounds []map[string]any `json:"rounds"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("json: %v", err)
+		}
+		return len(resp.Rounds)
+	}
+
+	// No window -> capped History (2 rounds from the embedded MemStore); HistorySince untouched.
+	rec := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(rec, httptest.NewRequest("GET", "/api/series?target=t", nil))
+	if rec.Code != 200 {
+		t.Fatalf("no-window status = %d", rec.Code)
+	}
+	if rs.called {
+		t.Error("no-window request must use History, not HistorySince")
+	}
+	if n := rounds(rec); n != 2 {
+		t.Errorf("no-window rounds = %d, want 2 (History)", n)
+	}
+
+	// With window -> HistorySince, cutoff ~ now-30h, and its single round.
+	rs.called = false
+	rec = httptest.NewRecorder()
+	srv.Routes().ServeHTTP(rec, httptest.NewRequest("GET", "/api/series?target=t&window=30h", nil))
+	if rec.Code != 200 {
+		t.Fatalf("window status = %d", rec.Code)
+	}
+	if !rs.called {
+		t.Fatal("window request did not use HistorySince")
+	}
+	if d := time.Since(rs.gotCutoff); d < 29*time.Hour || d > 31*time.Hour {
+		t.Errorf("cutoff = %v ago, want ~30h", d)
+	}
+	if n := rounds(rec); n != 1 {
+		t.Errorf("window rounds = %d, want 1 (HistorySince stub)", n)
+	}
+
+	// Invalid window -> 400.
+	rec = httptest.NewRecorder()
+	srv.Routes().ServeHTTP(rec, httptest.NewRequest("GET", "/api/series?target=t&window=zzz", nil))
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("window=zzz status = %d, want 400", rec.Code)
+	}
+}

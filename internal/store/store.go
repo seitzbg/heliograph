@@ -67,6 +67,15 @@ type Availabler interface {
 	Availability(ctx context.Context, target string, cutoff time.Time, maxLossPct *float64) (AvailabilityStat, error)
 }
 
+// RangeHistorier is implemented by stores that can return a target's rounds over
+// an arbitrary window (at or after cutoff), unbounded by the History cap — so a
+// long drill-down range (e.g. 30h of per-round samples) isn't silently truncated
+// to the last N stored rounds. Returned oldest->newest, like History. /api/series
+// prefers this when given a window, falling back to the capped History otherwise.
+type RangeHistorier interface {
+	HistorySince(ctx context.Context, target string, cutoff time.Time) ([]scheduler.Outcome, error)
+}
+
 // MemStore is the in-memory implementation: latest + bounded history per target.
 // Used by default and in tests; not durable.
 type MemStore struct {
@@ -161,8 +170,28 @@ func (s *MemStore) Availability(_ context.Context, target string, cutoff time.Ti
 	return st, nil
 }
 
+// HistorySince returns the target's rounds at or after cutoff, oldest->newest.
+// Best-effort: MemStore only holds what fits its history cap, so a window longer
+// than the cap covers is reported as far back as it can (honest, not truncated
+// silently the way a DB LIMIT would be); production uses the pgstore implementation,
+// which reads the full window.
+func (s *MemStore) HistorySince(_ context.Context, target string, cutoff time.Time) ([]scheduler.Outcome, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	h := s.history[target]
+	out := make([]scheduler.Outcome, 0, len(h))
+	for _, o := range h {
+		if o.When.Before(cutoff) {
+			continue
+		}
+		out = append(out, o)
+	}
+	return out, nil
+}
+
 // compile-time checks
 var (
-	_ Store      = (*MemStore)(nil)
-	_ Availabler = (*MemStore)(nil)
+	_ Store          = (*MemStore)(nil)
+	_ Availabler     = (*MemStore)(nil)
+	_ RangeHistorier = (*MemStore)(nil)
 )

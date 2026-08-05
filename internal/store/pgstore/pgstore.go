@@ -354,6 +354,41 @@ func (s *PGStore) Availability(ctx context.Context, target string, cutoff time.T
 	return st, nil
 }
 
+// maxRangeRounds defensively bounds a windowed series read. It's far above any
+// real drill-down (30h at a 60s step = 1800 rounds); the true bound is the raw
+// retention policy (30 days). If a window somehow holds more, the most recent
+// maxRangeRounds are returned rather than an unbounded result set.
+const maxRangeRounds = 20000
+
+// HistorySince returns the target's rounds at or after cutoff, oldest->newest,
+// unbounded by histCap — so a long raw range (e.g. the 30h drill-down) reads the
+// whole window instead of just the last histCap rounds.
+func (s *PGStore) HistorySince(ctx context.Context, target string, cutoff time.Time) ([]scheduler.Outcome, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT ts, target, probe, host, pings, loss, median_seconds, rtts_seconds, err, duration_ms
+		   FROM samples WHERE target=$1 AND ts >= $2 ORDER BY ts DESC LIMIT $3`, target, cutoff.UTC(), maxRangeRounds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []scheduler.Outcome
+	for rows.Next() {
+		o, err := scanOutcome(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, o)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// query is DESC; return oldest->newest to match History/MemStore.
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		out[i], out[j] = out[j], out[i]
+	}
+	return out, nil
+}
+
 var _ interface {
 	Add([]scheduler.Outcome)
 	Keys() []string
@@ -364,4 +399,5 @@ var _ interface {
 var _ interface {
 	store.Rollupper
 	store.Availabler
+	store.RangeHistorier
 } = (*PGStore)(nil)
