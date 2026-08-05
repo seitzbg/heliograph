@@ -54,9 +54,9 @@ breaking changes.
   so docs and external validators can't drift from what the collector accepts.
 - Alert priority inhibition and per-target `alertee` (`internal/alert`, config): a per-alert
   `priority` (1 = highest) suppresses lower-priority alerts on the same target while it
-  fires (Alertmanager-style inhibition; RESOLVED events are never suppressed); a per-target
-  `alertee` list adds extra notifier recipients on top of each alert's own `to`, inherited
-  down the target tree and deduped at dispatch.
+  fires (Alertmanager-style inhibition); a per-target `alertee` list adds extra notifier
+  recipients on top of each alert's own `to`, inherited down the target tree and deduped at
+  dispatch. (A RESOLVED is delivered only when the matching FIRING was — see Fixed below.)
 - Richer alert pattern DSL (`internal/alert`): `*N*` skip (0..N arbitrary samples
   between hard comparisons), bare `*` (one arbitrary sample), and `==U`/`!=U` for the
   unknown value (a lost round's missing rtt median). Patterns are right-anchored to the
