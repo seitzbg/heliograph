@@ -171,6 +171,41 @@ func TestPlannerPerTargetCadence(t *testing.T) {
 	}
 }
 
+// A SIGHUP reload that changes a target's Step must take effect promptly: the old
+// deadline (computed under the previous step) is discarded so the new cadence
+// applies, rather than leaving the target deferred until the stale deadline.
+func TestPlannerReArmsOnStepChange(t *testing.T) {
+	t0 := time.Unix(1_700_000_000, 0)
+	p := NewPlanner()
+	// A on a 1h cadence fires now; next fire is ~t0+1h.
+	p.Tick([]Job{pj("A", time.Hour)}, t0, time.Minute)
+	if due, _ := p.Tick([]Job{pj("A", time.Hour)}, t0.Add(time.Second), time.Minute); has(due, "A") {
+		t.Fatalf("A should not be due 1s into a 1h cadence")
+	}
+	// Reload retunes A to a 1s cadence: it must re-arm and fire promptly, not wait
+	// out the old 1h deadline.
+	due, _ := p.Tick([]Job{pj("A", time.Second)}, t0.Add(2*time.Second), time.Minute)
+	if !has(due, "A") {
+		t.Fatalf("after step change 1h->1s, A should fire promptly, got %v", names(due))
+	}
+}
+
+// SleepToNext recomputes the wait from the current time, so a slow round doesn't
+// skew the phase-aligned grid (the serving loop calls it after probes complete).
+func TestPlannerSleepToNext(t *testing.T) {
+	t0 := time.Unix(1_700_000_000, 0)
+	p := NewPlanner()
+	p.Tick([]Job{pj("A", 10*time.Second)}, t0, time.Minute) // next A = t0+10s
+	if d := p.SleepToNext(t0.Add(3*time.Second), time.Minute); d != 7*time.Second {
+		t.Errorf("SleepToNext after 3s of work = %v, want 7s", d)
+	}
+	// A round that overran its step yields a zero sleep (fire immediately), not a
+	// negative one.
+	if d := p.SleepToNext(t0.Add(12*time.Second), time.Minute); d != 0 {
+		t.Errorf("SleepToNext past the deadline = %v, want 0", d)
+	}
+}
+
 func TestPlannerCapsSleepAndForgetsRemoved(t *testing.T) {
 	t0 := time.Unix(1_700_000_000, 0)
 	p := NewPlanner()

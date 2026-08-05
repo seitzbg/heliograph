@@ -198,8 +198,7 @@ func main() {
 			planner := scheduler.NewPlanner()
 			const maxSleep = time.Second
 			for {
-				now := time.Now()
-				due, sleep := planner.Tick(current.Load().jobs, now, maxSleep)
+				due, _ := planner.Tick(current.Load().jobs, time.Now(), maxSleep)
 				if len(due) > 0 {
 					start := time.Now()
 					out := scheduler.RunRound(ctx, due, *workers)
@@ -211,6 +210,10 @@ func main() {
 					roundStats.Observe(dur, len(out), countErrs(out), start)
 					logRound(0, dur, out)
 				}
+				// Recompute the sleep from the current time — after the probes ran — so a
+				// slow round doesn't shift the phase-aligned grid, and an overrun target
+				// fires immediately on the next tick instead of a step later.
+				sleep := planner.SleepToNext(time.Now(), maxSleep)
 				select {
 				case <-ctx.Done():
 					return
