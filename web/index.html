@@ -270,13 +270,16 @@ async function refreshSLA() {
   } catch (e) { return; }
   const sub = document.getElementById('slaWindow');
   if (!rows.length) { list.innerHTML = '<li class="empty-row">no data yet</li>'; if (sub) sub.textContent = 'last ' + SLA_WINDOW; return; }
-  // Actual coverage: oldest sample any shown target has within the window.
-  let oldest = Infinity;
-  for (const s of rows) { const t = Date.parse(s.covered_from); if (!isNaN(t)) oldest = Math.min(oldest, t); }
-  if (sub && isFinite(oldest)) {
-    const span = humanSpan((Date.now() - oldest) / 1000);
-    sub.textContent = span === SLA_WINDOW ? 'last ' + SLA_WINDOW : 'last ' + span + ' available';
-    sub.title = 'requested ' + SLA_WINDOW + '; history is bounded by store retention';
+  // Show the coverage common to ALL listed targets (the shortest span = the most
+  // recent covered_from), not the longest any single target happens to have.
+  // Using the oldest would make one target with a full day of history imply "24h"
+  // while others hold only minutes.
+  let commonStart = -Infinity;
+  for (const s of rows) { const t = Date.parse(s.covered_from); if (!isNaN(t)) commonStart = Math.max(commonStart, t); }
+  if (sub && isFinite(commonStart)) {
+    const span = humanSpan((Date.now() - commonStart) / 1000);
+    sub.textContent = span === SLA_WINDOW ? 'last ' + SLA_WINDOW : 'last ' + span + ' (all targets)';
+    sub.title = 'requested ' + SLA_WINDOW + '; shown is the span every listed target covers, bounded by store retention';
   }
   list.innerHTML = rows.slice(0, 8).map((s, i) => {
     const cls = s.availability >= 99.5 ? 'ok' : s.availability >= 95 ? 'warn' : 'bad';

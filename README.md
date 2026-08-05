@@ -77,6 +77,10 @@ internal/
   probe/         Probe interface + registry (the plugin contract)
     tcpconnect/  native TCP-connect probe
     fping/       fping(8) wrapper probe (own process group; killed as a group on timeout)
+    dns/         native DNS probe (miekg/dns)
+    httpprobe/   native HTTP TTFB probe (net/http + httptrace)
+    sshprobe/    native SSH banner-timing probe
+    irttprobe/   irtt(1) UDP round-trip/jitter wrapper (+ parser test)
   sample/        median / loss / centered-smoke-array math (+ tests)
   scheduler/     parallel worker pool, per-target timeout, phase-aligned NextDelay (+ tests)
   config/        YAML target-tree loader + inheritance resolver (+ tests)
@@ -85,10 +89,6 @@ internal/
   store/         store.Store interface + MemStore (in-memory)
     pgstore/     TimescaleDB implementation (samples hypertable, raw sample arrays)
   api/           JSON HTTP API + static file serving (SmokePing CGI replacement)
-    probe/dns/       native DNS probe (miekg/dns)
-    probe/httpprobe/ native HTTP TTFB probe (net/http + httptrace)
-    probe/sshprobe/  native SSH banner-timing probe
-    probe/irttprobe/ irtt(1) UDP round-trip/jitter wrapper (+ parser test)
 cmd/smoked/      the collector binary
 web/
   smoke.js       shared canvas smoke renderer (bands + loss-coloured median)
@@ -104,5 +104,5 @@ web/
 
 ## Not built yet (roadmap)
 
-DNS/HTTP/SSH/IRTT native probes · TimescaleDB storage + downsampling tiers · YAML/DB config target-tree with inheritance · the React/canvas smoke-graph frontend · the pattern/matcher alert engine · gRPC+mTLS federation agents. See `07-modernization-blueprint.md` §8.
+gRPC+mTLS federation agents (remote vantage points) · config sourced from a database (today it's YAML files only) · richer notifier integrations beyond log + webhook. The native probes, TimescaleDB storage + hourly downsampling, YAML target-tree with inheritance, the canvas smoke-graph frontend, and the pattern/matcher alert engine listed here previously are now implemented (see "What works today"). See `07-modernization-blueprint.md` §8.
 ```

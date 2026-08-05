@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os/exec"
 	"strconv"
 	"syscall"
@@ -56,7 +57,7 @@ func (p *irttProbe) Schema() map[string]probe.VarSpec {
 }
 
 func (p *irttProbe) Measure(ctx context.Context, t probe.Target, pings int) (probe.Result, error) {
-	addr := t.Host + ":" + t.Param("port", p.port)
+	addr := net.JoinHostPort(t.Host, t.Param("port", p.port))
 	// irtt is duration-based; pick a duration that yields ~pings packets.
 	dur := time.Duration(pings-1)*p.interval + p.interval/2
 	if dur <= 0 {
