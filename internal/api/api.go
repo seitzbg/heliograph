@@ -32,6 +32,11 @@ type Server struct {
 	// reported as healthy — its historical rows remain in the store but are no
 	// longer surfaced in the live views. nil means no filtering (tests/pure API).
 	Active func() map[string]bool
+	// Steps, if set, returns each configured target's polling step. /api/sla uses
+	// it to compute how many rounds a window should have contained (expected), and
+	// thus coverage. A target with no known step reports availability without
+	// coverage. nil means coverage is omitted entirely.
+	Steps func() map[string]time.Duration
 }
 
 func New(s store.Store, webDir string) *Server { return &Server{store: s, webDir: webDir} }
@@ -238,14 +243,16 @@ func (srv *Server) charts(w http.ResponseWriter, r *http.Request) {
 }
 
 type slaEntry struct {
-	Name         string  `json:"name"`
-	Probe        string  `json:"probe"`
-	Rounds       int     `json:"rounds"`       // measured rounds within the window
-	UpRounds     int     `json:"up_rounds"`    // rounds counted as "up"
-	Availability float64 `json:"availability"` // percent: up_rounds / rounds * 100
-	AvgLossPct   float64 `json:"avg_loss_pct"` // mean loss across in-window rounds
-	CoveredFrom  string  `json:"covered_from"` // oldest in-window round actually available
-	Latest       string  `json:"latest"`       // timestamp of the newest in-window round
+	Name         string   `json:"name"`
+	Probe        string   `json:"probe"`
+	Measured     int      `json:"measured"`     // rounds actually measured within the window
+	UpRounds     int      `json:"up_rounds"`    // rounds counted as "up"
+	Availability float64  `json:"availability"` // percent: up_rounds / measured * 100
+	Expected     *int     `json:"expected"`     // rounds the window should have held (window/step); null if step unknown
+	CoveragePct  *float64 `json:"coverage_pct"` // min(100, measured/expected*100); null if step unknown
+	AvgLossPct   float64  `json:"avg_loss_pct"` // mean loss across in-window rounds
+	CoveredFrom  string   `json:"covered_from"` // oldest in-window round actually available
+	Latest       string   `json:"latest"`       // timestamp of the newest in-window round
 }
 
 // slaOf reduces one target's history to an availability summary over the rounds
@@ -289,6 +296,9 @@ func (srv *Server) sla(w http.ResponseWriter, r *http.Request) {
 		}
 		window = d
 	}
+	// maxLossPct tightens "up" from "at least one reply" to a loss ceiling. It's
+	// passed to the store aggregate; isUp mirrors it for the History fallback.
+	var maxLossPct *float64
 	isUp := func(lossPct float64) bool { return lossPct < 100 }
 	if v := r.URL.Query().Get("maxloss"); v != "" {
 		max, err := strconv.ParseFloat(v, 64)
@@ -296,27 +306,62 @@ func (srv *Server) sla(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, `{"error":"maxloss must be a non-negative percent"}`, http.StatusBadRequest)
 			return
 		}
+		maxLossPct = &max
 		isUp = func(lossPct float64) bool { return lossPct <= max }
 	}
 
 	cutoff := time.Now().Add(-window)
+	av, _ := srv.store.(store.Availabler)
+	var steps map[string]time.Duration
+	if srv.Steps != nil {
+		steps = srv.Steps()
+	}
+
 	out := make([]slaEntry, 0)
 	for _, k := range srv.liveKeys() {
-		rounds, up, sumLoss, oldest, latest := slaOf(srv.store.History(k), cutoff, isUp)
-		if rounds == 0 {
+		var (
+			measured, up   int
+			sumLoss        float64
+			oldest, latest time.Time
+		)
+		if av != nil {
+			// Accurate over the full window, unbounded by the History cap.
+			st, err := av.Availability(r.Context(), k, cutoff, maxLossPct)
+			if err != nil {
+				slog.Warn("sla: availability query failed", "target", k, "err", err)
+				continue
+			}
+			measured, up, sumLoss, oldest, latest = st.Measured, st.Up, st.SumLossPct, st.Oldest, st.Latest
+		} else {
+			measured, up, sumLoss, oldest, latest = slaOf(srv.store.History(k), cutoff, isUp)
+		}
+		if measured == 0 {
 			continue
 		}
 		o, _ := srv.store.Latest(k)
-		out = append(out, slaEntry{
+		e := slaEntry{
 			Name:         k,
 			Probe:        o.ProbeName,
-			Rounds:       rounds,
+			Measured:     measured,
 			UpRounds:     up,
-			Availability: float64(up) / float64(rounds) * 100,
-			AvgLossPct:   sumLoss / float64(rounds),
+			Availability: float64(up) / float64(measured) * 100,
+			AvgLossPct:   sumLoss / float64(measured),
 			CoveredFrom:  oldest.UTC().Format("2006-01-02T15:04:05Z"),
 			Latest:       latest.UTC().Format("2006-01-02T15:04:05Z"),
-		})
+		}
+		// Coverage: how much of the requested window we actually measured, derived
+		// from the target's step. Unknown step -> availability shown without coverage.
+		if step, ok := steps[k]; ok && step > 0 {
+			if expected := int(window / step); expected > 0 {
+				cov := float64(measured) / float64(expected) * 100
+				if cov > 100 {
+					cov = 100
+				}
+				e.Expected = &expected
+				e.CoveragePct = &cov
+			}
+		}
+		out = append(out, e)
 	}
 	sort.SliceStable(out, func(i, j int) bool {
 		if out[i].Availability != out[j].Availability {

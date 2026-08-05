@@ -77,6 +77,21 @@
   .rank .val { color: var(--ink-soft); font-variant-numeric: tabular-nums; }
   .rank .val.bad { color: #d64545; } .rank .val.warn { color: #d9822b; }
   .rank .empty-row { color: var(--ink-faint); grid-template-columns: 1fr; }
+  /* availability panel: availability (health) + coverage (data quality) */
+  .rank.sla li { grid-template-columns: 20px minmax(0,1fr) 116px 150px; align-items: center; }
+  .rank.sla li.head { font-size: 10px; letter-spacing: .09em; text-transform: uppercase; color: var(--ink-faint); background: none; }
+  .avail { text-align: right; font-variant-numeric: tabular-nums; }
+  .avail .pct { font-size: 13px; }
+  .avail .frac { color: var(--ink-faint); font-size: 10px; display: block; margin-top: 1px; }
+  .avail.ok .pct { color: var(--ok); } .avail.warn .pct { color: #d9822b; } .avail.bad .pct { color: #d64545; }
+  .avail.provisional .pct { color: var(--ink-soft); } .avail.provisional .pct::after { content: " ~"; color: var(--ink-faint); }
+  .cov { display: flex; flex-direction: column; gap: 3px; }
+  .cov .lbl { font-size: 10px; color: var(--ink-faint); display: flex; justify-content: space-between; gap: 6px; white-space: nowrap; }
+  .cov .lbl b { color: var(--ink-soft); font-weight: 600; }
+  .cov .track { height: 6px; border-radius: 4px; background: color-mix(in srgb, var(--ink) 10%, transparent); overflow: hidden; }
+  .cov .fill { height: 100%; border-radius: 4px; background: var(--accent); }
+  .cov.thin .fill { background: repeating-linear-gradient(45deg, var(--ink-faint), var(--ink-faint) 3px, transparent 3px, transparent 6px); }
+  .chip { display: inline-block; font-size: 9.5px; letter-spacing: .04em; text-transform: uppercase; color: var(--ink-faint); border: 1px solid var(--border); border-radius: 5px; padding: 0 5px; margin-left: 7px; vertical-align: 1px; }
   .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); gap: 18px; margin-top: 18px; }
   .panel { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 14px 16px 10px; box-shadow: var(--shadow); }
   .panel h2 { font-size: 14.5px; margin: 0; display: flex; align-items: baseline; gap: 9px; flex-wrap: wrap; }
@@ -269,24 +284,31 @@ async function refreshSLA() {
     rows = (await r.json()).targets || [];
   } catch (e) { return; }
   const sub = document.getElementById('slaWindow');
-  if (!rows.length) { list.innerHTML = '<li class="empty-row">no data yet</li>'; if (sub) sub.textContent = 'last ' + SLA_WINDOW; return; }
-  // Show the coverage common to ALL listed targets (the shortest span = the most
-  // recent covered_from), not the longest any single target happens to have.
-  // Using the oldest would make one target with a full day of history imply "24h"
-  // while others hold only minutes.
-  let commonStart = -Infinity;
-  for (const s of rows) { const t = Date.parse(s.covered_from); if (!isNaN(t)) commonStart = Math.max(commonStart, t); }
-  if (sub && isFinite(commonStart)) {
-    const span = humanSpan((Date.now() - commonStart) / 1000);
-    sub.textContent = span === SLA_WINDOW ? 'last ' + SLA_WINDOW : 'last ' + span + ' (all targets)';
-    sub.title = 'requested ' + SLA_WINDOW + '; shown is the span every listed target covers, bounded by store retention';
-  }
-  list.innerHTML = rows.slice(0, 8).map((s, i) => {
-    const cls = s.availability >= 99.5 ? 'ok' : s.availability >= 95 ? 'warn' : 'bad';
-    return '<li><span class="n">' + (i + 1) + '</span>' +
-      '<span class="who">' + escapeHtml(s.name) + '<span class="pk">' + escapeHtml(s.probe) + '</span></span>' +
-      '<span class="val ' + cls + '">' + fmt(s.availability, 2) + ' % · ' + s.up_rounds + '/' + s.rounds + '</span></li>';
-  }).join('');
+  if (sub) { sub.textContent = 'last ' + SLA_WINDOW; sub.title = 'availability = up / measured; coverage = measured / expected over the window'; }
+  if (!rows.length) { list.innerHTML = '<li class="empty-row">no data yet</li>'; return; }
+  // Two independent facts per target: availability (health) and coverage (how much
+  // of the window we actually measured). Thin coverage holds the health colour back
+  // to a provisional grey so partial data never reads as a clean bill of health.
+  list.innerHTML =
+    '<li class="head"><span class="n">#</span><span class="who">target</span><span class="avail">availability</span><span>coverage</span></li>' +
+    rows.slice(0, 8).map((s, i) => {
+      const cov = s.coverage_pct;
+      const thin = cov != null && cov < 50;
+      const acls = thin ? 'provisional' : s.availability >= 99.5 ? 'ok' : s.availability >= 95 ? 'warn' : 'bad';
+      let covCell;
+      if (cov == null) {
+        covCell = '<span class="cov"><span class="lbl"><span>coverage</span><b>—</b></span></span>';
+      } else {
+        let left = 'covered';
+        if (thin) { const t = Date.parse(s.covered_from); if (!isNaN(t)) left = 'watched ' + humanSpan((Date.now() - t) / 1000); }
+        covCell = '<span class="cov' + (thin ? ' thin' : '') + '"><span class="lbl"><span>' + left + '</span><b>' + Math.round(cov) + '%</b></span>' +
+          '<span class="track"><span class="fill" style="width:' + Math.min(100, cov) + '%"></span></span></span>';
+      }
+      return '<li><span class="n">' + (i + 1) + '</span>' +
+        '<span class="who">' + escapeHtml(s.name) + '<span class="pk">' + escapeHtml(s.probe) + '</span>' + (thin ? '<span class="chip">thin data</span>' : '') + '</span>' +
+        '<span class="avail ' + acls + '"><span class="pct">' + fmt(s.availability, 2) + ' %</span><span class="frac">' + s.up_rounds + ' / ' + s.measured + ' up</span></span>' +
+        covCell + '</li>';
+    }).join('');
 }
 
 // ---- Worst-targets ("charts") panel ----

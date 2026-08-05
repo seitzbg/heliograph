@@ -45,6 +45,28 @@ type Rollupper interface {
 	Rollup(ctx context.Context, target string) ([]RollupPoint, error)
 }
 
+// AvailabilityStat is the aggregate a store computes over a time window: how many
+// rounds were measured (in the window), how many were "up", the summed loss
+// percent (for an average), and the oldest/newest round actually seen. The API
+// derives availability = Up/Measured, and coverage = Measured against the rounds
+// it expected over the window from the target's step.
+type AvailabilityStat struct {
+	Measured   int
+	Up         int
+	SumLossPct float64
+	Oldest     time.Time
+	Latest     time.Time
+}
+
+// Availabler is implemented by stores that can aggregate availability over an
+// arbitrary window — crucially, unbounded by the History cap, so a 24h SLA is
+// computed over the whole 24h rather than the last N stored rounds. maxLossPct nil
+// means "up" is at least one reply (loss < pings); non-nil means up is loss
+// percent <= *maxLossPct. The API prefers this over the History-based fallback.
+type Availabler interface {
+	Availability(ctx context.Context, target string, cutoff time.Time, maxLossPct *float64) (AvailabilityStat, error)
+}
+
 // MemStore is the in-memory implementation: latest + bounded history per target.
 // Used by default and in tests; not durable.
 type MemStore struct {
@@ -107,5 +129,40 @@ func (s *MemStore) History(key string) []scheduler.Outcome {
 	return out
 }
 
-// compile-time check
-var _ Store = (*MemStore)(nil)
+// Availability scans the in-memory history for target and aggregates the rounds at
+// or after cutoff. Unlike a database store it can only see what it currently holds
+// (bounded by the history cap) — best-effort, honest coverage; production uses the
+// pgstore implementation, which is unbounded.
+func (s *MemStore) Availability(_ context.Context, target string, cutoff time.Time, maxLossPct *float64) (AvailabilityStat, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var st AvailabilityStat
+	for _, o := range s.history[target] {
+		if o.When.Before(cutoff) {
+			continue
+		}
+		lossPct := o.Computed.LossFraction() * 100
+		st.Measured++
+		st.SumLossPct += lossPct
+		up := lossPct < 100 // default: at least one reply
+		if maxLossPct != nil {
+			up = lossPct <= *maxLossPct
+		}
+		if up {
+			st.Up++
+		}
+		if st.Oldest.IsZero() || o.When.Before(st.Oldest) {
+			st.Oldest = o.When
+		}
+		if o.When.After(st.Latest) {
+			st.Latest = o.When
+		}
+	}
+	return st, nil
+}
+
+// compile-time checks
+var (
+	_ Store      = (*MemStore)(nil)
+	_ Availabler = (*MemStore)(nil)
+)

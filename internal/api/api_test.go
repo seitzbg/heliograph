@@ -290,8 +290,8 @@ func TestSLAEndpoint(t *testing.T) {
 		byName[r["name"].(string)] = r
 	}
 	// "a": 3 in-window rounds, 2 up -> 66.7%; old round excluded.
-	if a := byName["a"]; a["rounds"].(float64) != 3 || a["availability"].(float64) < 66 || a["availability"].(float64) > 67 {
-		t.Errorf("a: rounds=%v avail=%v, want 3 rounds ~66.7%%", a["rounds"], a["availability"])
+	if a := byName["a"]; a["measured"].(float64) != 3 || a["availability"].(float64) < 66 || a["availability"].(float64) > 67 {
+		t.Errorf("a: measured=%v avail=%v, want 3 measured ~66.7%%", a["measured"], a["availability"])
 	}
 	// "b": fully down -> 0% availability, and sorted first (worst).
 	if rows[0]["name"] != "b" || rows[0]["availability"].(float64) != 0 {
@@ -310,6 +310,75 @@ func TestSLAEndpoint(t *testing.T) {
 	srv.Routes().ServeHTTP(rec, httptest.NewRequest("GET", "/api/sla?window=zzz", nil))
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("window=zzz: status %d, want 400", rec.Code)
+	}
+}
+
+// /api/sla reports coverage: measured rounds vs the rounds expected over the
+// window from each target's step. Availability stays up/measured (gaps = unknown).
+func TestSLACoverage(t *testing.T) {
+	st := store.NewMem(100)
+	now := time.Now()
+	add := func(name string, off time.Duration, rtts []float64) {
+		st.Add([]scheduler.Outcome{{Target: probe.Target{Name: name, Host: "h"}, ProbeName: "FPing",
+			When: now.Add(off), Computed: sample.Compute(4, rtts)}})
+	}
+	// "a": step 1h, window 24h -> expected 24. 6 measured rounds, 1 fully down.
+	for i := 1; i <= 5; i++ {
+		add("a", -time.Duration(i)*time.Minute, []float64{.01, .01, .01, .01})
+	}
+	add("a", -6*time.Minute, nil) // down
+	// "b": has data but no known step -> coverage omitted.
+	add("b", -1*time.Minute, []float64{.01, .01, .01, .01})
+
+	srv := New(st, "")
+	srv.Steps = func() map[string]time.Duration { return map[string]time.Duration{"a": time.Hour} }
+
+	rec := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(rec, httptest.NewRequest("GET", "/api/sla?window=24h", nil))
+	if rec.Code != 200 {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	var m struct {
+		Targets []struct {
+			Name         string   `json:"name"`
+			Measured     int      `json:"measured"`
+			UpRounds     int      `json:"up_rounds"`
+			Availability float64  `json:"availability"`
+			Expected     *int     `json:"expected"`
+			CoveragePct  *float64 `json:"coverage_pct"`
+		} `json:"targets"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &m); err != nil {
+		t.Fatalf("json: %v", err)
+	}
+	byName := map[string]struct {
+		Name         string   `json:"name"`
+		Measured     int      `json:"measured"`
+		UpRounds     int      `json:"up_rounds"`
+		Availability float64  `json:"availability"`
+		Expected     *int     `json:"expected"`
+		CoveragePct  *float64 `json:"coverage_pct"`
+	}{}
+	for _, e := range m.Targets {
+		byName[e.Name] = e
+	}
+
+	a := byName["a"]
+	if a.Measured != 6 {
+		t.Errorf("a.measured = %d, want 6", a.Measured)
+	}
+	if a.Expected == nil || *a.Expected != 24 { // 24h / 1h
+		t.Errorf("a.expected = %v, want 24", a.Expected)
+	}
+	if a.CoveragePct == nil || *a.CoveragePct < 24.9 || *a.CoveragePct > 25.1 { // 6/24
+		t.Errorf("a.coverage_pct = %v, want ~25", a.CoveragePct)
+	}
+	if a.Availability < 83.2 || a.Availability > 83.4 { // 5/6
+		t.Errorf("a.availability = %v, want ~83.33", a.Availability)
+	}
+	// "b" has no known step -> no coverage.
+	if b := byName["b"]; b.Expected != nil || b.CoveragePct != nil {
+		t.Errorf("b coverage should be omitted, got expected=%v coverage=%v", b.Expected, b.CoveragePct)
 	}
 }
 
