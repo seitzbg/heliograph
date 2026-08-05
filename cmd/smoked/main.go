@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"sort"
@@ -79,6 +80,11 @@ func main() {
 
 	notifiers := map[string]alert.Notifier{"log": alert.LogNotifier{W: os.Stdout}}
 	if *webhook != "" {
+		// Validate the URL up front so a typo is a clear startup error, not a stream
+		// of per-event delivery failures at runtime.
+		if u, err := url.Parse(*webhook); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			fatal("invalid -webhook URL", fmt.Errorf("must be an absolute http(s) URL, got %q", *webhook))
+		}
 		notifiers["webhook"] = alert.WebhookNotifier{URL: *webhook}
 	}
 
@@ -313,7 +319,15 @@ func (rt *runtime) eval(out []scheduler.Outcome) {
 // buildRuntime loads targets (from YAML config, or the demo set) and builds the
 // probe jobs and alert engine. A probe whose binary/deps are unavailable is
 // skipped with a warning, not fatal.
-func buildRuntime(configPath string, demoPings int, demoStep, timeout time.Duration, notifiers map[string]alert.Notifier) (*runtime, error) {
+func buildRuntime(configPath string, demoPings int, demoStep, timeout time.Duration, notifiers map[string]alert.Notifier) (rt *runtime, err error) {
+	// Final safeguard for the SIGHUP reload path: a panic while building the runtime
+	// (e.g. a config edge case the validator misses) must not take the collector
+	// down — the reload goroutine turns this error into "keep the running config".
+	defer func() {
+		if r := recover(); r != nil {
+			rt, err = nil, fmt.Errorf("build runtime panicked: %v", r)
+		}
+	}()
 	var monitors []model.Monitor
 	var probeCfgs map[string]map[string]string
 	var alertDefs map[string]*alert.Alert

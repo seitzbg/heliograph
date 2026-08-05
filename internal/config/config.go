@@ -6,7 +6,10 @@
 package config
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"slices"
 	"sort"
@@ -117,10 +120,14 @@ func Load(path string) (*Config, error) {
 	return c, nil
 }
 
-// Parse parses YAML bytes into a Config and applies defaults.
+// Parse parses YAML bytes into a Config and applies defaults. Parsing is strict:
+// an unknown field (a typo like `porbe:` or `databse:`) is a hard error rather
+// than a silently ignored setting.
 func Parse(b []byte) (*Config, error) {
 	var c Config
-	if err := yaml.Unmarshal(b, &c); err != nil {
+	dec := yaml.NewDecoder(bytes.NewReader(b))
+	dec.KnownFields(true)
+	if err := dec.Decode(&c); err != nil && !errors.Is(err, io.EOF) {
 		return nil, err
 	}
 	if c.Database.Pings == 0 {
@@ -178,14 +185,43 @@ func (c *Config) Monitors() ([]model.Monitor, error) {
 	var out []model.Monitor
 	var problems []string
 
+	// Validate probe-level config blocks (probes.<Kind>) against each probe's
+	// schema, mirroring the additionalProperties:false published for probe_config.
+	// A registered kind that can't be constructed here (e.g. missing binary) is
+	// skipped, like target validation, since its schema is unavailable.
+	for _, kind := range sortedProbeKinds(c.Probes) {
+		if !slices.Contains(probe.Registered(), kind) {
+			problems = append(problems, fmt.Sprintf("probes.%s: unknown probe kind", kind))
+			continue
+		}
+		schema, err := getSchema(kind)
+		if err != nil {
+			continue
+		}
+		for _, name := range sortedStrKeys(c.Probes[kind]) {
+			if _, ok := schema[name]; !ok {
+				problems = append(problems, fmt.Sprintf("probes.%s: unknown param %q", kind, name))
+			}
+		}
+	}
+
 	var walk func(path string, n *Node, inh inherited)
 	walk = func(path string, n *Node, inh inherited) {
+		// A YAML entry with no value (`empty:`) decodes to a nil *Node. Report it as
+		// a config problem instead of dereferencing it and panicking (which, in the
+		// reload goroutine, would take the whole collector down).
+		if n == nil {
+			problems = append(problems, fmt.Sprintf("%s: empty node — give it a host and/or children, or remove it", path))
+			return
+		}
+		// An explicit empty list ([]) clears an inherited value; an absent field
+		// (nil slice) keeps inheriting. len()>0 would conflate the two.
 		alerts := inh.alerts
-		if len(n.Alerts) > 0 {
+		if n.Alerts != nil {
 			alerts = n.Alerts
 		}
 		alertee := inh.alertee
-		if len(n.Alertee) > 0 {
+		if n.Alertee != nil {
 			alertee = n.Alertee
 		}
 		eff := inherited{
@@ -261,6 +297,18 @@ func validate(path string, m model.Monitor, getSchema func(string) (map[string]p
 			}
 		}
 	}
+	// Enforce the published schema's additionalProperties:false and scope on target
+	// params: an unknown name is a typo; a probe-scoped var set per target would be
+	// silently ignored at runtime. Both should be loud config errors.
+	for name := range m.Params {
+		spec, ok := schema[name]
+		if !ok {
+			return fmt.Errorf("%s (%s): unknown target param %q", path, m.ProbeKind, name)
+		}
+		if spec.Scope != probe.TargetVar {
+			return fmt.Errorf("%s (%s): param %q is probe-level (set it under probes.%s), not per target", path, m.ProbeKind, name, m.ProbeKind)
+		}
+	}
 	return nil
 }
 
@@ -283,6 +331,22 @@ func firstNonZeroDur(a, b time.Duration) time.Duration {
 	return b
 }
 func sortedKeys(m map[string]*Node) []string {
+	ks := make([]string, 0, len(m))
+	for k := range m {
+		ks = append(ks, k)
+	}
+	sort.Strings(ks)
+	return ks
+}
+func sortedProbeKinds(m map[string]map[string]string) []string {
+	ks := make([]string, 0, len(m))
+	for k := range m {
+		ks = append(ks, k)
+	}
+	sort.Strings(ks)
+	return ks
+}
+func sortedStrKeys(m map[string]string) []string {
 	ks := make([]string, 0, len(m))
 	for k := range m {
 		ks = append(ks, k)
