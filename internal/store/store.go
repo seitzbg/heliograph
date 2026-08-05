@@ -6,11 +6,18 @@ package store
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 
 	"smokeping-modern/internal/scheduler"
 )
+
+// ErrRollupUnavailable is returned by a Rollupper whose downsampled aggregate has
+// not been created (e.g. a PostgreSQL store started without -downsample, so the
+// samples_hourly view is missing). The API turns it into a 501 so the UI disables
+// hourly mode, rather than a 503 that looks like a transient failure.
+var ErrRollupUnavailable = errors.New("store: rollup aggregate not available")
 
 // Store is the sink the collector writes each round's outcomes to, and the API
 // reads series back from.

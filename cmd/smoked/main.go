@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"sort"
@@ -79,6 +80,11 @@ func main() {
 
 	notifiers := map[string]alert.Notifier{"log": alert.LogNotifier{W: os.Stdout}}
 	if *webhook != "" {
+		// Validate the URL up front so a typo is a clear startup error, not a stream
+		// of per-event delivery failures at runtime.
+		if u, err := url.Parse(*webhook); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			fatal("invalid -webhook URL", fmt.Errorf("must be an absolute http(s) URL, got %q", *webhook))
+		}
 		notifiers["webhook"] = alert.WebhookNotifier{URL: *webhook}
 	}
 
@@ -181,7 +187,28 @@ func main() {
 	if *serve && ctx.Err() == nil {
 		srv := api.New(st, *webdir)
 		srv.Rounds = roundStats
-		httpSrv := &http.Server{Addr: *addr, Handler: srv.Routes()}
+		// Live views report only currently-configured targets, so a target removed or
+		// renamed on a SIGHUP reload stops showing as healthy (its history stays in
+		// the store but ages out via retention / the bounded cap).
+		srv.Active = func() map[string]bool {
+			jobs := current.Load().jobs
+			m := make(map[string]bool, len(jobs))
+			for _, j := range jobs {
+				m[j.Target.Name] = true
+			}
+			return m
+		}
+		// Defensive timeouts so a slow or idle client can't tie up a connection
+		// indefinitely (the read endpoints are expensive). WriteTimeout is generous
+		// because an aggregate scan over many targets can take a little while.
+		httpSrv := &http.Server{
+			Addr:              *addr,
+			Handler:           srv.Routes(),
+			ReadHeaderTimeout: 5 * time.Second,
+			ReadTimeout:       10 * time.Second,
+			WriteTimeout:      30 * time.Second,
+			IdleTimeout:       120 * time.Second,
+		}
 		fmt.Printf("\nserving web UI + JSON API on %s  (/, /api/targets, /api/series?target=NAME, /api/probes, /metrics)\n", *addr)
 		slog.Info("serving", "addr", *addr)
 		// Keep polling in the background while serving. Each target fires on its own
@@ -192,8 +219,7 @@ func main() {
 			planner := scheduler.NewPlanner()
 			const maxSleep = time.Second
 			for {
-				now := time.Now()
-				due, sleep := planner.Tick(current.Load().jobs, now, maxSleep)
+				due, _ := planner.Tick(current.Load().jobs, time.Now(), maxSleep)
 				if len(due) > 0 {
 					start := time.Now()
 					out := scheduler.RunRound(ctx, due, *workers)
@@ -205,6 +231,10 @@ func main() {
 					roundStats.Observe(dur, len(out), countErrs(out), start)
 					logRound(0, dur, out)
 				}
+				// Recompute the sleep from the current time — after the probes ran — so a
+				// slow round doesn't shift the phase-aligned grid, and an overrun target
+				// fires immediately on the next tick instead of a step later.
+				sleep := planner.SleepToNext(time.Now(), maxSleep)
 				select {
 				case <-ctx.Done():
 					return
@@ -313,7 +343,15 @@ func (rt *runtime) eval(out []scheduler.Outcome) {
 // buildRuntime loads targets (from YAML config, or the demo set) and builds the
 // probe jobs and alert engine. A probe whose binary/deps are unavailable is
 // skipped with a warning, not fatal.
-func buildRuntime(configPath string, demoPings int, demoStep, timeout time.Duration, notifiers map[string]alert.Notifier) (*runtime, error) {
+func buildRuntime(configPath string, demoPings int, demoStep, timeout time.Duration, notifiers map[string]alert.Notifier) (rt *runtime, err error) {
+	// Final safeguard for the SIGHUP reload path: a panic while building the runtime
+	// (e.g. a config edge case the validator misses) must not take the collector
+	// down — the reload goroutine turns this error into "keep the running config".
+	defer func() {
+		if r := recover(); r != nil {
+			rt, err = nil, fmt.Errorf("build runtime panicked: %v", r)
+		}
+	}()
 	var monitors []model.Monitor
 	var probeCfgs map[string]map[string]string
 	var alertDefs map[string]*alert.Alert

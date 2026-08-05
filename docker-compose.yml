@@ -29,6 +29,7 @@ services:
       - "/etc/smokeping/config.yaml"
       - "-dsn"
       - "postgres://smoke:smoke@timescaledb:5432/smoke?sslmode=disable"
+      - "-downsample"     # create the hourly continuous aggregate so the UI's Hourly mode works
     ports:
       - "8087:8087"
     depends_on:

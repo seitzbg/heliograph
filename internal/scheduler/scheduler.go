@@ -79,10 +79,13 @@ func RunRound(ctx context.Context, jobs []Job, workers int) []Outcome {
 // how long to sleep before the next one is. Times are passed in, so it is pure
 // and deterministic to test. Not safe for concurrent use (one driver goroutine).
 type Planner struct {
-	next map[string]time.Time // target name -> next scheduled fire (phase-aligned)
+	next map[string]time.Time     // target name -> next scheduled fire (phase-aligned)
+	step map[string]time.Duration // last-seen Step; a change re-arms the target
 }
 
-func NewPlanner() *Planner { return &Planner{next: map[string]time.Time{}} }
+func NewPlanner() *Planner {
+	return &Planner{next: map[string]time.Time{}, step: map[string]time.Duration{}}
+}
 
 // Tick reconciles the planner against the current job set and returns the jobs
 // due at `now` (advancing each to its next phase-aligned grid point) plus how
@@ -90,11 +93,19 @@ func NewPlanner() *Planner { return &Planner{next: map[string]time.Time{}} }
 // wakes often enough to notice a config reload. A target new to the planner
 // fires immediately; a target no longer present is forgotten. A job with a
 // non-positive Step is treated as due every tick (defensive; config rejects it).
+//
+// When a target's Step changes (a SIGHUP reload retuned its cadence) its old
+// deadline is discarded so the new cadence takes effect immediately, rather than
+// leaving it deferred until the deadline computed under the previous step.
 func (p *Planner) Tick(jobs []Job, now time.Time, maxSleep time.Duration) (due []Job, sleep time.Duration) {
 	seen := make(map[string]bool, len(jobs))
 	for _, j := range jobs {
 		name := j.Target.Name
 		seen[name] = true
+		if s, known := p.step[name]; known && s != j.Step {
+			delete(p.next, name) // re-arm on a changed cadence
+		}
+		p.step[name] = j.Step
 		nt, known := p.next[name]
 		if !known || !nt.After(now) {
 			due = append(due, j)
@@ -106,16 +117,31 @@ func (p *Planner) Tick(jobs []Job, now time.Time, maxSleep time.Duration) (due [
 			delete(p.next, name)
 		}
 	}
-	sleep = maxSleep
-	for _, j := range jobs {
-		if d := p.next[j.Target.Name].Sub(now); d < sleep {
+	for name := range p.step {
+		if !seen[name] {
+			delete(p.step, name)
+		}
+	}
+	sleep = p.SleepToNext(now, maxSleep)
+	return due, sleep
+}
+
+// SleepToNext returns how long until the earliest scheduled fire, capped at
+// maxSleep. It does not mutate the planner, so the serving loop can call it after
+// a round's probes complete: the sleep then reflects the real current time and
+// keeps samples on their phase-aligned grid, instead of double-counting the probe
+// duration by using a value computed before the round ran.
+func (p *Planner) SleepToNext(now time.Time, maxSleep time.Duration) time.Duration {
+	sleep := maxSleep
+	for _, nt := range p.next {
+		if d := nt.Sub(now); d < sleep {
 			sleep = d
 		}
 	}
 	if sleep < 0 {
 		sleep = 0
 	}
-	return due, sleep
+	return sleep
 }
 
 // NextDelay returns how long to sleep so the next round lands on a fixed

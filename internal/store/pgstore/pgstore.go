@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"smokeping-modern/internal/scheduler"
@@ -286,6 +287,12 @@ func (s *PGStore) Rollup(ctx context.Context, target string) ([]store.RollupPoin
 		`SELECT bucket, median_avg, median_min, median_max, loss_frac, rounds
 		   FROM samples_hourly WHERE target=$1 ORDER BY bucket`, target)
 	if err != nil {
+		// The continuous aggregate was never created (started without -downsample):
+		// report it as "not available" so the API answers 501, not a generic 503.
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "42P01" { // undefined_table
+			return nil, store.ErrRollupUnavailable
+		}
 		return nil, err
 	}
 	defer rows.Close()
