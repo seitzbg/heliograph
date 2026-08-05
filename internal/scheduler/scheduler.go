@@ -22,6 +22,7 @@ type Job struct {
 	Target  probe.Target
 	Pings   int
 	Timeout time.Duration
+	Step    time.Duration // per-target polling interval (drives the Planner)
 }
 
 // Outcome is the derived result of a Job.
@@ -70,6 +71,51 @@ func RunRound(ctx context.Context, jobs []Job, workers int) []Outcome {
 	}
 	wg.Wait()
 	return out
+}
+
+// Planner tracks each target's next-fire time so targets can poll on their own
+// per-target `Step` cadence rather than one global interval. A single caller
+// drives it: on each wake it calls Tick to learn which targets are due now and
+// how long to sleep before the next one is. Times are passed in, so it is pure
+// and deterministic to test. Not safe for concurrent use (one driver goroutine).
+type Planner struct {
+	next map[string]time.Time // target name -> next scheduled fire (phase-aligned)
+}
+
+func NewPlanner() *Planner { return &Planner{next: map[string]time.Time{}} }
+
+// Tick reconciles the planner against the current job set and returns the jobs
+// due at `now` (advancing each to its next phase-aligned grid point) plus how
+// long to sleep before the next job is due, capped at maxSleep so the caller
+// wakes often enough to notice a config reload. A target new to the planner
+// fires immediately; a target no longer present is forgotten. A job with a
+// non-positive Step is treated as due every tick (defensive; config rejects it).
+func (p *Planner) Tick(jobs []Job, now time.Time, maxSleep time.Duration) (due []Job, sleep time.Duration) {
+	seen := make(map[string]bool, len(jobs))
+	for _, j := range jobs {
+		name := j.Target.Name
+		seen[name] = true
+		nt, known := p.next[name]
+		if !known || !nt.After(now) {
+			due = append(due, j)
+			p.next[name] = now.Add(NextDelay(now, j.Step, 0))
+		}
+	}
+	for name := range p.next {
+		if !seen[name] {
+			delete(p.next, name)
+		}
+	}
+	sleep = maxSleep
+	for _, j := range jobs {
+		if d := p.next[j.Target.Name].Sub(now); d < sleep {
+			sleep = d
+		}
+	}
+	if sleep < 0 {
+		sleep = 0
+	}
+	return due, sleep
 }
 
 // NextDelay returns how long to sleep so the next round lands on a fixed

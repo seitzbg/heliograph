@@ -14,6 +14,10 @@ breaking changes.
   than every 3s — cutting their per-target store scans ~5×.
 
 ### Fixed
+- Per-target polling intervals are honored while serving: each target now fires on its own
+  `step` via a scheduler Planner, instead of every target polling at the single global
+  `-step`. A config's `step: 60s` (or a per-branch override) is no longer silently ignored.
+  (The `-rounds` foreground demo still runs synchronized rounds at `-step`.)
 - Alert priority inhibition no longer emits an orphan RESOLVED: an alert whose FIRING was
   suppressed by a higher-priority one never sends a lone RESOLVED, while an alert that was
   delivered before being inhibited still gets its close-out (tracked via a delivered-view
