@@ -15,6 +15,7 @@ import (
 	"os/signal"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -67,6 +68,13 @@ func main() {
 
 	setupLogger(*logFormat, *logLevel)
 
+	if *pings < 1 || *pings > config.MaxPings {
+		fatal("invalid -pings", fmt.Errorf("must be between 1 and %d, got %d", config.MaxPings, *pings))
+	}
+	if *step <= 0 {
+		fatal("invalid -step", fmt.Errorf("must be positive, got %s", *step))
+	}
+
 	fmt.Printf("smoked %s — registered probe plugins: %s\n\n", version, strings.Join(probe.Registered(), ", "))
 
 	notifiers := map[string]alert.Notifier{"log": alert.LogNotifier{W: os.Stdout}}
@@ -82,6 +90,10 @@ func main() {
 	}
 	var current atomic.Pointer[runtime]
 	current.Store(rt)
+	// evalMu serializes a reload's state-inheritance+swap against a round's alert
+	// evaluation, so a round that finishes measuring across a reload boundary still
+	// updates the live engine (not the abandoned one) — no lost hysteresis state.
+	var evalMu sync.Mutex
 	if *configPath != "" {
 		fmt.Printf("config: %d targets from %s\n", len(rt.jobs), *configPath)
 	}
@@ -99,12 +111,16 @@ func main() {
 		signal.Notify(hup, syscall.SIGHUP)
 		go func() {
 			for range hup {
-				old := current.Load()
 				nrt, err := buildRuntime(*configPath, *pings, *step, *timeout, notifiers)
 				if err != nil {
 					slog.Error("reload failed, keeping running config", "err", err)
 					continue
 				}
+				// Snapshot the running engine and swap under evalMu so a concurrent
+				// round's eval is either fully before (its update is inherited) or
+				// fully after (it lands in the new engine) — never lost in between.
+				evalMu.Lock()
+				old := current.Load()
 				if nrt.engine != nil && old.engine != nil {
 					valid := make(map[string]bool, len(nrt.alertsByTarget))
 					for t := range nrt.alertsByTarget {
@@ -113,6 +129,7 @@ func main() {
 					nrt.engine.InheritStateFrom(old.engine, valid)
 				}
 				current.Store(nrt)
+				evalMu.Unlock()
 				slog.Info("config reloaded", "path", *configPath, "targets", len(nrt.jobs))
 			}
 		}()
@@ -147,7 +164,9 @@ func main() {
 		out := scheduler.RunRound(ctx, rt.jobs, *workers)
 		dur := time.Since(start)
 		st.Add(out)
-		rt.eval(out)
+		evalMu.Lock()
+		current.Load().eval(out) // eval on the live runtime (may differ after a reload)
+		evalMu.Unlock()
 		roundStats.Observe(dur, len(out), countErrs(out), start)
 		logRound(r, dur, out)
 		printRound(r, dur, out)
@@ -178,7 +197,9 @@ func main() {
 				out := scheduler.RunRound(ctx, rt.jobs, *workers)
 				dur := time.Since(start)
 				st.Add(out)
-				rt.eval(out)
+				evalMu.Lock()
+				current.Load().eval(out) // eval on the live runtime (may differ after a reload)
+				evalMu.Unlock()
 				roundStats.Observe(dur, len(out), countErrs(out), start)
 				logRound(0, dur, out)
 			}

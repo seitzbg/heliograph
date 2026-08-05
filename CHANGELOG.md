@@ -7,6 +7,24 @@ breaking changes.
 
 ## [Unreleased]
 
+### Fixed
+- Alert priority inhibition no longer emits an orphan RESOLVED: an alert whose FIRING was
+  suppressed by a higher-priority one never sends a lone RESOLVED, while an alert that was
+  delivered before being inhibited still gets its close-out (tracked via a delivered-view
+  flag, carried across config reload).
+- Reject non-positive/absurd `pings` and `step` at config load and on the CLI (a negative
+  `pings` previously panicked the collector from a scheduler goroutine); `sample.Compute`
+  also clamps defensively.
+- `HTTP.insecure_ssl` and DNS `recordtype` now take effect per target, matching their
+  advertised target scope (they were read only from probe-level config).
+- pgstore reads `duration_ms` back, so `smokeping_probe_duration_seconds` is no longer
+  always zero for TimescaleDB-persisted targets.
+- SIGHUP reload no longer loses a round's alert-state update on the reload boundary: the
+  round's evaluation and the reload's state-inheritance+swap are serialized, and evaluation
+  runs against the live runtime.
+- `/api/sla` reports the actual covered span (`covered_from`); the dashboard shows the real
+  availability window instead of always claiming "last 24h" when history is shorter.
+
 ### Added
 - Dashboard theme choice persists across reloads (localStorage), restored before first
   paint to avoid a flash; with no saved choice the page still follows the OS preference.

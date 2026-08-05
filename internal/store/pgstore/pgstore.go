@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -191,7 +192,7 @@ func (s *PGStore) Keys() []string {
 
 func (s *PGStore) Latest(key string) (scheduler.Outcome, bool) {
 	row := s.pool.QueryRow(s.ctx,
-		`SELECT ts, target, probe, host, pings, loss, median_seconds, rtts_seconds, err
+		`SELECT ts, target, probe, host, pings, loss, median_seconds, rtts_seconds, err, duration_ms
 		   FROM samples WHERE target=$1 ORDER BY ts DESC LIMIT 1`, key)
 	o, err := scanOutcome(row)
 	if err != nil {
@@ -205,7 +206,7 @@ func (s *PGStore) Latest(key string) (scheduler.Outcome, bool) {
 
 func (s *PGStore) History(key string) []scheduler.Outcome {
 	rows, err := s.pool.Query(s.ctx,
-		`SELECT ts, target, probe, host, pings, loss, median_seconds, rtts_seconds, err
+		`SELECT ts, target, probe, host, pings, loss, median_seconds, rtts_seconds, err, duration_ms
 		   FROM samples WHERE target=$1 ORDER BY ts DESC LIMIT $2`, key, s.histCap)
 	if err != nil {
 		s.onErr(err)
@@ -234,16 +235,20 @@ type scannable interface {
 
 func scanOutcome(row scannable) (scheduler.Outcome, error) {
 	var (
-		o        scheduler.Outcome
-		median   *float64
-		centered []*float64
-		errText  *string
+		o          scheduler.Outcome
+		median     *float64
+		centered   []*float64
+		errText    *string
+		durationMs *float64
 	)
 	if err := row.Scan(
 		&o.When, &o.Target.Name, &o.ProbeName, &o.Target.Host,
-		&o.Computed.Pings, &o.Computed.Loss, &median, &centered, &errText,
+		&o.Computed.Pings, &o.Computed.Loss, &median, &centered, &errText, &durationMs,
 	); err != nil {
 		return o, err
+	}
+	if durationMs != nil {
+		o.Duration = msToDuration(*durationMs)
 	}
 	o.Computed.Median = math.NaN()
 	if median != nil {
@@ -255,6 +260,12 @@ func scanOutcome(row scannable) (scheduler.Outcome, error) {
 		o.Err = errors.New(*errText)
 	}
 	return o, nil
+}
+
+// msToDuration converts stored fractional milliseconds back to a Duration. It is
+// the inverse of the insert's float64(Duration.Microseconds())/1000.0.
+func msToDuration(ms float64) time.Duration {
+	return time.Duration(ms * float64(time.Millisecond))
 }
 
 func sortedNonNaN(c []float64) []float64 {

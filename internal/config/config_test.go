@@ -73,6 +73,43 @@ func TestInheritanceFlatten(t *testing.T) {
 	}
 }
 
+func TestInvalidPingsAndStepRejected(t *testing.T) {
+	cases := map[string]string{
+		"negative pings": `
+database: { pings: -1 }
+targets:
+  children:
+    x: { probe: TCPConnect, host: 1.2.3.4 }
+`,
+		"per-node negative pings": `
+targets:
+  children:
+    x: { probe: TCPConnect, host: 1.2.3.4, pings: -5 }
+`,
+		"absurd pings": `
+database: { pings: 100000 }
+targets:
+  children:
+    x: { probe: TCPConnect, host: 1.2.3.4 }
+`,
+		"negative step": `
+database: { pings: 5 }
+targets:
+  children:
+    x: { probe: TCPConnect, host: 1.2.3.4, step: -5s }
+`,
+	}
+	for name, y := range cases {
+		c, err := Parse([]byte(y))
+		if err != nil {
+			t.Fatalf("%s: Parse: %v", name, err)
+		}
+		if _, err := c.Monitors(); err == nil {
+			t.Errorf("%s: expected a validation error, got none", name)
+		}
+	}
+}
+
 func TestUnknownProbeIsReported(t *testing.T) {
 	const bad = `
 targets:

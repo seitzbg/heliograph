@@ -171,12 +171,15 @@ func TestSLAOf(t *testing.T) {
 		mk(3*time.Minute, 0, 4),   // up
 	}
 	up := func(lossPct float64) bool { return lossPct < 100 }
-	rounds, upN, sumLoss, latest := slaOf(hist, t0.Add(1*time.Minute), up)
+	rounds, upN, sumLoss, oldest, latest := slaOf(hist, t0.Add(1*time.Minute), up)
 	if rounds != 3 || upN != 2 {
 		t.Fatalf("rounds=%d up=%d, want 3 and 2", rounds, upN)
 	}
 	if latest != t0.Add(3*time.Minute) {
 		t.Errorf("latest=%v, want t0+3m", latest)
+	}
+	if oldest != t0.Add(1*time.Minute) {
+		t.Errorf("oldest=%v, want t0+1m (earliest in-window round)", oldest)
 	}
 	if avg := sumLoss / float64(rounds); avg < 49 || avg > 51 { // (100+50+0)/3 = 50
 		t.Errorf("avg loss = %g, want ~50", avg)
