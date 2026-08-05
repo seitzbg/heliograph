@@ -276,3 +276,64 @@ func TestEnableDownsampling(t *testing.T) {
 		t.Errorf("aggregate median_avg = %v, want 0.03", medAvg)
 	}
 }
+
+// The 400d drill-down reads a daily tier. EnableDownsampling must also create
+// samples_daily, and Rollup(..., "1d") must return day buckets: rounds per day,
+// and the median avg/min/max consolidated across each day's rounds.
+func TestDailyRollup(t *testing.T) {
+	dsn := os.Getenv("SMOKE_TEST_DSN")
+	if dsn == "" {
+		t.Skip("set SMOKE_TEST_DSN to run the TimescaleDB integration test")
+	}
+	ctx := context.Background()
+	s, err := New(ctx, dsn, 100, func(e error) { t.Errorf("store error: %v", e) })
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer s.Close()
+	for _, q := range []string{
+		"DROP MATERIALIZED VIEW IF EXISTS samples_daily CASCADE",
+		"DROP MATERIALIZED VIEW IF EXISTS samples_hourly CASCADE",
+		"TRUNCATE samples",
+	} {
+		if _, err := s.pool.Exec(ctx, q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+
+	day1 := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	day2 := day1.Add(24 * time.Hour)
+	s.Add([]scheduler.Outcome{
+		{Target: probe.Target{Name: "dr", Host: "h"}, ProbeName: "FPing", When: day1, Computed: sample.Compute(3, []float64{0.01, 0.02, 0.03})},                // median .02
+		{Target: probe.Target{Name: "dr", Host: "h"}, ProbeName: "FPing", When: day1.Add(time.Hour), Computed: sample.Compute(3, []float64{0.03, 0.04, 0.05})}, // median .04
+		{Target: probe.Target{Name: "dr", Host: "h"}, ProbeName: "FPing", When: day2, Computed: sample.Compute(3, []float64{0.09, 0.10, 0.11})},                // median .10
+	})
+
+	if err := s.EnableDownsampling(ctx); err != nil {
+		t.Fatalf("EnableDownsampling: %v", err)
+	}
+	if _, err := s.pool.Exec(ctx, "CALL refresh_continuous_aggregate('samples_daily', NULL, NULL)"); err != nil {
+		t.Fatalf("refresh daily: %v", err)
+	}
+
+	pts, err := s.Rollup(ctx, "dr", "1d")
+	if err != nil {
+		t.Fatalf("Rollup 1d: %v", err)
+	}
+	if len(pts) != 2 {
+		t.Fatalf("daily buckets = %d, want 2", len(pts))
+	}
+	approx := func(got, want float64) bool { return math.Abs(got-want) < 1e-9 }
+	// Day 1: two rounds, medians .02 and .04 -> avg .03, min .02, max .04.
+	d1 := pts[0]
+	if d1.Rounds != 2 {
+		t.Errorf("day1 rounds = %d, want 2", d1.Rounds)
+	}
+	if !approx(d1.MedianAvg, 0.03) || !approx(d1.MedianMin, 0.02) || !approx(d1.MedianMax, 0.04) {
+		t.Errorf("day1 med avg/min/max = %v/%v/%v, want .03/.02/.04", d1.MedianAvg, d1.MedianMin, d1.MedianMax)
+	}
+	// Day 2: one round, median .10.
+	if d2 := pts[1]; d2.Rounds != 1 || !approx(d2.MedianAvg, 0.10) {
+		t.Errorf("day2 rounds/avg = %d/%v, want 1/.10", d2.Rounds, d2.MedianAvg)
+	}
+}

@@ -28,8 +28,8 @@ type Store interface {
 	History(key string) []scheduler.Outcome
 }
 
-// RollupPoint is one downsampled (hourly) bucket for a target. Median values are
-// NaN for buckets that were entirely lost.
+// RollupPoint is one downsampled bucket for a target (hourly or daily). Median
+// values are NaN for buckets that were entirely lost.
 type RollupPoint struct {
 	Bucket    time.Time
 	MedianAvg float64
@@ -40,9 +40,11 @@ type RollupPoint struct {
 }
 
 // Rollupper is implemented by stores that support downsampled reads (the hourly
-// continuous aggregate). The API exposes it at /api/rollup when available.
+// and daily continuous aggregates). resolution selects the tier: "1h" (default)
+// or "1d" — the daily tier feeds the long-range (400d) drill-down, where the
+// hourly tier would be too many buckets. The API exposes it at /api/rollup.
 type Rollupper interface {
-	Rollup(ctx context.Context, target string) ([]RollupPoint, error)
+	Rollup(ctx context.Context, target, resolution string) ([]RollupPoint, error)
 }
 
 // AvailabilityStat is the aggregate a store computes over a time window: how many
