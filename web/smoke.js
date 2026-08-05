@@ -1,6 +1,7 @@
 // Smoke — the canvas renderer for SmokePing-style latency-distribution graphs.
 // Shared by the synthetic POC (smoke-poc.html) and the live dashboard (index.html).
-// A "series" is { buckets: [{ centered:[…ms|NaN], samples:[…ms], lost, median }], N }.
+// A "series" is { buckets: [{ centered:[…ms|NaN], samples:[…ms], lost, median, pings }], N }.
+// Each bucket carries its own `pings` (ping count) so rounds with different N render correctly.
 // Values are in milliseconds. Reproduces codemap §05: nested percentile bands
 // darkening toward the median + an 8-bucket loss-colored median line.
 window.Smoke = (function () {
@@ -15,13 +16,13 @@ window.Smoke = (function () {
     { maxpct: 99.9, color: '#ff0000', label: '<100%' },
     { maxpct: 100, color: '#a00000', label: '100%' },
   ];
-  function lossColor(lost, N) {
-    if (lost <= 0) return LOSS_COLORS[0].color;
-    const pct = (lost / N) * 100;
+  function lossColorPct(pct) {
+    if (pct <= 0) return LOSS_COLORS[0].color;
     if (pct >= 100) return '#a00000';
     for (const b of LOSS_COLORS) if (pct <= b.maxpct) return b.color;
     return '#ff0000';
   }
+  function lossColor(lost, N) { return lossColorPct(N > 0 ? (lost / N) * 100 : 0); }
 
   function readVars() {
     const cs = getComputedStyle(document.documentElement);
@@ -64,13 +65,23 @@ window.Smoke = (function () {
     return s * mag;
   }
 
+  // Per-bucket ping count: rounds can differ in N (a reload retuned pings), so each
+  // bucket's loss fraction and band depth use its own denominator, never one
+  // series-wide N — which would misreport loss and drop bands for shorter rounds.
+  function bucketPings(b) { return b.pings || b.centered.length; }
+
   function seriesStats(s) {
-    let msum = 0, mmax = 0, mn = 0, lsum = 0;
+    let msum = 0, mmax = 0, mn = 0, lsum = 0, lcnt = 0;
     for (const b of s.buckets) {
       if (!isNaN(b.median)) { msum += b.median; mmax = Math.max(mmax, b.median); mn++; }
-      lsum += b.lost;
+      const bn = bucketPings(b);
+      if (bn > 0) { lsum += b.lost / bn; lcnt++; }
     }
-    return { medAvg: mn ? msum / mn : NaN, medMax: mmax, lossAvg: (lsum / (s.buckets.length * s.N)) * 100 };
+    return {
+      medAvg: mn ? msum / mn : NaN,
+      medMax: mn ? mmax : NaN, // NaN (not 0) when every bucket was fully lost
+      lossAvg: lcnt ? (lsum / lcnt) * 100 : 0,
+    };
   }
 
   function render(canvas, s, opts) {
@@ -86,8 +97,12 @@ window.Smoke = (function () {
 
     const mL = 48, mR = 12, mT = 10, mB = 22;
     const pw = cssW - mL - mR, ph = cssH - mT - mB;
-    const n = s.buckets.length, N = s.N, half = Math.floor(N / 2);
+    const n = s.buckets.length;
     if (n < 2) return;
+    // Band depth is per bucket (each round's own ping count); the shared gray ramp
+    // keys off the deepest bucket so a given shade always means the same depth.
+    let maxHalf = 0;
+    for (let i = 0; i < n; i++) maxHalf = Math.max(maxHalf, Math.floor(bucketPings(s.buckets[i]) / 2));
     const yMax = opts.yMax || robustMax(s);
     const X = (i) => mL + pw * (i / (n - 1));
     const Y = (v) => mT + ph * (1 - Math.min(v, yMax) / yMax);
@@ -110,8 +125,8 @@ window.Smoke = (function () {
     ctx.textAlign = 'center'; ctx.fillStyle = V.axis; ctx.fillText('ms', 0, 0); ctx.restore();
 
     // smoke bands, outer(light)->inner(dark), smooth over contiguous runs
-    for (let k = 1; k <= half; k++) {
-      ctx.fillStyle = smokeGray(k, half, V.dark);
+    for (let k = 1; k <= maxHalf; k++) {
+      ctx.fillStyle = smokeGray(k, maxHalf, V.dark);
       let run = [];
       const flush = () => {
         if (run.length >= 2) {
@@ -127,7 +142,9 @@ window.Smoke = (function () {
       };
       for (let i = 0; i < n; i++) {
         const c = s.buckets[i].centered;
-        const lo = c[k - 1], hi = c[N - k];
+        const bn = bucketPings(s.buckets[i]);
+        if (k > Math.floor(bn / 2)) { flush(); continue; } // this bucket has no k-th band
+        const lo = c[k - 1], hi = c[bn - k];
         if (isNaN(lo) || isNaN(hi)) { flush(); continue; }
         run.push({ x: X(i), yLo: Y(lo), yHi: Y(hi) });
       }
@@ -150,13 +167,14 @@ window.Smoke = (function () {
     for (let i = 1; i < n; i++) {
       const a = s.buckets[i - 1], b = s.buckets[i];
       if (isNaN(a.median) || isNaN(b.median)) continue;
-      ctx.strokeStyle = lossColor(Math.max(a.lost, b.lost), N);
+      const pct = Math.max((a.lost / bucketPings(a)) * 100, (b.lost / bucketPings(b)) * 100);
+      ctx.strokeStyle = lossColorPct(pct);
       ctx.beginPath(); ctx.moveTo(X(i - 1), Y(a.median)); ctx.lineTo(X(i), Y(b.median)); ctx.stroke();
     }
 
     // 100%-loss ticks at baseline
     ctx.fillStyle = '#a00000';
-    for (let i = 0; i < n; i++) if (s.buckets[i].lost >= N) ctx.fillRect(Math.round(X(i)) - 1, mT + ph - 3, 2, 3);
+    for (let i = 0; i < n; i++) if (s.buckets[i].lost >= bucketPings(s.buckets[i])) ctx.fillRect(Math.round(X(i)) - 1, mT + ph - 3, 2, 3);
 
     ctx.strokeStyle = V.frame; ctx.lineWidth = 1; ctx.strokeRect(mL + 0.5, mT + 0.5, pw - 1, ph - 1);
 
@@ -173,10 +191,11 @@ window.Smoke = (function () {
     const rounds = resp.rounds || [];
     let N = 0;
     const buckets = rounds.map((r) => {
-      N = Math.max(N, r.pings || 0);
       const centered = (r.rtts_ms || []).map((v) => (v == null ? NaN : v));
       const samples = centered.filter((v) => !isNaN(v));
-      return { centered, samples, lost: r.loss || 0, median: r.median_ms == null ? NaN : r.median_ms };
+      const pings = r.pings || centered.length; // retain each round's own N
+      N = Math.max(N, pings);
+      return { centered, samples, lost: r.loss || 0, median: r.median_ms == null ? NaN : r.median_ms, pings };
     });
     return { buckets, N: N || (buckets[0] ? buckets[0].centered.length : 0) };
   }
@@ -197,6 +216,7 @@ window.Smoke = (function () {
         samples: centered.filter((v) => !isNaN(v)),
         lost: (x.loss_pct || 0) / 50, // 0..100% -> 0..2 lost of N=2
         median: x.median_avg_ms == null ? NaN : x.median_avg_ms,
+        pings: 2, // min→max band; loss expressed as "lost of 2"
       };
     });
     return { buckets, N: 2, resolution: resp.resolution || '1h' };

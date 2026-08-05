@@ -238,8 +238,19 @@ async function refresh() {
 
 // The aggregate panels (worst-targets, availability) each scan every target
 // server-side, so they refresh on a slower cadence than the per-target series —
-// they change slowly and this keeps the store query load down at scale.
-function refreshAggregates() { refreshCharts(); refreshSLA(); }
+// they change slowly and this keeps the store query load down at scale. An
+// in-flight guard skips a tick while the previous aggregate scans are still
+// running, so a slow store can't let successive ticks pile up.
+let refreshingAggregates = false;
+async function refreshAggregates() {
+  if (refreshingAggregates) return;
+  refreshingAggregates = true;
+  try {
+    await Promise.all([refreshCharts(), refreshSLA()]);
+  } finally {
+    refreshingAggregates = false;
+  }
+}
 
 // ---- Availability (SLA) panel ----
 // Humanize a span in seconds so the subtitle reflects the data actually covered
