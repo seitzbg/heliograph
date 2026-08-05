@@ -124,31 +124,52 @@ window.Smoke = (function () {
     ctx.save(); ctx.translate(11, mT + ph / 2); ctx.rotate(-Math.PI / 2);
     ctx.textAlign = 'center'; ctx.fillStyle = V.axis; ctx.fillText('ms', 0, 0); ctx.restore();
 
-    // smoke bands, outer(light)->inner(dark), smooth over contiguous runs
-    for (let k = 1; k <= maxHalf; k++) {
-      ctx.fillStyle = smokeGray(k, maxHalf, V.dark);
+    // smooth-fill a run of {x,yLo,yHi} columns as one polygon (a single column
+    // falls back to a rectangle). Shared by the smoke stack and the band mode.
+    const fillRun = (run) => {
+      if (run.length >= 2) {
+        ctx.beginPath();
+        ctx.moveTo(run[0].x, run[0].yHi);
+        for (let p = 1; p < run.length; p++) ctx.lineTo(run[p].x, run[p].yHi);
+        for (let p = run.length - 1; p >= 0; p--) ctx.lineTo(run[p].x, run[p].yLo);
+        ctx.closePath(); ctx.fill();
+      } else if (run.length === 1) {
+        ctx.fillRect(run[0].x - colW / 2, run[0].yHi, colW, Math.max(1, run[0].yLo - run[0].yHi));
+      }
+    };
+
+    if (opts.band) {
+      // Aggregated tiers (hourly/daily) have no per-round distribution — only a
+      // min/avg/max per bucket. Draw one soft translucent min->max range-area
+      // instead of the nested smoke stack, whose single min->max pair renders as
+      // a muddy near-black blob. The avg still gets the loss-tinted median line.
+      ctx.fillStyle = V.axis;
+      ctx.globalAlpha = V.dark ? 0.34 : 0.22;
       let run = [];
-      const flush = () => {
-        if (run.length >= 2) {
-          ctx.beginPath();
-          ctx.moveTo(run[0].x, run[0].yHi);
-          for (let p = 1; p < run.length; p++) ctx.lineTo(run[p].x, run[p].yHi);
-          for (let p = run.length - 1; p >= 0; p--) ctx.lineTo(run[p].x, run[p].yLo);
-          ctx.closePath(); ctx.fill();
-        } else if (run.length === 1) {
-          ctx.fillRect(run[0].x - colW / 2, run[0].yHi, colW, Math.max(1, run[0].yLo - run[0].yHi));
-        }
-        run = [];
-      };
       for (let i = 0; i < n; i++) {
-        const c = s.buckets[i].centered;
-        const bn = bucketPings(s.buckets[i]);
-        if (k > Math.floor(bn / 2)) { flush(); continue; } // this bucket has no k-th band
-        const lo = c[k - 1], hi = c[bn - k];
-        if (isNaN(lo) || isNaN(hi)) { flush(); continue; }
+        const smp = s.buckets[i].samples;
+        if (!smp || smp.length === 0) { fillRun(run); run = []; continue; } // fully-lost bucket = gap
+        let lo = smp[0], hi = smp[0];
+        for (const v of smp) { if (v < lo) lo = v; if (v > hi) hi = v; }
         run.push({ x: X(i), yLo: Y(lo), yHi: Y(hi) });
       }
-      flush();
+      fillRun(run);
+      ctx.globalAlpha = 1;
+    } else {
+      // smoke bands, outer(light)->inner(dark), smooth over contiguous runs
+      for (let k = 1; k <= maxHalf; k++) {
+        ctx.fillStyle = smokeGray(k, maxHalf, V.dark);
+        let run = [];
+        for (let i = 0; i < n; i++) {
+          const c = s.buckets[i].centered;
+          const bn = bucketPings(s.buckets[i]);
+          if (k > Math.floor(bn / 2)) { fillRun(run); run = []; continue; } // this bucket has no k-th band
+          const lo = c[k - 1], hi = c[bn - k];
+          if (isNaN(lo) || isNaN(hi)) { fillRun(run); run = []; continue; }
+          run.push({ x: X(i), yLo: Y(lo), yHi: Y(hi) });
+        }
+        fillRun(run);
+      }
     }
 
     // median base line
