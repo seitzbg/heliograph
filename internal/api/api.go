@@ -219,13 +219,16 @@ type slaEntry struct {
 	UpRounds     int     `json:"up_rounds"`    // rounds counted as "up"
 	Availability float64 `json:"availability"` // percent: up_rounds / rounds * 100
 	AvgLossPct   float64 `json:"avg_loss_pct"` // mean loss across in-window rounds
+	CoveredFrom  string  `json:"covered_from"` // oldest in-window round actually available
 	Latest       string  `json:"latest"`       // timestamp of the newest in-window round
 }
 
 // slaOf reduces one target's history to an availability summary over the rounds
 // at or after cutoff. isUp decides whether a round counts as available from its
 // loss percentage. Pure (cutoff passed in) so it's deterministic to test.
-func slaOf(hist []scheduler.Outcome, cutoff time.Time, isUp func(lossPct float64) bool) (rounds, up int, sumLoss float64, latest time.Time) {
+// `oldest`/`latest` bound the rounds actually available, so a caller can tell the
+// window is only partially covered (history is bounded by the store's retention).
+func slaOf(hist []scheduler.Outcome, cutoff time.Time, isUp func(lossPct float64) bool) (rounds, up int, sumLoss float64, oldest, latest time.Time) {
 	for _, o := range hist {
 		if o.When.Before(cutoff) {
 			continue
@@ -238,6 +241,9 @@ func slaOf(hist []scheduler.Outcome, cutoff time.Time, isUp func(lossPct float64
 		}
 		if o.When.After(latest) {
 			latest = o.When
+		}
+		if oldest.IsZero() || o.When.Before(oldest) {
+			oldest = o.When
 		}
 	}
 	return
@@ -271,7 +277,7 @@ func (srv *Server) sla(w http.ResponseWriter, r *http.Request) {
 	cutoff := time.Now().Add(-window)
 	out := make([]slaEntry, 0)
 	for _, k := range srv.store.Keys() {
-		rounds, up, sumLoss, latest := slaOf(srv.store.History(k), cutoff, isUp)
+		rounds, up, sumLoss, oldest, latest := slaOf(srv.store.History(k), cutoff, isUp)
 		if rounds == 0 {
 			continue
 		}
@@ -283,6 +289,7 @@ func (srv *Server) sla(w http.ResponseWriter, r *http.Request) {
 			UpRounds:     up,
 			Availability: float64(up) / float64(rounds) * 100,
 			AvgLossPct:   sumLoss / float64(rounds),
+			CoveredFrom:  oldest.UTC().Format("2006-01-02T15:04:05Z"),
 			Latest:       latest.UTC().Format("2006-01-02T15:04:05Z"),
 		})
 	}

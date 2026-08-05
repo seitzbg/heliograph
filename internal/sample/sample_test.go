@@ -94,3 +94,17 @@ func TestComputeOddLoss(t *testing.T) {
 		t.Errorf("centered tail should be NaN: %v", c.Centered)
 	}
 }
+
+// A negative N (from a misconfigured probe reaching the scheduler) must not panic
+// as a slice capacity; Compute clamps it to zero.
+func TestComputeNegativePingsNoPanic(t *testing.T) {
+	// With no samples: clamped N=0 -> empty centered, no loss, no panic.
+	c := Compute(-1, nil)
+	if c.Loss != 0 || len(c.Centered) != 0 {
+		t.Errorf("Compute(-1,nil) = loss %d centered %v, want 0 and empty", c.Loss, c.Centered)
+	}
+	// With samples present it must still not panic (the bug was the capacity).
+	if got := Compute(-5, []float64{0.1, 0.2}); got.Loss != 0 {
+		t.Errorf("Compute(-5,[2]) loss = %d, want 0", got.Loss)
+	}
+}

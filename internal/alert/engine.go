@@ -57,7 +57,11 @@ type Engine struct {
 	alerts    map[string]*Alert
 	notifiers map[string]Notifier
 	win       map[string]*Window
-	state     map[string]bool
+	state     map[string]bool // matcher firing state (drives hysteresis)
+	// visible is the recipient's view: true iff a FIRING was actually delivered
+	// (not inhibited) and not yet closed. It gates RESOLVED so a suppressed alert
+	// never emits an orphan RESOLVED, and a delivered one always gets its close-out.
+	visible map[string]bool
 }
 
 func NewEngine(alerts map[string]*Alert, notifiers map[string]Notifier) *Engine {
@@ -66,6 +70,7 @@ func NewEngine(alerts map[string]*Alert, notifiers map[string]Notifier) *Engine 
 		notifiers: notifiers,
 		win:       map[string]*Window{},
 		state:     map[string]bool{},
+		visible:   map[string]bool{},
 	}
 }
 
@@ -112,6 +117,21 @@ func (e *Engine) InheritStateFrom(prev *Engine, validTargets map[string]bool) {
 			continue
 		}
 		e.state[key] = firing
+	}
+	// Carry the delivered-firing view too, so a reload mid-inhibition neither
+	// resurrects an orphan RESOLVED nor drops a real one.
+	for key, vis := range prev.visible {
+		target, name, ok := strings.Cut(key, "\x00")
+		if !ok {
+			continue
+		}
+		if _, defined := e.alerts[name]; !defined {
+			continue
+		}
+		if validTargets != nil && !validTargets[target] {
+			continue
+		}
+		e.visible[key] = vis
 	}
 }
 
@@ -172,18 +192,30 @@ func (e *Engine) Evaluate(target string, alertNames []string, lossPct, rttSec fl
 		}
 	}
 
-	// Second pass: emit events, applying priority inhibition. A FIRING event is
-	// suppressed when a strictly-higher-priority alert is firing on the same
-	// target. RESOLVED events are never suppressed, so a raised alert always gets
-	// its close-out even after a higher-priority one takes over.
+	// Second pass: emit events, applying priority inhibition. A FIRING is
+	// suppressed while a strictly-higher-priority alert fires on the same target;
+	// a RESOLVED is emitted only if the matching FIRING was actually delivered.
+	// The `visible` flag (outstanding delivered FIRING) closes both gaps: an
+	// inhibited alert never emits an orphan RESOLVED, and an alert that was
+	// delivered before being inhibited still gets its RESOLVED.
 	var events []Event
 	rttms := rttSec * 1000
 	for _, p := range pend {
 		if !p.emit {
 			continue
 		}
-		if p.firing && p.a.Priority >= 1 && topFiring != 0 && p.a.Priority > topFiring {
-			continue // inhibited by a higher-priority firing alert
+		key := target + "\x00" + p.a.Name
+		if p.firing {
+			inhibited := p.a.Priority >= 1 && topFiring != 0 && p.a.Priority > topFiring
+			if inhibited {
+				continue // suppress; leave `visible` unchanged (no delivery this round)
+			}
+			e.visible[key] = true
+		} else {
+			if !e.visible[key] {
+				continue // nothing was ever delivered — don't emit an orphan RESOLVED
+			}
+			e.visible[key] = false
 		}
 		events = append(events, Event{
 			Target: target, Alert: p.a.Name, Comment: p.a.Comment, Firing: p.firing,

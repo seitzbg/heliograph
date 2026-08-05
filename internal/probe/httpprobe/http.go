@@ -53,11 +53,18 @@ func (p *httpProbe) Measure(ctx context.Context, t probe.Target, pings int) (pro
 	urlformat := t.Param("urlformat", p.urlformat)
 	url := strings.ReplaceAll(urlformat, "%host%", t.Host)
 
+	// insecure_ssl is target-scoped (see Schema): a per-target value overrides the
+	// probe-level default.
+	insecure := p.insecure
+	if v := t.Param("insecure_ssl", ""); v != "" {
+		insecure = v == "true"
+	}
+
 	// Fresh connection per ping so each sample reflects full connect+TLS+TTFB
 	// (like SmokePing's Curl), not a reused keep-alive.
 	tr := &http.Transport{
 		DisableKeepAlives: true,
-		TLSClientConfig:   &tls.Config{InsecureSkipVerify: p.insecure}, //nolint:gosec // opt-in via config
+		TLSClientConfig:   &tls.Config{InsecureSkipVerify: insecure}, //nolint:gosec // opt-in via config
 	}
 	defer tr.CloseIdleConnections()
 	client := &http.Client{Transport: tr}

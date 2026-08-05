@@ -229,14 +229,31 @@ async function refresh() {
 }
 
 // ---- Availability (SLA) panel ----
+// Humanize a span in seconds so the subtitle reflects the data actually covered
+// (the store's history is bounded, so a "24h" request may hold far less).
+function humanSpan(sec) {
+  if (sec < 5400) return Math.max(1, Math.round(sec / 60)) + 'm';
+  if (sec < 172800) return (sec / 3600).toFixed(sec < 36000 ? 1 : 0) + 'h';
+  return Math.round(sec / 86400) + 'd';
+}
+const SLA_WINDOW = '24h';
 async function refreshSLA() {
   const list = document.getElementById('slaList');
   let rows;
   try {
-    const r = await fetch('/api/sla?window=24h', { cache: 'no-store' });
+    const r = await fetch('/api/sla?window=' + SLA_WINDOW, { cache: 'no-store' });
     rows = (await r.json()).targets || [];
   } catch (e) { return; }
-  if (!rows.length) { list.innerHTML = '<li class="empty-row">no data yet</li>'; return; }
+  const sub = document.getElementById('slaWindow');
+  if (!rows.length) { list.innerHTML = '<li class="empty-row">no data yet</li>'; if (sub) sub.textContent = 'last ' + SLA_WINDOW; return; }
+  // Actual coverage: oldest sample any shown target has within the window.
+  let oldest = Infinity;
+  for (const s of rows) { const t = Date.parse(s.covered_from); if (!isNaN(t)) oldest = Math.min(oldest, t); }
+  if (sub && isFinite(oldest)) {
+    const span = humanSpan((Date.now() - oldest) / 1000);
+    sub.textContent = span === SLA_WINDOW ? 'last ' + SLA_WINDOW : 'last ' + span + ' available';
+    sub.title = 'requested ' + SLA_WINDOW + '; history is bounded by store retention';
+  }
   list.innerHTML = rows.slice(0, 8).map((s, i) => {
     const cls = s.availability >= 99.5 ? 'ok' : s.availability >= 95 ? 'warn' : 'bad';
     return '<li><span class="n">' + (i + 1) + '</span>' +

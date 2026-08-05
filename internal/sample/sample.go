@@ -36,6 +36,9 @@ func (c Computed) LossFraction() float64 {
 // prepended and the remainder appended, so lost samples sit symmetrically
 // around the median.
 func Compute(pings int, rtts []float64) Computed {
+	if pings < 0 {
+		pings = 0 // defensive: a negative N would panic as a slice capacity below
+	}
 	sorted := make([]float64, 0, len(rtts))
 	for _, v := range rtts {
 		if !math.IsNaN(v) {

@@ -71,6 +71,21 @@ Not planned for now; pick up only if multi-vantage measurement is requested.
 - ✅ Availability/SLA reporting (the tSmoke equivalent) — `GET /api/sla?window=…` per-target
   availability % over a window + dashboard "Availability" panel
 
+## Known limitations / follow-ups (from the 2026-08-04 code review)
+- ⬜ **Per-target polling intervals** — the scheduler runs every target on one global
+  cadence (`-step`); a config/per-node `step` is currently inherited but ignored. SmokePing
+  parity needs a per-target scheduler (each target on its own interval/phase offset). Bigger
+  than a patch — tracked here so the config `step` promise is made real or removed.
+- ⬜ **Dashboard read amplification at scale** — a raw-mode refresh fans out one
+  `/api/series` per target plus charts/SLA, and the pgstore path issues ~5N+3 SQL queries
+  every 3s with no in-flight guard. Cheap wins: a frontend in-flight guard and a slower
+  charts/SLA cadence; bigger: bulk store queries + incremental series reads. Do before
+  large-N deployments.
+- ⬜ **SLA over long windows on pgstore** — availability is computed from `History()`, which
+  is bounded by store retention; a `>` a-few-hours window can be incomplete (the API now
+  reports `covered_from` so this is visible). A time-bounded store aggregate would make long
+  windows exact.
+
 ## Notes / decisions
 - Stack: Go collector · TimescaleDB (raw samples; bands via SQL quantiles) · REST+JSON API ·
   React/canvas frontend · gRPC+mTLS for federation. (See blueprint §1.)

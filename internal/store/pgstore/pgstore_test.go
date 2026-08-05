@@ -76,6 +76,25 @@ func TestPGStoreRoundTrip(t *testing.T) {
 	if hist[0].Err != nil {
 		t.Errorf("round0 unexpected err: %v", hist[0].Err)
 	}
+	if hist[0].Duration != 12*time.Millisecond {
+		t.Errorf("round0 duration = %v, want 12ms (must survive the DB round-trip)", hist[0].Duration)
+	}
+}
+
+func TestMsToDuration(t *testing.T) {
+	cases := []struct {
+		ms   float64
+		want time.Duration
+	}{
+		{12, 12 * time.Millisecond},
+		{1.5, 1500 * time.Microsecond},
+		{0, 0},
+	}
+	for _, c := range cases {
+		if got := msToDuration(c.ms); got != c.want {
+			t.Errorf("msToDuration(%g) = %v, want %v", c.ms, got, c.want)
+		}
+	}
 }
 
 func TestEnableDownsampling(t *testing.T) {

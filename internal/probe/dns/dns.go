@@ -63,6 +63,15 @@ func (p *dnsProbe) Measure(ctx context.Context, t probe.Target, pings int) (prob
 	}
 	server := net.JoinHostPort(t.Host, t.Param("port", p.port))
 
+	// recordtype is target-scoped (see Schema): a per-target value overrides the
+	// probe-level default; an unrecognized value falls back to it.
+	recordType := p.recordType
+	if v := t.Param("recordtype", ""); v != "" {
+		if rt, ok := dns.StringToType[v]; ok {
+			recordType = rt
+		}
+	}
+
 	var samples []float64
 	for i := 0; i < pings; i++ {
 		if err := ctx.Err(); err != nil {
@@ -70,7 +79,7 @@ func (p *dnsProbe) Measure(ctx context.Context, t probe.Target, pings int) (prob
 		}
 		c := &dns.Client{Net: p.proto}
 		m := new(dns.Msg)
-		m.SetQuestion(dns.Fqdn(lookup), p.recordType)
+		m.SetQuestion(dns.Fqdn(lookup), recordType)
 		_, rtt, err := c.ExchangeContext(ctx, m, server)
 		if err != nil {
 			continue // query failed/timed out => lost

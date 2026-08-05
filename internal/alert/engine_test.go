@@ -185,6 +185,60 @@ func TestPriorityInhibitionNonEdge(t *testing.T) {
 	}
 }
 
+// An edge-triggered alert whose FIRING is inhibited must NOT later emit a lone
+// RESOLVED — recipients would see a resolution for something they never saw fire.
+func TestPriorityInhibitionNoOrphanResolved(t *testing.T) {
+	alerts := map[string]*Alert{
+		"crit": {Name: "crit", Matcher: CheckLoss{L: 50, X: 1}, Priority: 1, EdgeTrigger: true, To: []string{"log"}},
+		"warn": {Name: "warn", Matcher: CheckLoss{L: 10, X: 1}, Priority: 2, EdgeTrigger: true, To: []string{"log"}},
+	}
+	e := NewEngine(alerts, map[string]Notifier{})
+	when := time.Unix(1_700_000_000, 0)
+
+	var all []Event
+	// Round 1: 60% loss -> both fire; warn (lower priority) is inhibited on its
+	// rising edge, so only crit is delivered.
+	all = append(all, e.Evaluate("t", []string{"crit", "warn"}, 60, math.NaN(), when)...)
+	// Round 2: 0% loss -> both clear. crit resolves (it was delivered); warn must
+	// stay silent because its FIRING was never delivered.
+	all = append(all, e.Evaluate("t", []string{"crit", "warn"}, 0, 0.01, when.Add(time.Minute))...)
+
+	for _, ev := range all {
+		if ev.Alert == "warn" {
+			t.Errorf("warn emitted %s but its FIRING was inhibited — orphan event", ev.Status())
+		}
+	}
+	got := evSummary(all)
+	if len(got) != 2 || got[0] != "crit/FIRING" || got[1] != "crit/RESOLVED" {
+		t.Fatalf("events = %v, want [crit/FIRING crit/RESOLVED] only", got)
+	}
+}
+
+// An alert delivered (visible) before a higher-priority alert starts inhibiting
+// it must still receive its RESOLVED — no dangling firing.
+func TestPriorityInhibitionStillResolvesDeliveredAlert(t *testing.T) {
+	alerts := map[string]*Alert{
+		"crit": {Name: "crit", Matcher: CheckLoss{L: 50, X: 1}, Priority: 1, EdgeTrigger: true, To: []string{"log"}},
+		"warn": {Name: "warn", Matcher: CheckLoss{L: 10, X: 1}, Priority: 2, EdgeTrigger: true, To: []string{"log"}},
+	}
+	e := NewEngine(alerts, map[string]Notifier{})
+	when := time.Unix(1_700_000_000, 0)
+
+	var all []Event
+	// Round 1: 20% loss -> only warn fires (crit needs >=50). warn is delivered.
+	all = append(all, e.Evaluate("t", []string{"crit", "warn"}, 20, 0.01, when)...)
+	// Round 2: 60% loss -> crit fires and now inhibits warn (still firing).
+	all = append(all, e.Evaluate("t", []string{"crit", "warn"}, 60, math.NaN(), when.Add(time.Minute))...)
+	// Round 3: 0% loss -> both clear. warn was delivered in round 1, so it must
+	// still emit RESOLVED even though it was inhibited in between.
+	all = append(all, e.Evaluate("t", []string{"crit", "warn"}, 0, 0.01, when.Add(2*time.Minute))...)
+
+	got := evSummary(all)
+	if !containsStr(got, "warn/FIRING") || !containsStr(got, "warn/RESOLVED") {
+		t.Fatalf("events = %v, want warn to both fire and resolve (delivered then inhibited)", got)
+	}
+}
+
 // An alert with no priority (0) is never inhibited, even when a higher-priority
 // alert is firing on the same target.
 func TestPriorityUnsetAlwaysNotifies(t *testing.T) {
