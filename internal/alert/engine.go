@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"math"
 	"net/http"
 	"regexp"
@@ -62,6 +63,11 @@ type Engine struct {
 	// (not inhibited) and not yet closed. It gates RESOLVED so a suppressed alert
 	// never emits an orphan RESOLVED, and a delivered one always gets its close-out.
 	visible map[string]bool
+	// warnedUnknown debounces the "unknown notifier" warning so a persistent typo
+	// logs once, not once per dispatched event. Guarded by its own mutex so it
+	// never contends with Evaluate's mu.
+	warnMu        sync.Mutex
+	warnedUnknown map[string]bool
 }
 
 func NewEngine(alerts map[string]*Alert, notifiers map[string]Notifier) *Engine {
@@ -158,12 +164,11 @@ func (e *Engine) Evaluate(target string, alertNames []string, lossPct, rttSec fl
 	w.Loss = appendCap(w.Loss, lossPct, cap)
 	w.RTT = appendCap(w.RTT, rttSec, cap)
 
-	// First pass: update every alert's firing state and decide whether it would
-	// emit an event this round. State must update for all alerts regardless of
-	// priority, so hysteresis stays correct even for suppressed alerts.
+	// First pass: update every alert's matcher (firing) state. State must update
+	// for all alerts regardless of priority, so hysteresis stays correct even for
+	// suppressed alerts. We also find the current inhibitor here.
 	type pending struct {
 		a      *Alert
-		emit   bool
 		firing bool
 	}
 	var pend []pending
@@ -180,35 +185,35 @@ func (e *Engine) Evaluate(target string, alertNames []string, lossPct, rttSec fl
 		now := a.Matcher.Test(*w, prev)
 		e.state[key] = now
 
-		emit := false
-		if a.EdgeTrigger {
-			emit = now != prev // only on transition
-		} else {
-			emit = now || prev // while firing, plus one resolved on the clearing edge
-		}
-		pend = append(pend, pending{a: a, emit: emit, firing: now})
+		pend = append(pend, pending{a: a, firing: now})
 		if now && a.Priority >= 1 && (topFiring == 0 || a.Priority < topFiring) {
 			topFiring = a.Priority
 		}
 	}
 
-	// Second pass: emit events, applying priority inhibition. A FIRING is
-	// suppressed while a strictly-higher-priority alert fires on the same target;
-	// a RESOLVED is emitted only if the matching FIRING was actually delivered.
-	// The `visible` flag (outstanding delivered FIRING) closes both gaps: an
-	// inhibited alert never emits an orphan RESOLVED, and an alert that was
-	// delivered before being inhibited still gets its RESOLVED.
+	// Second pass: derive the recipient-visible transitions, applying priority
+	// inhibition. Emission is keyed to `visible` (the delivered view) rather than
+	// the raw matcher edge, so an edge-triggered alert whose rising edge was
+	// swallowed while inhibited still surfaces FIRING once its inhibitor clears —
+	// there is no second matcher edge to rely on. The `visible` flag also gates
+	// RESOLVED: a suppressed alert never emits an orphan RESOLVED, and one that was
+	// delivered before being inhibited still gets its close-out.
 	var events []Event
 	rttms := rttSec * 1000
 	for _, p := range pend {
-		if !p.emit {
-			continue
-		}
 		key := target + "\x00" + p.a.Name
 		if p.firing {
-			inhibited := p.a.Priority >= 1 && topFiring != 0 && p.a.Priority > topFiring
-			if inhibited {
-				continue // suppress; leave `visible` unchanged (no delivery this round)
+			// Suppress while a strictly-higher-priority alert fires on this target.
+			if p.a.Priority >= 1 && topFiring != 0 && p.a.Priority > topFiring {
+				continue // inhibited this round; leave `visible` unchanged
+			}
+			// Active and uninhibited. An edge-triggered alert surfaces FIRING on the
+			// transition into the delivered view (whenever it is not already visible —
+			// covering both a fresh edge and one that fired earlier under inhibition).
+			// A level-triggered alert re-emits every active round (repeat notification),
+			// matching SmokePing's non-edge behavior.
+			if p.a.EdgeTrigger && e.visible[key] {
+				continue // already delivered; an edge alert does not repeat
 			}
 			e.visible[key] = true
 		} else {
@@ -242,8 +247,27 @@ func (e *Engine) Dispatch(events []Event, extra ...string) {
 			seen[name] = true
 			if n := e.notifiers[name]; n != nil {
 				n.Notify(ev)
+			} else {
+				e.warnUnknownNotifier(name, ev.Alert)
 			}
 		}
+	}
+}
+
+// warnUnknownNotifier logs (once per name) that an alert or alertee references a
+// notifier that does not exist, so a config typo does not silently discard every
+// notification routed to it.
+func (e *Engine) warnUnknownNotifier(name, alertName string) {
+	e.warnMu.Lock()
+	if e.warnedUnknown == nil {
+		e.warnedUnknown = map[string]bool{}
+	}
+	first := !e.warnedUnknown[name]
+	e.warnedUnknown[name] = true
+	e.warnMu.Unlock()
+	if first {
+		slog.Warn("alert: unknown notifier referenced; its notifications are dropped",
+			"notifier", name, "alert", alertName)
 	}
 }
 
@@ -275,16 +299,42 @@ type WebhookNotifier struct {
 	Client *http.Client
 }
 
+// webhookPayload is the wire shape for a webhook delivery. RTTms is a pointer so a
+// fully-lost round (NaN median) serializes as JSON null instead of failing the
+// entire marshal: Go's encoder rejects NaN, which previously left the body nil and
+// POSTed an empty request for exactly the outage case alerting matters most.
+type webhookPayload struct {
+	Target  string    `json:"target"`
+	Alert   string    `json:"alert"`
+	Comment string    `json:"comment"`
+	Firing  bool      `json:"firing"`
+	Status  string    `json:"status"`
+	LossPct float64   `json:"loss_pct"`
+	RTTms   *float64  `json:"rtt_ms"`
+	When    time.Time `json:"when"`
+}
+
 func (n WebhookNotifier) Notify(e Event) {
-	body, _ := json.Marshal(struct {
-		Event
-		Status string `json:"status"`
-	}{Event: e, Status: strings.ToLower(e.Status())})
+	var rtt *float64
+	if !math.IsNaN(e.RTTms) && !math.IsInf(e.RTTms, 0) {
+		v := e.RTTms
+		rtt = &v
+	}
+	body, err := json.Marshal(webhookPayload{
+		Target: e.Target, Alert: e.Alert, Comment: e.Comment, Firing: e.Firing,
+		Status: strings.ToLower(e.Status()), LossPct: e.LossPct, RTTms: rtt, When: e.When,
+	})
+	if err != nil {
+		// Never silently drop the delivery — surface it so an operator sees the gap.
+		slog.Error("webhook: marshal event failed", "alert", e.Alert, "target", e.Target, "err", err)
+		return
+	}
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 		defer cancel()
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, n.URL, bytes.NewReader(body))
 		if err != nil {
+			slog.Error("webhook: build request failed", "url", n.URL, "alert", e.Alert, "err", err)
 			return
 		}
 		req.Header.Set("Content-Type", "application/json")
@@ -294,10 +344,14 @@ func (n WebhookNotifier) Notify(e Event) {
 		}
 		resp, err := c.Do(req)
 		if err != nil {
+			slog.Warn("webhook: delivery failed", "url", n.URL, "alert", e.Alert, "target", e.Target, "err", err)
 			return
 		}
+		defer resp.Body.Close()
 		_, _ = io.Copy(io.Discard, resp.Body)
-		_ = resp.Body.Close()
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			slog.Warn("webhook: non-2xx response", "url", n.URL, "alert", e.Alert, "target", e.Target, "status", resp.StatusCode)
+		}
 	}()
 }
 

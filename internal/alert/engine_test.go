@@ -1,10 +1,49 @@
 package alert
 
 import (
+	"encoding/json"
+	"io"
 	"math"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 )
+
+// TestWebhookFullLossSendsValidBody proves the outage case that matters most: a
+// fully-lost round has a NaN median RTT. Go's JSON encoder rejects NaN, so the
+// previous marshal produced a nil body and the notifier POSTed an empty request.
+// The delivery must carry a valid JSON body with rtt_ms as null.
+func TestWebhookFullLossSendsValidBody(t *testing.T) {
+	bodies := make(chan []byte, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		bodies <- b
+	}))
+	defer srv.Close()
+
+	n := WebhookNotifier{URL: srv.URL}
+	n.Notify(Event{Target: "t", Alert: "loss", Firing: true, LossPct: 100, RTTms: math.NaN(), When: time.Unix(1_700_000_000, 0)})
+
+	select {
+	case b := <-bodies:
+		if len(b) == 0 {
+			t.Fatal("webhook body was empty for a full-loss (NaN RTT) event")
+		}
+		var got map[string]any
+		if err := json.Unmarshal(b, &got); err != nil {
+			t.Fatalf("webhook body is not valid JSON: %v (body=%q)", err, b)
+		}
+		if got["rtt_ms"] != nil {
+			t.Errorf("rtt_ms = %v, want null for a fully-lost round", got["rtt_ms"])
+		}
+		if got["status"] != "firing" {
+			t.Errorf("status = %v, want \"firing\"", got["status"])
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("webhook did not deliver within 3s")
+	}
+}
 
 type capture struct{ events []Event }
 
@@ -236,6 +275,38 @@ func TestPriorityInhibitionStillResolvesDeliveredAlert(t *testing.T) {
 	got := evSummary(all)
 	if !containsStr(got, "warn/FIRING") || !containsStr(got, "warn/RESOLVED") {
 		t.Fatalf("events = %v, want warn to both fire and resolve (delivered then inhibited)", got)
+	}
+}
+
+// An edge-triggered alert whose rising edge was suppressed by inhibition must
+// still surface FIRING once the inhibitor clears while it remains active. The
+// rising edge only happens once; if it is swallowed while inhibited and delivery
+// is keyed to the matcher edge, the alert stays firing forever with no event —
+// recipients see the inhibitor resolve and nothing about the outage underneath.
+func TestPriorityInhibitionEdgeSurfacesAfterInhibitorClears(t *testing.T) {
+	alerts := map[string]*Alert{
+		"crit": {Name: "crit", Matcher: CheckLoss{L: 50, X: 1}, Priority: 1, EdgeTrigger: true, To: []string{"log"}},
+		"warn": {Name: "warn", Matcher: CheckLoss{L: 10, X: 1}, Priority: 2, EdgeTrigger: true, To: []string{"log"}},
+	}
+	e := NewEngine(alerts, map[string]Notifier{})
+	when := time.Unix(1_700_000_000, 0)
+
+	var all []Event
+	// Round 1: 60% loss -> both fire on the same edge; warn is inhibited by crit.
+	all = append(all, e.Evaluate("t", []string{"crit", "warn"}, 60, math.NaN(), when)...)
+	// Round 2: 60% loss -> both still firing; no new edge for either.
+	all = append(all, e.Evaluate("t", []string{"crit", "warn"}, 60, math.NaN(), when.Add(time.Minute))...)
+	// Round 3: 20% loss -> crit clears (<50) but warn is still over its 10%
+	// threshold. crit's inhibition lifts, so warn must now surface FIRING even
+	// though it produced no matcher edge this round.
+	all = append(all, e.Evaluate("t", []string{"crit", "warn"}, 20, 0.05, when.Add(2*time.Minute))...)
+
+	got := evSummary(all)
+	if !containsStr(got, "crit/RESOLVED") {
+		t.Fatalf("events = %v, want crit/RESOLVED after crit clears", got)
+	}
+	if !containsStr(got, "warn/FIRING") {
+		t.Fatalf("events = %v, want warn/FIRING once its inhibitor clears (edge was swallowed while inhibited)", got)
 	}
 }
 
