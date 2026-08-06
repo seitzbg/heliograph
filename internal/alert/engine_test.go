@@ -132,6 +132,46 @@ func TestWebhookDrainsOnClose(t *testing.T) {
 	}
 }
 
+// Close's deadline must cancel an in-flight request, not just interrupt backoffs — a
+// hung endpoint can't keep a delivery (and its worker) running for the full per-attempt
+// timeout past the shutdown budget (CODE_REVIEW #6). Signal: the aborted attempt is
+// counted (Failed==1) — without cancellation the request would still be in flight and
+// nothing would be counted when Close returns.
+func TestWebhookCloseCancelsInflightAtDeadline(t *testing.T) {
+	release := make(chan struct{})
+	startedCh := make(chan struct{})
+	var startedOnce atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if startedOnce.CompareAndSwap(false, true) {
+			close(startedCh)
+		}
+		<-release // hold the request open (independent of server-side cancel detection)
+	}))
+	defer srv.Close()
+	defer close(release) // LIFO: unblock the handler before srv.Close waits on the conn
+
+	// Long per-attempt timeout: without deadline-driven cancellation the client's Do
+	// would block ~30s, so the delivery would still be in flight when Close returns.
+	n := NewWebhookNotifierConfig(srv.URL, nil, WebhookConfig{Workers: 1, QueueSize: 4, MaxAttempts: 3, BaseBackoff: time.Millisecond, Timeout: 30 * time.Second})
+	n.Notify(Event{Target: "t", Alert: "loss", Firing: true, RTTms: 1, When: time.Unix(1_700_000_000, 0)})
+	select {
+	case <-startedCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("delivery never reached the server")
+	}
+
+	start := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	n.Close(ctx)
+	if el := time.Since(start); el > 5*time.Second {
+		t.Fatalf("Close took %v; the in-flight request was not cancelled at the deadline", el)
+	}
+	if f := n.Stats().Failed; f != 1 {
+		t.Errorf("Failed = %d, want 1 (the in-flight delivery must be cancelled + counted, not left hanging)", f)
+	}
+}
+
 // WriteMetrics must expose the delivery counters so drops/failures are scrapeable.
 func TestWebhookWriteMetrics(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))

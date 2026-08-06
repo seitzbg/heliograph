@@ -88,6 +88,16 @@ func main() {
 		}
 		webhookN = alert.NewWebhookNotifier(*webhook, nil) // bounded queue + retry/backoff + drain
 		notifiers["webhook"] = webhookN
+		// Drain queued deliveries on ANY exit path (serve shutdown, demo-mode return,
+		// early exit) through this one lifecycle point (CODE_REVIEW #6). By the time it
+		// runs the event producers have stopped — serve joins the poll goroutine
+		// (pollDone) before returning, and demo rounds are synchronous — so no Notify
+		// races the close.
+		defer func() {
+			drainCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			webhookN.Close(drainCtx)
+			cancel()
+		}()
 	}
 
 	// The runtime (jobs + alert engine) is built from config (or the demo set) and
@@ -307,13 +317,8 @@ func main() {
 			fatal("http server failed", err)
 		}
 		<-pollDone // wait for the polling goroutine to drain in-flight probes before exiting
-		// The poll goroutine has stopped producing events, so no more Notify calls can
-		// race the close; drain any queued webhook deliveries within a deadline.
-		if webhookN != nil {
-			drainCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			webhookN.Close(drainCtx)
-			cancel()
-		}
+		// The webhook notifier is drained by the single deferred Close registered at its
+		// creation, which runs on this (and every other) exit path.
 		slog.Info("shutdown complete")
 		fmt.Println("shutdown complete")
 	}

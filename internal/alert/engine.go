@@ -307,7 +307,9 @@ type WebhookNotifier struct {
 	Client *http.Client
 
 	queue       chan delivery
-	done        chan struct{} // closed by Close to interrupt in-flight backoffs
+	done        chan struct{}      // closed by Close to interrupt in-flight backoffs
+	baseCtx     context.Context    // parent of every attempt's request context
+	baseCancel  context.CancelFunc // cancels in-flight requests when the drain deadline hits
 	wg          sync.WaitGroup
 	maxAttempts int
 	baseBackoff time.Duration
@@ -375,6 +377,9 @@ func NewWebhookNotifierConfig(url string, client *http.Client, cfg WebhookConfig
 		baseBackoff: cfg.BaseBackoff,
 		timeout:     cfg.Timeout,
 	}
+	// Every attempt's request derives from baseCtx, so Close can cancel in-flight
+	// requests once the drain deadline is reached (not just interrupt backoffs).
+	n.baseCtx, n.baseCancel = context.WithCancel(context.Background())
 	for i := 0; i < cfg.Workers; i++ {
 		n.wg.Add(1)
 		go n.worker()
@@ -469,7 +474,7 @@ func (n *WebhookNotifier) deliver(d delivery) {
 }
 
 func (n *WebhookNotifier) tryOnce(d delivery) bool {
-	ctx, cancel := context.WithTimeout(context.Background(), n.timeout)
+	ctx, cancel := context.WithTimeout(n.baseCtx, n.timeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, n.URL, bytes.NewReader(d.body))
 	if err != nil {
@@ -510,9 +515,15 @@ func (n *WebhookNotifier) Close(ctx context.Context) {
 	go func() { n.wg.Wait(); close(drained) }()
 	select {
 	case <-drained:
+		n.baseCancel() // release the base context
 		slog.Info("webhook: delivery drained", n.statsKV()...)
 	case <-ctx.Done():
-		slog.Warn("webhook: drain deadline exceeded; remaining deliveries abandoned", n.statsKV()...)
+		// Deadline hit: cancel in-flight requests so a hung endpoint can't keep a worker
+		// (and its HTTP request) running past the shutdown budget, then let the workers
+		// finish exiting.
+		n.baseCancel()
+		<-drained
+		slog.Warn("webhook: drain deadline exceeded; in-flight deliveries cancelled", n.statsKV()...)
 	}
 }
 
