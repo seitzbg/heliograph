@@ -20,7 +20,7 @@ type tcpProbe struct {
 func init() {
 	probe.Register("TCPConnect", "TCP Connect", map[string]probe.VarSpec{
 		"port":        {Doc: "TCP port to connect to", Default: "80", Scope: probe.TargetVar, Kind: probe.KindPort},
-		"interval_ms": {Doc: "milliseconds between the N connects", Default: "10", Scope: probe.ProbeVar, Kind: probe.KindInt},
+		"interval_ms": {Doc: "milliseconds between the N connects", Default: "10", Scope: probe.ProbeVar, Kind: probe.KindPositiveInt},
 	}, func(cfg map[string]string) (probe.Probe, error) {
 		p := &tcpProbe{port: "80", interval: 10 * time.Millisecond}
 		if v, ok := cfg["port"]; ok && v != "" {

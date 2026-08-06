@@ -3,7 +3,24 @@ package irttprobe
 import (
 	"math"
 	"testing"
+
+	"smokeping-modern/internal/probe"
 )
+
+// interval_ms is a send interval and must be positive: 0 (silently ignored by the
+// factory before) is now a loud config error (#9).
+func TestIntervalMsMustBePositive(t *testing.T) {
+	s, ok := probe.SchemaOf("IRTT")
+	if !ok {
+		t.Fatal("IRTT not registered")
+	}
+	if err := s["interval_ms"].ValidateValue("interval_ms", "0"); err == nil {
+		t.Error("interval_ms=0 should be rejected")
+	}
+	if err := s["interval_ms"].ValidateValue("interval_ms", "20"); err != nil {
+		t.Errorf("interval_ms=20 should be accepted: %v", err)
+	}
+}
 
 // Fixture mirrors real irtt JSON: rtt in nanoseconds, and `lost` is the STRING
 // "false" for received packets ("true_up"/etc. for losses). The last entry uses

@@ -30,7 +30,7 @@ func init() {
 	probe.Register("FPing", "ICMP Echo Pings", map[string]probe.VarSpec{
 		"binary":     {Doc: "path to the fping binary", Default: "fping", Scope: probe.ProbeVar},
 		"packetsize": {Doc: "ICMP payload size in bytes", Scope: probe.TargetVar, Kind: probe.KindInt},
-		"period_ms":  {Doc: "milliseconds between successive probes to a host (fping -p)", Default: "50", Scope: probe.ProbeVar, Kind: probe.KindInt},
+		"period_ms":  {Doc: "milliseconds between successive probes to a host (fping -p)", Default: "50", Scope: probe.ProbeVar, Kind: probe.KindPositiveInt},
 	}, func(cfg map[string]string) (probe.Probe, error) {
 		// Default period 50ms so N probes finish quickly (fping's own default is
 		// ~1000ms, which would make pings=10 take ~10s). SmokePing exposes this

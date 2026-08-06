@@ -426,6 +426,12 @@ func (c *Config) Monitors() ([]model.Monitor, error) {
 // slices per round — so reject anything absurd at config time.
 const MaxPings = 10000
 
+// MinStep is the smallest allowed polling interval. The API serializes each round's
+// timestamp at whole-second resolution, so a sub-second cadence would emit two rounds
+// with the same timestamp — ambiguous on the graph X-axis and to the incremental grid
+// watermark. One second is also a sane floor on collector/DB load (CODE_REVIEW #9).
+const MinStep = time.Second
+
 func validate(path string, m model.Monitor, getSchema func(string) (map[string]probe.VarSpec, error)) error {
 	if m.ProbeKind == "" {
 		return fmt.Errorf("%s: no probe set (and none inherited)", path)
@@ -433,8 +439,8 @@ func validate(path string, m model.Monitor, getSchema func(string) (map[string]p
 	if m.Pings < 1 || m.Pings > MaxPings {
 		return fmt.Errorf("%s: pings must be between 1 and %d, got %d", path, MaxPings, m.Pings)
 	}
-	if m.Step <= 0 {
-		return fmt.Errorf("%s: step must be positive, got %s", path, m.Step)
+	if m.Step < MinStep {
+		return fmt.Errorf("%s: step must be at least %s (sub-second cadences make whole-second timestamps ambiguous), got %s", path, MinStep, m.Step)
 	}
 	if !slices.Contains(probe.Registered(), m.ProbeKind) {
 		return fmt.Errorf("%s: unknown probe kind %q", path, m.ProbeKind)
