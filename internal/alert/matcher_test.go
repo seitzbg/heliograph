@@ -179,10 +179,24 @@ func TestParsePatternRejectsBadTokens(t *testing.T) {
 		{"loss", "*-3*", "negative skip count"},
 		{"loss", "50%", "missing comparison operator"},
 		{"loss", "", "empty pattern"},
+		// Threshold value grammar (CODE_REVIEW #7).
+		{"loss", ">NaN%", "non-finite loss threshold"},
+		{"loss", ">Inf%", "non-finite loss threshold"},
+		{"rtt", ">NaN", "non-finite rtt threshold"},
+		{"rtt", ">Inf", "non-finite rtt threshold"},
+		{"loss", ">150%", "loss threshold above 100%"},
+		{"loss", ">-5%", "negative loss threshold"},
+		{"rtt", ">-5", "negative rtt threshold"},
 	}
 	for _, c := range cases {
 		if _, err := ParsePattern(c.field, c.src); err == nil {
 			t.Errorf("ParsePattern(%q, %q): expected error (%s), got nil", c.field, c.src, c.why)
+		}
+	}
+	// Valid thresholds must still parse.
+	for _, c := range []struct{ field, src string }{{"loss", ">50%,<100%"}, {"rtt", ">200,<1000"}, {"loss", "==0%"}} {
+		if _, err := ParsePattern(c.field, c.src); err != nil {
+			t.Errorf("ParsePattern(%q, %q): unexpected error %v", c.field, c.src, err)
 		}
 	}
 }

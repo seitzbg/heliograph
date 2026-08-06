@@ -306,7 +306,17 @@ func parseToken(field, tok string) (step, error) {
 	if err != nil {
 		return step{}, fmt.Errorf("pattern token %q: %w", tok, err)
 	}
-	if field == "rtt" {
+	if math.IsNaN(v) || math.IsInf(v, 0) {
+		return step{}, fmt.Errorf("pattern token %q: threshold must be a finite number", tok)
+	}
+	if field == "loss" {
+		if v < 0 || v > 100 {
+			return step{}, fmt.Errorf("pattern token %q: loss threshold must be in [0, 100]", tok)
+		}
+	} else { // rtt (milliseconds)
+		if v < 0 {
+			return step{}, fmt.Errorf("pattern token %q: rtt threshold must be >= 0", tok)
+		}
 		v /= 1000 // ms -> seconds
 	}
 	return step{kind: stepCmp, op: op, val: v}, nil

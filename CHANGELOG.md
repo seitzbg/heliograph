@@ -76,6 +76,13 @@ breaking changes.
   `%` no longer break), and the Graphs grid removes panels for targets that disappear from
   `/api/targets` (e.g. after a SIGHUP removal).
 - **`/api/sla?maxloss`** requires a finite percent in `[0,100]` (NaN/Inf/>100 rejected).
+- **Strict alert numeric grammar.** Matcher and pattern thresholds are now validated at parse
+  time instead of silently misbehaving: matcher args reject unknown keys (a typo no longer
+  vanishes), duplicates, and non-finite values; `x` must be a whole number in `[1, 10000]`
+  (`x=1.9` no longer truncates to 1); `CheckLoss` loss thresholds must be in `(0, 100]`; and
+  loss/rtt pattern thresholds must be finite and in range (`>150%`, `>NaN`, negative values are
+  rejected). A malformed alert is a clear startup error, not a permanently inert or always-on
+  alert.
 - **Timestamp-accurate graphs.** Charts now place each round/bucket by its wall-clock time
   against the selected range's fixed window, instead of spreading samples evenly by array
   index. Short data floats at its true position (10 min on the 3h axis is a right-hand sliver,
