@@ -41,6 +41,14 @@ check('RANGES: raw vs band tiers map to the right endpoints', () => {
   assert.equal(D.RANGES['400d'].mode, 'band'); assert.equal(D.RANGES['400d'].res, '1d');
   assert.deepEqual(D.RANGE_ORDER, ['3h', '30h', '10d', '400d']);
 });
+check('RANGES: each tier carries the correct wall-clock window in ms', () => {
+  // Used to set the fixed X domain [now-windowMs, now] so the graph axis means
+  // exactly what it says and short data floats at its true position (#3).
+  assert.equal(D.RANGES['3h'].windowMs, 3 * 3600 * 1000);
+  assert.equal(D.RANGES['30h'].windowMs, 30 * 3600 * 1000);
+  assert.equal(D.RANGES['10d'].windowMs, 10 * 86400 * 1000);
+  assert.equal(D.RANGES['400d'].windowMs, 400 * 86400 * 1000);
+});
 check('parseRoute: does not double-decode the target name', () => {
   // URLSearchParams already percent-decodes, so a literal %20 in the name must
   // survive as-is (not become a space), and a name with % must not throw.

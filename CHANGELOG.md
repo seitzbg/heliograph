@@ -63,6 +63,12 @@ breaking changes.
   `%` no longer break), and the Graphs grid removes panels for targets that disappear from
   `/api/targets` (e.g. after a SIGHUP removal).
 - **`/api/sla?maxloss`** requires a finite percent in `[0,100]` (NaN/Inf/>100 rejected).
+- **Timestamp-accurate graphs.** Charts now place each round/bucket by its wall-clock time
+  against the selected range's fixed window, instead of spreading samples evenly by array
+  index. Short data floats at its true position (10 min on the 3h axis is a right-hand sliver,
+  not a full-width stretch), and a collector/DB outage wider than the target's cadence renders
+  as a real blank span — the median line and smoke bands break across it instead of drawing a
+  straight line over the gap.
 
 ### Changed (earlier)
 - Dashboard refresh is lighter on the collector: an in-flight guard skips a refresh tick
