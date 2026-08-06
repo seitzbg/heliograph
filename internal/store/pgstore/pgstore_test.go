@@ -4,6 +4,7 @@ import (
 	"context"
 	"math"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -213,6 +214,35 @@ func TestPGStoreHistorySinceIgnoresHistoryCap(t *testing.T) {
 	}
 	if len(got2) != N-30 {
 		t.Errorf("HistorySince after cutoff = %d, want %d", len(got2), N-30)
+	}
+}
+
+// #5: a failed sample-batch write is counted and exposed on /metrics, so a database
+// rejecting or timing out writes is visible (writes are fire-and-forget from the round's
+// point of view). Inducing a failure by writing to a closed pool.
+func TestPGStoreWriteFailureMetric(t *testing.T) {
+	dsn := os.Getenv("SMOKE_TEST_DSN")
+	if dsn == "" {
+		t.Skip("set SMOKE_TEST_DSN to run the TimescaleDB integration test")
+	}
+	ctx := context.Background()
+	s, err := New(ctx, dsn, 100, nil) // nil onErr -> failures are counted, not surfaced as fatal
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	s.Close() // close the pool so the next write fails
+
+	s.Add([]scheduler.Outcome{{
+		Target: probe.Target{Name: "x", Host: "h"}, ProbeName: "FPing",
+		When: time.Unix(1_700_600_000, 0).UTC(), Computed: sample.Compute(1, []float64{0.01}),
+	}})
+	if got := s.writeFails.Load(); got != 1 {
+		t.Fatalf("writeFails = %d, want 1 after a write to a closed pool", got)
+	}
+	var b strings.Builder
+	s.WriteMetrics(&b)
+	if !strings.Contains(b.String(), "smokeping_store_write_failures_total 1") {
+		t.Errorf("metrics missing the failure counter:\n%s", b.String())
 	}
 }
 

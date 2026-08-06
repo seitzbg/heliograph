@@ -12,6 +12,8 @@ import (
 	"log/slog"
 	"math"
 	"sort"
+	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -22,11 +24,21 @@ import (
 	"smokeping-modern/internal/store"
 )
 
+// writeTimeout bounds a single sample-batch write. The collector writes on a
+// process-level context, so without a per-write deadline a hung DB connection could
+// pin a scheduler worker indefinitely (the target is held in flight through the write
+// + alert eval). 10s is far above a healthy batch insert (CODE_REVIEW #5).
+const writeTimeout = 10 * time.Second
+
 type PGStore struct {
 	ctx     context.Context
 	pool    *pgxpool.Pool
 	histCap int
 	onErr   func(error)
+	// writeFails counts sample-batch writes that failed after retries/deadline — a
+	// persistent-write health signal exposed on /metrics (writes are fire-and-forget
+	// from the round's point of view, so this is how an operator sees them failing).
+	writeFails atomic.Int64
 }
 
 // New connects to the DSN, applies the schema, and returns a store. histCap
@@ -183,14 +195,26 @@ func (s *PGStore) Add(outcomes []scheduler.Outcome) {
 			float64(o.Duration.Microseconds())/1000.0,
 		)
 	}
-	br := s.pool.SendBatch(s.ctx, batch)
+	// Bound the write with a deadline derived from the process context, so a stalled DB
+	// connection can't pin the scheduler worker that holds the target in flight.
+	ctx, cancel := context.WithTimeout(s.ctx, writeTimeout)
+	defer cancel()
+	br := s.pool.SendBatch(ctx, batch)
 	defer br.Close()
 	for range outcomes {
 		if _, err := br.Exec(); err != nil {
+			s.writeFails.Add(1)
 			s.onErr(fmt.Errorf("pgstore: insert: %w", err))
 			return
 		}
 	}
+}
+
+// WriteMetrics appends the persistent-write health counter in Prometheus text format.
+// Wired into /metrics via api.Server.ExtraMetrics so a database that is rejecting or
+// timing out writes is scrapeable, not merely logged (CODE_REVIEW #5).
+func (s *PGStore) WriteMetrics(b *strings.Builder) {
+	fmt.Fprintf(b, "# HELP smokeping_store_write_failures_total Sample-batch writes that failed (a persistent store error or write deadline).\n# TYPE smokeping_store_write_failures_total counter\nsmokeping_store_write_failures_total %d\n", s.writeFails.Load())
 }
 
 func (s *PGStore) Keys() ([]string, error) {

@@ -144,6 +144,7 @@ func main() {
 	}
 
 	var st store.Store
+	var storeMetrics func(*strings.Builder) // persistent-write health, if the store exposes it
 	if *dsn != "" {
 		pg, err := pgstore.New(ctx, *dsn, 1024, func(e error) { slog.Error("store error", "err", e) })
 		if err != nil {
@@ -159,6 +160,7 @@ func main() {
 			fmt.Printf("store: TimescaleDB\n")
 		}
 		st = pg
+		storeMetrics = pg.WriteMetrics
 	} else {
 		st = store.NewMem(1024)
 		fmt.Printf("store: in-memory (pass -dsn to persist to TimescaleDB)\n")
@@ -197,10 +199,22 @@ func main() {
 	if *serve && ctx.Err() == nil {
 		srv := api.New(st, *webdir)
 		srv.Rounds = roundStats
-		// Expose the webhook delivery counters (queued/delivered/retried/dropped/failed)
-		// on /metrics so delivery health is scrapeable, not merely logged.
+		// Expose extra operational counters on /metrics so they are scrapeable, not
+		// merely logged: the store's persistent-write failures, and the webhook delivery
+		// counters (queued/delivered/retried/dropped/failed). Composed into one writer.
+		var extra []func(*strings.Builder)
+		if storeMetrics != nil {
+			extra = append(extra, storeMetrics)
+		}
 		if webhookN != nil {
-			srv.ExtraMetrics = webhookN.WriteMetrics
+			extra = append(extra, webhookN.WriteMetrics)
+		}
+		if len(extra) > 0 {
+			srv.ExtraMetrics = func(b *strings.Builder) {
+				for _, f := range extra {
+					f(b)
+				}
+			}
 		}
 		// Live views report only currently-configured targets, so a target removed or
 		// renamed on a SIGHUP reload stops showing as healthy (its history stays in
