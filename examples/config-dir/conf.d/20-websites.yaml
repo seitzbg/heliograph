@@ -1,0 +1,10 @@
+# Another drop-in branch. This one defaults its subtree to the HTTP probe.
+targets:
+  children:
+    Websites:
+      probe: HTTP
+      children:
+        example.com:
+          host: example.com
+        cloudflare.com:
+          host: www.cloudflare.com

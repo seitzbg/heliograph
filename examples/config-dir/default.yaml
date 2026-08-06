@@ -1,0 +1,28 @@
+# Base config for a config *directory* layout:  smoked -config examples/config-dir
+#
+# default.yaml holds the singletons — database, probes, alerts — and the tree-wide
+# target defaults. Target branches live in conf.d/*.yaml and are concatenated under
+# the `targets` tree below (SmokePing @include style), inheriting these defaults.
+database:
+  step: 60s          # base polling interval
+  pings: 20          # samples per round
+
+probes:              # probe-instance (probe-level) settings
+  FPing: { period_ms: "50" }
+  TCPConnect: {}
+  DNS: {}
+  HTTP: {}
+
+alerts:              # named alert definitions (attach to targets via `alerts:`)
+  loss:
+    type: matcher
+    matcher: CheckLoss(l=50,x=2)   # raise after 2 rounds >=50% loss, clear after 2 <50%
+    comment: sustained packet loss
+    edgetrigger: true
+    priority: 1
+
+targets:
+  probe: FPing       # tree-wide default probe; branches in conf.d inherit it
+  title: Network
+  alerts: [loss]     # every target gets the loss alert unless it overrides
+  # Children may live here too, but the conf.d fragments are the usual place.

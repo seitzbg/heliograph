@@ -10,7 +10,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
+	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
@@ -107,7 +109,7 @@ func (c *Config) BuildAlerts() (map[string]*alert.Alert, error) {
 	return out, nil
 }
 
-// Load reads and parses a YAML config file.
+// Load reads and parses a single YAML config file.
 func Load(path string) (*Config, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -120,14 +122,38 @@ func Load(path string) (*Config, error) {
 	return c, nil
 }
 
-// Parse parses YAML bytes into a Config and applies defaults. Parsing is strict:
-// an unknown field (a typo like `porbe:` or `databse:`) is a hard error rather
-// than a silently ignored setting.
-func Parse(b []byte) (*Config, error) {
+// LoadPath loads config from `path`: a single YAML file (via Load) or, if path is
+// a directory, from default.yaml + conf.d/*.yaml within it (via LoadDir). The
+// collector and the SIGHUP reload both go through here, so either layout works.
+func LoadPath(path string) (*Config, error) {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if fi.IsDir() {
+		return LoadDir(path)
+	}
+	return Load(path)
+}
+
+// decode strictly parses YAML bytes into a Config WITHOUT applying defaults. Strict
+// means an unknown field (a typo like `porbe:` or `databse:`) is a hard error, not
+// a silently ignored setting. Keeping defaults out lets a caller tell "unset" from
+// "set to the default value" — which LoadDir needs to reject `database` in a fragment.
+func decode(b []byte) (*Config, error) {
 	var c Config
 	dec := yaml.NewDecoder(bytes.NewReader(b))
 	dec.KnownFields(true)
 	if err := dec.Decode(&c); err != nil && !errors.Is(err, io.EOF) {
+		return nil, err
+	}
+	return &c, nil
+}
+
+// Parse parses YAML bytes into a Config and applies defaults (pings 20, step 60s).
+func Parse(b []byte) (*Config, error) {
+	c, err := decode(b)
+	if err != nil {
 		return nil, err
 	}
 	if c.Database.Pings == 0 {
@@ -136,7 +162,112 @@ func Parse(b []byte) (*Config, error) {
 	if c.Database.Step == 0 {
 		c.Database.Step = Duration(60 * time.Second)
 	}
-	return &c, nil
+	return c, nil
+}
+
+// LoadDir loads config from a directory: default.yaml (the base — database, probes,
+// alerts, tree-wide target defaults) plus conf.d/*.{yaml,yml} in sorted filename
+// order. Fragments are concatenated, not merged: each contributes top-level target
+// branches under the root, inheriting default.yaml's tree-wide defaults. A fragment
+// may contain ONLY targets.children — setting database/probes/alerts or tree-wide
+// targets:-node fields in a fragment, or defining the same top-level branch twice,
+// is a hard error (the loud-config-errors philosophy; see receiving-code-review).
+func LoadDir(dir string) (*Config, error) {
+	// Base from default.yaml if present; otherwise an empty config with defaults.
+	base := &Config{}
+	defPath := filepath.Join(dir, "default.yaml")
+	defExists := false
+	if b, err := os.ReadFile(defPath); err == nil {
+		defExists = true
+		if base, err = Parse(b); err != nil {
+			return nil, fmt.Errorf("config: parse %s: %w", defPath, err)
+		}
+	} else if errors.Is(err, fs.ErrNotExist) {
+		base, _ = Parse(nil) // defaults only
+	} else {
+		return nil, err
+	}
+	if base.Targets == nil {
+		base.Targets = &Node{}
+	}
+	if base.Targets.Children == nil {
+		base.Targets.Children = map[string]*Node{}
+	}
+
+	// origin tracks which file defined each top-level branch, for the dup-error message.
+	origin := map[string]string{}
+	for k := range base.Targets.Children {
+		origin[k] = "default.yaml"
+	}
+
+	// Collect conf.d/*.{yaml,yml} in sorted order (the 10-/20- prefix idiom).
+	confd := filepath.Join(dir, "conf.d")
+	entries, err := os.ReadDir(confd)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return nil, err
+	}
+	var files []string
+	for _, e := range entries {
+		n := e.Name()
+		if e.IsDir() || strings.HasPrefix(n, ".") {
+			continue
+		}
+		if strings.HasSuffix(n, ".yaml") || strings.HasSuffix(n, ".yml") {
+			files = append(files, n)
+		}
+	}
+	sort.Strings(files)
+
+	if !defExists && len(files) == 0 {
+		return nil, fmt.Errorf("config: %s has no default.yaml and no conf.d/*.yaml", dir)
+	}
+
+	for _, n := range files {
+		b, err := os.ReadFile(filepath.Join(confd, n))
+		if err != nil {
+			return nil, err
+		}
+		frag, err := decode(b) // no defaults: so an unset database stays zero
+		if err != nil {
+			return nil, fmt.Errorf("config: parse conf.d/%s: %w", n, err)
+		}
+		if err := validateFragment(n, frag); err != nil {
+			return nil, err
+		}
+		if frag.Targets == nil {
+			continue
+		}
+		for _, key := range sortedKeys(frag.Targets.Children) {
+			if prev, dup := origin[key]; dup {
+				return nil, fmt.Errorf("config: duplicate top-level target %q in conf.d/%s (already defined in %s)", key, n, prev)
+			}
+			origin[key] = "conf.d/" + n
+			base.Targets.Children[key] = frag.Targets.Children[key]
+		}
+	}
+	return base, nil
+}
+
+// validateFragment enforces that a conf.d fragment carries only target branches:
+// database / probes / alerts and any tree-wide targets:-node fields belong in
+// default.yaml. name is the fragment's filename (for the error message).
+func validateFragment(name string, c *Config) error {
+	where := "conf.d/" + name
+	if c.Database.Pings != 0 || c.Database.Step != 0 {
+		return fmt.Errorf("config: %s: `database` must be set in default.yaml, not in a fragment", where)
+	}
+	if len(c.Probes) > 0 {
+		return fmt.Errorf("config: %s: `probes` must be set in default.yaml, not in a fragment", where)
+	}
+	if len(c.Alerts) > 0 {
+		return fmt.Errorf("config: %s: `alerts` must be set in default.yaml, not in a fragment", where)
+	}
+	if t := c.Targets; t != nil {
+		if t.Probe != "" || t.Host != "" || t.Title != "" || t.Pings != 0 || t.Step != 0 || t.Params != nil || t.Alerts != nil || t.Alertee != nil {
+			return fmt.Errorf("config: %s: `targets:` may contain only `children` in a fragment (tree-wide defaults belong in default.yaml)", where)
+		}
+	}
+	return nil
 }
 
 type inherited struct {

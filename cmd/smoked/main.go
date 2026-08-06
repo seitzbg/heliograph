@@ -56,7 +56,7 @@ func main() {
 	webdir := flag.String("webdir", "web", "directory of static web assets to serve at /")
 	dsn := flag.String("dsn", "", "TimescaleDB/PostgreSQL DSN; if set, persist there instead of in-memory")
 	downsample := flag.Bool("downsample", false, "with -dsn: enable the hourly continuous aggregate + retention policies")
-	configPath := flag.String("config", "", "path to a YAML target-tree config; if set, replaces the built-in demo targets")
+	configPath := flag.String("config", "", "path to a YAML config file, or a directory holding default.yaml + conf.d/*.yaml; replaces the built-in demo targets")
 	webhook := flag.String("webhook", "", "webhook URL for alerts named 'to: [webhook]'")
 	logFormat := flag.String("log-format", "text", "operational log format: text or json")
 	logLevel := flag.String("log-level", "info", "operational log level: debug, info, warn, error")
@@ -365,7 +365,7 @@ func buildRuntime(configPath string, demoPings int, demoStep, timeout time.Durat
 	var probeCfgs map[string]map[string]string
 	var alertDefs map[string]*alert.Alert
 	if configPath != "" {
-		cfg, err := config.Load(configPath)
+		cfg, err := config.LoadPath(configPath)
 		if err != nil {
 			return nil, fmt.Errorf("config: %w", err)
 		}

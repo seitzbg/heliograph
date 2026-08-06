@@ -1,0 +1,17 @@
+# A conf.d fragment contributes one or more top-level branches. It may contain
+# ONLY `targets.children` — database/probes/alerts and any tree-wide defaults
+# belong in default.yaml. Files are loaded in sorted filename order (10-, 20-, …).
+targets:
+  children:
+    Cloudflare:
+      children:
+        DNS (ICMP):
+          host: 1.1.1.1
+        "443 (TCP)":
+          probe: TCPConnect
+          host: 1.1.1.1
+          params: { port: "443" }
+        resolver (DNS):
+          probe: DNS
+          host: 1.1.1.1
+          params: { lookup: example.com }
