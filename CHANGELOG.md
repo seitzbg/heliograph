@@ -111,6 +111,15 @@ breaking changes.
   as a real blank span — the median line and smoke bands break across it instead of drawing a
   straight line over the gap.
 
+### CI / ops
+- **CI hardening.** The pipeline now also enforces `gofmt` and `go mod tidy` cleanliness, runs
+  the test suite under the race detector, runs the checked-in Node frontend tests, and runs a
+  (non-blocking) `govulncheck` dependency scan — previously it was Go vet/build/test only.
+- **Compose publishes the API on localhost only.** `docker-compose.yml` binds the collector's
+  published port to `127.0.0.1` instead of all host interfaces, with guidance to front it with a
+  reverse proxy (TLS + auth + rate limiting) for access beyond the host — the API is
+  unauthenticated and query-heavy.
+
 ### Changed (earlier)
 - Dashboard refresh is lighter on the collector: an in-flight guard skips a refresh tick
   while the previous one is still running (no request pile-up on slow links / many targets),
