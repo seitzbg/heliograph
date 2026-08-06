@@ -54,7 +54,36 @@
     return { buckets, N };
   }
 
-  window.Dash = { RANGES, RANGE_ORDER, parseRoute, mergeSeries };
+  // gridSince is the incremental watermark for the bulk Graphs grid (#1): the OLDEST
+  // round timestamp among panels that currently hold data. Using the oldest frontier
+  // (not the global newest) means the shared `since` never advances past the
+  // slowest-updating target — a single global max would skip that target's late/
+  // out-of-order rounds permanently. Panels with no data yet are ignored (they backfill
+  // separately); null when nothing holds data, so the first tick fetches the whole window.
+  function gridSince(panels) {
+    let min = null;
+    for (const p of panels) {
+      const bs = p && p.series && p.series.buckets;
+      if (!bs || !bs.length) continue;
+      const last = bs[bs.length - 1].t;
+      if (!Number.isFinite(last)) continue;
+      if (min === null || last < min) min = last;
+    }
+    return min;
+  }
+
+  // fetchJSON GETs a JSON endpoint and REJECTS a non-2xx response instead of decoding
+  // its body (#2). The API returns JSON error bodies with HTTP 503 when storage is
+  // unavailable; decoding those as ordinary data turned a transient failure into an
+  // empty target/SLA/chart list, blanking the dashboard. Rejecting lets each caller
+  // keep its last-known state and show a degraded indicator instead.
+  async function fetchJSON(url) {
+    const r = await fetch(url, { cache: 'no-store' });
+    if (!r.ok) throw new Error('HTTP ' + r.status + ' from ' + url);
+    return r.json();
+  }
+
+  window.Dash = { RANGES, RANGE_ORDER, parseRoute, mergeSeries, gridSince, fetchJSON };
 
   // ---------------------------------------------------------------- init (DOM) --
   function init() {
@@ -109,9 +138,9 @@
     async function refreshWorst() {
       const list = $('worstList');
       let rows;
-      try { rows = (await (await fetch('/api/charts?by=' + worstBy + '&n=8', { cache: 'no-store' })).json()).charts || []; }
-      catch (e) { return; }
-      if (!rows.length) { list.innerHTML = '<li class="empty-row">no data yet</li>'; return; }
+      try { rows = (await fetchJSON('/api/charts?by=' + worstBy + '&n=8')).charts || []; }
+      catch (e) { return false; } // transient failure: keep the last-known list, report degraded
+      if (!rows.length) { list.innerHTML = '<li class="empty-row">no data yet</li>'; return true; }
       list.innerHTML = rows.map((c, i) => {
         let val, cls = '';
         if (worstBy === 'loss') { val = fmt(c.loss_pct, 1) + ' %'; cls = c.loss_pct > 2 ? 'bad' : c.loss_pct > 0.5 ? 'warn' : ''; }
@@ -120,16 +149,17 @@
         return '<li><span class="n">' + (i + 1) + '</span><span class="who" data-target="' + esc(c.name) + '">' + esc(c.name) +
           '<span class="pk">' + esc(c.probe) + '</span></span><span class="val ' + cls + '">' + val + '</span></li>';
       }).join('');
+      return true;
     }
     const SLA_WINDOW = '24h';
     function humanSpan(sec) { if (sec < 5400) return Math.max(1, Math.round(sec / 60)) + 'm'; if (sec < 172800) return (sec / 3600).toFixed(sec < 36000 ? 1 : 0) + 'h'; return Math.round(sec / 86400) + 'd'; }
     async function refreshSLA() {
       const list = $('slaList');
       let rows;
-      try { rows = (await (await fetch('/api/sla?window=' + SLA_WINDOW, { cache: 'no-store' })).json()).targets || []; }
-      catch (e) { return; }
+      try { rows = (await fetchJSON('/api/sla?window=' + SLA_WINDOW)).targets || []; }
+      catch (e) { return false; } // transient failure: keep the last-known list, report degraded
       const sub = $('slaWindow'); if (sub) sub.textContent = 'last ' + SLA_WINDOW;
-      if (!rows.length) { list.innerHTML = '<li class="empty-row">no data yet</li>'; return; }
+      if (!rows.length) { list.innerHTML = '<li class="empty-row">no data yet</li>'; return true; }
       list.innerHTML =
         '<li class="head"><span class="n">#</span><span class="who">target</span><span class="avail">availability</span><span>coverage</span></li>' +
         rows.slice(0, 8).map((s, i) => {
@@ -148,12 +178,18 @@
             '<span class="avail ' + acls + '"><span class="pct">' + fmt(s.availability, 2) + ' %</span><span class="frac">' + s.up_rounds + ' / ' + s.measured + ' up</span></span>' +
             covCell + '</li>';
         }).join('');
+      return true;
     }
     let overviewBusy = false;
     async function refreshOverview() {
       if (overviewBusy) return; overviewBusy = true;
-      try { await Promise.all([refreshWorst(), refreshSLA()]); $('statusText').textContent = 'live · updated ' + new Date().toLocaleTimeString(); }
-      finally { overviewBusy = false; }
+      try {
+        // Only claim "live" when both reads authoritatively succeeded; if either failed
+        // its list still shows its last-known data, so flag the view as degraded (#2).
+        const [okW, okS] = await Promise.all([refreshWorst(), refreshSLA()]);
+        const t = new Date().toLocaleTimeString();
+        $('statusText').textContent = (okW && okS) ? 'live · updated ' + t : 'degraded — showing last known · ' + t;
+      } finally { overviewBusy = false; }
     }
 
     // ---- Graphs grid (recent 3h thumbnails) ----
@@ -183,39 +219,40 @@
       p.meta.innerHTML = '<span class="stat"><span class="k">median</span><span class="v">' + fmt(st.medAvg, 1) + ' ms</span></span>' +
         '<span class="stat"><span class="k">loss</span><span class="v ' + lcls + '">' + fmt(st.lossAvg, 2) + ' %</span></span>';
     }
-    let gridBusy = false, gridWatermark = null; // watermark = newest round ms the client holds
+    let gridBusy = false, gridLoaded = false; // gridLoaded: the first full-window fetch has landed
     async function refreshGrid() {
       if (gridBusy) return; gridBusy = true;
       try {
         let targets;
-        try { targets = (await (await fetch('/api/targets', { cache: 'no-store' })).json()).targets || []; }
-        catch (e) { $('statusText').textContent = 'collector unreachable'; return; }
+        try { targets = (await fetchJSON('/api/targets')).targets || []; }
+        catch (e) { $('statusText').textContent = 'collector unreachable — showing last known'; return; } // keep panels (#2)
         $('statusText').textContent = targets.length + ' targets · updated ' + new Date().toLocaleTimeString();
-        // Reconcile: drop panels for targets no longer reported (e.g. removed on a
-        // SIGHUP reload), so an open Graphs tab doesn't keep showing stale ones
-        // (CODE_REVIEW #5).
+        // Reconcile ONLY against an authoritative target list (the fetch above succeeded):
+        // drop panels for targets no longer reported (e.g. removed on a SIGHUP reload). A
+        // failed /api/targets returned early, so a transient 503 never blanks the grid (#2).
         const live = new Set(targets.map((t) => t.name));
         for (const [name, p] of panels) {
           if (!live.has(name)) { p.el.remove(); panels.delete(name); }
         }
-        const firstLoad = gridWatermark == null;
         const cutoffMs = Date.now() - RANGES['3h'].windowMs;
+        // Incremental watermark = the oldest frontier among panels holding data, so the
+        // shared `since` never advances past a slow target and skips its late rounds (#1).
+        // null (until the first fetch lands) means fetch the whole window.
+        const since = gridLoaded ? gridSince([...panels.values()]) : null;
         let bulk = null;
-        try { bulk = await fetchGridSeries(gridWatermark); } catch (e) { /* transient */ }
-        let maxT = gridWatermark || 0;
+        try { bulk = await fetchGridSeries(since); } catch (e) { /* transient: keep panels */ }
         await Promise.all(targets.map(async (t) => {
           const p = ensurePanel(t);
           let incoming = null;
-          if (!firstLoad && !p.series) {
-            // Panel added after the first bulk load: the incremental read only carries
-            // rounds newer than the watermark, so backfill its full window once.
+          const raw = bulk && bulk.targets && bulk.targets[t.name];
+          if (raw) {
+            incoming = Smoke.fromApiSeries(raw);
+          } else if (!gridLoaded || !p.series) {
+            // First load, or a panel the incremental read didn't cover that has no cached
+            // data yet: backfill its full window once.
             try { const s = await fetchRange(t.name, '3h'); if (s && !s.unsupported) incoming = s; } catch (e) { /* transient */ }
-          } else {
-            const raw = bulk && bulk.targets && bulk.targets[t.name];
-            if (raw) incoming = Smoke.fromApiSeries(raw);
           }
           if (incoming) {
-            for (const b of incoming.buckets) if (b.t > maxT) maxT = b.t;
             p.series = mergeSeries(p.series, incoming, cutoffMs);
           } else if (p.series) {
             p.series = mergeSeries(p.series, null, cutoffMs); // no new rounds: still age out old ones
@@ -223,7 +260,7 @@
           if (p.series && p.series.buckets.length) gridMeta(p, p.series);
           renderInto(p.canvas, p.series, RANGES['3h'], 170);
         }));
-        if (maxT > 0) gridWatermark = maxT;
+        if (bulk) gridLoaded = true;
       } finally { gridBusy = false; }
     }
 
