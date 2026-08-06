@@ -456,3 +456,37 @@ targets:
 		t.Fatalf("valid params should pass, got: %v (mons=%d)", err, len(mons))
 	}
 }
+
+// Target identity is the path key used by the scheduler/store/alerts. Two config
+// paths that collapse to the same name, or a host on the root (empty name), must be
+// a loud error rather than silently merging targets (CODE_REVIEW #6).
+func TestMonitorsRejectsAmbiguousIdentity(t *testing.T) {
+	// A leaf literally named "a/b" and a nested a -> b both flatten to "a/b".
+	collide := `
+probes: { FPing: {} }
+targets:
+  probe: FPing
+  children:
+    "a/b": { host: 1.1.1.1 }
+    a:
+      children:
+        b: { host: 8.8.8.8 }
+`
+	c, err := Parse([]byte(collide))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if _, err := c.Monitors(); err == nil {
+		t.Error("expected an error for two paths colliding to the same target name")
+	}
+
+	// A host on the root node yields an empty target name.
+	rootHost := "probes: { FPing: {} }\ntargets: { probe: FPing, host: 1.1.1.1 }\n"
+	c2, err := Parse([]byte(rootHost))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if _, err := c2.Monitors(); err == nil {
+		t.Error("expected an error for an empty target name (host on the root node)")
+	}
+}

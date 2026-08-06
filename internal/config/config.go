@@ -394,6 +394,22 @@ func (c *Config) Monitors() ([]model.Monitor, error) {
 	}
 	walk("", c.Targets, inherited{pings: c.Database.Pings, step: time.Duration(c.Database.Step)})
 
+	// The target name is the identity key for the scheduler, store, alert engine and
+	// planner. Two config paths that flatten to the same name (a key containing "/",
+	// or a host on the root -> empty name) would silently merge two targets, so reject
+	// empties and duplicates before building the runtime (CODE_REVIEW #6).
+	seenName := make(map[string]bool, len(out))
+	for _, m := range out {
+		if m.Name == "" {
+			problems = append(problems, "a target has an empty name (a host on the root node? give it a child key instead)")
+			continue
+		}
+		if seenName[m.Name] {
+			problems = append(problems, fmt.Sprintf("%s: duplicate target name — two config paths collapse to the same identity (avoid \"/\" in a node key)", m.Name))
+		}
+		seenName[m.Name] = true
+	}
+
 	if len(problems) > 0 {
 		return out, fmt.Errorf("config: %d invalid target(s):\n  - %s", len(problems), strings.Join(problems, "\n  - "))
 	}

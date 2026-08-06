@@ -105,4 +105,3 @@ web/
 ## Not built yet (roadmap)
 
 gRPC+mTLS federation agents (remote vantage points) · config sourced from a database (today it's YAML files only) · richer notifier integrations beyond log + webhook. The native probes, TimescaleDB storage + hourly downsampling, YAML target-tree with inheritance, the canvas smoke-graph frontend, and the pattern/matcher alert engine listed here previously are now implemented (see "What works today"). See `07-modernization-blueprint.md` §8.
-```
