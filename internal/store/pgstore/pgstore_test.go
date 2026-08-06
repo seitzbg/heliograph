@@ -316,7 +316,7 @@ func TestDailyRollup(t *testing.T) {
 		t.Fatalf("refresh daily: %v", err)
 	}
 
-	pts, err := s.Rollup(ctx, "dr", "1d")
+	pts, err := s.Rollup(ctx, "dr", "1d", time.Time{}) // zero since -> full history
 	if err != nil {
 		t.Fatalf("Rollup 1d: %v", err)
 	}
@@ -335,6 +335,20 @@ func TestDailyRollup(t *testing.T) {
 	// Day 2: one round, median .10.
 	if d2 := pts[1]; d2.Rounds != 1 || !approx(d2.MedianAvg, 0.10) {
 		t.Errorf("day2 rounds/avg = %d/%v, want 1/.10", d2.Rounds, d2.MedianAvg)
+	}
+
+	// A `since` at the day-2 bucket start bounds the result to day 2 only (daily
+	// buckets are labeled at midnight, so the cutoff is the bucket boundary).
+	day2Start := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
+	pts2, err := s.Rollup(ctx, "dr", "1d", day2Start)
+	if err != nil {
+		t.Fatalf("Rollup 1d since day2: %v", err)
+	}
+	if len(pts2) != 1 {
+		t.Fatalf("windowed daily = %d buckets, want 1 (day 2 only)", len(pts2))
+	}
+	if !approx(pts2[0].MedianAvg, 0.10) {
+		t.Errorf("windowed daily avg = %v, want .10 (day 2)", pts2[0].MedianAvg)
 	}
 }
 

@@ -41,12 +41,5 @@ check('RANGES: raw vs band tiers map to the right endpoints', () => {
   assert.equal(D.RANGES['400d'].mode, 'band'); assert.equal(D.RANGES['400d'].res, '1d');
   assert.deepEqual(D.RANGE_ORDER, ['3h', '30h', '10d', '400d']);
 });
-check('sliceByCutoff: keeps buckets at/after the cutoff, drops older', () => {
-  const b = [{ bucket: '2026-01-01T00:00:00Z' }, { bucket: '2026-06-01T00:00:00Z' }];
-  const out = D.sliceByCutoff(b, Date.parse('2026-03-01T00:00:00Z'));
-  assert.equal(out.length, 1);
-  assert.equal(out[0].bucket, '2026-06-01T00:00:00Z');
-});
-
 if (failed) { console.error(`\n${failed} test(s) failed`); process.exit(1); }
 console.log('\nall dashboard tests passed');

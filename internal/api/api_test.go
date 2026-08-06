@@ -23,7 +23,7 @@ const rollupInternalErr = `pq: relation "samples_hourly" does not exist`
 // errRollupStore is a Rollupper whose Rollup always fails with an internal error.
 type errRollupStore struct{ *store.MemStore }
 
-func (errRollupStore) Rollup(context.Context, string, string) ([]store.RollupPoint, error) {
+func (errRollupStore) Rollup(context.Context, string, string, time.Time) ([]store.RollupPoint, error) {
 	return nil, errors.New(rollupInternalErr)
 }
 
@@ -47,19 +47,21 @@ func TestRollupHidesInternalError(t *testing.T) {
 // unavailableRollupStore is a Rollupper whose aggregate was never created.
 type unavailableRollupStore struct{ *store.MemStore }
 
-func (unavailableRollupStore) Rollup(context.Context, string, string) ([]store.RollupPoint, error) {
+func (unavailableRollupStore) Rollup(context.Context, string, string, time.Time) ([]store.RollupPoint, error) {
 	return nil, store.ErrRollupUnavailable
 }
 
-// resRollupStore records the resolution passed to Rollup, so a test can assert
-// /api/rollup routes ?res to the right tier and echoes it back.
+// resRollupStore records the resolution and since passed to Rollup, so a test can
+// assert /api/rollup routes ?res to the right tier and bounds ?window server-side.
 type resRollupStore struct {
 	*store.MemStore
-	gotRes string
+	gotRes   string
+	gotSince time.Time
 }
 
-func (rs *resRollupStore) Rollup(_ context.Context, _ string, resolution string) ([]store.RollupPoint, error) {
+func (rs *resRollupStore) Rollup(_ context.Context, _ string, resolution string, since time.Time) ([]store.RollupPoint, error) {
 	rs.gotRes = resolution
+	rs.gotSince = since
 	return []store.RollupPoint{{Bucket: time.Unix(1_700_000_000, 0), MedianAvg: 0.01, MedianMin: 0.01, MedianMax: 0.02, Rounds: 3}}, nil
 }
 
@@ -86,6 +88,41 @@ func TestRollupResolution(t *testing.T) {
 	}
 	if code, _ := do("?target=x&res=bogus"); code != http.StatusBadRequest {
 		t.Errorf("res=bogus: code=%d, want 400", code)
+	}
+}
+
+// /api/rollup?window bounds the buckets server-side: it passes a cutoff ~window ago
+// to the store; no window means the full history (zero since); a bad window is 400.
+func TestRollupWindow(t *testing.T) {
+	rs := &resRollupStore{MemStore: store.NewMem(10)}
+	srv := New(rs, "")
+	get := func(q string) int {
+		rec := httptest.NewRecorder()
+		srv.Routes().ServeHTTP(rec, httptest.NewRequest("GET", "/api/rollup"+q, nil))
+		return rec.Code
+	}
+
+	// window=240h (10 days) -> since ~10 days ago.
+	rs.gotSince = time.Time{}
+	if code := get("?target=x&res=1h&window=240h"); code != 200 {
+		t.Fatalf("window=240h status = %d", code)
+	}
+	if d := time.Since(rs.gotSince); d < 239*time.Hour || d > 241*time.Hour {
+		t.Errorf("since = %v ago, want ~240h", d)
+	}
+
+	// no window -> zero since (full history).
+	rs.gotSince = time.Unix(1, 0)
+	if code := get("?target=x&res=1h"); code != 200 {
+		t.Fatalf("no-window status = %d", code)
+	}
+	if !rs.gotSince.IsZero() {
+		t.Errorf("no window should pass a zero since, got %v", rs.gotSince)
+	}
+
+	// bad window -> 400.
+	if code := get("?target=x&window=zzz"); code != http.StatusBadRequest {
+		t.Errorf("window=zzz status = %d, want 400", code)
 	}
 }
 
