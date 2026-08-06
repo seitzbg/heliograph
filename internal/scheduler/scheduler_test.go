@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -94,6 +95,147 @@ func TestIsolation(t *testing.T) {
 		if out[i].Computed.Loss != 0 {
 			t.Errorf("fast target %d loss = %d, want 0", i, out[i].Computed.Loss)
 		}
+	}
+}
+
+// gateProbe blocks in Measure until gate is closed, tracking how many times it was
+// called and the peak concurrency observed — for testing the Dispatcher.
+type gateProbe struct {
+	gate    chan struct{}
+	calls   atomic.Int32
+	running atomic.Int32
+	peak    atomic.Int32
+}
+
+func (g *gateProbe) Name() string                     { return "gate" }
+func (g *gateProbe) Describe() string                 { return "gate" }
+func (g *gateProbe) Schema() map[string]probe.VarSpec { return nil }
+func (g *gateProbe) Measure(ctx context.Context, _ probe.Target, _ int) (probe.Result, error) {
+	g.calls.Add(1)
+	r := g.running.Add(1)
+	for {
+		p := g.peak.Load()
+		if r <= p || g.peak.CompareAndSwap(p, r) {
+			break
+		}
+	}
+	defer g.running.Add(-1)
+	select {
+	case <-g.gate:
+	case <-ctx.Done():
+		return probe.Result{}, ctx.Err()
+	}
+	return probe.Result{Samples: []float64{0.01}}, nil
+}
+
+func gateJob(name string, g *gateProbe) Job {
+	return Job{Probe: g, Target: probe.Target{Name: name}, Pings: 1, Timeout: 2 * time.Second}
+}
+
+// A slow job in flight must not block a later dispatch of a fast job — the whole
+// point of #3a (a slow target no longer stalls faster ones across ticks).
+func TestDispatcherNonBlocking(t *testing.T) {
+	d := NewDispatcher(4)
+	slow := &gateProbe{gate: make(chan struct{})}
+	fast := &gateProbe{gate: make(chan struct{})}
+	close(fast.gate) // fast returns immediately
+
+	d.Go(context.Background(), []Job{gateJob("slow", slow)}, func(Outcome) {}, nil)
+
+	done := make(chan Outcome, 1)
+	d.Go(context.Background(), []Job{gateJob("fast", fast)}, func(o Outcome) { done <- o }, nil)
+
+	select {
+	case o := <-done:
+		if o.Computed.Loss != 0 {
+			t.Errorf("fast outcome = %+v, want no loss", o)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("fast job did not complete while a slow job was in flight (dispatcher blocked)")
+	}
+	close(slow.gate)
+	d.Wait()
+}
+
+// The key fix: a fast job sharing a batch with a slow one is released the instant
+// IT finishes, so it can be dispatched again before the slow job completes — it is
+// not held in-flight for the batch's (slow) duration.
+func TestDispatcherPerJobRelease(t *testing.T) {
+	d := NewDispatcher(4)
+	slow := &gateProbe{gate: make(chan struct{})}
+	fast := &gateProbe{gate: make(chan struct{})}
+	close(fast.gate)
+
+	firstFast := make(chan struct{}, 1)
+	d.Go(context.Background(), []Job{gateJob("fast", fast), gateJob("slow", slow)},
+		func(o Outcome) {
+			if o.Target.Name == "fast" {
+				firstFast <- struct{}{}
+			}
+		}, nil)
+	<-firstFast // fast finished; slow is still blocked
+
+	again := make(chan struct{}, 1)
+	d.Go(context.Background(), []Job{gateJob("fast", fast)}, func(Outcome) { again <- struct{}{} }, nil)
+	select {
+	case <-again:
+	case <-time.After(time.Second):
+		t.Fatal("fast target was held in-flight by the slow job's batch — per-job release broken")
+	}
+	close(slow.gate)
+	d.Wait()
+}
+
+// A target already in flight is skipped when dispatched again, so a slow target
+// never overlaps itself.
+func TestDispatcherInFlightGuard(t *testing.T) {
+	d := NewDispatcher(4)
+	g := &gateProbe{gate: make(chan struct{})}
+	d.Go(context.Background(), []Job{gateJob("x", g)}, func(Outcome) {}, nil)
+	// give the first dispatch a moment to mark x in flight
+	for i := 0; i < 100 && g.running.Load() == 0; i++ {
+		time.Sleep(time.Millisecond)
+	}
+	called := make(chan struct{}, 1)
+	d.Go(context.Background(), []Job{gateJob("x", g)}, func(Outcome) { called <- struct{}{} }, nil)
+	select {
+	case <-called:
+		t.Fatal("second dispatch of an in-flight target should be skipped, not run")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(g.gate)
+	d.Wait()
+	if n := g.calls.Load(); n != 1 {
+		t.Errorf("gate probe called %d times, want 1 (the overlap was skipped)", n)
+	}
+}
+
+// Concurrency is capped by the worker count across all in-flight jobs, and every
+// job's outcome is delivered.
+func TestDispatcherConcurrencyCap(t *testing.T) {
+	d := NewDispatcher(2)
+	g := &gateProbe{gate: make(chan struct{})}
+	jobs := []Job{gateJob("a", g), gateJob("b", g), gateJob("c", g), gateJob("d", g), gateJob("e", g)}
+	var got atomic.Int32
+	var batches atomic.Int32
+	d.Go(context.Background(), jobs, func(Outcome) { got.Add(1) }, func(BatchStat) { batches.Add(1) })
+	// wait until the pool is saturated
+	for i := 0; i < 200 && g.running.Load() < 2; i++ {
+		time.Sleep(time.Millisecond)
+	}
+	if p := g.peak.Load(); p > 2 {
+		t.Errorf("peak concurrency = %d, want <= 2", p)
+	}
+	close(g.gate)
+	d.Wait()
+	if g.peak.Load() != 2 {
+		t.Errorf("peak concurrency = %d, want exactly 2", g.peak.Load())
+	}
+	if got.Load() != 5 {
+		t.Errorf("delivered %d outcomes, want 5", got.Load())
+	}
+	if batches.Load() != 1 {
+		t.Errorf("onBatch called %d times, want 1", batches.Load())
 	}
 }
 

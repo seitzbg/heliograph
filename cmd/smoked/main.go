@@ -225,27 +225,38 @@ func main() {
 		// default), and the loop wakes at least once a second so a SIGHUP reload's
 		// new target set is picked up promptly.
 		go func() {
+			// The Dispatcher runs each tick's due targets without blocking the loop, so
+			// a slow target burning down its timeout no longer delays faster targets that
+			// come due meanwhile (review item #3a). Each batch's store-write + alert eval
+			// happen on completion; eval stays serialized under evalMu, and store.Add /
+			// RoundStats are concurrency-safe, so overlapping batches are fine.
+			disp := scheduler.NewDispatcher(*workers)
 			planner := scheduler.NewPlanner()
 			const maxSleep = time.Second
 			for {
-				due, _ := planner.Tick(current.Load().jobs, time.Now(), maxSleep)
+				now := time.Now()
+				due, _ := planner.Tick(current.Load().jobs, now, maxSleep)
 				if len(due) > 0 {
-					start := time.Now()
-					out := scheduler.RunRound(ctx, due, *workers)
-					dur := time.Since(start)
-					st.Add(out)
-					evalMu.Lock()
-					current.Load().eval(out) // eval on the live runtime (may differ after a reload)
-					evalMu.Unlock()
-					roundStats.Observe(dur, len(out), countErrs(out), start)
-					logRound(0, dur, out)
+					start := now
+					disp.Go(ctx, due,
+						func(o scheduler.Outcome) { // per outcome: store + alert eval, in completion order
+							st.Add([]scheduler.Outcome{o})
+							evalMu.Lock()
+							current.Load().eval([]scheduler.Outcome{o}) // eval on the live runtime (may differ after a reload)
+							evalMu.Unlock()
+						},
+						func(bs scheduler.BatchStat) { // once per tick's batch: operational round metrics
+							roundStats.Observe(bs.Duration, bs.Ran, bs.Errs, start)
+							slog.Info("round complete", "targets", bs.Ran, "errors", bs.Errs,
+								"duration_ms", float64(bs.Duration.Microseconds())/1000)
+						})
 				}
-				// Recompute the sleep from the current time — after the probes ran — so a
-				// slow round doesn't shift the phase-aligned grid, and an overrun target
-				// fires immediately on the next tick instead of a step later.
+				// Recompute the sleep from the current time so the phase-aligned grid holds
+				// and an overrun target fires on the next tick, not a step later.
 				sleep := planner.SleepToNext(time.Now(), maxSleep)
 				select {
 				case <-ctx.Done():
+					disp.Wait() // let in-flight batches drain (their probes honor ctx)
 					return
 				case <-time.After(sleep):
 				}
