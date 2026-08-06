@@ -78,18 +78,35 @@ func (p *fpingProbe) Measure(ctx context.Context, t probe.Target, pings int) (pr
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr // fping -C prints results to stderr by default
 	err := cmd.Run()
-	// fping exits 1 when a host is unreachable; that is not a probe error, just loss.
 	samples := parseCounting(stderr.String(), t.Host)
-	if err != nil && len(samples) == 0 {
+	if err != nil {
 		if ctx.Err() != nil {
 			return probe.Result{}, ctx.Err()
 		}
-		if ee, ok := err.(*exec.ExitError); ok && ee.ExitCode() == 1 {
-			return probe.Result{Samples: nil}, nil // total loss, not an error
-		}
-		return probe.Result{}, fmt.Errorf("fping: %w (%s)", err, strings.TrimSpace(stderr.String()))
+		return interpretExit(exitCode(err), err, samples, stderr.String())
 	}
 	return probe.Result{Samples: samples}, nil
+}
+
+// exitCode extracts a process exit code from a *exec.ExitError, or -1 when err is not
+// one (e.g. the binary failed to start).
+func exitCode(err error) int {
+	if ee, ok := err.(*exec.ExitError); ok {
+		return ee.ExitCode()
+	}
+	return -1
+}
+
+// interpretExit maps a failed fping run to a probe result. fping exit 1 means "some
+// hosts were unreachable" — ordinary loss — so it returns whatever samples parsed
+// (partial or empty). Any other non-zero exit (2 = resolve failure, 3 = bad args,
+// 4 = syscall error, -1 = failed to start) is a real probe error even when some
+// samples came through, so a real failure isn't silently reported as success.
+func interpretExit(code int, runErr error, samples []float64, stderr string) (probe.Result, error) {
+	if code == 1 {
+		return probe.Result{Samples: samples}, nil
+	}
+	return probe.Result{}, fmt.Errorf("fping: %w (%s)", runErr, strings.TrimSpace(stderr))
 }
 
 // parseCounting parses fping -C output lines like:
