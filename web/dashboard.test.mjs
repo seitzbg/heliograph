@@ -117,6 +117,18 @@ check('pixelToTime inverts the domain mapping and clamps to the plot', () => {
   assert.equal(D.pixelToTime(9999, W, t0, t1), t1);              // past right -> clamped to t1
 });
 
+// sharedYMax: the Graphs grid's unison Y-axis is the max per-panel robustMax across all
+// panels that hold data, so small multiples are visually comparable; undefined (per-panel
+// auto-scale) when nothing has data.
+check('sharedYMax is the max robustMax over panels with data', () => {
+  globalThis.Smoke = { robustMax: (s) => s.buckets[0].m }; // marker: robustMax = first bucket's .m
+  const s = (m) => ({ buckets: [{ m }] });
+  assert.equal(D.sharedYMax([s(5), s(50), s(20)]), 50);
+  assert.equal(D.sharedYMax([s(5), { buckets: [] }, null]), 5); // empty/absent panels ignored
+  assert.equal(D.sharedYMax([{ buckets: [] }, null]), undefined); // no data anywhere
+  assert.equal(D.sharedYMax([]), undefined);
+});
+
 // fetchJSON (#2): a non-2xx response must reject (so callers keep last-known state
 // instead of decoding an error body as empty data and wiping the view). 2xx returns JSON.
 async function checkAsync(n, f) { try { await f(); console.log('ok   -', n); } catch (e) { failed++; console.error('FAIL -', n, '\n      ', e.message); } }
