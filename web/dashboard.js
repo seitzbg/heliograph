@@ -104,7 +104,19 @@
     return t0 + f * (t1 - t0);
   }
 
-  window.Dash = { RANGES, RANGE_ORDER, parseRoute, mergeSeries, gridSince, fetchJSON, zoomResolution, pixelToTime };
+  // sharedYMax is the Graphs grid's unison Y-axis: the largest per-panel robustMax across
+  // every panel that holds data, so a 5ms target and a 500ms target are drawn to the same
+  // scale and are visually comparable. undefined when nothing has data yet — callers then
+  // fall back to per-panel auto-scaling.
+  function sharedYMax(seriesList) {
+    let m = 0;
+    for (const s of seriesList) {
+      if (s && s.buckets && s.buckets.length) m = Math.max(m, Smoke.robustMax(s));
+    }
+    return m > 0 ? m : undefined;
+  }
+
+  window.Dash = { RANGES, RANGE_ORDER, parseRoute, mergeSeries, gridSince, fetchJSON, zoomResolution, pixelToTime, sharedYMax };
 
   // ---------------------------------------------------------------- init (DOM) --
   function init() {
@@ -136,7 +148,9 @@
       ctx.font = '12px ui-monospace, monospace'; ctx.textAlign = 'center';
       ctx.fillText(text, canvas.clientWidth / 2, height / 2);
     }
-    function renderInto(canvas, s, R, height) {
+    // yMax (optional) forces a shared Y-axis maximum — the Graphs grid passes one so its
+    // small multiples share a scale (unison); omitted, each graph auto-scales to its own data.
+    function renderInto(canvas, s, R, height, yMax) {
       if (s && s.unsupported) { drawNote(canvas, 'needs the TimescaleDB store (-dsn -downsample)', height); return; }
       if (!s || s.buckets.length < 2) { drawNote(canvas, 'collecting…', height); return; }
       // Fixed wall-clock domain [now-windowMs, now]. t1 extends to the newest sample if
@@ -145,7 +159,7 @@
       const lastT = s.buckets[s.buckets.length - 1].t;
       const t1 = Math.max(Date.now(), Number.isFinite(lastT) ? lastT : 0);
       const t0 = R.windowMs ? t1 - R.windowMs : undefined;
-      Smoke.render(canvas, s, { height, band: R.mode === 'band', xlabels: R.xl, t0, t1: t0 == null ? undefined : t1 });
+      Smoke.render(canvas, s, { height, band: R.mode === 'band', xlabels: R.xl, t0, t1: t0 == null ? undefined : t1, yMax });
     }
     function metaHtml(s) {
       const st = Smoke.seriesStats(s); const lcls = st.lossAvg > 2 ? 'bad' : st.lossAvg > 0.5 ? 'warn' : '';
@@ -279,10 +293,17 @@
             p.series = mergeSeries(p.series, null, cutoffMs); // no new rounds: still age out old ones
           }
           if (p.series && p.series.buckets.length) gridMeta(p, p.series);
-          renderInto(p.canvas, p.series, RANGES['3h'], 170);
         }));
         if (bulk) gridLoaded = true;
+        renderGridPanels(); // render all panels together so a unison Y-axis can be shared
       } finally { gridBusy = false; }
+    }
+    // Render every grid panel. In unison mode the whole grid shares one Y-axis max
+    // (sharedYMax) so the small multiples are comparable; otherwise each auto-scales.
+    let unisonScale = true;
+    function renderGridPanels() {
+      const yMax = unisonScale ? sharedYMax([...panels.values()].map((p) => p.series)) : undefined;
+      for (const p of panels.values()) renderInto(p.canvas, p.series, RANGES['3h'], 170, yMax);
     }
 
     // ---- Drill-down: stack (all four) + zoom (one) ----
@@ -436,6 +457,7 @@
       canvas.addEventListener('mouseleave', finish);
     })();
     $('zoomReset').addEventListener('click', () => { if (curTarget && curRange) renderZoom(curTarget, curRange); });
+    $('unisonToggle').addEventListener('change', (e) => { unisonScale = e.target.checked; renderGridPanels(); });
 
     // ---- theme ----
     const btn = $('themeBtn');
@@ -443,7 +465,7 @@
     function themeLabel() { const d = curTheme() === 'dark'; $('themeIcon').textContent = d ? '☾' : '☀'; $('themeLabel').textContent = d ? 'Dark' : 'Light'; }
     function rerender() {
       const v = currentView();
-      if (v === 'graphs') { for (const p of panels.values()) if (p.series) renderInto(p.canvas, p.series, RANGES['3h'], 170); }
+      if (v === 'graphs') { renderGridPanels(); }
       else if (v === 'stack') { for (const c of stackCanvases) renderInto(c.canvas, c.series, c.R, 170); }
       else if (v === 'zoom') { drawZoom(); }
     }
