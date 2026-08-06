@@ -140,15 +140,20 @@ func (d *Dispatcher) Go(ctx context.Context, jobs []Job, onEach func(Outcome), o
 				d.sem <- struct{}{}
 				o := runOne(ctx, j)
 				<-d.sem // release the worker slot before the (store-write) callback
-				d.mu.Lock()
-				delete(d.inflight, j.Target.Name)
-				d.mu.Unlock()
 				if o.Err != nil {
 					errs.Add(1)
 				}
+				// Keep the target in flight THROUGH onEach (store write + alert eval),
+				// then release it. This serializes a target's result processing end to
+				// end, so a slow store write can't let its next round's callback overtake
+				// and reorder its alert history, and blocked callbacks stay bounded to one
+				// per target (the in-flight guard) rather than piling up (CODE_REVIEW #1).
 				if onEach != nil {
 					onEach(o)
 				}
+				d.mu.Lock()
+				delete(d.inflight, j.Target.Name)
+				d.mu.Unlock()
 			}(j)
 		}
 		jwg.Wait()

@@ -166,24 +166,61 @@ func TestDispatcherPerJobRelease(t *testing.T) {
 	fast := &gateProbe{gate: make(chan struct{})}
 	close(fast.gate)
 
-	firstFast := make(chan struct{}, 1)
-	d.Go(context.Background(), []Job{gateJob("fast", fast), gateJob("slow", slow)},
-		func(o Outcome) {
-			if o.Target.Name == "fast" {
-				firstFast <- struct{}{}
+	d.Go(context.Background(), []Job{gateJob("fast", fast), gateJob("slow", slow)}, func(Outcome) {}, nil)
+
+	// While the slow job is still blocked, the fast target must become re-dispatchable
+	// (it's released per-job, not held for the batch's slow member). Poll: a dispatch
+	// while fast is briefly still in flight is a no-op, so retry until it runs.
+	ran := make(chan struct{}, 1)
+	ok := false
+	for i := 0; i < 200 && !ok; i++ {
+		d.Go(context.Background(), []Job{gateJob("fast", fast)}, func(Outcome) {
+			select {
+			case ran <- struct{}{}:
+			default:
 			}
 		}, nil)
-	<-firstFast // fast finished; slow is still blocked
-
-	again := make(chan struct{}, 1)
-	d.Go(context.Background(), []Job{gateJob("fast", fast)}, func(Outcome) { again <- struct{}{} }, nil)
-	select {
-	case <-again:
-	case <-time.After(time.Second):
-		t.Fatal("fast target was held in-flight by the slow job's batch — per-job release broken")
+		select {
+		case <-ran:
+			ok = true
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	if !ok {
+		t.Fatal("fast target never became re-dispatchable while the slow job was in flight — per-job release broken")
 	}
 	close(slow.gate)
 	d.Wait()
+}
+
+// A target stays in flight until its onEach callback (store write + alert eval)
+// has finished, so a slow store write can't let a second callback for the same
+// target overtake and reorder its alert history (CODE_REVIEW #1).
+func TestDispatcherHoldsInFlightThroughCallback(t *testing.T) {
+	d := NewDispatcher(4)
+	g := &gateProbe{gate: make(chan struct{})}
+	close(g.gate) // measurement returns immediately; the callback is what blocks
+
+	entered := make(chan struct{}, 1)
+	proceed := make(chan struct{})
+	d.Go(context.Background(), []Job{gateJob("x", g)}, func(Outcome) {
+		entered <- struct{}{}
+		<-proceed // simulate a slow store write inside onEach
+	}, nil)
+	<-entered // x measured; its onEach is now blocking
+
+	ran := make(chan struct{}, 1)
+	d.Go(context.Background(), []Job{gateJob("x", g)}, func(Outcome) { ran <- struct{}{} }, nil)
+	select {
+	case <-ran:
+		t.Fatal("second callback for x ran while the first was still processing — overlap/reorder")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(proceed)
+	d.Wait()
+	if n := g.calls.Load(); n != 1 {
+		t.Errorf("gate probe called %d times, want 1 (the overlap was skipped)", n)
+	}
 }
 
 // A target already in flight is skipped when dispatched again, so a slow target
