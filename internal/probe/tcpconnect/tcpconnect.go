@@ -49,14 +49,13 @@ func (p *tcpProbe) Measure(ctx context.Context, t probe.Target, pings int) (prob
 		}
 		start := time.Now()
 		conn, err := d.DialContext(ctx, "tcp", addr)
-		if err != nil {
-			// connection refused / timeout => this ping is lost (absent sample)
-			continue
+		if err == nil {
+			samples = append(samples, time.Since(start).Seconds())
+			_ = conn.Close()
 		}
-		elapsed := time.Since(start).Seconds()
-		_ = conn.Close()
-		samples = append(samples, elapsed)
-
+		// A failed connect (refused/timeout) is a lost ping (absent sample). Either
+		// way, honor the inter-attempt delay so a down host isn't flooded with
+		// back-to-back SYNs — the delay must not be skipped on failure.
 		if p.interval > 0 && i < pings-1 {
 			select {
 			case <-ctx.Done():

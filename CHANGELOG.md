@@ -87,6 +87,14 @@ breaking changes.
 - **Empty target leaves rejected.** A non-nil but empty node (`x: {}`, or one that sets only
   defaults with no host and no children) is a config error, like a nil node — no longer silently
   ignored.
+- **Probe accuracy nits.** The TCP-connect probe now applies its configured inter-attempt delay
+  after a failed connect too (a down host is no longer flooded with back-to-back SYNs); and fping
+  only treats its documented loss exit (code 1) as loss — any other non-zero exit (resolve
+  failure, bad args, syscall error) is a probe error even when some samples came through, instead
+  of being silently reported as success.
+- **Round-weighted rollup summaries.** The long-range summary stats (median/loss averages) now
+  weight each rollup bucket by the number of rounds it aggregates, so a sparse bucket no longer
+  counts the same as a full one.
 - **Strict alert numeric grammar.** Matcher and pattern thresholds are now validated at parse
   time instead of silently misbehaving: matcher args reject unknown keys (a typo no longer
   vanishes), duplicates, and non-finite values; `x` must be a whole number in `[1, 10000]`

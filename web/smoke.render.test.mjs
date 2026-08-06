@@ -185,5 +185,22 @@ check('short data occupies only its true fraction of a longer window', () => {
   assert.ok(minX >= GEO.mL + GEO.pw * 0.9, `all data sits in the right 10% (min X ${minX})`);
 });
 
+// seriesStats must weight each rollup bucket by the number of rounds it aggregates, so
+// a sparse bucket (few rounds) doesn't count the same as a full one. A 60-round 0%-loss
+// bucket and a 2-round 100%-loss bucket average to ~3.2% loss, not the unweighted 50%.
+check('seriesStats weights loss/median by each bucket round count', () => {
+  const s = Smoke.fromApiRollup({
+    resolution: '1h',
+    buckets: [
+      { bucket: '2026-08-06T00:00:00Z', median_avg_ms: 10, median_min_ms: 8, median_max_ms: 12, loss_pct: 0, rounds: 60 },
+      { bucket: '2026-08-06T01:00:00Z', median_avg_ms: 20, median_min_ms: 18, median_max_ms: 22, loss_pct: 100, rounds: 2 },
+    ],
+  });
+  const st = Smoke.seriesStats(s);
+  assert.ok(st.lossAvg < 5, `loss avg ${st.lossAvg} should be round-weighted (~3.2%), not the unweighted 50%`);
+  // median avg likewise weighted: (10*60 + 20*2)/62 ≈ 10.3, not the unweighted 15.
+  assert.ok(st.medAvg < 12, `median avg ${st.medAvg} should be round-weighted (~10.3), not the unweighted 15`);
+});
+
 if (failed) { console.error(`\n${failed} test(s) failed`); process.exit(1); }
 console.log('\nall smoke.render tests passed');

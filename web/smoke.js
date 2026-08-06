@@ -71,16 +71,20 @@ window.Smoke = (function () {
   function bucketPings(b) { return b.pings || b.centered.length; }
 
   function seriesStats(s) {
-    let msum = 0, mmax = 0, mn = 0, lsum = 0, lcnt = 0;
+    // Weight each bucket by the number of rounds it aggregates (1 for a raw round,
+    // `rounds` for a rollup bucket), so a sparse bucket doesn't count the same as a
+    // full one in the loss/median averages.
+    let mwsum = 0, mmax = 0, mw = 0, lsum = 0, wsum = 0;
     for (const b of s.buckets) {
-      if (!isNaN(b.median)) { msum += b.median; mmax = Math.max(mmax, b.median); mn++; }
+      const w = b.rounds || 1;
+      if (!isNaN(b.median)) { mwsum += b.median * w; mmax = Math.max(mmax, b.median); mw += w; }
       const bn = bucketPings(b);
-      if (bn > 0) { lsum += b.lost / bn; lcnt++; }
+      if (bn > 0) { lsum += (b.lost / bn) * w; wsum += w; }
     }
     return {
-      medAvg: mn ? msum / mn : NaN,
-      medMax: mn ? mmax : NaN, // NaN (not 0) when every bucket was fully lost
-      lossAvg: lcnt ? (lsum / lcnt) * 100 : 0,
+      medAvg: mw ? mwsum / mw : NaN,
+      medMax: mw ? mmax : NaN, // NaN (not 0) when every bucket was fully lost
+      lossAvg: wsum ? (lsum / wsum) * 100 : 0,
     };
   }
 
@@ -265,6 +269,7 @@ window.Smoke = (function () {
         lost: (x.loss_pct || 0) / 50, // 0..100% -> 0..2 lost of N=2
         median: x.median_avg_ms == null ? NaN : x.median_avg_ms,
         pings: 2, // min→max band; loss expressed as "lost of 2"
+        rounds: x.rounds || 1, // raw rounds this bucket aggregates — weights seriesStats
         t: x.bucket == null ? NaN : Date.parse(x.bucket), // wall-clock ms for time-scaled X + gap breaks
       };
     });
