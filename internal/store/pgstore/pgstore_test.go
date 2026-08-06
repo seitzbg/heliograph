@@ -410,3 +410,112 @@ func TestPGStoreBulkReads(t *testing.T) {
 		t.Errorf("AvailabilityAll[a] != Availability(a)")
 	}
 }
+
+// #3: a windowed single-target read is capped at maxRangeRounds, keeping the NEWEST
+// rounds (still returned oldest->newest). The cap is far above the documented 30h view
+// at the 1s min step; here it is lowered so a handful of rows exercises the truncation.
+func TestPGStoreHistorySinceCap(t *testing.T) {
+	dsn := os.Getenv("SMOKE_TEST_DSN")
+	if dsn == "" {
+		t.Skip("set SMOKE_TEST_DSN to run the TimescaleDB integration test")
+	}
+	ctx := context.Background()
+	s, err := New(ctx, dsn, 100, func(e error) { t.Errorf("store error: %v", e) })
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.pool.Exec(ctx, "TRUNCATE samples"); err != nil {
+		t.Fatalf("truncate: %v", err)
+	}
+	old := maxRangeRounds
+	maxRangeRounds = 5
+	defer func() { maxRangeRounds = old }()
+
+	base := time.Unix(1_700_400_000, 0).UTC()
+	const N = 12
+	var outs []scheduler.Outcome
+	for i := 0; i < N; i++ {
+		outs = append(outs, scheduler.Outcome{
+			Target: probe.Target{Name: "t", Host: "h"}, ProbeName: "FPing",
+			When: base.Add(time.Duration(i) * time.Minute), Computed: sample.Compute(4, []float64{0.01, 0.02, 0.03, 0.04}),
+		})
+	}
+	s.Add(outs)
+
+	got, err := s.HistorySince(ctx, "t", base)
+	if err != nil {
+		t.Fatalf("HistorySince: %v", err)
+	}
+	if len(got) != 5 {
+		t.Fatalf("HistorySince len = %d, want 5 (capped at maxRangeRounds)", len(got))
+	}
+	// the newest 5 rounds (7..11), still oldest->newest
+	if !got[0].When.Equal(base.Add(7*time.Minute)) || !got[4].When.Equal(base.Add(11*time.Minute)) {
+		t.Errorf("cap kept %v..%v, want rounds 7..11 (the newest 5)", got[0].When, got[4].When)
+	}
+}
+
+// #8: the bulk grid read caps each target to its newest maxSeriesAllPerTarget rounds,
+// so no target is ever dropped whole (as a bare LIMIT would); rounds stay strictly after
+// the cutoff and oldest->newest.
+func TestPGStoreSeriesAllPerTargetCap(t *testing.T) {
+	dsn := os.Getenv("SMOKE_TEST_DSN")
+	if dsn == "" {
+		t.Skip("set SMOKE_TEST_DSN to run the TimescaleDB integration test")
+	}
+	ctx := context.Background()
+	s, err := New(ctx, dsn, 100, func(e error) { t.Errorf("store error: %v", e) })
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.pool.Exec(ctx, "TRUNCATE samples"); err != nil {
+		t.Fatalf("truncate: %v", err)
+	}
+	old := maxSeriesAllPerTarget
+	maxSeriesAllPerTarget = 3
+	defer func() { maxSeriesAllPerTarget = old }()
+
+	base := time.Unix(1_700_500_000, 0).UTC()
+	mk := func(name string, i int) scheduler.Outcome {
+		return scheduler.Outcome{
+			Target: probe.Target{Name: name, Host: "h"}, ProbeName: "FPing",
+			When: base.Add(time.Duration(i) * time.Minute), Computed: sample.Compute(4, []float64{0.01, 0.02, 0.03, 0.04}),
+		}
+	}
+	var outs []scheduler.Outcome
+	for i := 0; i < 5; i++ { // target a: 5 rounds -> capped to 3
+		outs = append(outs, mk("a", i))
+	}
+	for i := 0; i < 2; i++ { // target b: 2 rounds -> under the cap, all kept
+		outs = append(outs, mk("b", i))
+	}
+	s.Add(outs)
+
+	all, err := s.SeriesAll(ctx, base.Add(-time.Second)) // everything is after this
+	if err != nil {
+		t.Fatalf("SeriesAll: %v", err)
+	}
+	if len(all["a"]) != 3 {
+		t.Fatalf("a rounds = %d, want 3 (capped)", len(all["a"]))
+	}
+	if len(all["b"]) != 2 {
+		t.Fatalf("b rounds = %d, want 2 (under cap, kept)", len(all["b"]))
+	}
+	// a kept the newest 3 (rounds 2,3,4), oldest->newest
+	if !all["a"][0].When.Equal(base.Add(2*time.Minute)) || !all["a"][2].When.Equal(base.Add(4*time.Minute)) {
+		t.Errorf("a cap kept %v..%v, want rounds 2..4 (newest 3)", all["a"][0].When, all["a"][2].When)
+	}
+	// strictly-after cutoff: a cutoff at round 2's ts drops a's 0..2 and all of b.
+	after, err := s.SeriesAll(ctx, base.Add(2*time.Minute))
+	if err != nil {
+		t.Fatalf("SeriesAll (cutoff): %v", err)
+	}
+	if len(after["a"]) != 2 {
+		t.Errorf("a after cutoff = %d, want 2 (rounds 3,4)", len(after["a"]))
+	}
+	if _, ok := after["b"]; ok {
+		t.Errorf("b should be absent after the cutoff (its newest round is at the cutoff)")
+	}
+}
