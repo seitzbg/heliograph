@@ -79,13 +79,15 @@ func main() {
 	fmt.Printf("smoked %s — registered probe plugins: %s\n\n", version, strings.Join(probe.Registered(), ", "))
 
 	notifiers := map[string]alert.Notifier{"log": alert.LogNotifier{W: os.Stdout}}
+	var webhookN *alert.WebhookNotifier // concrete ref for /metrics + shutdown drain
 	if *webhook != "" {
 		// Validate the URL up front so a typo is a clear startup error, not a stream
 		// of per-event delivery failures at runtime.
 		if u, err := url.Parse(*webhook); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 			fatal("invalid -webhook URL", fmt.Errorf("must be an absolute http(s) URL, got %q", *webhook))
 		}
-		notifiers["webhook"] = alert.WebhookNotifier{URL: *webhook}
+		webhookN = alert.NewWebhookNotifier(*webhook, nil) // bounded queue + retry/backoff + drain
+		notifiers["webhook"] = webhookN
 	}
 
 	// The runtime (jobs + alert engine) is built from config (or the demo set) and
@@ -195,6 +197,11 @@ func main() {
 	if *serve && ctx.Err() == nil {
 		srv := api.New(st, *webdir)
 		srv.Rounds = roundStats
+		// Expose the webhook delivery counters (queued/delivered/retried/dropped/failed)
+		// on /metrics so delivery health is scrapeable, not merely logged.
+		if webhookN != nil {
+			srv.ExtraMetrics = webhookN.WriteMetrics
+		}
 		// Live views report only currently-configured targets, so a target removed or
 		// renamed on a SIGHUP reload stops showing as healthy (its history stays in
 		// the store but ages out via retention / the bounded cap).
@@ -286,6 +293,13 @@ func main() {
 			fatal("http server failed", err)
 		}
 		<-pollDone // wait for the polling goroutine to drain in-flight probes before exiting
+		// The poll goroutine has stopped producing events, so no more Notify calls can
+		// race the close; drain any queued webhook deliveries within a deadline.
+		if webhookN != nil {
+			drainCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			webhookN.Close(drainCtx)
+			cancel()
+		}
 		slog.Info("shutdown complete")
 		fmt.Println("shutdown complete")
 	}

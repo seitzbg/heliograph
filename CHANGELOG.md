@@ -44,6 +44,13 @@ breaking changes.
   client already holds, so a refresh is one request + one query regardless of target count and
   transfers just the new rounds — not the whole window each tick (the last piece of the
   thousands-of-targets goal; the drill-down still uses single `/api/series`).
+- **Durable webhook delivery.** Webhook notifications now go through a bounded worker pool with
+  retry/backoff instead of one fire-and-forget goroutine per event. A full queue drops the
+  newest event and counts it (rather than spawning unbounded goroutines); each delivery carries
+  a stable `X-Idempotency-Key` so the receiver can dedupe retries and level-triggered repeats;
+  failed deliveries are retried with exponential backoff; and shutdown drains the queue within a
+  deadline. Delivery counters (`smokeping_webhook_queued_total`, `_delivered_total`,
+  `_retried_total`, `_dropped_total`, `_failed_total`, `_queue_depth`) are exposed on `/metrics`.
 - **Per-probe value validation.** Probe params are validated at config load — bool/int/port
   kinds, enums (e.g. DNS `protocol`), and a valid-record-type check for DNS `recordtype` — so a
   bad value is a loud config error instead of a silent runtime fallback; the published JSON

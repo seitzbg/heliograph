@@ -1,11 +1,14 @@
 package alert
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -22,7 +25,8 @@ func TestWebhookFullLossSendsValidBody(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	n := WebhookNotifier{URL: srv.URL}
+	n := NewWebhookNotifier(srv.URL, nil)
+	defer n.Close(context.Background())
 	n.Notify(Event{Target: "t", Alert: "loss", Firing: true, LossPct: 100, RTTms: math.NaN(), When: time.Unix(1_700_000_000, 0)})
 
 	select {
@@ -42,6 +46,111 @@ func TestWebhookFullLossSendsValidBody(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("webhook did not deliver within 3s")
+	}
+}
+
+// A failing endpoint that recovers must be retried, and every attempt for the same
+// event must carry the same idempotency key so the receiver can dedupe.
+func TestWebhookRetriesThenDelivers(t *testing.T) {
+	var attempts atomic.Int32
+	var lastIdem atomic.Value
+	delivered := make(chan struct{}, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		lastIdem.Store(r.Header.Get("X-Idempotency-Key"))
+		if attempts.Add(1) < 3 { // fail the first two attempts, then succeed
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		select {
+		case delivered <- struct{}{}:
+		default:
+		}
+	}))
+	defer srv.Close()
+
+	n := NewWebhookNotifierConfig(srv.URL, nil, WebhookConfig{Workers: 1, QueueSize: 8, MaxAttempts: 5, BaseBackoff: time.Millisecond, Timeout: time.Second})
+	defer n.Close(context.Background())
+	n.Notify(Event{Target: "t", Alert: "loss", Firing: true, RTTms: 1, When: time.Unix(1_700_000_000, 0)})
+
+	select {
+	case <-delivered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("webhook never delivered after retries")
+	}
+	if got := attempts.Load(); got != 3 {
+		t.Errorf("attempts = %d, want 3 (two failures then success)", got)
+	}
+	if key, _ := lastIdem.Load().(string); key != "t|loss|firing|1700000000000000000" {
+		t.Errorf("idempotency key = %q, want the stable target|alert|status|when key", key)
+	}
+}
+
+// A full queue must drop the newest event without blocking Notify (bounding both
+// memory and goroutines), and the drop must be counted, not silent.
+func TestWebhookDropsWhenQueueFull(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { <-release }))
+	defer srv.Close()
+
+	n := NewWebhookNotifierConfig(srv.URL, nil, WebhookConfig{Workers: 1, QueueSize: 1, MaxAttempts: 1, BaseBackoff: time.Millisecond, Timeout: 5 * time.Second})
+	defer n.Close(context.Background())
+	defer close(release) // LIFO: unblock the worker before Close drains
+
+	done := make(chan struct{})
+	go func() {
+		for i := 0; i < 50; i++ { // 1 in flight + 1 queued; the rest must be dropped
+			n.Notify(Event{Target: "t", Alert: "loss", Firing: true, RTTms: 1, When: time.Unix(int64(1_700_000_000+i), 0)})
+		}
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Notify blocked on a full queue; it must drop, non-blocking")
+	}
+	if st := n.Stats(); st.Dropped == 0 {
+		t.Errorf("expected dropped events on a full queue, got dropped=%d", st.Dropped)
+	}
+}
+
+// Close must drain the queued deliveries (best-effort) within its deadline.
+func TestWebhookDrainsOnClose(t *testing.T) {
+	var got atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { got.Add(1) }))
+	defer srv.Close()
+
+	n := NewWebhookNotifierConfig(srv.URL, nil, WebhookConfig{Workers: 2, QueueSize: 16, MaxAttempts: 2, BaseBackoff: time.Millisecond, Timeout: time.Second})
+	for i := 0; i < 5; i++ {
+		n.Notify(Event{Target: "t", Alert: "loss", Firing: true, RTTms: 1, When: time.Unix(int64(1_700_000_000+i), 0)})
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	n.Close(ctx)
+	if got.Load() != 5 {
+		t.Errorf("drained %d of 5 queued deliveries", got.Load())
+	}
+}
+
+// WriteMetrics must expose the delivery counters so drops/failures are scrapeable.
+func TestWebhookWriteMetrics(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	defer srv.Close()
+
+	n := NewWebhookNotifierConfig(srv.URL, nil, WebhookConfig{Workers: 1, QueueSize: 8, MaxAttempts: 1, BaseBackoff: time.Millisecond, Timeout: time.Second})
+	n.Notify(Event{Target: "t", Alert: "loss", Firing: true, RTTms: 1, When: time.Unix(1_700_000_000, 0)})
+	n.Close(context.Background())
+	var b strings.Builder
+	n.WriteMetrics(&b)
+	out := b.String()
+	for _, want := range []string{
+		"smokeping_webhook_queued_total", "smokeping_webhook_delivered_total",
+		"smokeping_webhook_retried_total", "smokeping_webhook_dropped_total",
+		"smokeping_webhook_failed_total", "smokeping_webhook_queue_depth",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("WriteMetrics missing %q\n--- got ---\n%s", want, out)
+		}
 	}
 }
 
