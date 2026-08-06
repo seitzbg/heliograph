@@ -41,13 +41,14 @@ frontend:
 
 # Dependency vulnerability scan. Needs network to fetch the tool + the vuln DB, so it
 # is allowed to fail (informative, non-blocking) rather than red a pipeline on a runner
-# without outbound access.
+# without outbound access. The tool is pinned (not @latest) so the scan is reproducible
+# — a given commit always runs against the same govulncheck build.
 govulncheck:
   extends: .go-base
   stage: test
   allow_failure: true
   script:
-    - go install golang.org/x/vuln/cmd/govulncheck@latest
+    - go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
     - "$GOPATH/bin/govulncheck ./..."
 
 # pgstore integration test is skipped unless SMOKE_TEST_DSN is set, so no DB service is

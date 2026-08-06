@@ -10,27 +10,17 @@ import (
 // count) that complements the per-target series. The collector loop calls
 // Observe after each round; the /metrics handler renders the latest snapshot.
 // The zero value is ready to use and safe for concurrent access.
+//
+// Reads are one coherent snapshot published behind a single atomic pointer, so a
+// scrape never mixes fields from two different rounds. Overlapping batches can finish
+// out of start order, so an older completion increments the total but does not rewind
+// the latest-round fields (CODE_REVIEW round-completion/snapshot consistency).
 type RoundStats struct {
-	total       atomic.Int64 // rounds completed since start (a counter)
-	durationNs  atomic.Int64 // wall-clock of the most recent round
-	targetsLast atomic.Int64 // jobs run in the most recent round
-	errsLast    atomic.Int64 // jobs that errored in the most recent round
-	lastUnixSec atomic.Int64 // start time of the most recent round (unix seconds)
+	total atomic.Int64                  // rounds completed since start (a monotonic counter)
+	last  atomic.Pointer[roundSnapshot] // the most recent round's fields, as one coherent set
 }
 
-// Observe records one completed round.
-func (rs *RoundStats) Observe(d time.Duration, targets, errs int, when time.Time) {
-	if rs == nil {
-		return
-	}
-	rs.total.Add(1)
-	rs.durationNs.Store(int64(d))
-	rs.targetsLast.Store(int64(targets))
-	rs.errsLast.Store(int64(errs))
-	rs.lastUnixSec.Store(when.Unix())
-}
-
-// roundSnapshot is an immutable read of the counters for rendering.
+// roundSnapshot is an immutable, coherent read of the counters for rendering.
 type roundSnapshot struct {
 	total    int64
 	duration time.Duration
@@ -39,15 +29,44 @@ type roundSnapshot struct {
 	lastUnix int64
 }
 
+// Observe records one completed round. The total always increments; the latest-round
+// fields are replaced only when this round's start is at or after the currently
+// published one, so a batch that finishes after a newer one (out-of-order completion)
+// cannot rewind the reported round.
+func (rs *RoundStats) Observe(d time.Duration, targets, errs int, when time.Time) {
+	if rs == nil {
+		return
+	}
+	total := rs.total.Add(1)
+	whenUnix := when.Unix()
+	next := &roundSnapshot{
+		total:    total,
+		duration: d,
+		targets:  int64(targets),
+		errs:     int64(errs),
+		lastUnix: whenUnix,
+	}
+	for {
+		cur := rs.last.Load()
+		if cur != nil && whenUnix < cur.lastUnix {
+			return // older completion: counts toward total (already added), publishes nothing
+		}
+		if rs.last.CompareAndSwap(cur, next) {
+			return
+		}
+		// lost the race with a concurrent Observe; reload cur and retry.
+	}
+}
+
 func (rs *RoundStats) snapshot() (roundSnapshot, bool) {
-	if rs == nil || rs.total.Load() == 0 {
+	if rs == nil {
+		return roundSnapshot{}, false
+	}
+	last := rs.last.Load()
+	if last == nil {
 		return roundSnapshot{}, false // no round has completed yet
 	}
-	return roundSnapshot{
-		total:    rs.total.Load(),
-		duration: time.Duration(rs.durationNs.Load()),
-		targets:  rs.targetsLast.Load(),
-		errs:     rs.errsLast.Load(),
-		lastUnix: rs.lastUnixSec.Load(),
-	}, true
+	snap := *last
+	snap.total = rs.total.Load() // authoritative count, even if the latest publish was an older round
+	return snap, true
 }
