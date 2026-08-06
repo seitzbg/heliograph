@@ -512,10 +512,42 @@ var _ interface {
 	History(string) []scheduler.Outcome
 } = (*PGStore)(nil)
 
+// SeriesAll returns every target's rounds strictly after cutoff in one query,
+// grouped by target and oldest->newest (ts ascending) — the bulk, incremental read
+// behind the Graphs grid: one query per refresh, and with cutoff = the client's
+// watermark it returns only rounds newer than that instead of the whole window each
+// tick. Targets with no rounds after cutoff are absent from the map. A query/scan
+// error is returned (not swallowed) so the API answers 503, not a false-empty grid.
+func (s *PGStore) SeriesAll(ctx context.Context, cutoff time.Time) (map[string][]scheduler.Outcome, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT ts, target, probe, host, pings, loss, median_seconds, rtts_seconds, err, duration_ms
+		   FROM samples WHERE ts > $1 ORDER BY target, ts`, cutoff.UTC())
+	if err != nil {
+		s.onErr(err)
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string][]scheduler.Outcome{}
+	for rows.Next() {
+		o, err := scanOutcome(rows)
+		if err != nil {
+			s.onErr(err)
+			return nil, err
+		}
+		out[o.Target.Name] = append(out[o.Target.Name], o)
+	}
+	if err := rows.Err(); err != nil {
+		s.onErr(err)
+		return nil, err
+	}
+	return out, nil
+}
+
 var _ interface {
 	store.Rollupper
 	store.Availabler
 	store.RangeHistorier
 	store.LatestAller
 	store.AvailabilityAller
+	store.SeriesAller
 } = (*PGStore)(nil)

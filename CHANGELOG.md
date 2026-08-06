@@ -38,6 +38,12 @@ breaking changes.
   `/api/targets`, `/api/charts`, `/metrics`, and `/api/sla` to one query each instead of one
   per target; the long-range rollup is windowed server-side rather than fetched whole and
   sliced in the browser.
+- **Bulk, incremental Graphs grid.** The per-target smoke grid now refreshes through a single
+  `GET /api/series/all?window=&since=` (store `SeriesAll`) instead of one `/api/series` per
+  target every 5s. With a `since` watermark the server returns only rounds newer than the
+  client already holds, so a refresh is one request + one query regardless of target count and
+  transfers just the new rounds — not the whole window each tick (the last piece of the
+  thousands-of-targets goal; the drill-down still uses single `/api/series`).
 - **Per-probe value validation.** Probe params are validated at config load — bool/int/port
   kinds, enums (e.g. DNS `protocol`), and a valid-record-type check for DNS `recordtype` — so a
   bad value is a loud config error instead of a silent runtime fallback; the published JSON

@@ -138,3 +138,49 @@ func TestMemStoreAvailabilityAll(t *testing.T) {
 		t.Errorf("AvailabilityAll[a] != Availability(a)")
 	}
 }
+
+// TestMemStoreSeriesAll covers the bulk incremental read: every target's rounds
+// strictly after the cutoff, grouped by target, oldest->newest; a round exactly at
+// the cutoff is excluded (so an incremental fetch never re-sends its watermark round),
+// and a target with no rounds after the cutoff is omitted entirely.
+func TestMemStoreSeriesAll(t *testing.T) {
+	t0 := time.Unix(1_700_000_000, 0)
+	s := NewMem(100)
+	add := func(name string, off time.Duration) {
+		s.Add([]scheduler.Outcome{{Target: probe.Target{Name: name}, When: t0.Add(off), Computed: sample.Compute(2, []float64{.01, .02})}})
+	}
+	add("a", 0)
+	add("a", 1*time.Minute)
+	add("a", 2*time.Minute)
+	add("b", 1*time.Minute)
+	add("b", 3*time.Minute)
+
+	// cutoff at t0+1m: strictly-after keeps a@2m and b@3m only.
+	got, err := s.SeriesAll(context.Background(), t0.Add(1*time.Minute))
+	if err != nil {
+		t.Fatalf("SeriesAll: %v", err)
+	}
+	if len(got["a"]) != 1 || !got["a"][0].When.Equal(t0.Add(2*time.Minute)) {
+		t.Errorf("a rounds len=%d, want [a@2m]", len(got["a"]))
+	}
+	if len(got["b"]) != 1 || !got["b"][0].When.Equal(t0.Add(3*time.Minute)) {
+		t.Errorf("b rounds len=%d, want [b@3m]", len(got["b"]))
+	}
+
+	// zero cutoff -> everything, oldest->newest per target.
+	all, _ := s.SeriesAll(context.Background(), time.Time{})
+	if len(all["a"]) != 3 {
+		t.Fatalf("a full len = %d, want 3", len(all["a"]))
+	}
+	for i := 1; i < len(all["a"]); i++ {
+		if all["a"][i].When.Before(all["a"][i-1].When) {
+			t.Errorf("a not oldest->newest")
+		}
+	}
+
+	// cutoff past everything -> no targets in the map.
+	none, _ := s.SeriesAll(context.Background(), t0.Add(1*time.Hour))
+	if len(none) != 0 {
+		t.Errorf("past-cutoff map len = %d, want 0", len(none))
+	}
+}

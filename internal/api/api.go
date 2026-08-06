@@ -84,6 +84,7 @@ func (srv *Server) Routes() *http.ServeMux {
 	mux.HandleFunc("GET /api/sla", srv.sla)
 	mux.HandleFunc("GET /api/targets", srv.targets)
 	mux.HandleFunc("GET /api/series", srv.series)
+	mux.HandleFunc("GET /api/series/all", srv.seriesAll)
 	mux.HandleFunc("GET /api/rollup", srv.rollup)
 	mux.HandleFunc("GET /metrics", srv.metrics)
 	if srv.webDir != "" {
@@ -456,6 +457,13 @@ func (srv *Server) series(w http.ResponseWriter, r *http.Request) {
 	} else {
 		hist = srv.store.History(key)
 	}
+	writeJSON(w, map[string]any{"target": key, "rounds": roundsDTO(hist)})
+}
+
+// roundsDTO converts a target's rounds (oldest->newest) into the wire shape shared by
+// /api/series and /api/series/all: each round carries its wall-clock timestamp `t`,
+// loss/pings, and the centered RTTs (null in lost slots) ready for the smoke bands.
+func roundsDTO(hist []scheduler.Outcome) []roundDTO {
 	rounds := make([]roundDTO, 0, len(hist))
 	for _, o := range hist {
 		rd := roundDTO{
@@ -477,7 +485,67 @@ func (srv *Server) series(w http.ResponseWriter, r *http.Request) {
 		}
 		rounds = append(rounds, rd)
 	}
-	writeJSON(w, map[string]any{"target": key, "rounds": rounds})
+	return rounds
+}
+
+// maxGridWindow bounds the bulk grid endpoint's lookback. The Graphs grid only ever
+// asks for the recent window (3h); this is generous headroom while preventing an
+// all-targets full-table scan from a hand-crafted request. Long ranges use /api/rollup.
+const maxGridWindow = 48 * time.Hour
+
+// seriesAll returns recent per-round samples for every target in one response — the
+// bulk, incremental read behind the Graphs grid. `window` (required, a Go duration)
+// bounds the first fetch; `since` (unix ms) is the client's watermark, so a refresh
+// transfers only rounds newer than it instead of the whole window every tick. The
+// effective cutoff is max(now-window, since). One store query serves all targets,
+// replacing the previous one-request-and-query-per-target fan-out (CODE_REVIEW #2).
+func (srv *Server) seriesAll(w http.ResponseWriter, r *http.Request) {
+	v := r.URL.Query().Get("window")
+	if v == "" {
+		http.Error(w, `{"error":"window is required, e.g. 3h"}`, http.StatusBadRequest)
+		return
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		http.Error(w, `{"error":"window must be a positive Go duration, e.g. 3h"}`, http.StatusBadRequest)
+		return
+	}
+	if d > maxGridWindow {
+		http.Error(w, `{"error":"window too large for the bulk grid endpoint; use /api/rollup for long ranges"}`, http.StatusBadRequest)
+		return
+	}
+	sa, ok := srv.store.(store.SeriesAller)
+	if !ok {
+		http.Error(w, `{"error":"bulk series not supported by this store"}`, http.StatusNotImplemented)
+		return
+	}
+	// cutoff = max(now-window, since): never scan older than the window, and on an
+	// incremental refresh the watermark dominates so only new rounds come back.
+	cutoff := time.Now().Add(-d)
+	if sv := r.URL.Query().Get("since"); sv != "" {
+		ms, err := strconv.ParseInt(sv, 10, 64)
+		if err != nil {
+			http.Error(w, `{"error":"since must be a unix-millisecond integer"}`, http.StatusBadRequest)
+			return
+		}
+		if st := time.UnixMilli(ms); st.After(cutoff) {
+			cutoff = st
+		}
+	}
+	all, err := sa.SeriesAll(r.Context(), cutoff)
+	if err != nil {
+		slog.Error("series/all query failed", "err", err)
+		http.Error(w, `{"error":"series unavailable"}`, http.StatusServiceUnavailable)
+		return
+	}
+	targets := make(map[string]any, len(all))
+	for name, hist := range all {
+		targets[name] = map[string]any{"rounds": roundsDTO(hist)}
+	}
+	writeJSON(w, map[string]any{
+		"cutoff":  cutoff.UTC().Format("2006-01-02T15:04:05Z"),
+		"targets": targets,
+	})
 }
 
 type rollupDTO struct {

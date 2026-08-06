@@ -38,7 +38,23 @@
     return { view: 'overview' };
   }
 
-  window.Dash = { RANGES, RANGE_ORDER, parseRoute };
+  // Fold the rounds newer than the watermark (incoming) into a panel's cached series
+  // (prev), drop buckets older than cutoffMs (the window floor), keep oldest->newest.
+  // Powers the incremental Graphs grid (#2): each refresh merges only the new rounds
+  // instead of re-fetching the whole 3h window. Dedupes the boundary round defensively
+  // (the server already returns strictly-newer rounds).
+  function mergeSeries(prev, incoming, cutoffMs) {
+    const prevB = (prev && prev.buckets) || [];
+    const lastT = prevB.length ? prevB[prevB.length - 1].t : -Infinity;
+    const fresh = ((incoming && incoming.buckets) || []).filter((b) => b.t > lastT);
+    let buckets = prevB.concat(fresh);
+    if (cutoffMs != null) buckets = buckets.filter((b) => !(b.t < cutoffMs)); // keep b.t >= cutoff (NaN t kept)
+    let N = 0;
+    for (const b of buckets) N = Math.max(N, b.pings || (b.centered ? b.centered.length : 0));
+    return { buckets, N };
+  }
+
+  window.Dash = { RANGES, RANGE_ORDER, parseRoute, mergeSeries };
 
   // ---------------------------------------------------------------- init (DOM) --
   function init() {
@@ -151,7 +167,23 @@
       p = { el, canvas: el.querySelector('canvas'), meta: el.querySelector('.meta'), series: null };
       panels.set(t.name, p); return p;
     }
-    let gridBusy = false;
+    // One bulk, incremental read for the whole grid: /api/series/all returns every
+    // target's rounds newer than the watermark (or the full 3h window on the first
+    // tick, when sinceMs is null), so a refresh is one request + one store query
+    // regardless of target count — replacing the old one-fetch-per-target fan-out
+    // (CODE_REVIEW #2). Response: { cutoff, targets: { name: { rounds:[...] } } }.
+    async function fetchGridSeries(sinceMs) {
+      const since = sinceMs != null ? '&since=' + sinceMs : '';
+      const r = await fetch('/api/series/all?window=' + RANGES['3h'].window + since, { cache: 'no-store' });
+      if (!r.ok) return null;
+      return r.json();
+    }
+    function gridMeta(p, s) {
+      const st = Smoke.seriesStats(s); const lcls = st.lossAvg > 2 ? 'bad' : st.lossAvg > 0.5 ? 'warn' : '';
+      p.meta.innerHTML = '<span class="stat"><span class="k">median</span><span class="v">' + fmt(st.medAvg, 1) + ' ms</span></span>' +
+        '<span class="stat"><span class="k">loss</span><span class="v ' + lcls + '">' + fmt(st.lossAvg, 2) + ' %</span></span>';
+    }
+    let gridBusy = false, gridWatermark = null; // watermark = newest round ms the client holds
     async function refreshGrid() {
       if (gridBusy) return; gridBusy = true;
       try {
@@ -166,18 +198,32 @@
         for (const [name, p] of panels) {
           if (!live.has(name)) { p.el.remove(); panels.delete(name); }
         }
+        const firstLoad = gridWatermark == null;
+        const cutoffMs = Date.now() - RANGES['3h'].windowMs;
+        let bulk = null;
+        try { bulk = await fetchGridSeries(gridWatermark); } catch (e) { /* transient */ }
+        let maxT = gridWatermark || 0;
         await Promise.all(targets.map(async (t) => {
           const p = ensurePanel(t);
-          try {
-            const s = await fetchRange(t.name, '3h');
-            if (!s || s.unsupported) return;
-            p.series = s;
-            const st = Smoke.seriesStats(s); const lcls = st.lossAvg > 2 ? 'bad' : st.lossAvg > 0.5 ? 'warn' : '';
-            p.meta.innerHTML = '<span class="stat"><span class="k">median</span><span class="v">' + fmt(st.medAvg, 1) + ' ms</span></span>' +
-              '<span class="stat"><span class="k">loss</span><span class="v ' + lcls + '">' + fmt(st.lossAvg, 2) + ' %</span></span>';
-            renderInto(p.canvas, s, RANGES['3h'], 170);
-          } catch (e) { /* transient */ }
+          let incoming = null;
+          if (!firstLoad && !p.series) {
+            // Panel added after the first bulk load: the incremental read only carries
+            // rounds newer than the watermark, so backfill its full window once.
+            try { const s = await fetchRange(t.name, '3h'); if (s && !s.unsupported) incoming = s; } catch (e) { /* transient */ }
+          } else {
+            const raw = bulk && bulk.targets && bulk.targets[t.name];
+            if (raw) incoming = Smoke.fromApiSeries(raw);
+          }
+          if (incoming) {
+            for (const b of incoming.buckets) if (b.t > maxT) maxT = b.t;
+            p.series = mergeSeries(p.series, incoming, cutoffMs);
+          } else if (p.series) {
+            p.series = mergeSeries(p.series, null, cutoffMs); // no new rounds: still age out old ones
+          }
+          if (p.series && p.series.buckets.length) gridMeta(p, p.series);
+          renderInto(p.canvas, p.series, RANGES['3h'], 170);
         }));
+        if (maxT > 0) gridWatermark = maxT;
       } finally { gridBusy = false; }
     }
 

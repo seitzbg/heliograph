@@ -56,5 +56,25 @@ check('parseRoute: does not double-decode the target name', () => {
   assert.deepEqual(D.parseRoute('#target=CPU%252099%2525'), { view: 'stack', name: 'CPU%2099%25' });
 });
 
+// mergeSeries powers the incremental Graphs grid (#2): it folds the rounds newer than
+// the watermark into the panel's cached series, drops rounds older than the window,
+// and keeps oldest->newest — so a refresh transfers only new rounds, not the whole 3h.
+const bkt = (t, med) => ({ t, median: med == null ? t / 1000 : med, centered: [1], samples: [1], lost: 0, pings: 1 });
+check('mergeSeries appends only newer rounds, trims to the cutoff, dedupes the boundary', () => {
+  const prev = { buckets: [bkt(1000), bkt(2000), bkt(3000)], N: 1 };
+  const incoming = { buckets: [bkt(3000), bkt(4000), bkt(5000)], N: 1 }; // 3000 overlaps the boundary
+  const merged = D.mergeSeries(prev, incoming, 2000); // cutoff drops t<2000
+  assert.deepEqual(merged.buckets.map((b) => b.t), [2000, 3000, 4000, 5000]);
+});
+check('mergeSeries from empty prev takes all incoming within the window', () => {
+  const merged = D.mergeSeries(null, { buckets: [bkt(100), bkt(200), bkt(300)], N: 1 }, 150);
+  assert.deepEqual(merged.buckets.map((b) => b.t), [200, 300]);
+});
+check('mergeSeries with no new rounds keeps the previous series (trimmed)', () => {
+  const prev = { buckets: [bkt(1000), bkt(2000), bkt(3000)], N: 1 };
+  const merged = D.mergeSeries(prev, { buckets: [], N: 0 }, 0);
+  assert.deepEqual(merged.buckets.map((b) => b.t), [1000, 2000, 3000]);
+});
+
 if (failed) { console.error(`\n${failed} test(s) failed`); process.exit(1); }
 console.log('\nall dashboard tests passed');
