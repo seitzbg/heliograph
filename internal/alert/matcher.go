@@ -266,8 +266,11 @@ func parseToken(field, tok string) (step, error) {
 	if len(tok) >= 2 && strings.HasPrefix(tok, "*") && strings.HasSuffix(tok, "*") {
 		inner := tok[1 : len(tok)-1]
 		n, err := strconv.Atoi(inner)
-		if err != nil || n < 0 {
-			return step{}, fmt.Errorf("pattern token %q: skip must be *N* with N a non-negative integer", tok)
+		// Bound N: a skip's allowance is added into Pattern.Length, which sizes the
+		// engine's per-target sample window — so a huge (typo or hostile) N would size a
+		// huge buffer. Cap it at the same maxAlertX the hysteresis matchers use.
+		if err != nil || n < 0 || n > maxAlertX {
+			return step{}, fmt.Errorf("pattern token %q: skip must be *N* with N in [0, %d]", tok, maxAlertX)
 		}
 		return step{kind: stepSkip, max: n}, nil
 	}

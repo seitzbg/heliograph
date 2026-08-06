@@ -177,6 +177,7 @@ func TestParsePatternRejectsBadTokens(t *testing.T) {
 		{"loss", "*,*3*", "only wildcards/skips -> matches anything"},
 		{"loss", "*x*", "non-integer skip count"},
 		{"loss", "*-3*", "negative skip count"},
+		{"loss", ">0%,*20000*,>0%", "skip count exceeds the max window"},
 		{"loss", "50%", "missing comparison operator"},
 		{"loss", "", "empty pattern"},
 		// Threshold value grammar (CODE_REVIEW #7).
@@ -193,8 +194,8 @@ func TestParsePatternRejectsBadTokens(t *testing.T) {
 			t.Errorf("ParsePattern(%q, %q): expected error (%s), got nil", c.field, c.src, c.why)
 		}
 	}
-	// Valid thresholds must still parse.
-	for _, c := range []struct{ field, src string }{{"loss", ">50%,<100%"}, {"rtt", ">200,<1000"}, {"loss", "==0%"}} {
+	// Valid thresholds must still parse — including a skip at the max allowance.
+	for _, c := range []struct{ field, src string }{{"loss", ">50%,<100%"}, {"rtt", ">200,<1000"}, {"loss", "==0%"}, {"loss", ">0%,*10000*,>0%"}} {
 		if _, err := ParsePattern(c.field, c.src); err != nil {
 			t.Errorf("ParsePattern(%q, %q): unexpected error %v", c.field, c.src, err)
 		}

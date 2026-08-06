@@ -77,11 +77,11 @@ Not planned for now; pick up only if multi-vantage measurement is requested.
 - ✅ **Per-target polling intervals** — while serving, each target fires on its own `step`
   via `scheduler.Planner` (phase-aligned per target); config/per-node `step` is honored. The
   `-rounds` foreground demo still runs synchronized rounds at `-step`.
-- 🚧 **Dashboard read amplification at scale** — mostly done ✅: bulk `LatestAll` +
-  `AvailabilityAll` collapse the aggregate endpoints to one query each, and the 10d/400d
-  rollup is now windowed server-side. Still ⬜: the raw per-target 3h `/api/series` grid
-  fan-out (one request + store query per target per tick) — needs a bulk/incremental
-  (`series?targets=&since=`) endpoint before large-N deployments.
+- ✅ **Dashboard read amplification at scale** — done: bulk `LatestAll` +
+  `AvailabilityAll` collapse the aggregate endpoints to one query each, the 10d/400d
+  rollup is windowed server-side, and the raw 3h grid now uses one bulk, incremental
+  `GET /api/series/all?window=&since=` (a single store query per tick, transferring only
+  rounds newer than the client watermark) instead of a request + query per target.
 - ✅ **SLA over long windows on pgstore** — done: a time-bounded store aggregate
   (`Availabler`/`AvailabilityAll`, and windowed `HistorySince`) computes availability over
   the full requested window, unbounded by the `History` cap, with per-target coverage.
