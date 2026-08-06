@@ -515,12 +515,23 @@ func (srv *Server) rollup(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"res must be 1h or 1d"}`, http.StatusBadRequest)
 		return
 	}
+	// Optional window (a Go duration, e.g. 240h for 10 days) bounds the buckets
+	// server-side, so a long-range view doesn't transfer the whole retained history.
+	var since time.Time
+	if v := r.URL.Query().Get("window"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d <= 0 {
+			http.Error(w, `{"error":"window must be a positive Go duration, e.g. 240h"}`, http.StatusBadRequest)
+			return
+		}
+		since = time.Now().Add(-d)
+	}
 	rp, ok := srv.store.(store.Rollupper)
 	if !ok {
 		http.Error(w, `{"error":"rollup requires the TimescaleDB store (run with -dsn -downsample)"}`, http.StatusNotImplemented)
 		return
 	}
-	points, err := rp.Rollup(r.Context(), key, res)
+	points, err := rp.Rollup(r.Context(), key, res, since)
 	if err != nil {
 		// A store that implements Rollupper but whose hourly aggregate was never
 		// created (a Compose DB started without -downsample) should look "hourly not

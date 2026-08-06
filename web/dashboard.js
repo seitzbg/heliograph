@@ -34,12 +34,7 @@
     return { view: 'overview' };
   }
 
-  // Keep only API rollup buckets at/after cutoffMs (a bucket carries an ISO `bucket`).
-  function sliceByCutoff(buckets, cutoffMs) {
-    return (buckets || []).filter((b) => { const t = Date.parse(b.bucket); return isNaN(t) ? true : t >= cutoffMs; });
-  }
-
-  window.Dash = { RANGES, RANGE_ORDER, parseRoute, sliceByCutoff };
+  window.Dash = { RANGES, RANGE_ORDER, parseRoute };
 
   // ---------------------------------------------------------------- init (DOM) --
   function init() {
@@ -48,7 +43,7 @@
     const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
     const enc = encodeURIComponent;
 
-    // ---- data fetch for one range (raw series or client-sliced rollup band) ----
+    // ---- data fetch for one range (raw series, or a server-windowed rollup band) ----
     async function fetchRange(name, key) {
       const R = RANGES[key];
       if (R.mode === 'raw') {
@@ -56,12 +51,12 @@
         if (!r.ok) return null;
         return Smoke.fromApiSeries(await r.json());
       }
-      const r = await fetch('/api/rollup?target=' + enc(name) + '&res=' + R.res, { cache: 'no-store' });
+      // Bound the rollup to the range window server-side (Go duration, e.g. 240h for
+      // 10 days) so we don't fetch the target's full retained history each refresh.
+      const r = await fetch('/api/rollup?target=' + enc(name) + '&res=' + R.res + '&window=' + (R.days * 24) + 'h', { cache: 'no-store' });
       if (r.status === 501) return { unsupported: true };
       if (!r.ok) return null;
-      const resp = await r.json();
-      resp.buckets = sliceByCutoff(resp.buckets || [], Date.now() - R.days * 86400000);
-      return Smoke.fromApiRollup(resp);
+      return Smoke.fromApiRollup(await r.json());
     }
 
     function drawNote(canvas, text, height) {

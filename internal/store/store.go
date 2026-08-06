@@ -42,9 +42,12 @@ type RollupPoint struct {
 // Rollupper is implemented by stores that support downsampled reads (the hourly
 // and daily continuous aggregates). resolution selects the tier: "1h" (default)
 // or "1d" — the daily tier feeds the long-range (400d) drill-down, where the
-// hourly tier would be too many buckets. The API exposes it at /api/rollup.
+// hourly tier would be too many buckets. since bounds the result to buckets at or
+// after it (a zero since returns the full history), so a 10d view fetches ~240
+// hourly buckets server-side rather than the whole retained history. The API
+// exposes it at /api/rollup.
 type Rollupper interface {
-	Rollup(ctx context.Context, target, resolution string) ([]RollupPoint, error)
+	Rollup(ctx context.Context, target, resolution string, since time.Time) ([]RollupPoint, error)
 }
 
 // AvailabilityStat is the aggregate a store computes over a time window: how many

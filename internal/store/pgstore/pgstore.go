@@ -309,7 +309,7 @@ func sortedNonNaN(c []float64) []float64 {
 // Rollup returns the downsampled buckets for a target from the continuous
 // aggregate selected by resolution ("1h" default, or "1d"). Requires
 // EnableDownsampling to have run.
-func (s *PGStore) Rollup(ctx context.Context, target, resolution string) ([]store.RollupPoint, error) {
+func (s *PGStore) Rollup(ctx context.Context, target, resolution string, since time.Time) ([]store.RollupPoint, error) {
 	// Map resolution to a fixed view name here — never interpolate caller input
 	// into the query. Unknown resolutions are a programming error (the API
 	// validates the param before reaching this point).
@@ -322,9 +322,17 @@ func (s *PGStore) Rollup(ctx context.Context, target, resolution string) ([]stor
 	default:
 		return nil, fmt.Errorf("pgstore: unknown rollup resolution %q", resolution)
 	}
-	rows, err := s.pool.Query(ctx,
-		`SELECT bucket, median_avg, median_min, median_max, loss_frac, rounds
-		   FROM `+view+` WHERE target=$1 ORDER BY bucket`, target)
+	// A zero `since` returns the full history; otherwise bound to buckets in-window
+	// so a long-range view doesn't transfer every retained bucket.
+	q := `SELECT bucket, median_avg, median_min, median_max, loss_frac, rounds
+	        FROM ` + view + ` WHERE target=$1`
+	args := []any{target}
+	if !since.IsZero() {
+		q += ` AND bucket >= $2`
+		args = append(args, since.UTC())
+	}
+	q += ` ORDER BY bucket`
+	rows, err := s.pool.Query(ctx, q, args...)
 	if err != nil {
 		// The continuous aggregate was never created (started without -downsample):
 		// report it as "not available" so the API answers 501, not a generic 503.
