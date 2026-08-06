@@ -1,6 +1,9 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -251,5 +254,140 @@ targets:
 	}
 	if len(mons) != 0 {
 		t.Errorf("bad leaf should be excluded, got %d monitors", len(mons))
+	}
+}
+
+// ---- config directory (default.yaml + conf.d concatenation) ----
+
+func writeConfigDir(t *testing.T, def string, frags map[string]string) string {
+	t.Helper()
+	dir := t.TempDir()
+	if def != "" {
+		if err := os.WriteFile(filepath.Join(dir, "default.yaml"), []byte(def), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(frags) > 0 {
+		cd := filepath.Join(dir, "conf.d")
+		if err := os.Mkdir(cd, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		for name, body := range frags {
+			if err := os.WriteFile(filepath.Join(cd, name), []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	return dir
+}
+
+const dirDefault = `
+database: { step: 30s, pings: 6 }
+probes: { FPing: {}, TCPConnect: {}, HTTP: {} }
+targets:
+  probe: FPing
+`
+
+// LoadDir merges default.yaml with the conf.d fragments: each fragment contributes
+// top-level target branches that inherit the tree-wide defaults from default.yaml.
+func TestLoadDirConcatenatesBranches(t *testing.T) {
+	dir := writeConfigDir(t, dirDefault, map[string]string{
+		"10-cloudflare.yaml": "targets:\n  children:\n    Cloudflare:\n      children:\n        DNS: { host: 1.1.1.1 }\n        \"443\": { probe: TCPConnect, host: 1.1.1.1, params: { port: \"443\" } }\n",
+		"20-sites.yaml":      "targets:\n  children:\n    Sites:\n      probe: HTTP\n      children:\n        example: { host: example.com }\n",
+	})
+	c, err := LoadDir(dir)
+	if err != nil {
+		t.Fatalf("LoadDir: %v", err)
+	}
+	mons, err := c.Monitors()
+	if err != nil {
+		t.Fatalf("Monitors: %v", err)
+	}
+	byName := map[string]model.Monitor{}
+	for _, m := range mons {
+		byName[m.Name] = m
+	}
+	if len(mons) != 3 {
+		t.Fatalf("got %d monitors, want 3: %v", len(mons), byName)
+	}
+	if m := byName["Cloudflare/DNS"]; m.ProbeKind != "FPing" || m.Host != "1.1.1.1" {
+		t.Errorf("Cloudflare/DNS = %+v, want FPing/1.1.1.1 (default probe inherited)", m)
+	}
+	if m := byName["Cloudflare/443"]; m.ProbeKind != "TCPConnect" {
+		t.Errorf("Cloudflare/443 probe = %q, want TCPConnect", m.ProbeKind)
+	}
+	if m := byName["Sites/example"]; m.ProbeKind != "HTTP" {
+		t.Errorf("Sites/example probe = %q, want HTTP", m.ProbeKind)
+	}
+	// database is inherited from default.yaml (step 30s, pings 6).
+	if m := byName["Cloudflare/DNS"]; m.Step != 30*time.Second || m.Pings != 6 {
+		t.Errorf("Cloudflare/DNS step/pings = %v/%d, want 30s/6 (from default.yaml database)", m.Step, m.Pings)
+	}
+}
+
+// A fragment may only contain targets.children — database/probes/alerts and any
+// tree-wide targets:-node fields belong in default.yaml, and are loud errors.
+func TestLoadDirRejectsNonBranchFragments(t *testing.T) {
+	cases := map[string]string{
+		"database": "database: { step: 10s }\ntargets:\n  children:\n    X: { host: h }\n",
+		"probes":   "probes: { FPing: {} }\ntargets:\n  children:\n    X: { host: h }\n",
+		"alerts":   "alerts:\n  a: { type: loss, pattern: \">1\" }\ntargets:\n  children:\n    X: { host: h }\n",
+		"rootnode": "targets:\n  probe: FPing\n  children:\n    X: { host: h }\n",
+	}
+	for name, frag := range cases {
+		t.Run(name, func(t *testing.T) {
+			dir := writeConfigDir(t, dirDefault, map[string]string{"10-bad.yaml": frag})
+			if _, err := LoadDir(dir); err == nil {
+				t.Fatalf("expected LoadDir to reject a fragment setting %s", name)
+			}
+		})
+	}
+}
+
+// The same top-level branch in two fragments is ambiguous — a hard error naming both.
+func TestLoadDirDuplicateBranch(t *testing.T) {
+	dir := writeConfigDir(t, dirDefault, map[string]string{
+		"10-a.yaml": "targets:\n  children:\n    Dup: { host: 1.1.1.1 }\n",
+		"20-b.yaml": "targets:\n  children:\n    Dup: { host: 8.8.8.8 }\n",
+	})
+	_, err := LoadDir(dir)
+	if err == nil {
+		t.Fatal("expected an error for a duplicate top-level branch")
+	}
+	if !strings.Contains(err.Error(), "Dup") {
+		t.Errorf("error should name the duplicate branch, got: %v", err)
+	}
+}
+
+func TestLoadDirEmpty(t *testing.T) {
+	if _, err := LoadDir(t.TempDir()); err == nil {
+		t.Fatal("expected an error for an empty config directory")
+	}
+}
+
+// LoadPath dispatches: a file goes through Load, a directory through LoadDir.
+func TestLoadPathDispatch(t *testing.T) {
+	// single file
+	f := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(f, []byte(sample), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cf, err := LoadPath(f)
+	if err != nil {
+		t.Fatalf("LoadPath(file): %v", err)
+	}
+	if mf, _ := cf.Monitors(); len(mf) != 3 {
+		t.Errorf("LoadPath(file) monitors = %d, want 3", len(mf))
+	}
+	// directory
+	dir := writeConfigDir(t, dirDefault, map[string]string{
+		"10-x.yaml": "targets:\n  children:\n    X: { host: 1.1.1.1 }\n",
+	})
+	cd, err := LoadPath(dir)
+	if err != nil {
+		t.Fatalf("LoadPath(dir): %v", err)
+	}
+	if md, _ := cd.Monitors(); len(md) != 1 {
+		t.Errorf("LoadPath(dir) monitors = %d, want 1", len(md))
 	}
 }
