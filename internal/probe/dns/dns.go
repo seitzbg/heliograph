@@ -22,7 +22,12 @@ type dnsProbe struct {
 }
 
 func init() {
-	probe.Register("DNS", func(cfg map[string]string) (probe.Probe, error) {
+	probe.Register("DNS", "DNS query", map[string]probe.VarSpec{
+		"lookup":     {Doc: "name to query against the target resolver", Default: "google.com", Scope: probe.TargetVar},
+		"recordtype": {Doc: "DNS record type: any recognized type (A, AAAA, MX, TXT, NS, CNAME, SOA, PTR, SRV, CAA, ...)", Default: "A", Scope: probe.TargetVar, Validate: validRecordType},
+		"port":       {Doc: "resolver port", Default: "53", Scope: probe.TargetVar, Kind: probe.KindPort},
+		"protocol":   {Doc: "transport: udp or tcp", Default: "udp", Scope: probe.ProbeVar, Enum: []string{"udp", "tcp"}},
+	}, func(cfg map[string]string) (probe.Probe, error) {
 		p := &dnsProbe{lookup: "google.com.", recordType: dns.TypeA, port: "53", proto: "udp"}
 		if v := cfg["lookup"]; v != "" {
 			p.lookup = dns.Fqdn(v)
@@ -44,17 +49,7 @@ func init() {
 	})
 }
 
-func (p *dnsProbe) Name() string     { return "DNS" }
-func (p *dnsProbe) Describe() string { return "DNS query (" + p.lookup + ")" }
-
-func (p *dnsProbe) Schema() map[string]probe.VarSpec {
-	return map[string]probe.VarSpec{
-		"lookup":     {Doc: "name to query against the target resolver", Default: "google.com", Scope: probe.TargetVar},
-		"recordtype": {Doc: "DNS record type: any recognized type (A, AAAA, MX, TXT, NS, CNAME, SOA, PTR, SRV, CAA, ...)", Default: "A", Scope: probe.TargetVar, Validate: validRecordType},
-		"port":       {Doc: "resolver port", Default: "53", Scope: probe.TargetVar, Kind: probe.KindPort},
-		"protocol":   {Doc: "transport: udp or tcp", Default: "udp", Scope: probe.ProbeVar, Enum: []string{"udp", "tcp"}},
-	}
-}
+func (p *dnsProbe) Name() string { return "DNS" }
 
 // validRecordType accepts any DNS record type miekg/dns recognizes — the same set
 // the probe can actually query — so config validation matches runtime behavior.

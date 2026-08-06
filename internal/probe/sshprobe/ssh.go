@@ -20,7 +20,9 @@ type sshProbe struct {
 }
 
 func init() {
-	probe.Register("SSH", func(cfg map[string]string) (probe.Probe, error) {
+	probe.Register("SSH", "SSH banner", map[string]probe.VarSpec{
+		"port": {Doc: "SSH port", Default: "22", Scope: probe.TargetVar, Kind: probe.KindPort},
+	}, func(cfg map[string]string) (probe.Probe, error) {
 		p := &sshProbe{port: "22", interval: 10 * time.Millisecond}
 		if v := cfg["port"]; v != "" {
 			p.port = v
@@ -29,14 +31,7 @@ func init() {
 	})
 }
 
-func (p *sshProbe) Name() string     { return "SSH" }
-func (p *sshProbe) Describe() string { return "SSH banner (port " + p.port + ")" }
-
-func (p *sshProbe) Schema() map[string]probe.VarSpec {
-	return map[string]probe.VarSpec{
-		"port": {Doc: "SSH port", Default: "22", Scope: probe.TargetVar, Kind: probe.KindPort},
-	}
-}
+func (p *sshProbe) Name() string { return "SSH" }
 
 func (p *sshProbe) Measure(ctx context.Context, t probe.Target, pings int) (probe.Result, error) {
 	addr := net.JoinHostPort(t.Host, t.Param("port", p.port))

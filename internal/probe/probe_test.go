@@ -1,28 +1,19 @@
 package probe
 
 import (
-	"context"
 	"testing"
 )
 
-// stubProbe exercises JSONSchema with a mix of scopes, defaults, and a mandatory
-// var, without depending on any real probe's binaries.
-type stubProbe struct{}
-
-func (stubProbe) Name() string     { return "Stub" }
-func (stubProbe) Describe() string { return "stub probe" }
-func (stubProbe) Schema() map[string]VarSpec {
-	return map[string]VarSpec{
-		"port":   {Doc: "TCP port", Default: "80", Scope: TargetVar},
-		"lookup": {Doc: "name to resolve", Mandatory: true, Scope: TargetVar},
-		"binary": {Doc: "path to helper", Default: "helper", Scope: ProbeVar},
-		"seeded": {Doc: "mandatory but has a default", Mandatory: true, Default: "x", Scope: ProbeVar},
-	}
+// stubSchema exercises JSONSchema with a mix of scopes, defaults, and a mandatory var.
+var stubSchema = map[string]VarSpec{
+	"port":   {Doc: "TCP port", Default: "80", Scope: TargetVar},
+	"lookup": {Doc: "name to resolve", Mandatory: true, Scope: TargetVar},
+	"binary": {Doc: "path to helper", Default: "helper", Scope: ProbeVar},
+	"seeded": {Doc: "mandatory but has a default", Mandatory: true, Default: "x", Scope: ProbeVar},
 }
-func (stubProbe) Measure(context.Context, Target, int) (Result, error) { return Result{}, nil }
 
 func TestJSONSchemaShape(t *testing.T) {
-	s := JSONSchema(stubProbe{})
+	s := JSONSchema("Stub", "stub probe", stubSchema)
 	if s["name"] != "Stub" || s["describe"] != "stub probe" {
 		t.Fatalf("name/describe wrong: %v", s)
 	}
@@ -44,20 +35,26 @@ func TestJSONSchemaShape(t *testing.T) {
 	if !contains(req, "lookup") || contains(req, "port") {
 		t.Errorf("target required = %v, want [lookup] only", req)
 	}
-
-	probeCfg := s["probe_config"].(map[string]any)
-	pprops := probeCfg["properties"].(map[string]any)
-	if _, ok := pprops["binary"]; !ok {
-		t.Errorf("probe config missing 'binary'")
-	}
-	// probe-scoped vars must not leak into target params and vice-versa.
+	// Probe-scoped vars must NOT appear in target params.
 	if _, leaked := tprops["binary"]; leaked {
 		t.Errorf("probe-scoped 'binary' leaked into target params")
 	}
-	// 'seeded' is mandatory but has a default -> must NOT be required (matches
-	// runtime validation, which treats a default as satisfying mandatory).
-	if contains(toStrings(probeCfg["required"]), "seeded") {
-		t.Errorf("'seeded' has a default and must not be required")
+
+	probeCfg := s["probe_config"].(map[string]any)
+	pprops := probeCfg["properties"].(map[string]any)
+	// probe_config accepts every var: probe-scoped AND target-scoped (settable at
+	// probe level as a tree-wide default) — matching what runtime validation accepts.
+	for _, name := range []string{"binary", "seeded", "port", "lookup"} {
+		if _, ok := pprops[name]; !ok {
+			t.Errorf("probe_config missing %q (should list all vars)", name)
+		}
+	}
+	// But required at probe level = mandatory probe-scoped vars with no default only.
+	// 'seeded' has a default; 'lookup' is target-scoped (satisfiable per target); neither
+	// is required in probe_config.
+	preq := toStrings(probeCfg["required"])
+	if contains(preq, "seeded") || contains(preq, "lookup") || contains(preq, "port") {
+		t.Errorf("probe_config required = %v, want none (no mandatory-no-default probe var)", preq)
 	}
 }
 

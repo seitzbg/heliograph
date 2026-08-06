@@ -104,6 +104,30 @@ targets:
   children:
     x: { probe: TCPConnect, host: 1.2.3.4, step: -5s }
 `,
+		// #12(d): a non-nil but empty leaf contributes nothing and must be rejected.
+		"non-nil empty leaf": `
+targets:
+  probe: TCPConnect
+  children:
+    x: {}
+`,
+		// #12(c): a malformed HTTP urlformat (target param) is a config error, not
+		// phantom loss at runtime.
+		"bad http urlformat": `
+probes: { HTTP: {} }
+targets:
+  probe: HTTP
+  children:
+    x: { host: 1.2.3.4, params: { urlformat: "ftp://%host%/" } }
+`,
+		// #12(c): a bad HTTP method (probe-level param) is a config error.
+		"bad http method": `
+probes: { HTTP: { method: FETCH } }
+targets:
+  probe: HTTP
+  children:
+    x: { host: 1.2.3.4 }
+`,
 	}
 	for name, y := range cases {
 		c, err := Parse([]byte(y))

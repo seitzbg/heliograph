@@ -16,13 +16,16 @@ import (
 
 // Every probe's own default value must satisfy its own constraint — otherwise a
 // user who omits the param gets a value the validator would reject (author drift).
+// Schemas come from the registry, so this checks every probe including those whose
+// external binary is absent here (#12).
 func TestProbeSchemaDefaultsValid(t *testing.T) {
 	for _, kind := range probe.Registered() {
-		p, err := probe.New(kind, nil)
-		if err != nil {
-			continue // needs an unavailable binary; schema not inspectable here
+		schema, ok := probe.SchemaOf(kind)
+		if !ok {
+			t.Errorf("%s registered but has no schema", kind)
+			continue
 		}
-		for name, spec := range p.Schema() {
+		for name, spec := range schema {
 			if spec.Default == "" {
 				continue
 			}
@@ -37,11 +40,11 @@ func TestProbeSchemaDefaultsValid(t *testing.T) {
 // constraint (so a bad value is a loud config error, not a silent default).
 func TestConstrainedParamsHaveConstraints(t *testing.T) {
 	specOf := func(kind, param string) probe.VarSpec {
-		p, err := probe.New(kind, nil)
-		if err != nil {
-			t.Skipf("%s not constructible here", kind)
+		schema, ok := probe.SchemaOf(kind)
+		if !ok {
+			t.Fatalf("%s not registered", kind)
 		}
-		s, ok := p.Schema()[param]
+		s, ok := schema[param]
 		if !ok {
 			t.Fatalf("%s has no %q param", kind, param)
 		}
