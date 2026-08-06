@@ -1,8 +1,8 @@
 stages:
   - test
 
-test:
-  stage: test
+# Shared Go job settings (image, runner tag, module cache).
+.go-base:
   image: golang:1.26
   tags:
     - ubuntu-26.04-amd64
@@ -12,11 +12,43 @@ test:
     key: gomod
     paths:
       - .gocache/pkg/mod
+
+go-test:
+  extends: .go-base
+  stage: test
   before_script:
     - go version
   script:
+    # Formatting must be clean (gofmt -l prints files that need formatting).
+    - test -z "$(gofmt -l cmd internal)"
     - go vet ./...
     - go build ./...
-    - go test ./...
-  # pgstore integration test is skipped unless SMOKE_TEST_DSN is set, so no DB
-  # service is required here; the irtt test is a pure JSON-parser test.
+    # Race detector on the full suite (catches data races in the async scheduler,
+    # dispatcher, and webhook delivery pool).
+    - go test -race ./...
+    # go.mod / go.sum must be tidy.
+    - go mod tidy
+    - git diff --exit-code go.mod go.sum
+
+frontend:
+  stage: test
+  image: node:22-alpine
+  tags:
+    - ubuntu-26.04-amd64
+  script:
+    - node web/dashboard.test.mjs
+    - node web/smoke.render.test.mjs
+
+# Dependency vulnerability scan. Needs network to fetch the tool + the vuln DB, so it
+# is allowed to fail (informative, non-blocking) rather than red a pipeline on a runner
+# without outbound access.
+govulncheck:
+  extends: .go-base
+  stage: test
+  allow_failure: true
+  script:
+    - go install golang.org/x/vuln/cmd/govulncheck@latest
+    - "$GOPATH/bin/govulncheck ./..."
+
+# pgstore integration test is skipped unless SMOKE_TEST_DSN is set, so no DB service is
+# required here; the irtt test is a pure JSON-parser test.

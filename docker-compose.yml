@@ -22,7 +22,8 @@ services:
     # Runs as a non-root user (see Dockerfile); NET_RAW stays in the bounding set
     # so the setcap'd fping can still send ICMP. The server binds 0.0.0.0:8087
     # inside the container — put it behind a reverse proxy / VPN for real exposure
-    # (the proxy owns TLS + auth); the published port below is for local access.
+    # (the proxy owns TLS + authentication + rate limiting); the port below is
+    # published on localhost only.
     cap_add:
       - NET_RAW          # fping ICMP (via fping's file capability, non-root)
     command:
@@ -37,7 +38,11 @@ services:
       - "postgres://smoke:smoke@timescaledb:5432/smoke?sslmode=disable"
       - "-downsample"     # create the hourly continuous aggregate so the UI's Hourly mode works
     ports:
-      - "8087:8087"
+      # Published on localhost only: the API is unauthenticated and query-heavy, so it
+      # must not be reachable on all host interfaces. For access beyond this host, run a
+      # reverse proxy (TLS + auth + rate limiting) pointed at 127.0.0.1:8087 rather than
+      # changing this to 0.0.0.0.
+      - "127.0.0.1:8087:8087"
     depends_on:
       timescaledb:
         condition: service_healthy
