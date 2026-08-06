@@ -54,8 +54,8 @@ func (p *fpingProbe) Describe() string { return "ICMP Echo Pings" }
 func (p *fpingProbe) Schema() map[string]probe.VarSpec {
 	return map[string]probe.VarSpec{
 		"binary":     {Doc: "path to the fping binary", Default: "fping", Scope: probe.ProbeVar},
-		"packetsize": {Doc: "ICMP payload size in bytes", Scope: probe.TargetVar},
-		"period_ms":  {Doc: "milliseconds between successive probes to a host (fping -p)", Default: "50", Scope: probe.ProbeVar},
+		"packetsize": {Doc: "ICMP payload size in bytes", Scope: probe.TargetVar, Kind: probe.KindInt},
+		"period_ms":  {Doc: "milliseconds between successive probes to a host (fping -p)", Default: "50", Scope: probe.ProbeVar, Kind: probe.KindInt},
 	}
 }
 

@@ -51,8 +51,8 @@ func (p *irttProbe) Describe() string { return "IRTT UDP round-trip" }
 func (p *irttProbe) Schema() map[string]probe.VarSpec {
 	return map[string]probe.VarSpec{
 		"binary":      {Doc: "path to the irtt binary", Default: "irtt", Scope: probe.ProbeVar},
-		"port":        {Doc: "irtt server port", Default: "2112", Scope: probe.TargetVar},
-		"interval_ms": {Doc: "send interval in milliseconds", Default: "20", Scope: probe.ProbeVar},
+		"port":        {Doc: "irtt server port", Default: "2112", Scope: probe.TargetVar, Kind: probe.KindPort},
+		"interval_ms": {Doc: "send interval in milliseconds", Default: "20", Scope: probe.ProbeVar, Kind: probe.KindInt},
 	}
 }
 

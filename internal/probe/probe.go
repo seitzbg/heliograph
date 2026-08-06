@@ -10,7 +10,10 @@ package probe
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
+	"strconv"
+	"strings"
 )
 
 // Target is one thing to measure.
@@ -28,12 +31,57 @@ type Result struct {
 
 // VarSpec describes one config variable a probe accepts. This is how each probe
 // contributes its own schema fragment (replacing SmokePing's Config::Grammar
-// _dyn per-probe schema mutation). A real build would emit JSON Schema from these.
+// _dyn per-probe schema mutation), and the single source both runtime validation
+// and the published JSON Schema draw from — so a bad value is a loud config error
+// rather than a silent runtime fallback.
 type VarSpec struct {
 	Doc       string
 	Default   string
 	Mandatory bool
 	Scope     VarScope // probe-level or per-target
+	// Value constraints (all optional). Kind + Enum are declarative and reflected
+	// in the JSON Schema; Validate is an escape hatch for constraints a schema
+	// can't express (e.g. "any valid DNS record type") and is enforced at runtime only.
+	Kind     VarKind
+	Enum     []string
+	Validate func(string) error
+}
+
+// VarKind constrains a config value's form. Values are always strings (config is
+// map[string]string), so these validate the string's shape.
+type VarKind int
+
+const (
+	KindString VarKind = iota // any string (default)
+	KindBool                  // "true" or "false"
+	KindInt                   // a non-negative integer
+	KindPort                  // an integer in 1..65535
+)
+
+// ValidateValue checks value against the spec's constraints (Kind, then Enum, then
+// Validate). name is used in the error message. An unconstrained spec accepts anything.
+func (s VarSpec) ValidateValue(name, value string) error {
+	switch s.Kind {
+	case KindBool:
+		if value != "true" && value != "false" {
+			return fmt.Errorf("%s must be true or false, got %q", name, value)
+		}
+	case KindInt:
+		if n, err := strconv.Atoi(value); err != nil || n < 0 {
+			return fmt.Errorf("%s must be a non-negative integer, got %q", name, value)
+		}
+	case KindPort:
+		if n, err := strconv.Atoi(value); err != nil || n < 1 || n > 65535 {
+			return fmt.Errorf("%s must be a port 1-65535, got %q", name, value)
+		}
+	}
+	if len(s.Enum) > 0 && !slices.Contains(s.Enum, value) {
+		return fmt.Errorf("%s must be one of %s, got %q", name, strings.Join(s.Enum, ", "), value)
+	}
+	if s.Validate != nil {
+		return s.Validate(value)
+	}
+	return nil
 }
 
 type VarScope int
@@ -105,6 +153,19 @@ func JSONSchema(p Probe) map[string]any {
 		}
 		if spec.Default != "" {
 			prop["default"] = spec.Default
+		}
+		// Reflect value constraints (config values are strings, so numeric kinds
+		// become patterns; a Validate func can't be rendered — its Doc carries it).
+		switch spec.Kind {
+		case KindBool:
+			prop["enum"] = []string{"true", "false"}
+		case KindInt:
+			prop["pattern"] = "^[0-9]+$"
+		case KindPort:
+			prop["pattern"] = "^[0-9]{1,5}$"
+		}
+		if len(spec.Enum) > 0 {
+			prop["enum"] = spec.Enum
 		}
 		if spec.Scope == TargetVar {
 			targetProps[name] = prop

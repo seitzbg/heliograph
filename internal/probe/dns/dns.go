@@ -50,10 +50,19 @@ func (p *dnsProbe) Describe() string { return "DNS query (" + p.lookup + ")" }
 func (p *dnsProbe) Schema() map[string]probe.VarSpec {
 	return map[string]probe.VarSpec{
 		"lookup":     {Doc: "name to query against the target resolver", Default: "google.com", Scope: probe.TargetVar},
-		"recordtype": {Doc: "DNS record type (A, AAAA, MX, ...)", Default: "A", Scope: probe.TargetVar},
-		"port":       {Doc: "resolver port", Default: "53", Scope: probe.TargetVar},
-		"protocol":   {Doc: "transport: udp or tcp", Default: "udp", Scope: probe.ProbeVar},
+		"recordtype": {Doc: "DNS record type: any recognized type (A, AAAA, MX, TXT, NS, CNAME, SOA, PTR, SRV, CAA, ...)", Default: "A", Scope: probe.TargetVar, Validate: validRecordType},
+		"port":       {Doc: "resolver port", Default: "53", Scope: probe.TargetVar, Kind: probe.KindPort},
+		"protocol":   {Doc: "transport: udp or tcp", Default: "udp", Scope: probe.ProbeVar, Enum: []string{"udp", "tcp"}},
 	}
+}
+
+// validRecordType accepts any DNS record type miekg/dns recognizes — the same set
+// the probe can actually query — so config validation matches runtime behavior.
+func validRecordType(v string) error {
+	if _, ok := dns.StringToType[v]; !ok {
+		return fmt.Errorf("recordtype %q is not a known DNS record type", v)
+	}
+	return nil
 }
 
 func (p *dnsProbe) Measure(ctx context.Context, t probe.Target, pings int) (probe.Result, error) {

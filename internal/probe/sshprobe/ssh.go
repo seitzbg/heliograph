@@ -34,7 +34,7 @@ func (p *sshProbe) Describe() string { return "SSH banner (port " + p.port + ")"
 
 func (p *sshProbe) Schema() map[string]probe.VarSpec {
 	return map[string]probe.VarSpec{
-		"port": {Doc: "SSH port", Default: "22", Scope: probe.TargetVar},
+		"port": {Doc: "SSH port", Default: "22", Scope: probe.TargetVar, Kind: probe.KindPort},
 	}
 }
 

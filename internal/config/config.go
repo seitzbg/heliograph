@@ -330,8 +330,13 @@ func (c *Config) Monitors() ([]model.Monitor, error) {
 			continue
 		}
 		for _, name := range sortedStrKeys(c.Probes[kind]) {
-			if _, ok := schema[name]; !ok {
+			spec, ok := schema[name]
+			if !ok {
 				problems = append(problems, fmt.Sprintf("probes.%s: unknown param %q", kind, name))
+				continue
+			}
+			if err := spec.ValidateValue(name, c.Probes[kind][name]); err != nil {
+				problems = append(problems, fmt.Sprintf("probes.%s: %v", kind, err))
 			}
 		}
 	}
@@ -438,6 +443,9 @@ func validate(path string, m model.Monitor, getSchema func(string) (map[string]p
 		}
 		if spec.Scope != probe.TargetVar {
 			return fmt.Errorf("%s (%s): param %q is probe-level (set it under probes.%s), not per target", path, m.ProbeKind, name, m.ProbeKind)
+		}
+		if err := spec.ValidateValue(name, m.Params[name]); err != nil {
+			return fmt.Errorf("%s (%s): %w", path, m.ProbeKind, err)
 		}
 	}
 	return nil
