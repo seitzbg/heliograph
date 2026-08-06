@@ -37,6 +37,10 @@ type Server struct {
 	// thus coverage. A target with no known step reports availability without
 	// coverage. nil means coverage is omitted entirely.
 	Steps func() map[string]time.Duration
+	// ExtraMetrics, if set, appends extra Prometheus lines to /metrics after the
+	// probe and round metrics — the webhook notifier wires its delivery counters here
+	// (a plain func so api needs no dependency on the alert package). nil = none.
+	ExtraMetrics func(*strings.Builder)
 }
 
 func New(s store.Store, webDir string) *Server { return &Server{store: s, webDir: webDir} }
@@ -670,6 +674,9 @@ func (srv *Server) metrics(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprintf(&b, "smokeping_probe_last_sample_timestamp_seconds%s %d\n", lbl, o.When.Unix())
 	}
 	srv.writeRoundMetrics(&b)
+	if srv.ExtraMetrics != nil {
+		srv.ExtraMetrics(&b)
+	}
 	_, _ = w.Write([]byte(b.String()))
 }
 

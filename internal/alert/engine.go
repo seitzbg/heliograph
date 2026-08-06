@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -293,10 +294,92 @@ func (n LogNotifier) Notify(e Event) {
 		e.Status(), e.Target, e.Alert, e.Comment, e.LossPct, rtt, e.When.Format(time.RFC3339))
 }
 
-// WebhookNotifier POSTs the event as JSON (fire-and-forget).
+// WebhookNotifier POSTs each event as JSON through a bounded worker pool with
+// retry/backoff, so a slow or unavailable webhook can neither spawn unbounded
+// goroutines nor silently lose deliveries. Construct it with NewWebhookNotifier; the
+// zero value is not usable. Delivery guarantee: best-effort, at-least-once attempted
+// with bounded retries and a stable X-Idempotency-Key (the receiver can dedupe retries
+// and level-triggered repeats). On a full queue the newest event is dropped and
+// counted; on shutdown Close drains the queue up to a deadline, then abandons and
+// counts the remainder — nothing is ever dropped silently.
 type WebhookNotifier struct {
 	URL    string
 	Client *http.Client
+
+	queue       chan delivery
+	done        chan struct{} // closed by Close to interrupt in-flight backoffs
+	wg          sync.WaitGroup
+	maxAttempts int
+	baseBackoff time.Duration
+	timeout     time.Duration
+
+	mu     sync.Mutex
+	closed bool
+
+	queued, delivered, retried, dropped, failed atomic.Int64
+}
+
+// WebhookConfig tunes the delivery pool. Zero fields fall back to defaults.
+type WebhookConfig struct {
+	Workers     int
+	QueueSize   int
+	MaxAttempts int
+	BaseBackoff time.Duration
+	Timeout     time.Duration
+}
+
+// WebhookStats is a snapshot of the delivery counters.
+type WebhookStats struct {
+	Queued, Delivered, Retried, Dropped, Failed int64
+	QueueDepth                                  int
+}
+
+type delivery struct {
+	body          []byte
+	idem          string
+	alert, target string
+}
+
+// NewWebhookNotifier builds a delivery pool with production defaults (4 workers, a
+// 1024-deep queue, 4 attempts, 500ms base backoff, 8s per-attempt timeout).
+func NewWebhookNotifier(url string, client *http.Client) *WebhookNotifier {
+	return NewWebhookNotifierConfig(url, client, WebhookConfig{})
+}
+
+// NewWebhookNotifierConfig builds a delivery pool and starts its workers. Zero config
+// fields take the defaults; this variant lets tests use a tiny backoff.
+func NewWebhookNotifierConfig(url string, client *http.Client, cfg WebhookConfig) *WebhookNotifier {
+	if client == nil {
+		client = &http.Client{}
+	}
+	if cfg.Workers <= 0 {
+		cfg.Workers = 4
+	}
+	if cfg.QueueSize <= 0 {
+		cfg.QueueSize = 1024
+	}
+	if cfg.MaxAttempts <= 0 {
+		cfg.MaxAttempts = 4
+	}
+	if cfg.BaseBackoff <= 0 {
+		cfg.BaseBackoff = 500 * time.Millisecond
+	}
+	if cfg.Timeout <= 0 {
+		cfg.Timeout = 8 * time.Second
+	}
+	n := &WebhookNotifier{
+		URL: url, Client: client,
+		queue:       make(chan delivery, cfg.QueueSize),
+		done:        make(chan struct{}),
+		maxAttempts: cfg.MaxAttempts,
+		baseBackoff: cfg.BaseBackoff,
+		timeout:     cfg.Timeout,
+	}
+	for i := 0; i < cfg.Workers; i++ {
+		n.wg.Add(1)
+		go n.worker()
+	}
+	return n
 }
 
 // webhookPayload is the wire shape for a webhook delivery. RTTms is a pointer so a
@@ -314,7 +397,7 @@ type webhookPayload struct {
 	When    time.Time `json:"when"`
 }
 
-func (n WebhookNotifier) Notify(e Event) {
+func (n *WebhookNotifier) Notify(e Event) {
 	var rtt *float64
 	if !math.IsNaN(e.RTTms) && !math.IsInf(e.RTTms, 0) {
 		v := e.RTTms
@@ -329,30 +412,134 @@ func (n WebhookNotifier) Notify(e Event) {
 		slog.Error("webhook: marshal event failed", "alert", e.Alert, "target", e.Target, "err", err)
 		return
 	}
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-		defer cancel()
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, n.URL, bytes.NewReader(body))
-		if err != nil {
-			slog.Error("webhook: build request failed", "url", n.URL, "alert", e.Alert, "err", err)
+	d := delivery{body: body, idem: idemKey(e), alert: e.Alert, target: e.Target}
+	// Non-blocking enqueue under the lock: never block the alert-eval path, and never
+	// race Close's channel close. A full queue drops the newest event, counted.
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.closed {
+		return
+	}
+	select {
+	case n.queue <- d:
+		n.queued.Add(1)
+	default:
+		n.dropped.Add(1)
+		slog.Warn("webhook: delivery queue full, dropping event", "url", n.URL, "alert", e.Alert, "target", e.Target, "queue_size", cap(n.queue))
+	}
+}
+
+// idemKey is a stable per-event key, so every retry and every level-triggered repeat
+// of the same event carries one X-Idempotency-Key the receiver can dedupe on.
+func idemKey(e Event) string {
+	return fmt.Sprintf("%s|%s|%s|%d", e.Target, e.Alert, strings.ToLower(e.Status()), e.When.UnixNano())
+}
+
+func (n *WebhookNotifier) worker() {
+	defer n.wg.Done()
+	for d := range n.queue {
+		n.deliver(d)
+	}
+}
+
+// deliver POSTs one event, retrying with exponential backoff up to maxAttempts. The
+// backoff wait is interrupted by Close, so a shutdown drain doesn't stall on a
+// down endpoint.
+func (n *WebhookNotifier) deliver(d delivery) {
+	backoff := n.baseBackoff
+	for attempt := 1; ; attempt++ {
+		if n.tryOnce(d) {
+			n.delivered.Add(1)
 			return
 		}
-		req.Header.Set("Content-Type", "application/json")
-		c := n.Client
-		if c == nil {
-			c = http.DefaultClient
-		}
-		resp, err := c.Do(req)
-		if err != nil {
-			slog.Warn("webhook: delivery failed", "url", n.URL, "alert", e.Alert, "target", e.Target, "err", err)
+		if attempt >= n.maxAttempts {
+			n.failed.Add(1)
+			slog.Warn("webhook: giving up after retries", "url", n.URL, "alert", d.alert, "target", d.target, "attempts", attempt)
 			return
 		}
-		defer resp.Body.Close()
-		_, _ = io.Copy(io.Discard, resp.Body)
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			slog.Warn("webhook: non-2xx response", "url", n.URL, "alert", e.Alert, "target", e.Target, "status", resp.StatusCode)
+		n.retried.Add(1)
+		select {
+		case <-n.done: // draining on shutdown: stop retrying this event
+			n.failed.Add(1)
+			return
+		case <-time.After(backoff):
 		}
-	}()
+		backoff *= 2
+	}
+}
+
+func (n *WebhookNotifier) tryOnce(d delivery) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), n.timeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, n.URL, bytes.NewReader(d.body))
+	if err != nil {
+		slog.Error("webhook: build request failed", "url", n.URL, "alert", d.alert, "err", err)
+		return false
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Idempotency-Key", d.idem)
+	resp, err := n.Client.Do(req)
+	if err != nil {
+		slog.Warn("webhook: delivery attempt failed", "url", n.URL, "alert", d.alert, "target", d.target, "err", err)
+		return false
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		slog.Warn("webhook: non-2xx response", "url", n.URL, "alert", d.alert, "target", d.target, "status", resp.StatusCode)
+		return false
+	}
+	return true
+}
+
+// Close stops accepting new events, drains the queue (workers finish what's queued),
+// and waits for the workers up to ctx's deadline; past the deadline it returns and the
+// remaining deliveries are abandoned. Safe to call more than once.
+func (n *WebhookNotifier) Close(ctx context.Context) {
+	n.mu.Lock()
+	if n.closed {
+		n.mu.Unlock()
+		return
+	}
+	n.closed = true
+	close(n.done)  // interrupt in-flight backoffs so the drain is prompt
+	close(n.queue) // workers finish the remaining items then exit their range loop
+	n.mu.Unlock()
+
+	drained := make(chan struct{})
+	go func() { n.wg.Wait(); close(drained) }()
+	select {
+	case <-drained:
+		slog.Info("webhook: delivery drained", n.statsKV()...)
+	case <-ctx.Done():
+		slog.Warn("webhook: drain deadline exceeded; remaining deliveries abandoned", n.statsKV()...)
+	}
+}
+
+func (n *WebhookNotifier) statsKV() []any {
+	s := n.Stats()
+	return []any{"queued", s.Queued, "delivered", s.Delivered, "retried", s.Retried, "dropped", s.Dropped, "failed", s.Failed}
+}
+
+// Stats snapshots the delivery counters.
+func (n *WebhookNotifier) Stats() WebhookStats {
+	return WebhookStats{
+		Queued: n.queued.Load(), Delivered: n.delivered.Load(), Retried: n.retried.Load(),
+		Dropped: n.dropped.Load(), Failed: n.failed.Load(), QueueDepth: len(n.queue),
+	}
+}
+
+// WriteMetrics appends the webhook delivery counters in Prometheus text format —
+// wired into /metrics via api.Server.ExtraMetrics so drops/failures are scrapeable,
+// not merely logged.
+func (n *WebhookNotifier) WriteMetrics(b *strings.Builder) {
+	s := n.Stats()
+	fmt.Fprintf(b, "# HELP smokeping_webhook_queued_total Webhook events accepted onto the delivery queue.\n# TYPE smokeping_webhook_queued_total counter\nsmokeping_webhook_queued_total %d\n", s.Queued)
+	fmt.Fprintf(b, "# HELP smokeping_webhook_delivered_total Webhook events delivered (a 2xx response).\n# TYPE smokeping_webhook_delivered_total counter\nsmokeping_webhook_delivered_total %d\n", s.Delivered)
+	fmt.Fprintf(b, "# HELP smokeping_webhook_retried_total Webhook delivery attempts retried after a failure.\n# TYPE smokeping_webhook_retried_total counter\nsmokeping_webhook_retried_total %d\n", s.Retried)
+	fmt.Fprintf(b, "# HELP smokeping_webhook_dropped_total Webhook events dropped because the delivery queue was full.\n# TYPE smokeping_webhook_dropped_total counter\nsmokeping_webhook_dropped_total %d\n", s.Dropped)
+	fmt.Fprintf(b, "# HELP smokeping_webhook_failed_total Webhook events abandoned after exhausting retries.\n# TYPE smokeping_webhook_failed_total counter\nsmokeping_webhook_failed_total %d\n", s.Failed)
+	fmt.Fprintf(b, "# HELP smokeping_webhook_queue_depth Current webhook delivery queue depth.\n# TYPE smokeping_webhook_queue_depth gauge\nsmokeping_webhook_queue_depth %d\n", s.QueueDepth)
 }
 
 // ---- matcher factory (for `type: matcher`) ----

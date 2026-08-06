@@ -739,6 +739,21 @@ func TestSeriesAllReadFailure503(t *testing.T) {
 	}
 }
 
+// The ExtraMetrics hook (used to expose webhook delivery counters) must append to
+// /metrics after the probe/round metrics.
+func TestExtraMetricsHook(t *testing.T) {
+	srv := New(store.NewMem(10), "")
+	srv.ExtraMetrics = func(b *strings.Builder) { b.WriteString("smokeping_webhook_queued_total 7\n") }
+	rec := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
+	if rec.Code != 200 {
+		t.Fatalf("status %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "smokeping_webhook_queued_total 7") {
+		t.Errorf("/metrics missing ExtraMetrics output:\n%s", rec.Body.String())
+	}
+}
+
 // errLatestStore is a LatestAller whose bulk read fails — simulating a database
 // outage. The live endpoints must answer 503, not a false-empty 200 (CODE_REVIEW #4).
 type errLatestStore struct{ *store.MemStore }
