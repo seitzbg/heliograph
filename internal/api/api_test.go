@@ -773,6 +773,24 @@ func TestReadFailureReturns503(t *testing.T) {
 	}
 }
 
+// errHistoryStore is a Store whose base History read fails. The no-window /api/series
+// path reads History, so it must answer 503 rather than a false-empty 200 (the #4
+// remainder — the base read interface now returns errors).
+type errHistoryStore struct{ *store.MemStore }
+
+func (errHistoryStore) History(string) ([]scheduler.Outcome, error) {
+	return nil, errors.New("db read failed")
+}
+
+func TestSeriesHistoryFailureReturns503(t *testing.T) {
+	srv := New(errHistoryStore{store.NewMem(10)}, "")
+	rec := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(rec, httptest.NewRequest("GET", "/api/series?target=t", nil))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("no-window /api/series on a History failure = %d, want 503", rec.Code)
+	}
+}
+
 // /api/sla?maxloss must be a finite percent in [0,100]; NaN, Inf, negative, and
 // >100 are rejected (CODE_REVIEW lower-severity).
 func TestSLAMaxlossRange(t *testing.T) {

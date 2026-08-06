@@ -23,9 +23,9 @@ var ErrRollupUnavailable = errors.New("store: rollup aggregate not available")
 // reads series back from.
 type Store interface {
 	Add(outcomes []scheduler.Outcome)
-	Keys() []string
+	Keys() ([]string, error)
 	Latest(key string) (scheduler.Outcome, bool)
-	History(key string) []scheduler.Outcome
+	History(key string) ([]scheduler.Outcome, error)
 }
 
 // RollupPoint is one downsampled bucket for a target (hourly or daily). Median
@@ -146,12 +146,12 @@ func (s *MemStore) Add(outcomes []scheduler.Outcome) {
 	}
 }
 
-func (s *MemStore) Keys() []string {
+func (s *MemStore) Keys() ([]string, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out := make([]string, len(s.keys))
 	copy(out, s.keys)
-	return out
+	return out, nil // in-memory reads never fail
 }
 
 func (s *MemStore) Latest(key string) (scheduler.Outcome, bool) {
@@ -161,13 +161,13 @@ func (s *MemStore) Latest(key string) (scheduler.Outcome, bool) {
 	return o, ok
 }
 
-func (s *MemStore) History(key string) []scheduler.Outcome {
+func (s *MemStore) History(key string) ([]scheduler.Outcome, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	h := s.history[key]
 	out := make([]scheduler.Outcome, len(h))
 	copy(out, h)
-	return out
+	return out, nil // in-memory reads never fail
 }
 
 // Availability scans the in-memory history for target and aggregates the rounds at
