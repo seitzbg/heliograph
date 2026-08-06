@@ -41,5 +41,12 @@ check('RANGES: raw vs band tiers map to the right endpoints', () => {
   assert.equal(D.RANGES['400d'].mode, 'band'); assert.equal(D.RANGES['400d'].res, '1d');
   assert.deepEqual(D.RANGE_ORDER, ['3h', '30h', '10d', '400d']);
 });
+check('parseRoute: does not double-decode the target name', () => {
+  // URLSearchParams already percent-decodes, so a literal %20 in the name must
+  // survive as-is (not become a space), and a name with % must not throw.
+  assert.deepEqual(D.parseRoute('#target=literal%2520name'), { view: 'stack', name: 'literal%20name' });
+  assert.deepEqual(D.parseRoute('#target=CPU%252099%2525'), { view: 'stack', name: 'CPU%2099%25' });
+});
+
 if (failed) { console.error(`\n${failed} test(s) failed`); process.exit(1); }
 console.log('\nall dashboard tests passed');

@@ -323,8 +323,8 @@ func (srv *Server) sla(w http.ResponseWriter, r *http.Request) {
 	isUp := func(lossPct float64) bool { return lossPct < 100 }
 	if v := r.URL.Query().Get("maxloss"); v != "" {
 		max, err := strconv.ParseFloat(v, 64)
-		if err != nil || max < 0 {
-			http.Error(w, `{"error":"maxloss must be a non-negative percent"}`, http.StatusBadRequest)
+		if err != nil || math.IsNaN(max) || math.IsInf(max, 0) || max < 0 || max > 100 {
+			http.Error(w, `{"error":"maxloss must be a percent in [0,100]"}`, http.StatusBadRequest)
 			return
 		}
 		maxLossPct = &max

@@ -675,3 +675,24 @@ func TestReadFailureReturns503(t *testing.T) {
 		}
 	}
 }
+
+// /api/sla?maxloss must be a finite percent in [0,100]; NaN, Inf, negative, and
+// >100 are rejected (CODE_REVIEW lower-severity).
+func TestSLAMaxlossRange(t *testing.T) {
+	srv := New(store.NewMem(10), "")
+	code := func(q string) int {
+		rec := httptest.NewRecorder()
+		srv.Routes().ServeHTTP(rec, httptest.NewRequest("GET", "/api/sla"+q, nil))
+		return rec.Code
+	}
+	for _, bad := range []string{"NaN", "Inf", "-1", "150", "100.1"} {
+		if c := code("?maxloss=" + bad); c != http.StatusBadRequest {
+			t.Errorf("maxloss=%s status = %d, want 400", bad, c)
+		}
+	}
+	for _, ok := range []string{"0", "50", "100"} {
+		if c := code("?maxloss=" + ok); c != 200 {
+			t.Errorf("maxloss=%s status = %d, want 200", ok, c)
+		}
+	}
+}

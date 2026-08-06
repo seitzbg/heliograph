@@ -77,18 +77,18 @@ Not planned for now; pick up only if multi-vantage measurement is requested.
 - ✅ **Per-target polling intervals** — while serving, each target fires on its own `step`
   via `scheduler.Planner` (phase-aligned per target); config/per-node `step` is honored. The
   `-rounds` foreground demo still runs synchronized rounds at `-step`.
-- 🚧 **Dashboard read amplification at scale** — cheap wins done ✅ (frontend in-flight
-  guard; aggregate charts/SLA panels on a 15s cadence, not every 3s). Still ⬜: the raw
-  per-target `/api/series` fan-out (one request + store query per target per tick) — needs
-  bulk store queries + incremental/since-based series reads before large-N deployments.
-- ⬜ **SLA over long windows on pgstore** — availability is computed from `History()`, which
-  is bounded by store retention; a `>` a-few-hours window can be incomplete (the API now
-  reports `covered_from` so this is visible). A time-bounded store aggregate would make long
-  windows exact.
+- 🚧 **Dashboard read amplification at scale** — mostly done ✅: bulk `LatestAll` +
+  `AvailabilityAll` collapse the aggregate endpoints to one query each, and the 10d/400d
+  rollup is now windowed server-side. Still ⬜: the raw per-target 3h `/api/series` grid
+  fan-out (one request + store query per target per tick) — needs a bulk/incremental
+  (`series?targets=&since=`) endpoint before large-N deployments.
+- ✅ **SLA over long windows on pgstore** — done: a time-bounded store aggregate
+  (`Availabler`/`AvailabilityAll`, and windowed `HistorySince`) computes availability over
+  the full requested window, unbounded by the `History` cap, with per-target coverage.
 
 ## Notes / decisions
 - Stack: Go collector · TimescaleDB (raw samples; bands via SQL quantiles) · REST+JSON API ·
-  React/canvas frontend · gRPC+mTLS for federation. (See blueprint §1.)
+  vanilla-JS/canvas frontend · gRPC+mTLS for federation. (See blueprint §1.)
 - Storage deliberately keeps the raw N samples per round — the smoke bands need the
   distribution, not just the median.
 - Probe binaries that are unavailable are skipped with a warning, never fatal.

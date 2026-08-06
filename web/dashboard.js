@@ -26,7 +26,7 @@
     const h = (hash || '').replace(/^#/, '');
     if (h.startsWith('target=')) {
       const p = new URLSearchParams(h);
-      const name = decodeURIComponent(p.get('target') || '');
+      const name = p.get('target') || ''; // URLSearchParams already percent-decodes; a second decode corrupts names with % (CODE_REVIEW #10)
       const range = p.get('range');
       return (range && RANGES[range]) ? { view: 'zoom', name, range } : { view: 'stack', name };
     }
@@ -149,6 +149,13 @@
         try { targets = (await (await fetch('/api/targets', { cache: 'no-store' })).json()).targets || []; }
         catch (e) { $('statusText').textContent = 'collector unreachable'; return; }
         $('statusText').textContent = targets.length + ' targets · updated ' + new Date().toLocaleTimeString();
+        // Reconcile: drop panels for targets no longer reported (e.g. removed on a
+        // SIGHUP reload), so an open Graphs tab doesn't keep showing stale ones
+        // (CODE_REVIEW #5).
+        const live = new Set(targets.map((t) => t.name));
+        for (const [name, p] of panels) {
+          if (!live.has(name)) { p.el.remove(); panels.delete(name); }
+        }
         await Promise.all(targets.map(async (t) => {
           const p = ensurePanel(t);
           try {
