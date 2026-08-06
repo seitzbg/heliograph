@@ -164,7 +164,15 @@ func main() {
 
 	roundStats := &api.RoundStats{}
 
-	for r := 1; r <= *rounds && ctx.Err() == nil; r++ {
+	// In serve mode the per-target planner fires each target on its own cadence, so
+	// synchronous warm-up rounds (run on the global -step, not per-target steps) would
+	// only double-fire every target and rush hysteresis at startup — skip them
+	// (CODE_REVIEW #8). Non-serve (demo) mode still runs -rounds.
+	warmupRounds := *rounds
+	if *serve {
+		warmupRounds = 0
+	}
+	for r := 1; r <= warmupRounds && ctx.Err() == nil; r++ {
 		rt := current.Load()
 		start := time.Now()
 		out := scheduler.RunRound(ctx, rt.jobs, *workers)
@@ -224,7 +232,12 @@ func main() {
 		// Step via the Planner (a slow-cadence target no longer polls at the fast
 		// default), and the loop wakes at least once a second so a SIGHUP reload's
 		// new target set is picked up promptly.
+		// pollDone closes when the polling goroutine has returned and drained its
+		// in-flight probes, so main can join it on shutdown rather than exiting while
+		// store writes are still running (CODE_REVIEW lower-severity shutdown note).
+		pollDone := make(chan struct{})
 		go func() {
+			defer close(pollDone)
 			// The Dispatcher runs each tick's due targets without blocking the loop, so
 			// a slow target burning down its timeout no longer delays faster targets that
 			// come due meanwhile (review item #3a). Each batch's store-write + alert eval
@@ -272,6 +285,7 @@ func main() {
 		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			fatal("http server failed", err)
 		}
+		<-pollDone // wait for the polling goroutine to drain in-flight probes before exiting
 		slog.Info("shutdown complete")
 		fmt.Println("shutdown complete")
 	}
