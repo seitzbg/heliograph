@@ -391,3 +391,68 @@ func TestLoadPathDispatch(t *testing.T) {
 		t.Errorf("LoadPath(dir) monitors = %d, want 1", len(md))
 	}
 }
+
+// A constrained param with a bad value is a loud config error, not a silent
+// runtime fallback — target-scoped params (validated per leaf) and probe-level
+// params (validated once) both.
+func TestConfigRejectsBadParamValues(t *testing.T) {
+	cases := map[string]string{
+		"target port out of range": `
+probes: { TCPConnect: {} }
+targets:
+  probe: TCPConnect
+  children:
+    x: { host: h, params: { port: "99999" } }
+`,
+		"target insecure_ssl typo": `
+probes: { HTTP: {} }
+targets:
+  probe: HTTP
+  children:
+    x: { host: h, params: { insecure_ssl: "ture" } }
+`,
+		"target recordtype invalid": `
+probes: { DNS: {} }
+targets:
+  probe: DNS
+  children:
+    x: { host: h, params: { recordtype: "NOTATYPE" } }
+`,
+		"probe-level protocol invalid": `
+probes: { DNS: { protocol: sctp } }
+targets:
+  probe: DNS
+  children:
+    x: { host: h }
+`,
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			c, err := Parse([]byte(body))
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			if _, err := c.Monitors(); err == nil {
+				t.Fatalf("expected a validation error for %s", name)
+			}
+		})
+	}
+
+	// A valid config with the same params must still pass (regression guard).
+	good := `
+probes: { DNS: { protocol: tcp }, TCPConnect: {}, HTTP: {} }
+targets:
+  probe: TCPConnect
+  children:
+    tcp: { host: h, params: { port: "443" } }
+    dns: { probe: DNS, host: h, params: { recordtype: AAAA } }
+    web: { probe: HTTP, host: h, params: { insecure_ssl: "true" } }
+`
+	c, err := Parse([]byte(good))
+	if err != nil {
+		t.Fatalf("Parse good: %v", err)
+	}
+	if mons, err := c.Monitors(); err != nil {
+		t.Fatalf("valid params should pass, got: %v (mons=%d)", err, len(mons))
+	}
+}

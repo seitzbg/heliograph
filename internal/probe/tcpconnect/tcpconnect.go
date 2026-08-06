@@ -37,8 +37,8 @@ func (p *tcpProbe) Describe() string { return "TCP Connect (port " + p.port + ")
 
 func (p *tcpProbe) Schema() map[string]probe.VarSpec {
 	return map[string]probe.VarSpec{
-		"port":        {Doc: "TCP port to connect to", Default: "80", Scope: probe.TargetVar},
-		"interval_ms": {Doc: "milliseconds between the N connects", Default: "10", Scope: probe.ProbeVar},
+		"port":        {Doc: "TCP port to connect to", Default: "80", Scope: probe.TargetVar, Kind: probe.KindPort},
+		"interval_ms": {Doc: "milliseconds between the N connects", Default: "10", Scope: probe.ProbeVar, Kind: probe.KindInt},
 	}
 }
 

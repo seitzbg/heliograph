@@ -45,7 +45,7 @@ func (p *httpProbe) Schema() map[string]probe.VarSpec {
 	return map[string]probe.VarSpec{
 		"urlformat":    {Doc: "URL template; %host% is replaced by the target host", Default: "https://%host%/", Scope: probe.TargetVar},
 		"method":       {Doc: "HTTP method", Default: "GET", Scope: probe.ProbeVar},
-		"insecure_ssl": {Doc: "skip TLS certificate verification (true/false)", Default: "false", Scope: probe.TargetVar},
+		"insecure_ssl": {Doc: "skip TLS certificate verification (true/false)", Default: "false", Scope: probe.TargetVar, Kind: probe.KindBool},
 	}
 }
 
