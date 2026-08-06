@@ -208,6 +208,9 @@ func (s *PGStore) Keys() []string {
 		}
 		keys = append(keys, k)
 	}
+	if err := rows.Err(); err != nil {
+		s.onErr(err)
+	}
 	return keys
 }
 
@@ -242,6 +245,9 @@ func (s *PGStore) History(key string) []scheduler.Outcome {
 			return out
 		}
 		out = append(out, o)
+	}
+	if err := rows.Err(); err != nil {
+		s.onErr(err)
 	}
 	// query is DESC; History returns oldest->newest to match MemStore.
 	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
@@ -423,14 +429,16 @@ func (s *PGStore) HistorySince(ctx context.Context, target string, cutoff time.T
 }
 
 // LatestAll returns every target's most recent outcome in one query (DISTINCT ON),
-// so the live endpoints don't fan out to one Latest per target.
-func (s *PGStore) LatestAll() map[string]scheduler.Outcome {
+// so the live endpoints don't fan out to one Latest per target. A query/scan error
+// is returned (not swallowed) so the API can answer 503 instead of a false-empty
+// success.
+func (s *PGStore) LatestAll() (map[string]scheduler.Outcome, error) {
 	rows, err := s.pool.Query(s.ctx,
 		`SELECT DISTINCT ON (target) ts, target, probe, host, pings, loss, median_seconds, rtts_seconds, err, duration_ms
 		   FROM samples ORDER BY target, ts DESC`)
 	if err != nil {
 		s.onErr(err)
-		return nil
+		return nil, err
 	}
 	defer rows.Close()
 	out := map[string]scheduler.Outcome{}
@@ -438,11 +446,15 @@ func (s *PGStore) LatestAll() map[string]scheduler.Outcome {
 		o, err := scanOutcome(rows)
 		if err != nil {
 			s.onErr(err)
-			return out
+			return nil, err
 		}
 		out[o.Target.Name] = o
 	}
-	return out
+	if err := rows.Err(); err != nil {
+		s.onErr(err)
+		return nil, err
+	}
+	return out, nil
 }
 
 // AvailabilityAll aggregates every target over [cutoff, now) in one grouped query —

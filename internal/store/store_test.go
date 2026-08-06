@@ -98,7 +98,10 @@ func TestMemStoreLatestAll(t *testing.T) {
 	s.Add([]scheduler.Outcome{{Target: probe.Target{Name: "a"}, When: t0.Add(time.Minute), Computed: sample.Compute(2, []float64{.03, .04})}})
 	s.Add([]scheduler.Outcome{{Target: probe.Target{Name: "b"}, When: t0, Computed: sample.Compute(2, nil)}})
 
-	all := s.LatestAll()
+	all, err := s.LatestAll()
+	if err != nil {
+		t.Fatalf("LatestAll: %v", err)
+	}
 	if len(all) != 2 {
 		t.Fatalf("LatestAll len = %d, want 2", len(all))
 	}

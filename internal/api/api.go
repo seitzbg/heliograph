@@ -43,11 +43,17 @@ func New(s store.Store, webDir string) *Server { return &Server{store: s, webDir
 
 // activeLatest returns each active target's most recent outcome, sorted by name.
 // It uses the store's bulk LatestAll (one query) when available instead of one
-// Latest per target — the live endpoints (targets, charts, metrics) all read this.
-func (srv *Server) activeLatest() []scheduler.Outcome {
+// Latest per target — the live endpoints (targets, charts, metrics, sla) all read
+// this. A backing-store read error is returned so callers answer 503 rather than a
+// false-empty success (CODE_REVIEW #4).
+func (srv *Server) activeLatest() ([]scheduler.Outcome, error) {
 	var all map[string]scheduler.Outcome
 	if la, ok := srv.store.(store.LatestAller); ok {
-		all = la.LatestAll()
+		m, err := la.LatestAll()
+		if err != nil {
+			return nil, err
+		}
+		all = m
 	} else {
 		all = map[string]scheduler.Outcome{}
 		for _, k := range srv.store.Keys() {
@@ -67,7 +73,7 @@ func (srv *Server) activeLatest() []scheduler.Outcome {
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Target.Name < out[j].Target.Name })
-	return out
+	return out, nil
 }
 
 func (srv *Server) Routes() *http.ServeMux {
@@ -122,8 +128,14 @@ type targetDTO struct {
 }
 
 func (srv *Server) targets(w http.ResponseWriter, _ *http.Request) {
+	latest, err := srv.activeLatest()
+	if err != nil {
+		slog.Error("targets: store read failed", "err", err)
+		http.Error(w, `{"error":"store unavailable"}`, http.StatusServiceUnavailable)
+		return
+	}
 	var out []targetDTO
-	for _, o := range srv.activeLatest() {
+	for _, o := range latest {
 		dto := targetDTO{
 			Name:    o.Target.Name,
 			Probe:   o.ProbeName,
@@ -193,8 +205,14 @@ func (srv *Server) charts(w http.ResponseWriter, r *http.Request) {
 		e   chartEntry
 		key float64
 	}
+	latest, err := srv.activeLatest()
+	if err != nil {
+		slog.Error("charts: store read failed", "err", err)
+		http.Error(w, `{"error":"store unavailable"}`, http.StatusServiceUnavailable)
+		return
+	}
 	var rows []scored
-	for _, o := range srv.activeLatest() {
+	for _, o := range latest {
 		e := chartEntry{
 			Name:    o.Target.Name,
 			Probe:   o.ProbeName,
@@ -331,9 +349,15 @@ func (srv *Server) sla(w http.ResponseWriter, r *http.Request) {
 		statsAll = m
 	}
 
-	out := make([]slaEntry, 0)
 	// activeLatest is one bulk query for the active targets + their probe names.
-	for _, o := range srv.activeLatest() {
+	active, err := srv.activeLatest()
+	if err != nil {
+		slog.Error("sla: store read failed", "err", err)
+		http.Error(w, `{"error":"store unavailable"}`, http.StatusServiceUnavailable)
+		return
+	}
+	out := make([]slaEntry, 0)
+	for _, o := range active {
 		k := o.Target.Name
 		var (
 			measured, up   int
@@ -529,6 +553,14 @@ func (srv *Server) rollup(w http.ResponseWriter, r *http.Request) {
 // metrics exposes the latest per-target values in Prometheus text format so
 // Grafana/Alertmanager-native setups can scrape and alert on them.
 func (srv *Server) metrics(w http.ResponseWriter, _ *http.Request) {
+	// Read the store first: a failure must be a 503 so the scrape is marked down,
+	// not a 200 that silently drops every target series (CODE_REVIEW #4).
+	latest, err := srv.activeLatest()
+	if err != nil {
+		slog.Error("metrics: store read failed", "err", err)
+		http.Error(w, "store unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	var b strings.Builder
 	b.WriteString("# HELP smokeping_probe_median_seconds Median round-trip time of the most recent round.\n")
@@ -541,7 +573,7 @@ func (srv *Server) metrics(w http.ResponseWriter, _ *http.Request) {
 	b.WriteString("# TYPE smokeping_probe_duration_seconds gauge\n")
 	b.WriteString("# HELP smokeping_probe_last_sample_timestamp_seconds Unix time of this target's most recent round (alert on staleness).\n")
 	b.WriteString("# TYPE smokeping_probe_last_sample_timestamp_seconds gauge\n")
-	for _, o := range srv.activeLatest() {
+	for _, o := range latest {
 		lbl := fmt.Sprintf(`{target=%q,probe=%q}`, escapeLabel(o.Target.Name), escapeLabel(o.ProbeName))
 		median := o.Computed.Median
 		if math.IsNaN(median) {
