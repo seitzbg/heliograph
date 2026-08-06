@@ -52,10 +52,11 @@ type VarSpec struct {
 type VarKind int
 
 const (
-	KindString VarKind = iota // any string (default)
-	KindBool                  // "true" or "false"
-	KindInt                   // a non-negative integer
-	KindPort                  // an integer in 1..65535
+	KindString      VarKind = iota // any string (default)
+	KindBool                       // "true" or "false"
+	KindInt                        // a non-negative integer
+	KindPositiveInt                // an integer >= 1 (e.g. a send interval / period in ms)
+	KindPort                       // an integer in 1..65535
 )
 
 // ValidateValue checks value against the spec's constraints (Kind, then Enum, then
@@ -69,6 +70,10 @@ func (s VarSpec) ValidateValue(name, value string) error {
 	case KindInt:
 		if n, err := strconv.Atoi(value); err != nil || n < 0 {
 			return fmt.Errorf("%s must be a non-negative integer, got %q", name, value)
+		}
+	case KindPositiveInt:
+		if n, err := strconv.Atoi(value); err != nil || n < 1 {
+			return fmt.Errorf("%s must be a positive integer, got %q", name, value)
 		}
 	case KindPort:
 		if n, err := strconv.Atoi(value); err != nil || n < 1 || n > 65535 {
@@ -178,6 +183,8 @@ func JSONSchema(name, describe string, schema map[string]VarSpec) map[string]any
 			prop["enum"] = []string{"true", "false"}
 		case KindInt:
 			prop["pattern"] = "^[0-9]+$"
+		case KindPositiveInt:
+			prop["pattern"] = "^[1-9][0-9]*$"
 		case KindPort:
 			prop["pattern"] = "^[0-9]{1,5}$"
 		}

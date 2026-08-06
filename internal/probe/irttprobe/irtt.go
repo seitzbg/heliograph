@@ -28,7 +28,7 @@ func init() {
 	probe.Register("IRTT", "IRTT UDP round-trip", map[string]probe.VarSpec{
 		"binary":      {Doc: "path to the irtt binary", Default: "irtt", Scope: probe.ProbeVar},
 		"port":        {Doc: "irtt server port", Default: "2112", Scope: probe.TargetVar, Kind: probe.KindPort},
-		"interval_ms": {Doc: "send interval in milliseconds", Default: "20", Scope: probe.ProbeVar, Kind: probe.KindInt},
+		"interval_ms": {Doc: "send interval in milliseconds", Default: "20", Scope: probe.ProbeVar, Kind: probe.KindPositiveInt},
 	}, func(cfg map[string]string) (probe.Probe, error) {
 		p := &irttProbe{binary: "irtt", port: "2112", interval: 20 * time.Millisecond}
 		if v := cfg["binary"]; v != "" {

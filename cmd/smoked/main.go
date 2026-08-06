@@ -72,8 +72,8 @@ func main() {
 	if *pings < 1 || *pings > config.MaxPings {
 		fatal("invalid -pings", fmt.Errorf("must be between 1 and %d, got %d", config.MaxPings, *pings))
 	}
-	if *step <= 0 {
-		fatal("invalid -step", fmt.Errorf("must be positive, got %s", *step))
+	if *step < config.MinStep {
+		fatal("invalid -step", fmt.Errorf("must be at least %s, got %s", config.MinStep, *step))
 	}
 
 	fmt.Printf("smoked %s — registered probe plugins: %s\n\n", version, strings.Join(probe.Registered(), ", "))

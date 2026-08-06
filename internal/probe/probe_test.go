@@ -94,6 +94,11 @@ func TestVarSpecValidateValue(t *testing.T) {
 		{"int zero ok", VarSpec{Kind: KindInt}, "0", true},
 		{"int neg", VarSpec{Kind: KindInt}, "-1", false},
 		{"int nan", VarSpec{Kind: KindInt}, "x", false},
+		{"posint ok", VarSpec{Kind: KindPositiveInt}, "20", true},
+		{"posint one", VarSpec{Kind: KindPositiveInt}, "1", true},
+		{"posint zero", VarSpec{Kind: KindPositiveInt}, "0", false},
+		{"posint neg", VarSpec{Kind: KindPositiveInt}, "-5", false},
+		{"posint nan", VarSpec{Kind: KindPositiveInt}, "x", false},
 		{"enum ok", VarSpec{Enum: []string{"udp", "tcp"}}, "tcp", true},
 		{"enum bad", VarSpec{Enum: []string{"udp", "tcp"}}, "sctp", false},
 		{"validate ok", VarSpec{Validate: func(v string) error {

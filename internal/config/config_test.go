@@ -514,3 +514,26 @@ targets:
 		t.Error("expected an error for an empty target name (host on the root node)")
 	}
 }
+
+// A sub-second step must be rejected: the API serializes round timestamps at
+// whole-second resolution, so a cadence below 1s produces ambiguous/duplicate
+// timestamps that corrupt the graph X-axis and the incremental watermark (#9).
+func TestSubSecondStepRejected(t *testing.T) {
+	cfg := "database: { step: 500ms, pings: 4 }\ntargets: { probe: FPing, children: { h: { host: 1.1.1.1 } } }\n"
+	c, err := Parse([]byte(cfg))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if _, err := c.Monitors(); err == nil || !strings.Contains(err.Error(), "step") {
+		t.Fatalf("expected a sub-second step to be rejected mentioning `step`, got %v", err)
+	}
+	// A whole-second step at the 1s floor is accepted.
+	ok := "database: { step: 1s, pings: 4 }\ntargets: { probe: FPing, children: { h: { host: 1.1.1.1 } } }\n"
+	c2, err := Parse([]byte(ok))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if _, err := c2.Monitors(); err != nil {
+		t.Fatalf("a 1s step should be accepted, got %v", err)
+	}
+}
