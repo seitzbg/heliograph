@@ -550,3 +550,72 @@ func TestSeriesWindow(t *testing.T) {
 		t.Errorf("window=zzz status = %d, want 400", rec.Code)
 	}
 }
+
+// countingStore records which store methods the API calls, to prove the live
+// endpoints use the bulk queries (LatestAll / AvailabilityAll) rather than one
+// Latest / Availability per target (the #5 fan-out reduction).
+type countingStore struct {
+	*store.MemStore
+	latest, latestAll, avail, availAll int
+}
+
+func (c *countingStore) Latest(k string) (scheduler.Outcome, bool) {
+	c.latest++
+	return c.MemStore.Latest(k)
+}
+func (c *countingStore) LatestAll() map[string]scheduler.Outcome {
+	c.latestAll++
+	return c.MemStore.LatestAll()
+}
+func (c *countingStore) Availability(ctx context.Context, t string, cut time.Time, m *float64) (store.AvailabilityStat, error) {
+	c.avail++
+	return c.MemStore.Availability(ctx, t, cut, m)
+}
+func (c *countingStore) AvailabilityAll(ctx context.Context, cut time.Time, m *float64) (map[string]store.AvailabilityStat, error) {
+	c.availAll++
+	return c.MemStore.AvailabilityAll(ctx, cut, m)
+}
+
+func TestEndpointsUseBulkQueries(t *testing.T) {
+	cs := &countingStore{MemStore: store.NewMem(100)}
+	now := time.Now()
+	for _, name := range []string{"a", "b", "c"} {
+		cs.Add([]scheduler.Outcome{{Target: probe.Target{Name: name, Host: "h"}, ProbeName: "FPing",
+			When: now.Add(-time.Minute), Computed: sample.Compute(4, []float64{0.01, 0.02, 0.03, 0.04})}})
+	}
+	srv := New(cs, "")
+
+	call := func(path string) {
+		rec := httptest.NewRecorder()
+		srv.Routes().ServeHTTP(rec, httptest.NewRequest("GET", path, nil))
+		if rec.Code != 200 {
+			t.Fatalf("%s: status %d", path, rec.Code)
+		}
+	}
+
+	// /api/targets: one bulk LatestAll, zero per-target Latest.
+	cs.latest, cs.latestAll = 0, 0
+	call("/api/targets")
+	if cs.latestAll != 1 || cs.latest != 0 {
+		t.Errorf("/api/targets used latestAll=%d latest=%d, want 1/0", cs.latestAll, cs.latest)
+	}
+
+	// /api/charts and /api/metrics: same — bulk, no per-target Latest.
+	for _, p := range []string{"/api/charts?by=loss", "/metrics"} {
+		cs.latest, cs.latestAll = 0, 0
+		call(p)
+		if cs.latestAll != 1 || cs.latest != 0 {
+			t.Errorf("%s used latestAll=%d latest=%d, want 1/0", p, cs.latestAll, cs.latest)
+		}
+	}
+
+	// /api/sla: one bulk AvailabilityAll, zero per-target Availability.
+	cs.avail, cs.availAll, cs.latest = 0, 0, 0
+	call("/api/sla?window=24h")
+	if cs.availAll != 1 || cs.avail != 0 {
+		t.Errorf("/api/sla used availAll=%d avail=%d, want 1/0", cs.availAll, cs.avail)
+	}
+	if cs.latest != 0 {
+		t.Errorf("/api/sla made %d per-target Latest calls, want 0 (uses bulk latest for probe names)", cs.latest)
+	}
+}

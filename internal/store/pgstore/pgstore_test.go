@@ -337,3 +337,56 @@ func TestDailyRollup(t *testing.T) {
 		t.Errorf("day2 rounds/avg = %d/%v, want 1/.10", d2.Rounds, d2.MedianAvg)
 	}
 }
+
+// LatestAll and AvailabilityAll return every target in one query — the bulk forms
+// the API uses to avoid a per-target fan-out.
+func TestPGStoreBulkReads(t *testing.T) {
+	dsn := os.Getenv("SMOKE_TEST_DSN")
+	if dsn == "" {
+		t.Skip("set SMOKE_TEST_DSN to run the TimescaleDB integration test")
+	}
+	ctx := context.Background()
+	s, err := New(ctx, dsn, 100, func(e error) { t.Errorf("store error: %v", e) })
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.pool.Exec(ctx, "TRUNCATE samples"); err != nil {
+		t.Fatalf("truncate: %v", err)
+	}
+
+	base := time.Unix(1_700_300_000, 0).UTC()
+	// a: two rounds, both up; b: one round, fully lost (down).
+	s.Add([]scheduler.Outcome{
+		{Target: probe.Target{Name: "a", Host: "h"}, ProbeName: "FPing", When: base, Computed: sample.Compute(4, []float64{0.01, 0.02, 0.03, 0.04})},
+		{Target: probe.Target{Name: "a", Host: "h"}, ProbeName: "FPing", When: base.Add(time.Minute), Computed: sample.Compute(4, []float64{0.05, 0.06, 0.07, 0.08})},
+		{Target: probe.Target{Name: "b", Host: "h"}, ProbeName: "TCPConnect", When: base, Computed: sample.Compute(4, nil)},
+	})
+
+	all := s.LatestAll()
+	if len(all) != 2 {
+		t.Fatalf("LatestAll len = %d, want 2", len(all))
+	}
+	if !all["a"].When.Equal(base.Add(time.Minute)) {
+		t.Errorf("a latest = %v, want the newer round", all["a"].When)
+	}
+	if all["b"].ProbeName != "TCPConnect" {
+		t.Errorf("b probe = %q, want TCPConnect", all["b"].ProbeName)
+	}
+
+	av, err := s.AvailabilityAll(ctx, base, nil)
+	if err != nil {
+		t.Fatalf("AvailabilityAll: %v", err)
+	}
+	if a := av["a"]; a.Measured != 2 || a.Up != 2 {
+		t.Errorf("a measured/up = %d/%d, want 2/2", a.Measured, a.Up)
+	}
+	if b := av["b"]; b.Measured != 1 || b.Up != 0 {
+		t.Errorf("b measured/up = %d/%d, want 1/0", b.Measured, b.Up)
+	}
+	// matches the per-target Availability
+	a1, _ := s.Availability(ctx, "a", base, nil)
+	if a1.Measured != av["a"].Measured || a1.Up != av["a"].Up {
+		t.Errorf("AvailabilityAll[a] != Availability(a)")
+	}
+}
