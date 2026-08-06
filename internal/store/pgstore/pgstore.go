@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"sort"
 	"time"
@@ -403,11 +404,14 @@ func (s *PGStore) Availability(ctx context.Context, target string, cutoff time.T
 	return st, nil
 }
 
-// maxRangeRounds defensively bounds a windowed series read. It's far above any
-// real drill-down (30h at a 60s step = 1800 rounds); the true bound is the raw
-// retention policy (30 days). If a window somehow holds more, the most recent
-// maxRangeRounds are returned rather than an unbounded result set.
-const maxRangeRounds = 20000
+// maxRangeRounds bounds a windowed single-target series read. It comfortably covers
+// the largest documented raw range (the 30h drill-down) even at the 1s minimum step —
+// 30h/1s = 108,000 rounds — so that view never silently truncates (the old 20,000 cap
+// dropped ~1h53m of a 30h view at a 5s step). It stays a backstop against a pathological
+// long window (raw retention caps the absolute at 30 days); if a query still exceeds it,
+// the newest maxRangeRounds are returned and the truncation is logged, not silent. A var
+// so tests can lower it (CODE_REVIEW #3).
+var maxRangeRounds = 150_000
 
 // HistorySince returns the target's rounds at or after cutoff, oldest->newest,
 // unbounded by histCap — so a long raw range (e.g. the 30h drill-down) reads the
@@ -430,6 +434,10 @@ func (s *PGStore) HistorySince(ctx context.Context, target string, cutoff time.T
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
+	}
+	if len(out) == maxRangeRounds {
+		slog.Warn("pgstore: windowed series hit the row cap; oldest rounds omitted — narrow the window or raise the step",
+			"target", target, "cap", maxRangeRounds, "cutoff", cutoff.UTC())
 	}
 	// query is DESC; return oldest->newest to match History/MemStore.
 	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
@@ -509,16 +517,33 @@ func (s *PGStore) AvailabilityAll(ctx context.Context, cutoff time.Time, maxLoss
 
 var _ store.Store = (*PGStore)(nil)
 
+// maxSeriesAllPerTarget caps how many of the newest rounds the bulk grid read returns
+// PER TARGET. The endpoint allows a window up to 48h, so without a bound a short probe
+// step across many targets could multiply into a multi-million-row response. It
+// comfortably covers the grid's documented 3h window even at the 1s minimum step
+// (3h/1s = 10,800), so the live grid never truncates — it only bounds a pathological
+// request, keeping every target represented (unlike a plain LIMIT, which would drop
+// whole trailing targets). A var so tests can lower it (CODE_REVIEW #8).
+var maxSeriesAllPerTarget = 20_000
+
 // SeriesAll returns every target's rounds strictly after cutoff in one query,
 // grouped by target and oldest->newest (ts ascending) — the bulk, incremental read
 // behind the Graphs grid: one query per refresh, and with cutoff = the client's
 // watermark it returns only rounds newer than that instead of the whole window each
-// tick. Targets with no rounds after cutoff are absent from the map. A query/scan
-// error is returned (not swallowed) so the API answers 503, not a false-empty grid.
+// tick. Targets with no rounds after cutoff are absent from the map. Each target is
+// capped to its newest maxSeriesAllPerTarget rounds. A query/scan error is returned
+// (not swallowed) so the API answers 503, not a false-empty grid.
 func (s *PGStore) SeriesAll(ctx context.Context, cutoff time.Time) (map[string][]scheduler.Outcome, error) {
+	// row_number() per target keeps the newest N of each (so no target is dropped whole,
+	// as a bare LIMIT would); the outer query then returns them oldest->newest.
 	rows, err := s.pool.Query(ctx,
 		`SELECT ts, target, probe, host, pings, loss, median_seconds, rtts_seconds, err, duration_ms
-		   FROM samples WHERE ts > $1 ORDER BY target, ts`, cutoff.UTC())
+		   FROM (
+		     SELECT *, row_number() OVER (PARTITION BY target ORDER BY ts DESC) AS rn
+		       FROM samples WHERE ts > $1
+		   ) q
+		   WHERE rn <= $2
+		   ORDER BY target, ts`, cutoff.UTC(), maxSeriesAllPerTarget)
 	if err != nil {
 		s.onErr(err)
 		return nil, err
@@ -536,6 +561,16 @@ func (s *PGStore) SeriesAll(ctx context.Context, cutoff time.Time) (map[string][
 	if err := rows.Err(); err != nil {
 		s.onErr(err)
 		return nil, err
+	}
+	capped := 0
+	for _, hist := range out {
+		if len(hist) == maxSeriesAllPerTarget {
+			capped++
+		}
+	}
+	if capped > 0 {
+		slog.Warn("pgstore: bulk series hit the per-target row cap; oldest rounds omitted — narrow the window or raise the step",
+			"cap", maxSeriesAllPerTarget, "targets_capped", capped)
 	}
 	return out, nil
 }
