@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -593,7 +594,12 @@ func TestSeriesWindow(t *testing.T) {
 // Latest / Availability per target (the #5 fan-out reduction).
 type countingStore struct {
 	*store.MemStore
-	latest, latestAll, avail, availAll int
+	latest, latestAll, avail, availAll, seriesAll int
+}
+
+func (c *countingStore) SeriesAll(ctx context.Context, cutoff time.Time) (map[string][]scheduler.Outcome, error) {
+	c.seriesAll++
+	return c.MemStore.SeriesAll(ctx, cutoff)
 }
 
 func (c *countingStore) Latest(k string) (scheduler.Outcome, bool) {
@@ -654,6 +660,82 @@ func TestEndpointsUseBulkQueries(t *testing.T) {
 	}
 	if cs.latest != 0 {
 		t.Errorf("/api/sla made %d per-target Latest calls, want 0 (uses bulk latest for probe names)", cs.latest)
+	}
+}
+
+// TestSeriesAllBulk proves /api/series/all is one bulk, incremental read for the
+// whole Graphs grid (CODE_REVIEW #2): a single SeriesAll for all targets (not one
+// /api/series per target), a `since` watermark that returns only newer rounds, and a
+// required window.
+func TestSeriesAllBulk(t *testing.T) {
+	cs := &countingStore{MemStore: store.NewMem(100)}
+	now := time.Now()
+	for _, name := range []string{"a", "b", "c"} {
+		cs.Add([]scheduler.Outcome{
+			{Target: probe.Target{Name: name, Host: "h"}, ProbeName: "FPing", When: now.Add(-2 * time.Minute), Computed: sample.Compute(4, []float64{0.01, 0.02, 0.03, 0.04})},
+			{Target: probe.Target{Name: name, Host: "h"}, ProbeName: "FPing", When: now.Add(-1 * time.Minute), Computed: sample.Compute(4, []float64{0.01, 0.02, 0.03, 0.04})},
+		})
+	}
+	srv := New(cs, "")
+
+	type resp struct {
+		Cutoff  string `json:"cutoff"`
+		Targets map[string]struct {
+			Rounds []map[string]any `json:"rounds"`
+		} `json:"targets"`
+	}
+	get := func(path string) (*httptest.ResponseRecorder, resp) {
+		rec := httptest.NewRecorder()
+		srv.Routes().ServeHTTP(rec, httptest.NewRequest("GET", path, nil))
+		var r resp
+		_ = json.Unmarshal(rec.Body.Bytes(), &r)
+		return rec, r
+	}
+
+	// Full window: ONE SeriesAll for all 3 targets — the scale win (was one per target).
+	cs.seriesAll = 0
+	rec, r := get("/api/series/all?window=3h")
+	if rec.Code != 200 {
+		t.Fatalf("status %d", rec.Code)
+	}
+	if cs.seriesAll != 1 {
+		t.Errorf("SeriesAll called %d times, want 1 (bulk, not per-target)", cs.seriesAll)
+	}
+	if len(r.Targets) != 3 || len(r.Targets["a"].Rounds) != 2 {
+		t.Errorf("targets=%d a.rounds=%d, want 3 targets with 2 rounds each", len(r.Targets), len(r.Targets["a"].Rounds))
+	}
+
+	// Incremental: since between the two rounds returns only the newer round per target.
+	sinceMs := now.Add(-90 * time.Second).UnixMilli()
+	_, r2 := get("/api/series/all?window=3h&since=" + strconv.FormatInt(sinceMs, 10))
+	if len(r2.Targets["a"].Rounds) != 1 {
+		t.Errorf("incremental a.rounds=%d, want 1 (only the newer round)", len(r2.Targets["a"].Rounds))
+	}
+
+	// window is required and validated.
+	for _, p := range []string{"/api/series/all", "/api/series/all?window=zzz"} {
+		rec := httptest.NewRecorder()
+		srv.Routes().ServeHTTP(rec, httptest.NewRequest("GET", p, nil))
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("%s status=%d, want 400", p, rec.Code)
+		}
+	}
+}
+
+// errSeriesStore is a SeriesAller whose bulk read fails; /api/series/all must answer
+// 503, not a false-empty grid (CODE_REVIEW #4 discipline extended to the new endpoint).
+type errSeriesStore struct{ *store.MemStore }
+
+func (errSeriesStore) SeriesAll(context.Context, time.Time) (map[string][]scheduler.Outcome, error) {
+	return nil, errors.New("db read failed")
+}
+
+func TestSeriesAllReadFailure503(t *testing.T) {
+	srv := New(errSeriesStore{store.NewMem(10)}, "")
+	rec := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(rec, httptest.NewRequest("GET", "/api/series/all?window=3h", nil))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("series/all on a read failure = %d, want 503", rec.Code)
 	}
 }
 

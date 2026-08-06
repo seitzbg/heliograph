@@ -96,6 +96,18 @@ type AvailabilityAller interface {
 	AvailabilityAll(ctx context.Context, cutoff time.Time, maxLossPct *float64) (map[string]AvailabilityStat, error)
 }
 
+// SeriesAller returns every target's rounds strictly after cutoff in one call — the
+// bulk, incremental form of History that powers the Graphs grid. Instead of one
+// /api/series per target per refresh, the grid makes a single query, and with
+// cutoff = the newest round timestamp it has already seen (its watermark) it
+// transfers only rounds newer than that, not the whole window every tick. Strictly
+// after (not at) cutoff, so an incremental fetch never re-sends the watermark round.
+// Targets with no rounds after cutoff are omitted; returned oldest->newest per target.
+// The error lets a backing-store failure surface as an API 503, not a false-empty view.
+type SeriesAller interface {
+	SeriesAll(ctx context.Context, cutoff time.Time) (map[string][]scheduler.Outcome, error)
+}
+
 // MemStore is the in-memory implementation: latest + bounded history per target.
 // Used by default and in tests; not durable.
 type MemStore struct {
@@ -221,6 +233,28 @@ func (s *MemStore) LatestAll() (map[string]scheduler.Outcome, error) {
 	return out, nil
 }
 
+// SeriesAll returns every target's rounds strictly after cutoff, grouped by target,
+// oldest->newest (history is kept in insertion order). Best-effort like History,
+// bounded by the in-memory cap; production uses the pgstore implementation. Targets
+// with no rounds after cutoff are omitted.
+func (s *MemStore) SeriesAll(_ context.Context, cutoff time.Time) (map[string][]scheduler.Outcome, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make(map[string][]scheduler.Outcome)
+	for k, h := range s.history {
+		var rounds []scheduler.Outcome
+		for _, o := range h {
+			if o.When.After(cutoff) {
+				rounds = append(rounds, o)
+			}
+		}
+		if len(rounds) > 0 {
+			out[k] = rounds
+		}
+	}
+	return out, nil
+}
+
 // AvailabilityAll aggregates every target over [cutoff, now) — the same best-effort
 // scan as Availability, once per target it holds.
 func (s *MemStore) AvailabilityAll(ctx context.Context, cutoff time.Time, maxLossPct *float64) (map[string]AvailabilityStat, error) {
@@ -248,4 +282,5 @@ var (
 	_ RangeHistorier    = (*MemStore)(nil)
 	_ LatestAller       = (*MemStore)(nil)
 	_ AvailabilityAller = (*MemStore)(nil)
+	_ SeriesAller       = (*MemStore)(nil)
 )
