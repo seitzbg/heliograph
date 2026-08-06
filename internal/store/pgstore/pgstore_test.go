@@ -363,7 +363,10 @@ func TestPGStoreBulkReads(t *testing.T) {
 		{Target: probe.Target{Name: "b", Host: "h"}, ProbeName: "TCPConnect", When: base, Computed: sample.Compute(4, nil)},
 	})
 
-	all := s.LatestAll()
+	all, err := s.LatestAll()
+	if err != nil {
+		t.Fatalf("LatestAll: %v", err)
+	}
 	if len(all) != 2 {
 		t.Fatalf("LatestAll len = %d, want 2", len(all))
 	}

@@ -80,9 +80,11 @@ type RangeHistorier interface {
 
 // LatestAller returns every target's most recent outcome in one call. The live
 // endpoints (targets, charts, metrics) prefer it over one Latest per target, so a
-// refresh is a single query instead of N (the #5 query fan-out reduction).
+// refresh is a single query instead of N (the #5 query fan-out reduction). It
+// returns an error so a backing-store read failure surfaces as an API 503 rather
+// than a false-empty "0 targets" success (CODE_REVIEW #4).
 type LatestAller interface {
-	LatestAll() map[string]scheduler.Outcome
+	LatestAll() (map[string]scheduler.Outcome, error)
 }
 
 // AvailabilityAller aggregates availability for every target over the window in one
@@ -204,15 +206,16 @@ func (s *MemStore) HistorySince(_ context.Context, target string, cutoff time.Ti
 	return out, nil
 }
 
-// LatestAll returns a copy of every target's most recent outcome.
-func (s *MemStore) LatestAll() map[string]scheduler.Outcome {
+// LatestAll returns a copy of every target's most recent outcome. In-memory reads
+// never fail, so the error is always nil.
+func (s *MemStore) LatestAll() (map[string]scheduler.Outcome, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out := make(map[string]scheduler.Outcome, len(s.latest))
 	for k, o := range s.latest {
 		out[k] = o
 	}
-	return out
+	return out, nil
 }
 
 // AvailabilityAll aggregates every target over [cutoff, now) — the same best-effort

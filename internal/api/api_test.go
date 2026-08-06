@@ -563,7 +563,7 @@ func (c *countingStore) Latest(k string) (scheduler.Outcome, bool) {
 	c.latest++
 	return c.MemStore.Latest(k)
 }
-func (c *countingStore) LatestAll() map[string]scheduler.Outcome {
+func (c *countingStore) LatestAll() (map[string]scheduler.Outcome, error) {
 	c.latestAll++
 	return c.MemStore.LatestAll()
 }
@@ -617,5 +617,24 @@ func TestEndpointsUseBulkQueries(t *testing.T) {
 	}
 	if cs.latest != 0 {
 		t.Errorf("/api/sla made %d per-target Latest calls, want 0 (uses bulk latest for probe names)", cs.latest)
+	}
+}
+
+// errLatestStore is a LatestAller whose bulk read fails — simulating a database
+// outage. The live endpoints must answer 503, not a false-empty 200 (CODE_REVIEW #4).
+type errLatestStore struct{ *store.MemStore }
+
+func (errLatestStore) LatestAll() (map[string]scheduler.Outcome, error) {
+	return nil, errors.New("db read failed")
+}
+
+func TestReadFailureReturns503(t *testing.T) {
+	srv := New(errLatestStore{store.NewMem(10)}, "")
+	for _, p := range []string{"/api/targets", "/api/charts?by=loss", "/api/sla?window=24h", "/metrics"} {
+		rec := httptest.NewRecorder()
+		srv.Routes().ServeHTTP(rec, httptest.NewRequest("GET", p, nil))
+		if rec.Code != http.StatusServiceUnavailable {
+			t.Errorf("%s on a store read failure = %d, want 503", p, rec.Code)
+		}
 	}
 }
