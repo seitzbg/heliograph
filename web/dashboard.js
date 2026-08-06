@@ -14,11 +14,15 @@
 
   // Range tiers. raw -> /api/series?window=; band -> /api/rollup?res= (client-sliced
   // to the range window, since /api/rollup returns the full history for the target).
+  // windowMs sets the fixed wall-clock X domain [now-windowMs, now]: the axis means
+  // exactly what its label says, short data floats at its true position, and outages
+  // render as blank spans (#3). Kept in sync with the raw `window` / band `days`.
+  const H = 3600 * 1000, D = 86400 * 1000;
   const RANGES = {
-    '3h':  { mode: 'raw',  window: '3h',  label: 'Last 3 hours',  desc: 'per-round smoke', xl: ['-3h', '-2h', '-1h', 'now'] },
-    '30h': { mode: 'raw',  window: '30h', label: 'Last 30 hours', desc: 'per-round smoke', xl: ['-30h', '-20h', '-10h', 'now'] },
-    '10d': { mode: 'band', res: '1h', days: 10,  label: 'Last 10 days',  desc: 'hourly band', xl: ['-10d', '', '', 'now'] },
-    '400d':{ mode: 'band', res: '1d', days: 400, label: 'Last 400 days', desc: 'daily band',  xl: ['-400d', '', '', 'now'] },
+    '3h':  { mode: 'raw',  window: '3h',  windowMs: 3 * H,   label: 'Last 3 hours',  desc: 'per-round smoke', xl: ['-3h', '-2h', '-1h', 'now'] },
+    '30h': { mode: 'raw',  window: '30h', windowMs: 30 * H,  label: 'Last 30 hours', desc: 'per-round smoke', xl: ['-30h', '-20h', '-10h', 'now'] },
+    '10d': { mode: 'band', res: '1h', days: 10,  windowMs: 10 * D,  label: 'Last 10 days',  desc: 'hourly band', xl: ['-10d', '', '', 'now'] },
+    '400d':{ mode: 'band', res: '1d', days: 400, windowMs: 400 * D, label: 'Last 400 days', desc: 'daily band',  xl: ['-400d', '', '', 'now'] },
   };
   const RANGE_ORDER = ['3h', '30h', '10d', '400d'];
 
@@ -69,7 +73,13 @@
     function renderInto(canvas, s, R, height) {
       if (s && s.unsupported) { drawNote(canvas, 'needs the TimescaleDB store (-dsn -downsample)', height); return; }
       if (!s || s.buckets.length < 2) { drawNote(canvas, 'collecting…', height); return; }
-      Smoke.render(canvas, s, { height, band: R.mode === 'band', xlabels: R.xl });
+      // Fixed wall-clock domain [now-windowMs, now]. t1 extends to the newest sample if
+      // the client clock lags the server, so a fresh sample never clamps to the edge;
+      // t0 anchors to the selected range so the axis labels stay literally correct.
+      const lastT = s.buckets[s.buckets.length - 1].t;
+      const t1 = Math.max(Date.now(), Number.isFinite(lastT) ? lastT : 0);
+      const t0 = R.windowMs ? t1 - R.windowMs : undefined;
+      Smoke.render(canvas, s, { height, band: R.mode === 'band', xlabels: R.xl, t0, t1: t0 == null ? undefined : t1 });
     }
     function metaHtml(s) {
       const st = Smoke.seriesStats(s); const lcls = st.lossAvg > 2 ? 'bad' : st.lossAvg > 0.5 ? 'warn' : '';

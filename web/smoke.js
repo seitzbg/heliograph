@@ -104,9 +104,33 @@ window.Smoke = (function () {
     let maxHalf = 0;
     for (let i = 0; i < n; i++) maxHalf = Math.max(maxHalf, Math.floor(bucketPings(s.buckets[i]) / 2));
     const yMax = opts.yMax || robustMax(s);
-    const X = (i) => mL + pw * (i / (n - 1));
+    // X by wall-clock time when a domain (t0/t1 epoch ms) and per-bucket `.t` are
+    // supplied: short data floats at its true position and gaps land at the right
+    // place. Without them (smoke-poc.html) fall back to even array-index spacing.
+    const bk = s.buckets;
+    const useTime = opts.t0 != null && opts.t1 != null && opts.t1 > opts.t0 &&
+      bk.every((b) => typeof b.t === 'number' && !isNaN(b.t));
+    const clamp01 = (f) => (f < 0 ? 0 : f > 1 ? 1 : f);
+    const X = useTime
+      ? (i) => mL + pw * clamp01((bk[i].t - opts.t0) / (opts.t1 - opts.t0))
+      : (i) => mL + pw * (i / (n - 1));
     const Y = (v) => mT + ph * (1 - Math.min(v, yMax) / yMax);
     const colW = Math.ceil(pw / (n - 1)) + 1;
+
+    // A time gap wider than the inferred cadence breaks lines/bands, so a collector/DB
+    // outage renders as a blank span, never a straight line bridging it. Cadence =
+    // median of positive consecutive `.t` diffs; gap = diff > gapFactor*cadence
+    // (default 1.5 — RRD-style "a round was missed"). Disabled without a time domain.
+    let gapMs = Infinity;
+    if (useTime && n >= 2) {
+      const diffs = [];
+      for (let i = 1; i < n; i++) { const d = bk[i].t - bk[i - 1].t; if (d > 0) diffs.push(d); }
+      if (diffs.length) {
+        diffs.sort((a, b) => a - b);
+        gapMs = diffs[Math.floor(diffs.length / 2)] * (opts.gapFactor || 1.5);
+      }
+    }
+    const isGap = (i) => useTime && i >= 1 && (bk[i].t - bk[i - 1].t) > gapMs;
 
     ctx.fillStyle = V.plotBg;
     ctx.fillRect(mL, mT, pw, ph);
@@ -147,6 +171,7 @@ window.Smoke = (function () {
       ctx.globalAlpha = V.dark ? 0.34 : 0.22;
       let run = [];
       for (let i = 0; i < n; i++) {
+        if (isGap(i)) { fillRun(run); run = []; } // time gap: don't span the range-area across it
         const smp = s.buckets[i].samples;
         if (!smp || smp.length === 0) { fillRun(run); run = []; continue; } // fully-lost bucket = gap
         let lo = smp[0], hi = smp[0];
@@ -161,6 +186,7 @@ window.Smoke = (function () {
         ctx.fillStyle = smokeGray(k, maxHalf, V.dark);
         let run = [];
         for (let i = 0; i < n; i++) {
+          if (isGap(i)) { fillRun(run); run = []; } // time gap: break the smoke band here
           const c = s.buckets[i].centered;
           const bn = bucketPings(s.buckets[i]);
           if (k > Math.floor(bn / 2)) { fillRun(run); run = []; continue; } // this bucket has no k-th band
@@ -179,7 +205,7 @@ window.Smoke = (function () {
       const m = s.buckets[i].median;
       if (isNaN(m)) { started = false; continue; }
       const x = X(i), y = Y(m);
-      if (!started) { ctx.moveTo(x, y); started = true; } else ctx.lineTo(x, y);
+      if (!started || isGap(i)) { ctx.moveTo(x, y); started = true; } else ctx.lineTo(x, y); // pen-up across a gap
     }
     ctx.stroke();
 
@@ -187,7 +213,7 @@ window.Smoke = (function () {
     ctx.lineWidth = 2.2;
     for (let i = 1; i < n; i++) {
       const a = s.buckets[i - 1], b = s.buckets[i];
-      if (isNaN(a.median) || isNaN(b.median)) continue;
+      if (isNaN(a.median) || isNaN(b.median) || isGap(i)) continue; // no coloured segment across a gap
       const pct = Math.max((a.lost / bucketPings(a)) * 100, (b.lost / bucketPings(b)) * 100);
       ctx.strokeStyle = lossColorPct(pct);
       ctx.beginPath(); ctx.moveTo(X(i - 1), Y(a.median)); ctx.lineTo(X(i), Y(b.median)); ctx.stroke();
@@ -216,7 +242,8 @@ window.Smoke = (function () {
       const samples = centered.filter((v) => !isNaN(v));
       const pings = r.pings || centered.length; // retain each round's own N
       N = Math.max(N, pings);
-      return { centered, samples, lost: r.loss || 0, median: r.median_ms == null ? NaN : r.median_ms, pings };
+      const t = r.t == null ? NaN : Date.parse(r.t); // wall-clock ms for time-scaled X + gap breaks
+      return { centered, samples, lost: r.loss || 0, median: r.median_ms == null ? NaN : r.median_ms, pings, t };
     });
     return { buckets, N: N || (buckets[0] ? buckets[0].centered.length : 0) };
   }
@@ -238,6 +265,7 @@ window.Smoke = (function () {
         lost: (x.loss_pct || 0) / 50, // 0..100% -> 0..2 lost of N=2
         median: x.median_avg_ms == null ? NaN : x.median_avg_ms,
         pings: 2, // min→max band; loss expressed as "lost of 2"
+        t: x.bucket == null ? NaN : Date.parse(x.bucket), // wall-clock ms for time-scaled X + gap breaks
       };
     });
     return { buckets, N: 2, resolution: resp.resolution || '1h' };
