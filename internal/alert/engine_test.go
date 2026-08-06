@@ -198,6 +198,46 @@ type capture struct{ events []Event }
 
 func (c *capture) Notify(e Event) { c.events = append(c.events, e) }
 
+// SeedWindow pre-fills the sample window from stored history so a target that is already
+// breaching at startup fires on its FIRST post-boot round, not after X fresh samples (the
+// durable-store replacement for the S sentinel).
+func TestSeedWindowFiresAlreadyBadTargetOnFirstEvaluate(t *testing.T) {
+	m, err := ParseMatcher("CheckLoss(l=50,x=3)") // fire after 3 consecutive rounds >=50% loss
+	if err != nil {
+		t.Fatal(err)
+	}
+	alerts := map[string]*Alert{"loss": {Name: "loss", Matcher: m, To: []string{"log"}}}
+	cap := &capture{}
+	e := NewEngine(alerts, map[string]Notifier{"log": cap})
+
+	// Two already-bad rounds warmed from history (rtt unused by CheckLoss).
+	e.SeedWindow("t", []string{"loss"}, []float64{100, 100}, []float64{math.NaN(), math.NaN()})
+
+	// The first real round (also bad) completes 3-in-a-row -> fires now.
+	evs := e.Evaluate("t", []string{"loss"}, 100, math.NaN(), time.Unix(1_700_000_000, 0))
+	if len(evs) != 1 || !evs[0].Firing {
+		t.Fatalf("expected an immediate FIRING from the warmed window, got %+v", evs)
+	}
+
+	// Sanity: without warm-start the same first round must NOT fire (needs 3 rounds).
+	e2 := NewEngine(alerts, map[string]Notifier{"log": &capture{}})
+	if evs := e2.Evaluate("t", []string{"loss"}, 100, math.NaN(), time.Unix(1_700_000_000, 0)); len(evs) != 0 {
+		t.Fatalf("cold start must not fire on the first round, got %+v", evs)
+	}
+}
+
+// Seeding fills only the window, never firing state: a recovering first round must not
+// fire, and seeding itself emits nothing.
+func TestSeedWindowDoesNotSpuriouslyFire(t *testing.T) {
+	m, _ := ParseMatcher("CheckLoss(l=50,x=3)")
+	e := NewEngine(map[string]*Alert{"loss": {Name: "loss", Matcher: m, To: []string{"log"}}}, map[string]Notifier{"log": &capture{}})
+	e.SeedWindow("t", []string{"loss"}, []float64{100, 100}, []float64{math.NaN(), math.NaN()})
+	// First post-boot round is healthy -> the 3-in-a-row is broken -> no fire.
+	if evs := e.Evaluate("t", []string{"loss"}, 0, 0.01, time.Unix(1_700_000_000, 0)); len(evs) != 0 {
+		t.Fatalf("a recovering round must not fire, got %+v", evs)
+	}
+}
+
 func statuses(evs []Event) []string {
 	out := make([]string, len(evs))
 	for i, e := range evs {

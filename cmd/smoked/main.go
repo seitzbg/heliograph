@@ -176,6 +176,15 @@ func main() {
 		fmt.Printf("store: in-memory (pass -dsn to persist to TimescaleDB)\n")
 	}
 
+	// Warm-start each alerted target's sample window from durable history, so a target
+	// that is already breaching at startup fires on its first new round instead of
+	// waiting X fresh samples (the durable-store replacement for SmokePing's S sentinel).
+	// Boot-only: a SIGHUP reload carries windows via InheritStateFrom, and a fresh
+	// in-memory store has no history, so this is a no-op there.
+	if rt := current.Load(); rt.engine != nil {
+		warmStartAlerts(rt.engine, rt.alertsByTarget, st)
+	}
+
 	roundStats := &api.RoundStats{}
 
 	// In serve mode the per-target planner fires each target on its own cadence, so
@@ -404,6 +413,26 @@ func (rt *runtime) eval(out []scheduler.Outcome) {
 		events := rt.engine.Evaluate(o.Target.Name, names,
 			o.Computed.LossFraction()*100, o.Computed.Median, o.When)
 		rt.engine.Dispatch(events, rt.alerteeByTarget[o.Target.Name]...)
+	}
+}
+
+// warmStartAlerts seeds each alerted target's alert window from the store's recent
+// history (loss% and rtt median per round, oldest->newest — the same values eval feeds
+// Evaluate), so an already-breaching target fires immediately after boot. Best-effort: a
+// target with no history or a read error is skipped.
+func warmStartAlerts(engine *alert.Engine, alertsByTarget map[string][]string, st store.Store) {
+	for target, names := range alertsByTarget {
+		hist, err := st.History(target)
+		if err != nil || len(hist) == 0 {
+			continue
+		}
+		loss := make([]float64, len(hist))
+		rtt := make([]float64, len(hist))
+		for i, o := range hist {
+			loss[i] = o.Computed.LossFraction() * 100
+			rtt[i] = o.Computed.Median // NaN for a lost round
+		}
+		engine.SeedWindow(target, names, loss, rtt)
 	}
 }
 

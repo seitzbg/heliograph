@@ -148,15 +148,7 @@ func (e *Engine) Evaluate(target string, alertNames []string, lossPct, rttSec fl
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	// window capacity = max matcher length among the attached alerts
-	cap := 1
-	for _, name := range alertNames {
-		if a := e.alerts[name]; a != nil {
-			if l := a.Matcher.Length(); l > cap {
-				cap = l
-			}
-		}
-	}
+	cap := e.windowCap(alertNames)
 	w := e.win[target]
 	if w == nil {
 		w = &Window{}
@@ -278,6 +270,41 @@ func appendCap(s []float64, v float64, cap int) []float64 {
 		s = s[len(s)-cap:]
 	}
 	return s
+}
+
+// windowCap is the deepest trailing-sample window any of the attached alerts needs (the
+// max matcher Length), so a target's Window holds exactly enough history and no more.
+func (e *Engine) windowCap(alertNames []string) int {
+	cap := 1
+	for _, name := range alertNames {
+		if a := e.alerts[name]; a != nil {
+			if l := a.Matcher.Length(); l > cap {
+				cap = l
+			}
+		}
+	}
+	return cap
+}
+
+// SeedWindow pre-fills a target's sample window from historical loss (percent) and rtt
+// (seconds, NaN for a lost round) series, oldest->newest, trimmed to the deepest matcher
+// window among the target's alerts. On boot this lets a target that is already breaching
+// fire on its first new round instead of waiting X fresh samples — the durable-store
+// replacement for SmokePing's S startup sentinel. It seeds only the window, never firing
+// state, so it emits no events by itself; a reload carries state via InheritStateFrom.
+func (e *Engine) SeedWindow(target string, alertNames []string, loss, rtt []float64) {
+	cap := e.windowCap(alertNames)
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.win[target] = &Window{Loss: tailCopy(loss, cap), RTT: tailCopy(rtt, cap)}
+}
+
+// tailCopy returns a fresh slice holding the last n elements of s (all of s if shorter).
+func tailCopy(s []float64, n int) []float64 {
+	if len(s) > n {
+		s = s[len(s)-n:]
+	}
+	return append([]float64(nil), s...)
 }
 
 // ---- notifiers ----
