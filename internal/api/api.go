@@ -41,21 +41,32 @@ type Server struct {
 
 func New(s store.Store, webDir string) *Server { return &Server{store: s, webDir: webDir} }
 
-// liveKeys returns the store's target keys filtered to the active set (if Active
-// is configured). Callers iterating current per-target state use this so removed
-// targets are not reported as up.
-func (srv *Server) liveKeys() []string {
-	keys := srv.store.Keys()
-	if srv.Active == nil {
-		return keys
-	}
-	active := srv.Active()
-	out := make([]string, 0, len(keys))
-	for _, k := range keys {
-		if active[k] {
-			out = append(out, k)
+// activeLatest returns each active target's most recent outcome, sorted by name.
+// It uses the store's bulk LatestAll (one query) when available instead of one
+// Latest per target — the live endpoints (targets, charts, metrics) all read this.
+func (srv *Server) activeLatest() []scheduler.Outcome {
+	var all map[string]scheduler.Outcome
+	if la, ok := srv.store.(store.LatestAller); ok {
+		all = la.LatestAll()
+	} else {
+		all = map[string]scheduler.Outcome{}
+		for _, k := range srv.store.Keys() {
+			if o, ok := srv.store.Latest(k); ok {
+				all[k] = o
+			}
 		}
 	}
+	var active map[string]bool
+	if srv.Active != nil {
+		active = srv.Active()
+	}
+	out := make([]scheduler.Outcome, 0, len(all))
+	for k, o := range all {
+		if active == nil || active[k] {
+			out = append(out, o)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Target.Name < out[j].Target.Name })
 	return out
 }
 
@@ -112,11 +123,7 @@ type targetDTO struct {
 
 func (srv *Server) targets(w http.ResponseWriter, _ *http.Request) {
 	var out []targetDTO
-	for _, k := range srv.liveKeys() {
-		o, ok := srv.store.Latest(k)
-		if !ok {
-			continue
-		}
+	for _, o := range srv.activeLatest() {
 		dto := targetDTO{
 			Name:    o.Target.Name,
 			Probe:   o.ProbeName,
@@ -187,11 +194,7 @@ func (srv *Server) charts(w http.ResponseWriter, r *http.Request) {
 		key float64
 	}
 	var rows []scored
-	for _, k := range srv.liveKeys() {
-		o, ok := srv.store.Latest(k)
-		if !ok {
-			continue
-		}
+	for _, o := range srv.activeLatest() {
 		e := chartEntry{
 			Name:    o.Target.Name,
 			Probe:   o.ProbeName,
@@ -316,29 +319,44 @@ func (srv *Server) sla(w http.ResponseWriter, r *http.Request) {
 	if srv.Steps != nil {
 		steps = srv.Steps()
 	}
+	// Prefer one bulk availability scan over N per-target queries (#5 fan-out).
+	var statsAll map[string]store.AvailabilityStat
+	if avAll, ok := srv.store.(store.AvailabilityAller); ok {
+		m, err := avAll.AvailabilityAll(r.Context(), cutoff, maxLossPct)
+		if err != nil {
+			slog.Error("sla: bulk availability query failed", "err", err)
+			http.Error(w, `{"error":"availability unavailable"}`, http.StatusServiceUnavailable)
+			return
+		}
+		statsAll = m
+	}
 
 	out := make([]slaEntry, 0)
-	for _, k := range srv.liveKeys() {
+	// activeLatest is one bulk query for the active targets + their probe names.
+	for _, o := range srv.activeLatest() {
+		k := o.Target.Name
 		var (
 			measured, up   int
 			sumLoss        float64
 			oldest, latest time.Time
 		)
-		if av != nil {
-			// Accurate over the full window, unbounded by the History cap.
+		switch {
+		case statsAll != nil:
+			st := statsAll[k] // zero value (measured 0) if no in-window rounds
+			measured, up, sumLoss, oldest, latest = st.Measured, st.Up, st.SumLossPct, st.Oldest, st.Latest
+		case av != nil:
 			st, err := av.Availability(r.Context(), k, cutoff, maxLossPct)
 			if err != nil {
 				slog.Warn("sla: availability query failed", "target", k, "err", err)
 				continue
 			}
 			measured, up, sumLoss, oldest, latest = st.Measured, st.Up, st.SumLossPct, st.Oldest, st.Latest
-		} else {
+		default:
 			measured, up, sumLoss, oldest, latest = slaOf(srv.store.History(k), cutoff, isUp)
 		}
 		if measured == 0 {
 			continue
 		}
-		o, _ := srv.store.Latest(k)
 		e := slaEntry{
 			Name:         k,
 			Probe:        o.ProbeName,
@@ -523,11 +541,7 @@ func (srv *Server) metrics(w http.ResponseWriter, _ *http.Request) {
 	b.WriteString("# TYPE smokeping_probe_duration_seconds gauge\n")
 	b.WriteString("# HELP smokeping_probe_last_sample_timestamp_seconds Unix time of this target's most recent round (alert on staleness).\n")
 	b.WriteString("# TYPE smokeping_probe_last_sample_timestamp_seconds gauge\n")
-	for _, k := range srv.liveKeys() {
-		o, ok := srv.store.Latest(k)
-		if !ok {
-			continue
-		}
+	for _, o := range srv.activeLatest() {
 		lbl := fmt.Sprintf(`{target=%q,probe=%q}`, escapeLabel(o.Target.Name), escapeLabel(o.ProbeName))
 		median := o.Computed.Median
 		if math.IsNaN(median) {

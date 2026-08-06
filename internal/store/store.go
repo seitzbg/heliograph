@@ -78,6 +78,19 @@ type RangeHistorier interface {
 	HistorySince(ctx context.Context, target string, cutoff time.Time) ([]scheduler.Outcome, error)
 }
 
+// LatestAller returns every target's most recent outcome in one call. The live
+// endpoints (targets, charts, metrics) prefer it over one Latest per target, so a
+// refresh is a single query instead of N (the #5 query fan-out reduction).
+type LatestAller interface {
+	LatestAll() map[string]scheduler.Outcome
+}
+
+// AvailabilityAller aggregates availability for every target over the window in one
+// call — the bulk form of Availability, so /api/sla is one query instead of N.
+type AvailabilityAller interface {
+	AvailabilityAll(ctx context.Context, cutoff time.Time, maxLossPct *float64) (map[string]AvailabilityStat, error)
+}
+
 // MemStore is the in-memory implementation: latest + bounded history per target.
 // Used by default and in tests; not durable.
 type MemStore struct {
@@ -191,9 +204,42 @@ func (s *MemStore) HistorySince(_ context.Context, target string, cutoff time.Ti
 	return out, nil
 }
 
+// LatestAll returns a copy of every target's most recent outcome.
+func (s *MemStore) LatestAll() map[string]scheduler.Outcome {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make(map[string]scheduler.Outcome, len(s.latest))
+	for k, o := range s.latest {
+		out[k] = o
+	}
+	return out
+}
+
+// AvailabilityAll aggregates every target over [cutoff, now) — the same best-effort
+// scan as Availability, once per target it holds.
+func (s *MemStore) AvailabilityAll(ctx context.Context, cutoff time.Time, maxLossPct *float64) (map[string]AvailabilityStat, error) {
+	s.mu.RLock()
+	keys := make([]string, len(s.keys))
+	copy(keys, s.keys)
+	s.mu.RUnlock()
+	out := make(map[string]AvailabilityStat, len(keys))
+	for _, k := range keys {
+		st, err := s.Availability(ctx, k, cutoff, maxLossPct)
+		if err != nil {
+			return nil, err
+		}
+		if st.Measured > 0 {
+			out[k] = st
+		}
+	}
+	return out, nil
+}
+
 // compile-time checks
 var (
-	_ Store          = (*MemStore)(nil)
-	_ Availabler     = (*MemStore)(nil)
-	_ RangeHistorier = (*MemStore)(nil)
+	_ Store             = (*MemStore)(nil)
+	_ Availabler        = (*MemStore)(nil)
+	_ RangeHistorier    = (*MemStore)(nil)
+	_ LatestAller       = (*MemStore)(nil)
+	_ AvailabilityAller = (*MemStore)(nil)
 )

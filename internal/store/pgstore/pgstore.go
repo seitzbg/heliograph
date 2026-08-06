@@ -422,6 +422,69 @@ func (s *PGStore) HistorySince(ctx context.Context, target string, cutoff time.T
 	return out, nil
 }
 
+// LatestAll returns every target's most recent outcome in one query (DISTINCT ON),
+// so the live endpoints don't fan out to one Latest per target.
+func (s *PGStore) LatestAll() map[string]scheduler.Outcome {
+	rows, err := s.pool.Query(s.ctx,
+		`SELECT DISTINCT ON (target) ts, target, probe, host, pings, loss, median_seconds, rtts_seconds, err, duration_ms
+		   FROM samples ORDER BY target, ts DESC`)
+	if err != nil {
+		s.onErr(err)
+		return nil
+	}
+	defer rows.Close()
+	out := map[string]scheduler.Outcome{}
+	for rows.Next() {
+		o, err := scanOutcome(rows)
+		if err != nil {
+			s.onErr(err)
+			return out
+		}
+		out[o.Target.Name] = o
+	}
+	return out
+}
+
+// AvailabilityAll aggregates every target over [cutoff, now) in one grouped query —
+// the bulk form of Availability, so /api/sla is a single scan, not one per target.
+func (s *PGStore) AvailabilityAll(ctx context.Context, cutoff time.Time, maxLossPct *float64) (map[string]store.AvailabilityStat, error) {
+	upCond := "loss < pings"
+	args := []any{cutoff.UTC()}
+	if maxLossPct != nil {
+		upCond = "loss * 100.0 <= $2 * pings"
+		args = append(args, *maxLossPct)
+	}
+	q := `SELECT target, count(*),
+	             count(*) FILTER (WHERE ` + upCond + `),
+	             coalesce(sum(loss::float / NULLIF(pings,0) * 100), 0),
+	             min(ts), max(ts)
+	        FROM samples WHERE ts >= $1 GROUP BY target`
+	rows, err := s.pool.Query(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]store.AvailabilityStat{}
+	for rows.Next() {
+		var (
+			target         string
+			st             store.AvailabilityStat
+			oldest, latest *time.Time
+		)
+		if err := rows.Scan(&target, &st.Measured, &st.Up, &st.SumLossPct, &oldest, &latest); err != nil {
+			return nil, err
+		}
+		if oldest != nil {
+			st.Oldest = *oldest
+		}
+		if latest != nil {
+			st.Latest = *latest
+		}
+		out[target] = st
+	}
+	return out, rows.Err()
+}
+
 var _ interface {
 	Add([]scheduler.Outcome)
 	Keys() []string
@@ -433,4 +496,6 @@ var _ interface {
 	store.Rollupper
 	store.Availabler
 	store.RangeHistorier
+	store.LatestAller
+	store.AvailabilityAller
 } = (*PGStore)(nil)
