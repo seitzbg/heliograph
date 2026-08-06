@@ -92,6 +92,31 @@ check('gridSince skips a non-finite frontier timestamp', () => {
   assert.equal(D.gridSince([p, q]), 2000);
 });
 
+// zoomResolution: a drag-selected span maps to the fetch tier that best resolves it —
+// raw for short spans, then hourly, then daily bands (so zooming a long view refetches
+// finer data). Boundaries are inclusive of the finer tier.
+check('zoomResolution picks the fetch tier by span', () => {
+  const HOUR = 3600 * 1000, DAY = 86400 * 1000;
+  assert.deepEqual(D.zoomResolution(3 * HOUR), { mode: 'raw' });
+  assert.deepEqual(D.zoomResolution(30 * HOUR), { mode: 'raw' });               // <=30h -> raw
+  assert.deepEqual(D.zoomResolution(31 * HOUR), { mode: 'band', res: '1h' });
+  assert.deepEqual(D.zoomResolution(10 * DAY), { mode: 'band', res: '1h' });    // <=10d -> hourly
+  assert.deepEqual(D.zoomResolution(11 * DAY), { mode: 'band', res: '1d' });
+  assert.deepEqual(D.zoomResolution(400 * DAY), { mode: 'band', res: '1d' });
+});
+
+// pixelToTime inverts render's X mapping within the plot area (mL..width-mR), clamped.
+check('pixelToTime inverts the domain mapping and clamps to the plot', () => {
+  globalThis.Smoke = { MARGINS: { mL: 48, mR: 12, mT: 10, mB: 22 } };
+  const W = 600; // pw = 600 - 48 - 12 = 540
+  const t0 = 1000, t1 = 1000 + 540000; // 1ms per pixel
+  assert.equal(D.pixelToTime(48, W, t0, t1), t0);                 // left edge -> t0
+  assert.equal(D.pixelToTime(588, W, t0, t1), t1);                // right edge (48+540) -> t1
+  assert.equal(D.pixelToTime(48 + 270, W, t0, t1), (t0 + t1) / 2); // middle
+  assert.equal(D.pixelToTime(0, W, t0, t1), t0);                  // past left -> clamped to t0
+  assert.equal(D.pixelToTime(9999, W, t0, t1), t1);              // past right -> clamped to t1
+});
+
 // fetchJSON (#2): a non-2xx response must reject (so callers keep last-known state
 // instead of decoding an error body as empty data and wiping the view). 2xx returns JSON.
 async function checkAsync(n, f) { try { await f(); console.log('ok   -', n); } catch (e) { failed++; console.error('FAIL -', n, '\n      ', e.message); } }

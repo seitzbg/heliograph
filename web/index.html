@@ -102,6 +102,10 @@
   .detail-head { display:flex; align-items:flex-end; justify-content:space-between; gap:16px; flex-wrap:wrap; margin:12px 0 6px; }
   .detail-head h2 { font-size:16px; margin:0; display:flex; align-items:baseline; gap:9px; flex-wrap:wrap; }
   .reslabel { font-family:ui-monospace,Menlo,monospace; font-size:11px; color:var(--ink-faint); }
+  #zoomCanvas { cursor:crosshair; }
+  .zoom-sel { position:absolute; top:0; height:100%; background:rgba(80,150,235,.18); background:color-mix(in srgb, var(--accent) 16%, transparent); border-left:1px solid var(--accent); border-right:1px solid var(--accent); pointer-events:none; }
+  .zoom-reset { background:transparent; border:1px solid var(--border); border-radius:6px; padding:3px 9px; cursor:pointer; }
+  .zoom-reset:hover { color:var(--accent); border-color:var(--accent); }
   .stack { display:grid; grid-template-columns:1fr; gap:16px; margin-top:14px; }
   .spanel { cursor:pointer; transition:border-color .12s, transform .12s; }
   .spanel:hover { border-color:var(--accent); transform:translateY(-1px); }
@@ -179,10 +183,13 @@
   <section id="viewZoom" class="hidden">
     <button class="back" id="backZoom">← back to all ranges</button>
     <div class="detail panel" style="margin-top:12px">
-      <div class="detail-head" style="margin:0 0 6px"><h2 id="zoomTitle">—</h2></div>
+      <div class="detail-head" style="margin:0 0 6px"><h2 id="zoomTitle">—</h2><button id="zoomReset" class="reslabel zoom-reset" hidden>⤾ reset zoom</button></div>
       <div class="meta" id="zoomMeta"></div>
-      <canvas id="zoomCanvas"></canvas>
-      <div class="reslabel" id="zoomRes" style="margin-top:8px"></div>
+      <div id="zoomWrap" style="position:relative">
+        <canvas id="zoomCanvas"></canvas>
+        <div id="zoomSel" class="zoom-sel" hidden></div>
+      </div>
+      <div class="reslabel" id="zoomRes" style="margin-top:8px">drag on the graph to zoom into a time range</div>
     </div>
   </section>
 

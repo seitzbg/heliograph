@@ -349,7 +349,7 @@ func TestDailyRollup(t *testing.T) {
 		t.Fatalf("refresh daily: %v", err)
 	}
 
-	pts, err := s.Rollup(ctx, "dr", "1d", time.Time{}) // zero since -> full history
+	pts, err := s.Rollup(ctx, "dr", "1d", time.Time{}, time.Time{}) // zero since/until -> full history
 	if err != nil {
 		t.Fatalf("Rollup 1d: %v", err)
 	}
@@ -373,7 +373,7 @@ func TestDailyRollup(t *testing.T) {
 	// A `since` at the day-2 bucket start bounds the result to day 2 only (daily
 	// buckets are labeled at midnight, so the cutoff is the bucket boundary).
 	day2Start := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
-	pts2, err := s.Rollup(ctx, "dr", "1d", day2Start)
+	pts2, err := s.Rollup(ctx, "dr", "1d", day2Start, time.Time{})
 	if err != nil {
 		t.Fatalf("Rollup 1d since day2: %v", err)
 	}
@@ -382,6 +382,16 @@ func TestDailyRollup(t *testing.T) {
 	}
 	if !approx(pts2[0].MedianAvg, 0.10) {
 		t.Errorf("windowed daily avg = %v, want .10 (day 2)", pts2[0].MedianAvg)
+	}
+
+	// An `until` at the day-1 boundary (exclusive of day 2) bounds to day 1 only — the
+	// drag-zoom [from,to] path. `since` zero means "from the start".
+	pts3, err := s.Rollup(ctx, "dr", "1d", time.Time{}, day2Start.Add(-time.Nanosecond))
+	if err != nil {
+		t.Fatalf("Rollup 1d until day1: %v", err)
+	}
+	if len(pts3) != 1 || !approx(pts3[0].MedianAvg, 0.03) {
+		t.Fatalf("bounded daily [.., day1] = %d buckets avg %v, want 1 / .03 (day 1 only)", len(pts3), pts3[0].MedianAvg)
 	}
 }
 
@@ -483,6 +493,43 @@ func TestPGStoreHistorySinceCap(t *testing.T) {
 	// the newest 5 rounds (7..11), still oldest->newest
 	if !got[0].When.Equal(base.Add(7*time.Minute)) || !got[4].When.Equal(base.Add(11*time.Minute)) {
 		t.Errorf("cap kept %v..%v, want rounds 7..11 (the newest 5)", got[0].When, got[4].When)
+	}
+}
+
+// drag-zoom: HistoryBetween returns a target's rounds in [from,to], oldest->newest.
+func TestPGStoreHistoryBetween(t *testing.T) {
+	dsn := os.Getenv("SMOKE_TEST_DSN")
+	if dsn == "" {
+		t.Skip("set SMOKE_TEST_DSN to run the TimescaleDB integration test")
+	}
+	ctx := context.Background()
+	s, err := New(ctx, dsn, 100, func(e error) { t.Errorf("store error: %v", e) })
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.pool.Exec(ctx, "TRUNCATE samples"); err != nil {
+		t.Fatalf("truncate: %v", err)
+	}
+	base := time.Unix(1_700_700_000, 0).UTC()
+	var outs []scheduler.Outcome
+	for i := 0; i < 6; i++ { // rounds at minutes 0..5
+		outs = append(outs, scheduler.Outcome{
+			Target: probe.Target{Name: "t", Host: "h"}, ProbeName: "FPing",
+			When: base.Add(time.Duration(i) * time.Minute), Computed: sample.Compute(4, []float64{0.01, 0.02, 0.03, 0.04}),
+		})
+	}
+	s.Add(outs)
+
+	got, err := s.HistoryBetween(ctx, "t", base.Add(time.Minute), base.Add(4*time.Minute)) // [min1, min4]
+	if err != nil {
+		t.Fatalf("HistoryBetween: %v", err)
+	}
+	if len(got) != 4 {
+		t.Fatalf("got %d rounds, want 4 (minutes 1..4)", len(got))
+	}
+	if !got[0].When.Equal(base.Add(time.Minute)) || !got[3].When.Equal(base.Add(4*time.Minute)) {
+		t.Errorf("range = %v..%v, want min1..min4 oldest->newest", got[0].When, got[3].When)
 	}
 }
 
