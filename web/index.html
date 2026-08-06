@@ -6,115 +6,114 @@
 <title>smokeping-modern — live</title>
 <style>
   :root {
-    --bg: #e9edf1; --surface: #ffffff; --plot-bg: #ffffff;
-    --plot-grid: #e4e9ee; --plot-axis: #97a4b0; --plot-frame: #d3dae1;
-    --ink: #14222e; --ink-soft: #566573; --ink-faint: #8493a0;
-    --border: #dbe1e8; --accent: #0d9488; --accent-soft: #0d948820;
-    --median-base: #202020; --ok: #178a5a;
-    --shadow: 0 1px 2px rgba(20,34,46,.06), 0 8px 24px rgba(20,34,46,.05);
+    --bg:#e9edf1; --surface:#fff; --plot-bg:#fff; --plot-grid:#e4e9ee; --plot-axis:#97a4b0; --plot-frame:#d3dae1;
+    --ink:#14222e; --ink-soft:#566573; --ink-faint:#8493a0; --border:#dbe1e8;
+    --accent:#0d9488; --accent-soft:#0d948820; --median-base:#202020; --ok:#178a5a; --warn:#d9822b; --bad:#d64545;
+    --shadow:0 1px 2px rgba(20,34,46,.06), 0 8px 24px rgba(20,34,46,.05);
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --bg: #0a0f14; --surface: #111a22; --plot-bg: #0d151c;
-      --plot-grid: #1c2833; --plot-axis: #48586a; --plot-frame: #223140;
-      --ink: #dde8f0; --ink-soft: #8b9aa8; --ink-faint: #64768a;
-      --border: #1f2d3a; --accent: #2dd4bf; --accent-soft: #2dd4bf22;
-      --median-base: #c9d6df; --ok: #34d399;
-      --shadow: 0 1px 2px rgba(0,0,0,.4), 0 10px 30px rgba(0,0,0,.35);
+      --bg:#0a0f14; --surface:#111a22; --plot-bg:#0d151c; --plot-grid:#1c2833; --plot-axis:#48586a; --plot-frame:#223140;
+      --ink:#dde8f0; --ink-soft:#8b9aa8; --ink-faint:#64768a; --border:#1f2d3a;
+      --accent:#2dd4bf; --accent-soft:#2dd4bf22; --median-base:#c9d6df; --ok:#34d399; --warn:#e0993f; --bad:#e05a5a;
+      --shadow:0 1px 2px rgba(0,0,0,.4), 0 10px 30px rgba(0,0,0,.35);
     }
   }
   :root[data-theme="light"] {
-    --bg: #e9edf1; --surface: #ffffff; --plot-bg: #ffffff;
-    --plot-grid: #e4e9ee; --plot-axis: #97a4b0; --plot-frame: #d3dae1;
-    --ink: #14222e; --ink-soft: #566573; --ink-faint: #8493a0;
-    --border: #dbe1e8; --accent: #0d9488; --accent-soft: #0d948820;
-    --median-base: #202020; --ok: #178a5a;
-    --shadow: 0 1px 2px rgba(20,34,46,.06), 0 8px 24px rgba(20,34,46,.05);
+    --bg:#e9edf1; --surface:#fff; --plot-bg:#fff; --plot-grid:#e4e9ee; --plot-axis:#97a4b0; --plot-frame:#d3dae1;
+    --ink:#14222e; --ink-soft:#566573; --ink-faint:#8493a0; --border:#dbe1e8;
+    --accent:#0d9488; --accent-soft:#0d948820; --median-base:#202020; --ok:#178a5a; --warn:#d9822b; --bad:#d64545;
+    --shadow:0 1px 2px rgba(20,34,46,.06), 0 8px 24px rgba(20,34,46,.05);
   }
   :root[data-theme="dark"] {
-    --bg: #0a0f14; --surface: #111a22; --plot-bg: #0d151c;
-    --plot-grid: #1c2833; --plot-axis: #48586a; --plot-frame: #223140;
-    --ink: #dde8f0; --ink-soft: #8b9aa8; --ink-faint: #64768a;
-    --border: #1f2d3a; --accent: #2dd4bf; --accent-soft: #2dd4bf22;
-    --median-base: #c9d6df; --ok: #34d399;
-    --shadow: 0 1px 2px rgba(0,0,0,.4), 0 10px 30px rgba(0,0,0,.35);
+    --bg:#0a0f14; --surface:#111a22; --plot-bg:#0d151c; --plot-grid:#1c2833; --plot-axis:#48586a; --plot-frame:#223140;
+    --ink:#dde8f0; --ink-soft:#8b9aa8; --ink-faint:#64768a; --border:#1f2d3a;
+    --accent:#2dd4bf; --accent-soft:#2dd4bf22; --median-base:#c9d6df; --ok:#34d399; --warn:#e0993f; --bad:#e05a5a;
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 10px 30px rgba(0,0,0,.35);
   }
-  * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--ink);
-    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; line-height: 1.55; -webkit-font-smoothing: antialiased; }
-  .wrap { max-width: 1240px; margin: 0 auto; padding: 26px 22px 64px; }
-  header.top { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; flex-wrap: wrap; }
-  .eyebrow { font-family: ui-monospace, Menlo, monospace; font-size: 11px; letter-spacing: .18em; text-transform: uppercase; color: var(--accent); font-weight: 600; }
-  h1 { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: clamp(22px, 3vw, 30px); line-height: 1.1; margin: 8px 0 5px; letter-spacing: -.01em; }
-  .lede { color: var(--ink-soft); max-width: 70ch; font-size: 14.5px; }
-  .status { font-family: ui-monospace, Menlo, monospace; font-size: 12px; color: var(--ink-soft); display: inline-flex; align-items: center; gap: 7px; margin-top: 8px; }
-  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 25%, transparent); }
-  .theme-toggle { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 8px; font-family: ui-monospace, Menlo, monospace; font-size: 12px; color: var(--ink-soft); background: var(--surface); border: 1px solid var(--border); border-radius: 999px; padding: 7px 13px; cursor: pointer; }
-  .theme-toggle:hover { border-color: var(--accent); color: var(--ink); }
-  .theme-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-  .controls { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-  .seg { display: inline-flex; background: var(--surface); border: 1px solid var(--border); border-radius: 999px; padding: 3px; }
-  .seg button { font-family: ui-monospace, Menlo, monospace; font-size: 12px; color: var(--ink-soft); background: transparent; border: 0; border-radius: 999px; padding: 5px 12px; cursor: pointer; }
-  .seg button[aria-pressed="true"] { background: var(--accent-soft); color: var(--ink); box-shadow: inset 0 0 0 1px var(--accent); }
-  .seg button:disabled { opacity: .45; cursor: not-allowed; }
-  .seg button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-  .legend { display: flex; align-items: center; gap: 4px 16px; flex-wrap: wrap; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 11px 16px; margin: 20px 0 4px; box-shadow: var(--shadow); }
-  .legend .lbl { font-family: ui-monospace, Menlo, monospace; font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-faint); }
-  .swatch { display: inline-flex; align-items: center; gap: 5px; font-family: ui-monospace, Menlo, monospace; font-size: 11.5px; color: var(--ink-soft); }
-  .swatch i { width: 13px; height: 13px; border-radius: 3px; display: inline-block; box-shadow: inset 0 0 0 1px rgba(0,0,0,.12); }
-  .smoke-key { display: inline-flex; } .smoke-key i { width: 9px; height: 15px; display: inline-block; }
-  .charts { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 14px 16px 8px; margin-top: 18px; box-shadow: var(--shadow); }
-  .charts-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
-  .charts-head h2 { font-size: 14.5px; margin: 0; }
-  .charts-head h2 .sub { color: var(--ink-faint); font-family: ui-monospace, Menlo, monospace; font-size: 11px; font-weight: 400; margin-left: 6px; }
-  .rank .val.ok { color: var(--ok); }
-  .rank { list-style: none; margin: 10px 0 4px; padding: 0; display: grid; gap: 2px; }
-  .rank li { display: grid; grid-template-columns: 22px 1fr auto; align-items: baseline; gap: 10px; padding: 5px 8px; border-radius: 7px; font-family: ui-monospace, Menlo, monospace; font-size: 12.5px; }
-  .rank li:nth-child(odd) { background: color-mix(in srgb, var(--ink) 4%, transparent); }
-  .rank .n { color: var(--ink-faint); font-size: 11px; text-align: right; }
-  .rank .who { color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .rank .who .pk { color: var(--accent); font-size: 10px; margin-left: 6px; }
-  .rank .val { color: var(--ink-soft); font-variant-numeric: tabular-nums; }
-  .rank .val.bad { color: #d64545; } .rank .val.warn { color: #d9822b; }
-  .rank .empty-row { color: var(--ink-faint); grid-template-columns: 1fr; }
-  /* availability panel: availability (health) + coverage (data quality) */
-  .rank.sla li { grid-template-columns: 20px minmax(0,1fr) 116px 150px; align-items: center; }
-  .rank.sla li.head { font-size: 10px; letter-spacing: .09em; text-transform: uppercase; color: var(--ink-faint); background: none; }
-  .avail { text-align: right; font-variant-numeric: tabular-nums; }
-  .avail .pct { font-size: 13px; }
-  .avail .frac { color: var(--ink-faint); font-size: 10px; display: block; margin-top: 1px; }
-  .avail.ok .pct { color: var(--ok); } .avail.warn .pct { color: #d9822b; } .avail.bad .pct { color: #d64545; }
-  .avail.provisional .pct { color: var(--ink-soft); } .avail.provisional .pct::after { content: " ~"; color: var(--ink-faint); }
-  .cov { display: flex; flex-direction: column; gap: 3px; }
-  .cov .lbl { font-size: 10px; color: var(--ink-faint); display: flex; justify-content: space-between; gap: 6px; white-space: nowrap; }
-  .cov .lbl b { color: var(--ink-soft); font-weight: 600; }
-  .cov .track { height: 6px; border-radius: 4px; background: color-mix(in srgb, var(--ink) 10%, transparent); overflow: hidden; }
-  .cov .fill { height: 100%; border-radius: 4px; background: var(--accent); }
-  .cov.thin .fill { background: repeating-linear-gradient(45deg, var(--ink-faint), var(--ink-faint) 3px, transparent 3px, transparent 6px); }
-  .chip { display: inline-block; font-size: 9.5px; letter-spacing: .04em; text-transform: uppercase; color: var(--ink-faint); border: 1px solid var(--border); border-radius: 5px; padding: 0 5px; margin-left: 7px; vertical-align: 1px; }
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); gap: 18px; margin-top: 18px; }
-  .panel { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 14px 16px 10px; box-shadow: var(--shadow); }
-  .panel h2 { font-size: 14.5px; margin: 0; display: flex; align-items: baseline; gap: 9px; flex-wrap: wrap; }
-  .panel h2 .probe { font-family: ui-monospace, Menlo, monospace; font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--accent); border: 1px solid var(--accent); border-radius: 5px; padding: 1px 6px; }
-  .stats { display: flex; gap: 18px; flex-wrap: wrap; margin: 8px 0 10px; }
-  .stat { font-family: ui-monospace, Menlo, monospace; }
-  .stat .k { font-size: 10px; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-faint); display: block; }
-  .stat .v { font-size: 15px; color: var(--ink); font-variant-numeric: tabular-nums; }
-  .stat .v.loss.warn { color: #d9822b; } .stat .v.loss.bad { color: #d64545; }
-  canvas { width: 100%; display: block; border-radius: 8px; }
-  .empty { color: var(--ink-faint); font-family: ui-monospace, Menlo, monospace; font-size: 12px; padding: 40px 0; text-align: center; }
-  footer { margin-top: 30px; color: var(--ink-faint); font-family: ui-monospace, Menlo, monospace; font-size: 11.5px; }
-  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; line-height:1.55; -webkit-font-smoothing:antialiased; }
+  .wrap { max-width:1240px; margin:0 auto; padding:24px 22px 64px; }
+  header.top { display:flex; align-items:flex-start; justify-content:space-between; gap:20px; flex-wrap:wrap; }
+  .eyebrow { font-family:ui-monospace,Menlo,monospace; font-size:11px; letter-spacing:.18em; text-transform:uppercase; color:var(--accent); font-weight:600; }
+  h1 { font-family:ui-monospace,"SF Mono",Menlo,monospace; font-size:clamp(22px,3vw,30px); line-height:1.1; margin:8px 0 5px; letter-spacing:-.01em; }
+  .lede { color:var(--ink-soft); max-width:70ch; font-size:14.5px; }
+  .status { font-family:ui-monospace,Menlo,monospace; font-size:12px; color:var(--ink-soft); display:inline-flex; align-items:center; gap:7px; margin-top:8px; }
+  .dot { width:8px; height:8px; border-radius:50%; background:var(--ok); box-shadow:0 0 0 3px color-mix(in srgb, var(--ok) 25%, transparent); }
+  .controls { flex:0 0 auto; display:inline-flex; align-items:center; gap:10px; flex-wrap:wrap; }
+  .theme-toggle { display:inline-flex; align-items:center; gap:8px; font-family:ui-monospace,Menlo,monospace; font-size:12px; color:var(--ink-soft); background:var(--surface); border:1px solid var(--border); border-radius:999px; padding:7px 13px; cursor:pointer; }
+  .theme-toggle:hover { border-color:var(--accent); color:var(--ink); }
+  .theme-toggle:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+  .tabs { display:inline-flex; background:var(--surface); border:1px solid var(--border); border-radius:999px; padding:3px; margin-top:14px; }
+  .tabs button { font-family:ui-monospace,Menlo,monospace; font-size:13px; color:var(--ink-soft); background:transparent; border:0; border-radius:999px; padding:7px 18px; cursor:pointer; }
+  .tabs button[aria-selected="true"] { background:var(--accent-soft); color:var(--ink); box-shadow:inset 0 0 0 1px var(--accent); }
+  .tabs button:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+  .seg { display:inline-flex; background:var(--surface); border:1px solid var(--border); border-radius:999px; padding:3px; }
+  .seg button { font-family:ui-monospace,Menlo,monospace; font-size:11.5px; color:var(--ink-soft); background:transparent; border:0; border-radius:999px; padding:4px 11px; cursor:pointer; }
+  .seg button[aria-pressed="true"] { background:var(--accent-soft); color:var(--ink); box-shadow:inset 0 0 0 1px var(--accent); }
+  .seg button:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+  .panel { background:var(--surface); border:1px solid var(--border); border-radius:14px; padding:14px 16px 10px; box-shadow:var(--shadow); }
+  .panel h2 { font-size:14.5px; margin:0; display:flex; align-items:baseline; gap:9px; flex-wrap:wrap; }
+  .probe { font-family:ui-monospace,Menlo,monospace; font-size:10.5px; letter-spacing:.08em; text-transform:uppercase; color:var(--accent); border:1px solid var(--accent); border-radius:5px; padding:1px 6px; }
+  .charts-head { display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; }
+  .charts-head .sub { color:var(--ink-faint); font-family:ui-monospace,Menlo,monospace; font-size:11px; font-weight:400; margin-left:6px; }
+  .overview { display:grid; grid-template-columns:1fr 1fr; gap:18px; margin-top:18px; }
+  @media (max-width:820px){ .overview { grid-template-columns:1fr; } }
+  .rank { list-style:none; margin:10px 0 4px; padding:0; display:grid; gap:2px; }
+  .rank li { display:grid; align-items:baseline; gap:10px; padding:6px 8px; border-radius:7px; font-family:ui-monospace,Menlo,monospace; font-size:12.5px; }
+  .rank.worst li { grid-template-columns:20px 1fr auto; }
+  .rank.sla li { grid-template-columns:20px minmax(0,1fr) 116px 150px; align-items:center; }
+  .rank li:nth-child(odd) { background:color-mix(in srgb, var(--ink) 4%, transparent); }
+  .rank li.head { font-size:10px; letter-spacing:.09em; text-transform:uppercase; color:var(--ink-faint); background:none; }
+  .rank .n { color:var(--ink-faint); font-size:11px; text-align:right; }
+  .rank .who { color:var(--ink); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; cursor:pointer; }
+  .rank .who:hover { color:var(--accent); }
+  .rank .who .pk { color:var(--accent); font-size:10px; margin-left:6px; }
+  .rank .val { color:var(--ink-soft); font-variant-numeric:tabular-nums; text-align:right; }
+  .rank .val.bad { color:var(--bad); } .rank .val.warn { color:var(--warn); }
+  .rank .empty-row { color:var(--ink-faint); grid-template-columns:1fr; }
+  .avail { text-align:right; font-variant-numeric:tabular-nums; }
+  .avail .pct { font-size:13px; } .avail .frac { color:var(--ink-faint); font-size:10px; display:block; margin-top:1px; }
+  .avail.ok .pct { color:var(--ok);} .avail.warn .pct{color:var(--warn);} .avail.bad .pct{color:var(--bad);}
+  .avail.provisional .pct { color:var(--ink-soft);} .avail.provisional .pct::after { content:" ~"; color:var(--ink-faint);}
+  .cov { display:flex; flex-direction:column; gap:3px; }
+  .cov .lbl { font-size:10px; color:var(--ink-faint); display:flex; justify-content:space-between; gap:6px; white-space:nowrap; }
+  .cov .lbl b { color:var(--ink-soft); font-weight:600; }
+  .cov .track { height:6px; border-radius:4px; background:color-mix(in srgb, var(--ink) 10%, transparent); overflow:hidden; }
+  .cov .fill { height:100%; border-radius:4px; background:var(--accent); }
+  .cov.thin .fill { background:repeating-linear-gradient(45deg, var(--ink-faint), var(--ink-faint) 3px, transparent 3px, transparent 6px); }
+  .chip { display:inline-block; font-size:9.5px; letter-spacing:.04em; text-transform:uppercase; color:var(--ink-faint); border:1px solid var(--border); border-radius:5px; padding:0 5px; margin-left:7px; vertical-align:1px; }
+  .legend { display:flex; align-items:center; gap:4px 16px; flex-wrap:wrap; background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:10px 16px; margin:18px 0 0; box-shadow:var(--shadow); }
+  .legend .lbl { font-family:ui-monospace,Menlo,monospace; font-size:11px; letter-spacing:.1em; text-transform:uppercase; color:var(--ink-faint); }
+  .swatch { display:inline-flex; align-items:center; gap:5px; font-family:ui-monospace,Menlo,monospace; font-size:11.5px; color:var(--ink-soft); }
+  .swatch i { width:12px; height:12px; border-radius:3px; display:inline-block; box-shadow:inset 0 0 0 1px rgba(0,0,0,.12); }
+  .smoke-key { display:inline-flex; } .smoke-key i { width:9px; height:15px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(360px,1fr)); gap:18px; margin-top:18px; }
+  .gpanel { cursor:pointer; transition:border-color .12s, transform .12s; }
+  .gpanel:hover { border-color:var(--accent); transform:translateY(-1px); }
+  .gpanel .meta, .spanel .meta { display:flex; gap:16px; flex-wrap:wrap; margin:7px 0 8px; }
+  .stat { font-family:ui-monospace,Menlo,monospace; } .stat .k { font-size:10px; letter-spacing:.1em; text-transform:uppercase; color:var(--ink-faint); display:block; }
+  .stat .v { font-size:14px; color:var(--ink); font-variant-numeric:tabular-nums; } .stat .v.warn{color:var(--warn);} .stat .v.bad{color:var(--bad);}
+  canvas { width:100%; display:block; border-radius:8px; }
+  .empty { color:var(--ink-faint); font-family:ui-monospace,monospace; font-size:12px; padding:40px 0; text-align:center; }
+  .back { display:inline-flex; align-items:center; gap:7px; font-family:ui-monospace,Menlo,monospace; font-size:12.5px; color:var(--ink-soft); background:transparent; border:0; cursor:pointer; padding:0; margin-top:16px; }
+  .back:hover { color:var(--accent); }
+  .back:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+  .detail-head { display:flex; align-items:flex-end; justify-content:space-between; gap:16px; flex-wrap:wrap; margin:12px 0 6px; }
+  .detail-head h2 { font-size:16px; margin:0; display:flex; align-items:baseline; gap:9px; flex-wrap:wrap; }
+  .reslabel { font-family:ui-monospace,Menlo,monospace; font-size:11px; color:var(--ink-faint); }
+  .stack { display:grid; grid-template-columns:1fr; gap:16px; margin-top:14px; }
+  .spanel { cursor:pointer; transition:border-color .12s, transform .12s; }
+  .spanel:hover { border-color:var(--accent); transform:translateY(-1px); }
+  .spanel h3 { font-size:13px; margin:0; display:flex; align-items:baseline; gap:9px; }
+  .detail .meta { display:flex; gap:22px; flex-wrap:wrap; margin:6px 0 12px; }
+  .hidden { display:none !important; }
+  footer { margin-top:28px; color:var(--ink-faint); font-family:ui-monospace,Menlo,monospace; font-size:11.5px; }
+  @media (prefers-reduced-motion: reduce){ * { transition:none !important; } }
 </style>
 <script>
-  // Restore a saved theme before first paint (avoids a light/dark flash). With no
-  // saved choice, the CSS prefers-color-scheme media query decides.
-  try {
-    var savedTheme = localStorage.getItem('theme');
-    if (savedTheme === 'dark' || savedTheme === 'light') {
-      document.documentElement.setAttribute('data-theme', savedTheme);
-    }
-  } catch (e) { /* localStorage unavailable (private mode) — fall back to OS pref */ }
+  // Restore a saved theme before first paint (avoids a light/dark flash).
+  try { var st = localStorage.getItem('theme'); if (st === 'dark' || st === 'light') document.documentElement.setAttribute('data-theme', st); } catch (e) {}
 </script>
 </head>
 <body>
@@ -123,302 +122,74 @@
     <div>
       <div class="eyebrow">smokeping-modern · live</div>
       <h1>Latency monitor</h1>
-      <p class="lede">Live smoke graphs rendered client-side from the Go collector's <code>/api/series</code>. Each panel is a real target measured by a plugin probe; the smoke cloud is per-round jitter, the line is the median tinted by packet loss.</p>
+      <p class="lede">Live smoke graphs rendered client-side from the Go collector's JSON API. <b>Overview</b> ranks the worst targets and reports availability; <b>Graphs</b> is the per-target grid — click a target for all four ranges, then click a graph to zoom.</p>
       <div class="status"><span class="dot"></span><span id="statusText">connecting…</span></div>
+      <div class="tabs" role="tablist">
+        <button id="tabOverview" role="tab" aria-selected="true">Overview</button>
+        <button id="tabGraphs" role="tab" aria-selected="false">Graphs</button>
+      </div>
     </div>
     <div class="controls">
-      <div class="seg" id="resSeg" role="group" aria-label="Time resolution">
-        <button id="resRaw" aria-pressed="true" title="Recent per-round samples (full smoke distribution)">Raw</button>
-        <button id="resHourly" aria-pressed="false" title="Hourly downsampled min/avg/max — requires the TimescaleDB store">Hourly</button>
-      </div>
       <button class="theme-toggle" id="themeBtn" aria-label="Toggle light/dark theme"><span id="themeIcon">◑</span><span id="themeLabel">Theme</span></button>
     </div>
   </header>
 
-  <div class="legend" aria-label="How to read the graph">
-    <span class="lbl">Jitter</span>
-    <span class="smoke-key" id="smokeKey" aria-hidden="true"></span>
-    <span class="swatch" style="color:var(--ink-faint)">min → median → max</span>
-    <span class="lbl" style="margin-left:8px">Loss</span>
-    <span id="lossLegend" style="display:inline-flex;gap:12px;flex-wrap:wrap"></span>
-  </div>
-
-  <section class="charts" id="chartsPanel" aria-label="Worst targets">
-    <div class="charts-head">
-      <h2>Worst targets</h2>
-      <div class="seg" id="chartSeg" role="group" aria-label="Rank by">
-        <button id="byLoss" aria-pressed="true">Loss</button>
-        <button id="byMedian" aria-pressed="false">Latency</button>
-        <button id="byStddev" aria-pressed="false">Jitter</button>
+  <!-- OVERVIEW -->
+  <section id="viewOverview">
+    <div class="overview">
+      <div class="panel">
+        <div class="charts-head">
+          <h2>Worst targets</h2>
+          <div class="seg" id="worstSeg" role="group" aria-label="Rank by">
+            <button data-by="loss" aria-pressed="true">Loss</button>
+            <button data-by="median" aria-pressed="false">Latency</button>
+            <button data-by="stddev" aria-pressed="false">Jitter</button>
+          </div>
+        </div>
+        <ol class="rank worst" id="worstList"><li class="empty-row">—</li></ol>
+      </div>
+      <div class="panel">
+        <div class="charts-head"><h2>Availability <span class="sub" id="slaWindow">last 24h</span></h2></div>
+        <ol class="rank sla" id="slaList"><li class="empty-row">—</li></ol>
       </div>
     </div>
-    <ol class="rank" id="rankList"><li class="empty-row">—</li></ol>
   </section>
 
-  <section class="charts" id="slaPanel" aria-label="Availability">
-    <div class="charts-head">
-      <h2>Availability <span class="sub" id="slaWindow">last 24h</span></h2>
+  <!-- GRAPHS -->
+  <section id="viewGraphs" class="hidden">
+    <div class="legend" aria-label="How to read the graph">
+      <span class="lbl">Jitter</span><span class="smoke-key" id="smokeKey" aria-hidden="true"></span>
+      <span class="swatch" style="color:var(--ink-faint)">min → median → max</span>
+      <span class="lbl" style="margin-left:8px">Loss</span><span id="lossLegend" style="display:inline-flex;gap:12px;flex-wrap:wrap"></span>
     </div>
-    <ol class="rank" id="slaList"><li class="empty-row">—</li></ol>
+    <div class="grid" id="graphGrid"><div class="empty">Waiting for the collector…</div></div>
   </section>
 
-  <div class="grid" id="grid"><div class="empty">Waiting for the collector…</div></div>
-  <footer id="foot">smokeping-modern · live smoke renderer</footer>
+  <!-- DRILL-DOWN: all four ranges stacked -->
+  <section id="viewStack" class="hidden">
+    <button class="back" id="backStack">← back to graphs</button>
+    <div class="detail-head">
+      <h2 id="stackTitle">—</h2>
+      <span class="reslabel">all four ranges · click any graph to zoom</span>
+    </div>
+    <div class="stack" id="stackGrid"></div>
+  </section>
+
+  <!-- DRILL-DOWN: one range, zoomed -->
+  <section id="viewZoom" class="hidden">
+    <button class="back" id="backZoom">← back to all ranges</button>
+    <div class="detail panel" style="margin-top:12px">
+      <div class="detail-head" style="margin:0 0 6px"><h2 id="zoomTitle">—</h2></div>
+      <div class="meta" id="zoomMeta"></div>
+      <canvas id="zoomCanvas"></canvas>
+      <div class="reslabel" id="zoomRes" style="margin-top:8px"></div>
+    </div>
+  </section>
+
+  <footer>smokeping-modern · live smoke renderer</footer>
 </div>
 
 <script src="smoke.js"></script>
-<script>
-const grid = document.getElementById('grid');
-const panels = new Map(); // name -> {el, canvas, statsEl, series}
-
-let resolution = 'raw';     // 'raw' | 'hourly'
-let hourlySupported = true;  // flipped false if /api/rollup answers 501 (no TimescaleDB)
-
-function fmt(v, d) { return (v == null || isNaN(v)) ? '--' : v.toFixed(d); }
-
-function ensurePanel(t) {
-  let p = panels.get(t.name);
-  if (p) return p;
-  if (panels.size === 0) grid.innerHTML = '';
-  const el = document.createElement('div'); el.className = 'panel';
-  el.innerHTML =
-    '<h2>' + escapeHtml(t.name) + ' <span class="probe">' + escapeHtml(t.probe) + '</span></h2>' +
-    '<div class="stats"></div><canvas></canvas>';
-  grid.appendChild(el);
-  p = { el, canvas: el.querySelector('canvas'), statsEl: el.querySelector('.stats'), series: null };
-  panels.set(t.name, p);
-  return p;
-}
-
-function updateStats(p, s) {
-  const st = Smoke.seriesStats(s);
-  const cls = st.lossAvg > 2 ? 'bad' : st.lossAvg > 0.5 ? 'warn' : '';
-  p.statsEl.innerHTML =
-    '<span class="stat"><span class="k">median</span><span class="v">' + fmt(st.medAvg, 1) + ' ms</span></span>' +
-    '<span class="stat"><span class="k">max</span><span class="v">' + fmt(st.medMax, 1) + ' ms</span></span>' +
-    '<span class="stat"><span class="k">loss</span><span class="v loss ' + cls + '">' + fmt(st.lossAvg, 2) + ' %</span></span>' +
-    '<span class="stat"><span class="k">rounds</span><span class="v">' + s.buckets.length + '</span></span>';
-}
-
-// Fetch and adapt one target's series for the active resolution. Returns the
-// adapted series, or null on a transient error. A 501 on the hourly endpoint
-// (in-memory store) disables the hourly mode process-wide and reverts to raw.
-async function fetchSeries(name) {
-  if (resolution === 'hourly') {
-    const r = await fetch('/api/rollup?target=' + encodeURIComponent(name), { cache: 'no-store' });
-    if (r.status === 501) { hourlySupported = false; setResolution('raw'); return null; }
-    if (!r.ok) return null;
-    return Smoke.fromApiRollup(await r.json());
-  }
-  const r = await fetch('/api/series?target=' + encodeURIComponent(name), { cache: 'no-store' });
-  if (!r.ok) return null;
-  return Smoke.fromApiSeries(await r.json());
-}
-
-// In-flight guard: a refresh fans out one request per target, so on a slow link
-// (or many targets) a tick could start before the last finished and pile up.
-// Skip a tick while one is still running.
-let refreshing = false;
-async function refresh() {
-  if (refreshing) return;
-  refreshing = true;
-  try {
-    let targets;
-    try {
-      const r = await fetch('/api/targets', { cache: 'no-store' });
-      targets = (await r.json()).targets || [];
-    } catch (e) {
-      document.getElementById('statusText').textContent = 'collector unreachable';
-      return;
-    }
-    const mode = resolution; // capture: setResolution may flip it mid-flight on 501
-    await Promise.all(targets.map(async (t) => {
-      const p = ensurePanel(t);
-      try {
-        const s = await fetchSeries(t.name);
-        if (!s || mode !== resolution) return;
-        p.series = s;
-        updateStats(p, s);
-        renderPanel(p);
-      } catch (e) { /* transient */ }
-    }));
-    const now = new Date();
-    const res = resolution === 'hourly' ? 'hourly' : 'raw';
-    document.getElementById('statusText').textContent =
-      targets.length + ' targets · ' + res + ' · updated ' + now.toLocaleTimeString();
-  } finally {
-    refreshing = false;
-  }
-}
-
-// The aggregate panels (worst-targets, availability) each scan every target
-// server-side, so they refresh on a slower cadence than the per-target series —
-// they change slowly and this keeps the store query load down at scale. An
-// in-flight guard skips a tick while the previous aggregate scans are still
-// running, so a slow store can't let successive ticks pile up.
-let refreshingAggregates = false;
-async function refreshAggregates() {
-  if (refreshingAggregates) return;
-  refreshingAggregates = true;
-  try {
-    await Promise.all([refreshCharts(), refreshSLA()]);
-  } finally {
-    refreshingAggregates = false;
-  }
-}
-
-// ---- Availability (SLA) panel ----
-// Humanize a span in seconds so the subtitle reflects the data actually covered
-// (the store's history is bounded, so a "24h" request may hold far less).
-function humanSpan(sec) {
-  if (sec < 5400) return Math.max(1, Math.round(sec / 60)) + 'm';
-  if (sec < 172800) return (sec / 3600).toFixed(sec < 36000 ? 1 : 0) + 'h';
-  return Math.round(sec / 86400) + 'd';
-}
-const SLA_WINDOW = '24h';
-async function refreshSLA() {
-  const list = document.getElementById('slaList');
-  let rows;
-  try {
-    const r = await fetch('/api/sla?window=' + SLA_WINDOW, { cache: 'no-store' });
-    rows = (await r.json()).targets || [];
-  } catch (e) { return; }
-  const sub = document.getElementById('slaWindow');
-  if (sub) { sub.textContent = 'last ' + SLA_WINDOW; sub.title = 'availability = up / measured; coverage = measured / expected over the window'; }
-  if (!rows.length) { list.innerHTML = '<li class="empty-row">no data yet</li>'; return; }
-  // Two independent facts per target: availability (health) and coverage (how much
-  // of the window we actually measured). Thin coverage holds the health colour back
-  // to a provisional grey so partial data never reads as a clean bill of health.
-  list.innerHTML =
-    '<li class="head"><span class="n">#</span><span class="who">target</span><span class="avail">availability</span><span>coverage</span></li>' +
-    rows.slice(0, 8).map((s, i) => {
-      const cov = s.coverage_pct;
-      const thin = cov != null && cov < 50;
-      const acls = thin ? 'provisional' : s.availability >= 99.5 ? 'ok' : s.availability >= 95 ? 'warn' : 'bad';
-      let covCell;
-      if (cov == null) {
-        covCell = '<span class="cov"><span class="lbl"><span>coverage</span><b>—</b></span></span>';
-      } else {
-        let left = 'covered';
-        if (thin) { const t = Date.parse(s.covered_from); if (!isNaN(t)) left = 'watched ' + humanSpan((Date.now() - t) / 1000); }
-        covCell = '<span class="cov' + (thin ? ' thin' : '') + '"><span class="lbl"><span>' + left + '</span><b>' + Math.round(cov) + '%</b></span>' +
-          '<span class="track"><span class="fill" style="width:' + Math.min(100, cov) + '%"></span></span></span>';
-      }
-      return '<li><span class="n">' + (i + 1) + '</span>' +
-        '<span class="who">' + escapeHtml(s.name) + '<span class="pk">' + escapeHtml(s.probe) + '</span>' + (thin ? '<span class="chip">thin data</span>' : '') + '</span>' +
-        '<span class="avail ' + acls + '"><span class="pct">' + fmt(s.availability, 2) + ' %</span><span class="frac">' + s.up_rounds + ' / ' + s.measured + ' up</span></span>' +
-        covCell + '</li>';
-    }).join('');
-}
-
-// ---- Worst-targets ("charts") panel ----
-let chartBy = 'loss'; // 'loss' | 'median' | 'stddev'
-async function refreshCharts() {
-  const list = document.getElementById('rankList');
-  let rows;
-  try {
-    const r = await fetch('/api/charts?by=' + chartBy + '&n=8', { cache: 'no-store' });
-    rows = (await r.json()).charts || [];
-  } catch (e) { return; }
-  if (!rows.length) { list.innerHTML = '<li class="empty-row">no data yet</li>'; return; }
-  list.innerHTML = rows.map((c, i) => {
-    let val, cls = '';
-    if (chartBy === 'loss') {
-      val = fmt(c.loss_pct, 1) + ' %';
-      cls = c.loss_pct > 2 ? 'bad' : c.loss_pct > 0.5 ? 'warn' : '';
-    } else if (chartBy === 'median') {
-      val = fmt(c.median_ms, 1) + ' ms';
-    } else {
-      val = '± ' + fmt(c.stddev_ms, 1) + ' ms';
-    }
-    return '<li><span class="n">' + (i + 1) + '</span>' +
-      '<span class="who">' + escapeHtml(c.name) + '<span class="pk">' + escapeHtml(c.probe) + '</span></span>' +
-      '<span class="val ' + cls + '">' + val + '</span></li>';
-  }).join('');
-}
-function setChartBy(by) {
-  chartBy = by;
-  for (const [id, key] of [['byLoss', 'loss'], ['byMedian', 'median'], ['byStddev', 'stddev']]) {
-    document.getElementById(id).setAttribute('aria-pressed', String(key === by));
-  }
-  refreshCharts();
-}
-document.getElementById('byLoss').addEventListener('click', () => setChartBy('loss'));
-document.getElementById('byMedian').addEventListener('click', () => setChartBy('median'));
-document.getElementById('byStddev').addEventListener('click', () => setChartBy('stddev'));
-
-function renderPanel(p) {
-  if (!p.series) return;
-  if (p.series.buckets.length < 2) {
-    const ctx = p.canvas.getContext('2d');
-    p.canvas.style.height = '190px'; p.canvas.width = p.canvas.clientWidth; p.canvas.height = 190;
-    ctx.clearRect(0, 0, p.canvas.width, p.canvas.height);
-    ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--ink-faint');
-    ctx.font = '12px ui-monospace, monospace'; ctx.textAlign = 'center';
-    ctx.fillText('collecting… (' + p.series.buckets.length + ' round)', p.canvas.clientWidth / 2, 95);
-    return;
-  }
-  // Aggregated (rollup) series carry a `resolution` and only a min/avg/max per
-  // bucket — render them as a soft range-area, not the dense smoke stack.
-  Smoke.render(p.canvas, p.series, { height: 190, xlabels: ['', '', '', 'now'], band: !!p.series.resolution });
-}
-function renderAll() { for (const p of panels.values()) renderPanel(p); }
-
-function escapeHtml(s) { return s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
-
-// legend
-(function buildLegend() {
-  const ll = document.getElementById('lossLegend');
-  for (const b of Smoke.LOSS_COLORS) {
-    const s = document.createElement('span'); s.className = 'swatch';
-    s.innerHTML = '<i style="background:' + b.color + '"></i>' + b.label;
-    ll.appendChild(s);
-  }
-  refreshSmokeKey();
-})();
-function refreshSmokeKey() {
-  const sk = document.getElementById('smokeKey'); sk.innerHTML = '';
-  const dark = Smoke.readVars().dark;
-  for (let k = 1; k <= 6; k++) { const i = document.createElement('i'); i.style.background = Smoke.smokeGray(k, 6, dark); sk.appendChild(i); }
-}
-
-// theme
-const btn = document.getElementById('themeBtn');
-function currentTheme() { return document.documentElement.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'); }
-function applyThemeLabel() { const d = currentTheme() === 'dark'; document.getElementById('themeIcon').textContent = d ? '☾' : '☀'; document.getElementById('themeLabel').textContent = d ? 'Dark' : 'Light'; }
-btn.addEventListener('click', () => {
-  const next = currentTheme() === 'dark' ? 'light' : 'dark';
-  document.documentElement.setAttribute('data-theme', next);
-  try { localStorage.setItem('theme', next); } catch (e) { /* private mode: choice won't persist */ }
-  applyThemeLabel(); refreshSmokeKey(); renderAll();
-});
-// Follow OS theme changes only while the user hasn't made an explicit choice.
-matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { applyThemeLabel(); refreshSmokeKey(); renderAll(); });
-
-// resolution (raw <-> hourly) segmented control
-const resRawBtn = document.getElementById('resRaw');
-const resHourlyBtn = document.getElementById('resHourly');
-function setResolution(res) {
-  if (res === 'hourly' && !hourlySupported) res = 'raw';
-  const changed = res !== resolution;
-  resolution = res;
-  resRawBtn.setAttribute('aria-pressed', String(res === 'raw'));
-  resHourlyBtn.setAttribute('aria-pressed', String(res === 'hourly'));
-  resHourlyBtn.disabled = !hourlySupported;
-  resHourlyBtn.title = hourlySupported
-    ? 'Hourly downsampled min/avg/max'
-    : 'Hourly needs the TimescaleDB store (run smoked with -dsn -downsample)';
-  if (changed) refresh(); // re-fetch immediately at the new resolution
-}
-resRawBtn.addEventListener('click', () => setResolution('raw'));
-resHourlyBtn.addEventListener('click', () => setResolution('hourly'));
-
-let rt; window.addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(renderAll, 120); });
-applyThemeLabel();
-refresh();
-refreshAggregates();
-setInterval(refresh, 3000);
-setInterval(refreshAggregates, 15000);
-</script>
+<script src="dashboard.js"></script>
 </body>
 </html>
