@@ -7,9 +7,11 @@ package httpprobe
 import (
 	"context"
 	"crypto/tls"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptrace"
+	"net/url"
 	"strings"
 	"time"
 
@@ -23,7 +25,11 @@ type httpProbe struct {
 }
 
 func init() {
-	probe.Register("HTTP", func(cfg map[string]string) (probe.Probe, error) {
+	probe.Register("HTTP", "HTTP time-to-first-byte", map[string]probe.VarSpec{
+		"urlformat":    {Doc: "URL template; %host% is replaced by the target host", Default: "https://%host%/", Scope: probe.TargetVar, Validate: validURLFormat},
+		"method":       {Doc: "HTTP method", Default: "GET", Scope: probe.ProbeVar, Validate: validMethod},
+		"insecure_ssl": {Doc: "skip TLS certificate verification (true/false)", Default: "false", Scope: probe.TargetVar, Kind: probe.KindBool},
+	}, func(cfg map[string]string) (probe.Probe, error) {
 		p := &httpProbe{urlformat: "https://%host%/", method: "GET"}
 		if v := cfg["urlformat"]; v != "" {
 			p.urlformat = v
@@ -38,15 +44,37 @@ func init() {
 	})
 }
 
-func (p *httpProbe) Name() string     { return "HTTP" }
-func (p *httpProbe) Describe() string { return "HTTP time-to-first-byte" }
+func (p *httpProbe) Name() string { return "HTTP" }
 
-func (p *httpProbe) Schema() map[string]probe.VarSpec {
-	return map[string]probe.VarSpec{
-		"urlformat":    {Doc: "URL template; %host% is replaced by the target host", Default: "https://%host%/", Scope: probe.TargetVar},
-		"method":       {Doc: "HTTP method", Default: "GET", Scope: probe.ProbeVar},
-		"insecure_ssl": {Doc: "skip TLS certificate verification (true/false)", Default: "false", Scope: probe.TargetVar, Kind: probe.KindBool},
+// validURLFormat rejects a urlformat that can't build a request after %host%
+// substitution — a malformed scheme/host would otherwise fail request creation at
+// runtime and be counted as packet loss rather than flagged as a config error.
+func validURLFormat(v string) error {
+	u, err := url.Parse(strings.ReplaceAll(v, "%host%", "example.com"))
+	if err != nil {
+		return fmt.Errorf("urlformat %q is not a valid URL: %w", v, err)
 	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("urlformat %q must be an http(s) URL", v)
+	}
+	if u.Host == "" {
+		return fmt.Errorf("urlformat %q has no host", v)
+	}
+	return nil
+}
+
+var httpMethods = map[string]bool{
+	"GET": true, "HEAD": true, "POST": true, "PUT": true, "DELETE": true,
+	"OPTIONS": true, "PATCH": true, "TRACE": true, "CONNECT": true,
+}
+
+// validMethod rejects a method that isn't a recognized HTTP verb (an invalid method
+// makes http.NewRequest fail at runtime, counted as loss instead of a config error).
+func validMethod(v string) error {
+	if !httpMethods[strings.ToUpper(v)] {
+		return fmt.Errorf("method %q is not a recognized HTTP method", v)
+	}
+	return nil
 }
 
 func (p *httpProbe) Measure(ctx context.Context, t probe.Target, pings int) (probe.Result, error) {

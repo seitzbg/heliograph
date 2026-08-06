@@ -76,6 +76,17 @@ breaking changes.
   `%` no longer break), and the Graphs grid removes panels for targets that disappear from
   `/api/targets` (e.g. after a SIGHUP removal).
 - **`/api/sla?maxloss`** requires a finite percent in `[0,100]` (NaN/Inf/>100 rejected).
+- **Config validation no longer needs the probe binary.** Probe config schemas moved to the
+  registry (static, per kind), so a config lint validates every target's params even when the
+  probe's external binary (fping, irtt) is absent — previously all target-var checks for that
+  probe were silently skipped. The emitted `probe_config` schema now also lists target-scoped
+  vars (settable at probe level as tree-wide defaults), matching what the runtime accepts.
+- **HTTP url/method are validated at config time.** A malformed `urlformat` (bad scheme/host)
+  or an unrecognized `method` is now a startup config error instead of phantom packet loss when
+  request creation fails at runtime.
+- **Empty target leaves rejected.** A non-nil but empty node (`x: {}`, or one that sets only
+  defaults with no host and no children) is a config error, like a nil node — no longer silently
+  ignored.
 - **Strict alert numeric grammar.** Matcher and pattern thresholds are now validated at parse
   time instead of silently misbehaving: matcher args reject unknown keys (a typo no longer
   vanishes), duplicates, and non-finite values; `x` must be a whole number in `[1, 10000]`

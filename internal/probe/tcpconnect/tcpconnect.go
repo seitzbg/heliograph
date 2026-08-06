@@ -18,7 +18,10 @@ type tcpProbe struct {
 }
 
 func init() {
-	probe.Register("TCPConnect", func(cfg map[string]string) (probe.Probe, error) {
+	probe.Register("TCPConnect", "TCP Connect", map[string]probe.VarSpec{
+		"port":        {Doc: "TCP port to connect to", Default: "80", Scope: probe.TargetVar, Kind: probe.KindPort},
+		"interval_ms": {Doc: "milliseconds between the N connects", Default: "10", Scope: probe.ProbeVar, Kind: probe.KindInt},
+	}, func(cfg map[string]string) (probe.Probe, error) {
 		p := &tcpProbe{port: "80", interval: 10 * time.Millisecond}
 		if v, ok := cfg["port"]; ok && v != "" {
 			p.port = v
@@ -32,15 +35,7 @@ func init() {
 	})
 }
 
-func (p *tcpProbe) Name() string     { return "TCPConnect" }
-func (p *tcpProbe) Describe() string { return "TCP Connect (port " + p.port + ")" }
-
-func (p *tcpProbe) Schema() map[string]probe.VarSpec {
-	return map[string]probe.VarSpec{
-		"port":        {Doc: "TCP port to connect to", Default: "80", Scope: probe.TargetVar, Kind: probe.KindPort},
-		"interval_ms": {Doc: "milliseconds between the N connects", Default: "10", Scope: probe.ProbeVar, Kind: probe.KindInt},
-	}
-}
+func (p *tcpProbe) Name() string { return "TCPConnect" }
 
 func (p *tcpProbe) Measure(ctx context.Context, t probe.Target, pings int) (probe.Result, error) {
 	port := t.Param("port", p.port)

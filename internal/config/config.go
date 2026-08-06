@@ -297,20 +297,14 @@ func (c *Config) Monitors() ([]model.Monitor, error) {
 	if c.Targets == nil {
 		return nil, fmt.Errorf("config: no targets defined")
 	}
-	// One probe instance per kind (from probe-level config) to read schemas.
-	schemas := map[string]map[string]probe.VarSpec{}
-	schemaErr := map[string]error{}
+	// Schemas come from the registry, not a constructed probe instance, so target and
+	// probe-level params are validated even when a probe's external binary (fping,
+	// irtt) is absent — a config lint no longer silently skips those checks (#12).
 	getSchema := func(kind string) (map[string]probe.VarSpec, error) {
-		if s, ok := schemas[kind]; ok {
-			return s, schemaErr[kind]
+		if s, ok := probe.SchemaOf(kind); ok {
+			return s, nil
 		}
-		p, err := probe.New(kind, c.Probes[kind])
-		if err != nil {
-			schemas[kind], schemaErr[kind] = nil, err
-			return nil, err
-		}
-		schemas[kind] = p.Schema()
-		return schemas[kind], nil
+		return nil, fmt.Errorf("unknown probe kind %q", kind)
 	}
 
 	var out []model.Monitor
@@ -348,6 +342,17 @@ func (c *Config) Monitors() ([]model.Monitor, error) {
 		// reload goroutine, would take the whole collector down).
 		if n == nil {
 			problems = append(problems, fmt.Sprintf("%s: empty node — give it a host and/or children, or remove it", path))
+			return
+		}
+		// A non-nil but empty leaf (`x: {}`, or a node that sets only defaults and has
+		// no host and no children) contributes no monitor and no branch — it is dead
+		// config, silently ignored before. Reject it like the nil-node case (#12).
+		if n.Host == "" && len(n.Children) == 0 {
+			where := path
+			if where == "" {
+				where = "targets"
+			}
+			problems = append(problems, fmt.Sprintf("%s: empty node — give it a host and/or children, or remove it", where))
 			return
 		}
 		// An explicit empty list ([]) clears an inherited value; an absent field
@@ -436,11 +441,7 @@ func validate(path string, m model.Monitor, getSchema func(string) (map[string]p
 	}
 	schema, err := getSchema(m.ProbeKind)
 	if err != nil {
-		// The kind is registered but couldn't be constructed here — typically its
-		// external binary (fping, irtt, ...) isn't installed on this machine. That
-		// must not fail config validation: the collector skips such targets at
-		// runtime with a warning. We just can't check target vars without a schema.
-		return nil
+		return fmt.Errorf("%s: %w", path, err)
 	}
 	for name, spec := range schema {
 		if spec.Scope == probe.TargetVar && spec.Mandatory {

@@ -45,3 +45,28 @@ func TestHTTPPerTargetInsecureSSL(t *testing.T) {
 		t.Errorf("per-target insecure_ssl=true should connect to the self-signed server, got 0 samples")
 	}
 }
+
+// #12(c): urlformat/method must be validated at config time so a malformed value is a
+// loud config error instead of phantom packet loss when request creation fails.
+func TestHTTPParamValidators(t *testing.T) {
+	for _, ok := range []string{"https://%host%/", "http://%host%/path?q=1", "https://%host%:8443/x"} {
+		if err := validURLFormat(ok); err != nil {
+			t.Errorf("validURLFormat(%q) = %v, want nil", ok, err)
+		}
+	}
+	for _, bad := range []string{"%host%/no-scheme", "ftp://%host%/", "https:///no-host", "://%host%"} {
+		if err := validURLFormat(bad); err == nil {
+			t.Errorf("validURLFormat(%q) = nil, want error", bad)
+		}
+	}
+	for _, ok := range []string{"GET", "post", "HEAD", "Delete"} {
+		if err := validMethod(ok); err != nil {
+			t.Errorf("validMethod(%q) = %v, want nil", ok, err)
+		}
+	}
+	for _, bad := range []string{"FETCH", "", "GET POST", "123"} {
+		if err := validMethod(bad); err == nil {
+			t.Errorf("validMethod(%q) = nil, want error", bad)
+		}
+	}
+}

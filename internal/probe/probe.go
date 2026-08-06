@@ -92,14 +92,13 @@ const (
 )
 
 // Probe is the plugin interface. Implementations must be safe for concurrent
-// Measure calls (the scheduler runs many at once).
+// Measure calls (the scheduler runs many at once). The config schema and human
+// label live in the registry (see Register), not on the instance, so they are
+// available for validation and docs without constructing the probe — which for an
+// external-binary probe (fping, irtt) can fail when the binary is absent.
 type Probe interface {
 	// Name is the probe kind, e.g. "FPing", "TCPConnect".
 	Name() string
-	// Describe is the human label used on graphs (SmokePing's ProbeDesc).
-	Describe() string
-	// Schema returns the config variables this probe understands.
-	Schema() map[string]VarSpec
 	// Measure performs one round of `pings` measurements against t, honoring
 	// ctx for cancellation/timeout. It returns the received RTTs (seconds).
 	Measure(ctx context.Context, t Target, pings int) (Result, error)
@@ -108,24 +107,42 @@ type Probe interface {
 // Factory builds a probe instance from its probe-level config.
 type Factory func(cfg map[string]string) (Probe, error)
 
-var registry = map[string]Factory{}
+// registration holds everything a kind exposes. schema and describe are static
+// (independent of an instance), so config validation and the schema docs work even
+// when the probe can't be constructed (missing external binary).
+type registration struct {
+	factory  Factory
+	describe string
+	schema   map[string]VarSpec
+}
+
+var registry = map[string]registration{}
 
 // Register makes a probe kind available by name. Called from probe packages'
-// init() — the analog of SmokePing `require`-ing a probe module by name.
-func Register(name string, f Factory) {
+// init() — the analog of SmokePing `require`-ing a probe module by name. describe is
+// the human label; schema is the config variables the kind understands.
+func Register(name, describe string, schema map[string]VarSpec, f Factory) {
 	if _, dup := registry[name]; dup {
 		panic("probe: duplicate registration for " + name)
 	}
-	registry[name] = f
+	registry[name] = registration{factory: f, describe: describe, schema: schema}
 }
 
 // New instantiates a registered probe kind with the given config.
 func New(name string, cfg map[string]string) (Probe, error) {
-	f, ok := registry[name]
+	r, ok := registry[name]
 	if !ok {
 		return nil, fmt.Errorf("probe: unknown kind %q (registered: %v)", name, Registered())
 	}
-	return f(cfg)
+	return r.factory(cfg)
+}
+
+// SchemaOf returns a kind's static config schema without constructing it, so config
+// validation can check target params even when the probe's external binary is absent.
+// The bool is false for an unregistered kind.
+func SchemaOf(name string) (map[string]VarSpec, bool) {
+	r, ok := registry[name]
+	return r.schema, ok
 }
 
 // Registered lists the available probe kinds, sorted.
@@ -143,10 +160,10 @@ func Registered() []string {
 // external validation. Probe-level vars (the `probes.<Kind>` block) and per-target
 // vars (a target's `params`) configure different surfaces, so each gets its own
 // schema. Config values are strings, so every property is typed "string".
-func JSONSchema(p Probe) map[string]any {
+func JSONSchema(name, describe string, schema map[string]VarSpec) map[string]any {
 	probeProps, targetProps := map[string]any{}, map[string]any{}
 	var probeReq, targetReq []string
-	for name, spec := range p.Schema() {
+	for varName, spec := range schema {
 		prop := map[string]any{"type": "string"}
 		if spec.Doc != "" {
 			prop["description"] = spec.Doc
@@ -167,21 +184,24 @@ func JSONSchema(p Probe) map[string]any {
 		if len(spec.Enum) > 0 {
 			prop["enum"] = spec.Enum
 		}
+		// probe_config accepts every var — probe-only vars, plus target vars set at
+		// probe level as a tree-wide default (the runtime reads both from the
+		// probes.<Kind> block). target_params accepts only target-scoped vars. This
+		// matches what config validation enforces (#12 schema/runtime parity).
+		probeProps[varName] = prop
+		if spec.Mandatory && spec.Default == "" && spec.Scope != TargetVar {
+			probeReq = append(probeReq, varName) // a target var can be satisfied per target instead
+		}
 		if spec.Scope == TargetVar {
-			targetProps[name] = prop
+			targetProps[varName] = prop
 			if spec.Mandatory && spec.Default == "" {
-				targetReq = append(targetReq, name)
-			}
-		} else {
-			probeProps[name] = prop
-			if spec.Mandatory && spec.Default == "" {
-				probeReq = append(probeReq, name)
+				targetReq = append(targetReq, varName)
 			}
 		}
 	}
 	return map[string]any{
-		"name":          p.Name(),
-		"describe":      p.Describe(),
+		"name":          name,
+		"describe":      describe,
 		"probe_config":  schemaObject(probeProps, probeReq),
 		"target_params": schemaObject(targetProps, targetReq),
 	}
@@ -201,17 +221,14 @@ func schemaObject(props map[string]any, required []string) map[string]any {
 	return obj
 }
 
-// AllSchemas returns JSONSchema for every registered probe kind that can be
-// instantiated, sorted by name. A kind whose instance can't be built (e.g. a
-// missing external binary) is skipped rather than failing the whole set.
+// AllSchemas returns JSONSchema for every registered probe kind, sorted by name.
+// It reads the static registry (schema + describe), so a kind whose external binary
+// is absent still appears — the schema no longer depends on constructing the probe.
 func AllSchemas() []map[string]any {
 	var out []map[string]any
 	for _, kind := range Registered() {
-		p, err := New(kind, nil)
-		if err != nil {
-			continue
-		}
-		out = append(out, JSONSchema(p))
+		r := registry[kind]
+		out = append(out, JSONSchema(kind, r.describe, r.schema))
 	}
 	return out
 }

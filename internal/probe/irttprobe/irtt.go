@@ -25,7 +25,11 @@ type irttProbe struct {
 }
 
 func init() {
-	probe.Register("IRTT", func(cfg map[string]string) (probe.Probe, error) {
+	probe.Register("IRTT", "IRTT UDP round-trip", map[string]probe.VarSpec{
+		"binary":      {Doc: "path to the irtt binary", Default: "irtt", Scope: probe.ProbeVar},
+		"port":        {Doc: "irtt server port", Default: "2112", Scope: probe.TargetVar, Kind: probe.KindPort},
+		"interval_ms": {Doc: "send interval in milliseconds", Default: "20", Scope: probe.ProbeVar, Kind: probe.KindInt},
+	}, func(cfg map[string]string) (probe.Probe, error) {
 		p := &irttProbe{binary: "irtt", port: "2112", interval: 20 * time.Millisecond}
 		if v := cfg["binary"]; v != "" {
 			p.binary = v
@@ -45,16 +49,7 @@ func init() {
 	})
 }
 
-func (p *irttProbe) Name() string     { return "IRTT" }
-func (p *irttProbe) Describe() string { return "IRTT UDP round-trip" }
-
-func (p *irttProbe) Schema() map[string]probe.VarSpec {
-	return map[string]probe.VarSpec{
-		"binary":      {Doc: "path to the irtt binary", Default: "irtt", Scope: probe.ProbeVar},
-		"port":        {Doc: "irtt server port", Default: "2112", Scope: probe.TargetVar, Kind: probe.KindPort},
-		"interval_ms": {Doc: "send interval in milliseconds", Default: "20", Scope: probe.ProbeVar, Kind: probe.KindInt},
-	}
-}
+func (p *irttProbe) Name() string { return "IRTT" }
 
 func (p *irttProbe) Measure(ctx context.Context, t probe.Target, pings int) (probe.Result, error) {
 	addr := net.JoinHostPort(t.Host, t.Param("port", p.port))
