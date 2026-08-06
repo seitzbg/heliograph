@@ -495,10 +495,28 @@ func TestParseMatcherRejectsBadArgs(t *testing.T) {
 		"CheckLatency(x=3)",   // missing l
 		"CheckLatency(l=200,x=0)",
 		"CheckLatency(l=0,x=3)",
+		// Numeric grammar (CODE_REVIEW #7): the arg map must be strict.
+		"CheckLoss(l=50,x=3,foo=1)",  // unknown arg -> silently ignored typo
+		"CheckLoss(l=50,x=3,l=60)",   // duplicate arg -> last-wins ambiguity
+		"CheckLoss(l=NaN,x=3)",       // non-finite threshold
+		"CheckLoss(l=Inf,x=3)",       // non-finite threshold
+		"CheckLoss(l=50,x=NaN)",      // non-finite count
+		"CheckLoss(l=50,x=1.9)",      // fractional x -> truncated to 1 silently
+		"CheckLoss(l=50,x=99999999)", // absurd window size
+		"CheckLoss(l=150,x=3)",       // loss threshold > 100%
+		"CheckLoss(l=-5,x=3)",        // negative loss threshold
+		"CheckLatency(l=200,x=1.5)",  // fractional x
+		"CheckLatency(l=Inf,x=3)",    // non-finite latency threshold
 	}
 	for _, spec := range bad {
 		if _, err := ParseMatcher(spec); err == nil {
 			t.Errorf("ParseMatcher(%q): expected a config error, got nil", spec)
+		}
+	}
+	// Valid specs must still parse (guard against over-tightening).
+	for _, spec := range []string{"CheckLoss(l=50,x=3)", "CheckLoss(l=100,x=1)", "CheckLatency(l=200,x=3)"} {
+		if _, err := ParseMatcher(spec); err != nil {
+			t.Errorf("ParseMatcher(%q): unexpected error %v", spec, err)
 		}
 	}
 }

@@ -564,6 +564,9 @@ func ParseMatcher(spec string) (Matcher, error) {
 		if err != nil {
 			return nil, fmt.Errorf("matcher %q: %w", spec, err)
 		}
+		if l > 100 {
+			return nil, fmt.Errorf("matcher %q: loss threshold l must be in (0, 100], got %g", spec, l)
+		}
 		return CheckLoss{L: l, X: x}, nil
 	case "CheckLatency":
 		l, x, err := requireLX(args)
@@ -576,11 +579,23 @@ func ParseMatcher(spec string) (Matcher, error) {
 	}
 }
 
-// requireLX validates the l (threshold) and x (consecutive samples) args common
-// to the hysteresis matchers. A missing or zero arg would otherwise produce a
-// silently broken alert — x=0 never raises (dead), l=0 makes the threshold
-// always-true (fires forever) — so both must be a config error at parse time.
+// maxAlertX caps the consecutive-sample window x. Real alerts use a handful of
+// samples; a bound keeps a typo (or a hostile config) from sizing a huge per-target
+// window buffer.
+const maxAlertX = 10000
+
+// requireLX validates the l (threshold) and x (consecutive samples) args common to
+// the hysteresis matchers. A missing, zero, non-finite, unknown, or fractional arg
+// would otherwise produce a silently broken alert — x=0 never raises (dead), l=0
+// makes the threshold always-true (fires forever), x=1.9 truncates to 1, an unknown
+// key is a silently-ignored typo — so all are a config error at parse time. Values
+// are already finite here (parseArgs rejects NaN/Inf).
 func requireLX(args map[string]float64) (l float64, x int, err error) {
+	for k := range args {
+		if k != "l" && k != "x" {
+			return 0, 0, fmt.Errorf("unknown arg %q (only l and x are valid)", k)
+		}
+	}
 	lv, ok := args["l"]
 	if !ok {
 		return 0, 0, fmt.Errorf("missing required arg l")
@@ -592,8 +607,11 @@ func requireLX(args map[string]float64) (l float64, x int, err error) {
 	if !ok {
 		return 0, 0, fmt.Errorf("missing required arg x")
 	}
-	if xv < 1 {
-		return 0, 0, fmt.Errorf("arg x must be >= 1, got %g", xv)
+	if xv != math.Trunc(xv) {
+		return 0, 0, fmt.Errorf("arg x must be a whole number, got %g", xv)
+	}
+	if xv < 1 || xv > maxAlertX {
+		return 0, 0, fmt.Errorf("arg x must be in [1, %d], got %g", maxAlertX, xv)
 	}
 	return lv, int(xv), nil
 }
@@ -609,11 +627,18 @@ func parseArgs(s string) (map[string]float64, error) {
 		if len(parts) != 2 {
 			return nil, fmt.Errorf("bad arg %q", kv)
 		}
+		key := strings.TrimSpace(parts[0])
+		if _, dup := out[key]; dup {
+			return nil, fmt.Errorf("duplicate arg %q", key)
+		}
 		v, err := strconv.ParseFloat(strings.TrimSpace(parts[1]), 64)
 		if err != nil {
 			return nil, fmt.Errorf("bad arg %q: %w", kv, err)
 		}
-		out[strings.TrimSpace(parts[0])] = v
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			return nil, fmt.Errorf("arg %q must be a finite number, got %q", key, strings.TrimSpace(parts[1]))
+		}
+		out[key] = v
 	}
 	return out, nil
 }
