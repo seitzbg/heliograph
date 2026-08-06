@@ -7,7 +7,64 @@ breaking changes.
 
 ## [Unreleased]
 
+### Added
+- **Tabbed dashboard with per-target drill-down.** An **Overview** tab (worst-targets +
+  availability/coverage leaderboards) and a **Graphs** tab (per-target smoke grid). Clicking a
+  target opens a SmokePing-style drill-down with all four ranges stacked — 3h/30h per-round
+  smoke, 10d hourly band, 400d daily band — and clicking a graph zooms it. Hash-routed with
+  working browser Back and deep-links (`#overview` / `#graphs` / `#target=<name>&range=<r>`).
+  The dashboard app JS moved into a testable `web/dashboard.js`.
+- **Daily rollup tier** for the long range: a `samples_daily` continuous aggregate feeds the
+  400d view; `GET /api/rollup?res=1h|1d&window=<dur>` serves hourly or daily buckets, bounded
+  to the window server-side.
+- **Config directory:** `-config` also accepts a directory — `default.yaml` (database, probes,
+  alerts, tree-wide target defaults) plus `conf.d/*.yaml` drop-in target branches, concatenated
+  SmokePing-`@include`-style (a fragment may carry only `targets.children`; duplicate branches
+  are a hard error). Ships `examples/config-dir/`.
+- **Time-bounded raw series:** `GET /api/series?window=<dur>` reads the full window via a store
+  `HistorySince`, so a long range (e.g. the 30h drill-down) is no longer truncated at the
+  store's history cap.
+
 ### Changed
+- **Async per-target scheduling.** The serving collector dispatches each target on its own
+  cadence through a shared bounded worker pool, so a slow or stalled target no longer delays
+  faster targets across ticks (within-round isolation already held). Serve mode also skips the
+  synchronous warm-up rounds, which previously double-fired every target at startup.
+- **SLA over the full window.** Availability is computed by a time-bounded store aggregate
+  (`Availabler`/`AvailabilityAll`, unbounded by the history cap) with per-target coverage
+  (measured vs expected rounds from each target's step); thin coverage renders as provisional
+  rather than a clean bill of health.
+- **Fewer store queries per refresh.** Bulk `LatestAll` / `AvailabilityAll` collapse
+  `/api/targets`, `/api/charts`, `/metrics`, and `/api/sla` to one query each instead of one
+  per target; the long-range rollup is windowed server-side rather than fetched whole and
+  sliced in the browser.
+- **Per-probe value validation.** Probe params are validated at config load — bool/int/port
+  kinds, enums (e.g. DNS `protocol`), and a valid-record-type check for DNS `recordtype` — so a
+  bad value is a loud config error instead of a silent runtime fallback; the published JSON
+  Schema reflects the constraints.
+- **Cleaner long-range graphs.** Hourly/daily views render as a soft translucent min→avg→max
+  band (with the loss-tinted median) instead of the dense smoke stack, which showed as a
+  near-black blob.
+- **Hardened container.** Runs as a non-root user — `fping` gets `CAP_NET_RAW` via a file
+  capability rather than root — and the TimescaleDB image is pinned to a specific release
+  instead of a moving `latest-pg16` tag.
+
+### Fixed
+- **Store read failures now surface as HTTP 503** on `/api/targets`, `/api/charts`, `/api/sla`,
+  and `/metrics`, instead of a false-empty "0 targets" success that a Prometheus scrape could
+  not distinguish from a healthy empty configuration.
+- **Async result ordering:** a target stays in flight through its store-write + alert-eval
+  callback, so a slow write can't let a later result for the same target overtake it and
+  reorder alert history (and blocked callbacks stay bounded to one per target).
+- **Ambiguous target identity rejected:** two config paths that flatten to the same name (a key
+  containing `/`), or an empty name from a host on the root, are now a config error instead of
+  silently merging two targets.
+- **Dashboard routing/panels:** hash routing no longer double-decodes target names (names with
+  `%` no longer break), and the Graphs grid removes panels for targets that disappear from
+  `/api/targets` (e.g. after a SIGHUP removal).
+- **`/api/sla?maxloss`** requires a finite percent in `[0,100]` (NaN/Inf/>100 rejected).
+
+### Changed (earlier)
 - Dashboard refresh is lighter on the collector: an in-flight guard skips a refresh tick
   while the previous one is still running (no request pile-up on slow links / many targets),
   and the aggregate panels (worst-targets, availability) poll on a slower 15s cadence rather
