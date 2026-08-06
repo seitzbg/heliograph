@@ -2,7 +2,9 @@
 #   docker compose up --build   ->   http://localhost:8087/
 services:
   timescaledb:
-    image: timescale/timescaledb:latest-pg16
+    # Pinned to a specific release rather than a moving `latest-pg16` tag, so a
+    # rebuild can't silently pull a different TimescaleDB major/behaviour.
+    image: timescale/timescaledb:2.29.1-pg16
     environment:
       POSTGRES_USER: smoke
       POSTGRES_PASSWORD: smoke
@@ -17,8 +19,12 @@ services:
 
   smoked:
     build: .
+    # Runs as a non-root user (see Dockerfile); NET_RAW stays in the bounding set
+    # so the setcap'd fping can still send ICMP. The server binds 0.0.0.0:8087
+    # inside the container — put it behind a reverse proxy / VPN for real exposure
+    # (the proxy owns TLS + auth); the published port below is for local access.
     cap_add:
-      - NET_RAW          # fping ICMP
+      - NET_RAW          # fping ICMP (via fping's file capability, non-root)
     command:
       - "-serve"
       - "-addr"
