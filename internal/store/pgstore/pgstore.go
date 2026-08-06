@@ -192,11 +192,11 @@ func (s *PGStore) Add(outcomes []scheduler.Outcome) {
 	}
 }
 
-func (s *PGStore) Keys() []string {
+func (s *PGStore) Keys() ([]string, error) {
 	rows, err := s.pool.Query(s.ctx, `SELECT target FROM samples GROUP BY target ORDER BY min(ts)`)
 	if err != nil {
 		s.onErr(err)
-		return nil
+		return nil, err
 	}
 	defer rows.Close()
 	var keys []string
@@ -204,14 +204,15 @@ func (s *PGStore) Keys() []string {
 		var k string
 		if err := rows.Scan(&k); err != nil {
 			s.onErr(err)
-			return keys
+			return nil, err
 		}
 		keys = append(keys, k)
 	}
 	if err := rows.Err(); err != nil {
 		s.onErr(err)
+		return nil, err
 	}
-	return keys
+	return keys, nil
 }
 
 func (s *PGStore) Latest(key string) (scheduler.Outcome, bool) {
@@ -228,13 +229,13 @@ func (s *PGStore) Latest(key string) (scheduler.Outcome, bool) {
 	return o, true
 }
 
-func (s *PGStore) History(key string) []scheduler.Outcome {
+func (s *PGStore) History(key string) ([]scheduler.Outcome, error) {
 	rows, err := s.pool.Query(s.ctx,
 		`SELECT ts, target, probe, host, pings, loss, median_seconds, rtts_seconds, err, duration_ms
 		   FROM samples WHERE target=$1 ORDER BY ts DESC LIMIT $2`, key, s.histCap)
 	if err != nil {
 		s.onErr(err)
-		return nil
+		return nil, err
 	}
 	defer rows.Close()
 	var out []scheduler.Outcome
@@ -242,18 +243,19 @@ func (s *PGStore) History(key string) []scheduler.Outcome {
 		o, err := scanOutcome(rows)
 		if err != nil {
 			s.onErr(err)
-			return out
+			return nil, err
 		}
 		out = append(out, o)
 	}
 	if err := rows.Err(); err != nil {
 		s.onErr(err)
+		return nil, err
 	}
 	// query is DESC; History returns oldest->newest to match MemStore.
 	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
 		out[i], out[j] = out[j], out[i]
 	}
-	return out
+	return out, nil
 }
 
 type scannable interface {
@@ -505,12 +507,7 @@ func (s *PGStore) AvailabilityAll(ctx context.Context, cutoff time.Time, maxLoss
 	return out, rows.Err()
 }
 
-var _ interface {
-	Add([]scheduler.Outcome)
-	Keys() []string
-	Latest(string) (scheduler.Outcome, bool)
-	History(string) []scheduler.Outcome
-} = (*PGStore)(nil)
+var _ store.Store = (*PGStore)(nil)
 
 // SeriesAll returns every target's rounds strictly after cutoff in one query,
 // grouped by target and oldest->newest (ts ascending) — the bulk, incremental read

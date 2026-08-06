@@ -65,7 +65,9 @@ breaking changes.
 ### Fixed
 - **Store read failures now surface as HTTP 503** on `/api/targets`, `/api/charts`, `/api/sla`,
   and `/metrics`, instead of a false-empty "0 targets" success that a Prometheus scrape could
-  not distinguish from a healthy empty configuration.
+  not distinguish from a healthy empty configuration. The base `Store.History`/`Keys` reads are
+  now error-returning too, so a database failure on the no-window `/api/series` path (and the
+  `Keys`/`History` fallbacks) is a 503 rather than a swallowed empty result.
 - **Async result ordering:** a target stays in flight through its store-write + alert-eval
   callback, so a slow write can't let a later result for the same target overtake it and
   reorder alert history (and blocked callbacks stay bounded to one per target).

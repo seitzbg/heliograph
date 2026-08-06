@@ -44,8 +44,8 @@ func TestPGStoreRoundTrip(t *testing.T) {
 	}
 	s.Add([]scheduler.Outcome{out, out2})
 
-	if keys := s.Keys(); len(keys) != 1 || keys[0] != "t1" {
-		t.Fatalf("Keys = %v, want [t1]", keys)
+	if keys, err := s.Keys(); err != nil || len(keys) != 1 || keys[0] != "t1" {
+		t.Fatalf("Keys = %v (err %v), want [t1]", keys, err)
 	}
 
 	// Latest is the total-loss round.
@@ -58,7 +58,10 @@ func TestPGStoreRoundTrip(t *testing.T) {
 	}
 
 	// History oldest->newest, NaN gaps preserved.
-	hist := s.History("t1")
+	hist, err := s.History("t1")
+	if err != nil {
+		t.Fatalf("History: %v", err)
+	}
 	if len(hist) != 2 {
 		t.Fatalf("History len = %d, want 2", len(hist))
 	}
@@ -117,7 +120,7 @@ func TestPGStoreAvailabilityIgnoresHistoryCap(t *testing.T) {
 	s.Add(outs)
 
 	// The History-based path the old SLA used is capped — the truncation being fixed.
-	if h := s.History("t"); len(h) != 10 {
+	if h, err := s.History("t"); err != nil || len(h) != 10 {
 		t.Fatalf("History len = %d, want 10 (the cap that truncated SLA)", len(h))
 	}
 
@@ -187,7 +190,7 @@ func TestPGStoreHistorySinceIgnoresHistoryCap(t *testing.T) {
 	s.Add(outs)
 
 	// History is capped — the truncation being fixed.
-	if h := s.History("t"); len(h) != 10 {
+	if h, err := s.History("t"); err != nil || len(h) != 10 {
 		t.Fatalf("History len = %d, want 10 (the cap that truncated the 30h view)", len(h))
 	}
 

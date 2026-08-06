@@ -59,8 +59,12 @@ func (srv *Server) activeLatest() ([]scheduler.Outcome, error) {
 		}
 		all = m
 	} else {
+		keys, err := srv.store.Keys()
+		if err != nil {
+			return nil, err
+		}
 		all = map[string]scheduler.Outcome{}
-		for _, k := range srv.store.Keys() {
+		for _, k := range keys {
 			if o, ok := srv.store.Latest(k); ok {
 				all[k] = o
 			}
@@ -381,7 +385,12 @@ func (srv *Server) sla(w http.ResponseWriter, r *http.Request) {
 			}
 			measured, up, sumLoss, oldest, latest = st.Measured, st.Up, st.SumLossPct, st.Oldest, st.Latest
 		default:
-			measured, up, sumLoss, oldest, latest = slaOf(srv.store.History(k), cutoff, isUp)
+			h, err := srv.store.History(k)
+			if err != nil {
+				slog.Warn("sla: history query failed", "target", k, "err", err)
+				continue
+			}
+			measured, up, sumLoss, oldest, latest = slaOf(h, cutoff, isUp)
 		}
 		if measured == 0 {
 			continue
@@ -456,10 +465,22 @@ func (srv *Server) series(w http.ResponseWriter, r *http.Request) {
 			}
 			hist = h
 		} else {
-			hist = srv.store.History(key) // best-effort: capped, but honest
+			h, err := srv.store.History(key) // best-effort: capped, but honest
+			if err != nil {
+				slog.Error("series query failed", "target", key, "err", err)
+				http.Error(w, `{"error":"series unavailable"}`, http.StatusServiceUnavailable)
+				return
+			}
+			hist = h
 		}
 	} else {
-		hist = srv.store.History(key)
+		h, err := srv.store.History(key)
+		if err != nil {
+			slog.Error("series query failed", "target", key, "err", err)
+			http.Error(w, `{"error":"series unavailable"}`, http.StatusServiceUnavailable)
+			return
+		}
+		hist = h
 	}
 	writeJSON(w, map[string]any{"target": key, "rounds": roundsDTO(hist)})
 }
