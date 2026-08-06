@@ -107,6 +107,10 @@ window.Smoke = (function () {
     };
   }
 
+  // Plot margins (CSS px): left gutter for the y-axis, right/top/bottom padding. Shared
+  // with the dashboard's drag-to-zoom so pixel<->time mapping matches what render draws.
+  const MARGINS = { mL: 48, mR: 12, mT: 10, mB: 22 };
+
   function render(canvas, s, opts) {
     const V = readVars();
     const dpr = Math.max(1, window.devicePixelRatio || 1);
@@ -118,7 +122,7 @@ window.Smoke = (function () {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, cssW, cssH);
 
-    const mL = 48, mR = 12, mT = 10, mB = 22;
+    const { mL, mR, mT, mB } = MARGINS;
     const pw = cssW - mL - mR, ph = cssH - mT - mB;
     const n = s.buckets.length;
     if (n < 2) return;
@@ -285,5 +289,5 @@ window.Smoke = (function () {
     return { buckets, N: 2, resolution: resp.resolution || '1h' };
   }
 
-  return { LOSS_COLORS, lossColor, smokeGray, robustMax, gapThreshold, render, seriesStats, readVars, fromApiSeries, fromApiRollup };
+  return { LOSS_COLORS, MARGINS, lossColor, smokeGray, robustMax, gapThreshold, render, seriesStats, readVars, fromApiSeries, fromApiRollup };
 })();

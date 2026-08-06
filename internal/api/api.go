@@ -436,6 +436,28 @@ type roundDTO struct {
 	RTTsMs   []*float64 `json:"rtts_ms"` // centered; null in lost slots — ready for smoke bands
 }
 
+// parseFromTo reads an optional [from,to] sub-range (unix milliseconds) for a drag-zoom
+// fetch. present is true only when both are given and valid (from < to); a non-empty
+// errMsg means the caller should answer 400. Absent (both empty) is the normal case.
+func parseFromTo(r *http.Request) (from, to time.Time, present bool, errMsg string) {
+	fs, ts := r.URL.Query().Get("from"), r.URL.Query().Get("to")
+	if fs == "" && ts == "" {
+		return from, to, false, ""
+	}
+	if fs == "" || ts == "" {
+		return from, to, false, "from and to must be given together (unix milliseconds)"
+	}
+	fms, err1 := strconv.ParseInt(fs, 10, 64)
+	tms, err2 := strconv.ParseInt(ts, 10, 64)
+	if err1 != nil || err2 != nil {
+		return from, to, false, "from and to must be unix-millisecond integers"
+	}
+	if fms >= tms {
+		return from, to, false, "from must be before to"
+	}
+	return time.UnixMilli(fms), time.UnixMilli(tms), true, ""
+}
+
 // series returns a target's per-round smoke samples. By default it returns the
 // store's recent History (bounded by the store's cap). A `window` (a Go duration,
 // e.g. 30h) requests the full window instead: on a store that implements
@@ -447,6 +469,33 @@ func (srv *Server) series(w http.ResponseWriter, r *http.Request) {
 	key := r.URL.Query().Get("target")
 	if key == "" {
 		http.Error(w, `{"error":"missing target param"}`, http.StatusBadRequest)
+		return
+	}
+	// Drag-zoom sub-range: explicit [from,to] (unix ms) fetches an arbitrary historical
+	// window and takes precedence over the window-based tail.
+	if from, to, present, errMsg := parseFromTo(r); errMsg != "" {
+		http.Error(w, `{"error":"`+errMsg+`"}`, http.StatusBadRequest)
+		return
+	} else if present {
+		var hist []scheduler.Outcome
+		if rh, ok := srv.store.(store.RangeHistorier); ok {
+			h, err := rh.HistoryBetween(r.Context(), key, from, to)
+			if err != nil {
+				slog.Error("series range query failed", "target", key, "err", err)
+				http.Error(w, `{"error":"series unavailable"}`, http.StatusServiceUnavailable)
+				return
+			}
+			hist = h
+		} else {
+			h, err := srv.store.History(key) // best-effort: capped, but honest
+			if err != nil {
+				slog.Error("series query failed", "target", key, "err", err)
+				http.Error(w, `{"error":"series unavailable"}`, http.StatusServiceUnavailable)
+				return
+			}
+			hist = h
+		}
+		writeJSON(w, map[string]any{"target": key, "rounds": roundsDTO(hist)})
 		return
 	}
 	var hist []scheduler.Outcome
@@ -608,10 +657,16 @@ func (srv *Server) rollup(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"res must be 1h or 1d"}`, http.StatusBadRequest)
 		return
 	}
-	// Optional window (a Go duration, e.g. 240h for 10 days) bounds the buckets
-	// server-side, so a long-range view doesn't transfer the whole retained history.
-	var since time.Time
-	if v := r.URL.Query().Get("window"); v != "" {
+	// Bounds: an explicit [from,to] (unix ms) drag-zoom sub-range takes precedence;
+	// otherwise an optional window (a Go duration, e.g. 240h) bounds to the recent tail
+	// so a long-range view doesn't transfer the whole retained history.
+	var since, until time.Time
+	if from, to, present, errMsg := parseFromTo(r); errMsg != "" {
+		http.Error(w, `{"error":"`+errMsg+`"}`, http.StatusBadRequest)
+		return
+	} else if present {
+		since, until = from, to
+	} else if v := r.URL.Query().Get("window"); v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil || d <= 0 {
 			http.Error(w, `{"error":"window must be a positive Go duration, e.g. 240h"}`, http.StatusBadRequest)
@@ -624,7 +679,7 @@ func (srv *Server) rollup(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"rollup requires the TimescaleDB store (run with -dsn -downsample)"}`, http.StatusNotImplemented)
 		return
 	}
-	points, err := rp.Rollup(r.Context(), key, res, since)
+	points, err := rp.Rollup(r.Context(), key, res, since, until)
 	if err != nil {
 		// A store that implements Rollupper but whose hourly aggregate was never
 		// created (a Compose DB started without -downsample) should look "hourly not

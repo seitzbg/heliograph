@@ -83,7 +83,28 @@
     return r.json();
   }
 
-  window.Dash = { RANGES, RANGE_ORDER, parseRoute, mergeSeries, gridSince, fetchJSON };
+  // zoomResolution maps a drag-selected span (ms) to the fetch tier that best resolves
+  // it: raw per-round for short spans, hourly then daily bands for longer ones — so
+  // zooming a long band view down into a shorter span refetches finer data rather than
+  // stretching the buckets it already has.
+  function zoomResolution(spanMs) {
+    if (spanMs <= 30 * H) return { mode: 'raw' };
+    if (spanMs <= 10 * D) return { mode: 'band', res: '1h' };
+    return { mode: 'band', res: '1d' };
+  }
+
+  // pixelToTime maps an x offset within a graph canvas (CSS px) to a wall-clock time,
+  // given the canvas width and the rendered domain [t0,t1] — the inverse of Smoke.render's
+  // X mapping, clamped to the plot area so a drag past an edge saturates at t0/t1.
+  function pixelToTime(xCss, clientWidth, t0, t1) {
+    const { mL, mR } = Smoke.MARGINS;
+    const pw = clientWidth - mL - mR;
+    let f = pw > 0 ? (xCss - mL) / pw : 0;
+    f = f < 0 ? 0 : f > 1 ? 1 : f;
+    return t0 + f * (t1 - t0);
+  }
+
+  window.Dash = { RANGES, RANGE_ORDER, parseRoute, mergeSeries, gridSince, fetchJSON, zoomResolution, pixelToTime };
 
   // ---------------------------------------------------------------- init (DOM) --
   function init() {
@@ -265,9 +286,9 @@
     }
 
     // ---- Drill-down: stack (all four) + zoom (one) ----
-    let curTarget = null;
+    let curTarget = null, curRange = null;
     const stackCanvases = []; // {canvas, series, R}
-    let zoomState = null;     // {canvas, series, R}
+    let zoomState = null;     // {canvas, series, band, t0, t1, xlabels, custom}
     async function renderStack(name) {
       curTarget = name; stackCanvases.length = 0;
       $('stackTitle').innerHTML = esc(name);
@@ -289,18 +310,70 @@
         renderInto(c.canvas, s, c.R, 170);
       }));
     }
+    // drawZoom renders the current zoomState onto the zoom canvas with its explicit
+    // wall-clock domain [t0,t1] (a tier default, or a dragged sub-range).
+    function drawZoom() {
+      const z = zoomState; if (!z) return;
+      if (z.series && z.series.unsupported) { drawNote(z.canvas, 'needs the TimescaleDB store (-dsn -downsample)', 360); return; }
+      if (!z.series || !z.series.buckets || z.series.buckets.length < 2) { drawNote(z.canvas, 'collecting…', 360); return; }
+      Smoke.render(z.canvas, z.series, { height: 360, band: z.band, xlabels: z.xlabels, t0: z.t0, t1: z.t1 });
+    }
+    // Four axis labels for an arbitrary [t0,t1]: clock times for short spans, dates for long.
+    function rangeLabels(t0, t1) {
+      const span = t1 - t0;
+      const fmt = (t) => { const d = new Date(t); return span < 36 * H ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : d.toLocaleDateString([], { month: 'short', day: 'numeric' }); };
+      return [fmt(t0), fmt(t0 + span / 3), fmt(t0 + 2 * span / 3), fmt(t1)];
+    }
     async function renderZoom(name, range) {
-      curTarget = name; const R = RANGES[range];
+      curTarget = name; curRange = range; const R = RANGES[range];
       $('zoomTitle').innerHTML = esc(name) + ' <span class="reslabel">· ' + R.label + '</span>';
-      $('zoomMeta').innerHTML = ''; $('zoomRes').textContent = '';
+      $('zoomMeta').innerHTML = ''; $('zoomReset').hidden = true;
+      $('zoomRes').textContent = 'drag on the graph to zoom into a time range';
       const canvas = $('zoomCanvas');
       let s = null; try { s = await fetchRange(name, range); } catch (e) { /* transient */ }
-      zoomState = { canvas, series: s, R };
+      if (curTarget !== name || curRange !== range) return; // route moved on while awaiting
+      // Fixed tier domain [now-windowMs, now], matching the stacked detail view.
+      const lastT = s && s.buckets && s.buckets.length ? s.buckets[s.buckets.length - 1].t : NaN;
+      const t1 = Math.max(Date.now(), Number.isFinite(lastT) ? lastT : 0);
+      zoomState = { canvas, series: s, band: R.mode === 'band', t0: t1 - R.windowMs, t1, xlabels: R.xl, custom: false };
       if (s && !s.unsupported && s.buckets.length >= 2) {
         $('zoomMeta').innerHTML = metaHtml(s);
-        $('zoomRes').textContent = 'resolution: ' + R.desc + ' · ' + s.buckets.length + (R.mode === 'raw' ? ' rounds' : ' buckets');
+        $('zoomRes').textContent = 'resolution: ' + R.desc + ' · ' + s.buckets.length + (R.mode === 'raw' ? ' rounds' : ' buckets') + ' · drag to zoom';
       }
-      renderInto(canvas, s, R, 360);
+      drawZoom();
+    }
+    // zoomTo refetches an arbitrary dragged sub-range [fromMs,toMs] at the resolution best
+    // for its span, then renders it (refetch, not image swap). A reset restores the tier.
+    async function zoomTo(fromMs, toMs) {
+      const name = curTarget; if (!name) return;
+      const zr = zoomResolution(toMs - fromMs);
+      const canvas = $('zoomCanvas');
+      $('zoomRes').textContent = 'loading zoom…';
+      const qs = '&from=' + Math.round(fromMs) + '&to=' + Math.round(toMs);
+      let s = null;
+      try {
+        if (zr.mode === 'raw') {
+          const r = await fetch('/api/series?target=' + enc(name) + qs, { cache: 'no-store' });
+          if (r.ok) s = Smoke.fromApiSeries(await r.json());
+        } else {
+          const r = await fetch('/api/rollup?target=' + enc(name) + '&res=' + zr.res + qs, { cache: 'no-store' });
+          if (r.status === 501) s = { unsupported: true };
+          else if (r.ok) s = Smoke.fromApiRollup(await r.json());
+        }
+      } catch (e) { /* transient */ }
+      if (curTarget !== name) return;
+      zoomState = { canvas, series: s, band: zr.mode === 'band', t0: fromMs, t1: toMs, xlabels: rangeLabels(fromMs, toMs), custom: true };
+      $('zoomReset').hidden = false;
+      const desc = zr.mode === 'raw' ? 'per-round' : (zr.res === '1h' ? 'hourly band' : 'daily band');
+      if (s && !s.unsupported && s.buckets && s.buckets.length >= 2) {
+        $('zoomMeta').innerHTML = metaHtml(s);
+        $('zoomRes').textContent = 'zoomed · ' + desc + ' · ' + s.buckets.length + (zr.mode === 'raw' ? ' rounds' : ' buckets') + ' · reset to exit';
+      } else if (s && s.unsupported) {
+        $('zoomMeta').innerHTML = ''; $('zoomRes').textContent = 'zoom to this resolution needs the TimescaleDB store';
+      } else {
+        $('zoomMeta').innerHTML = ''; $('zoomRes').textContent = 'no data in the selected range · reset to exit';
+      }
+      drawZoom();
     }
 
     // ---- routing ----
@@ -335,6 +408,35 @@
       const who = e.target.closest('.who[data-target]'); if (who) { nav('target=' + enc(who.dataset.target)); }
     });
 
+    // ---- drag-to-zoom on the detail graph ----
+    (function setupZoomDrag() {
+      const canvas = $('zoomCanvas'), sel = $('zoomSel');
+      let dragging = false, x0 = 0;
+      const clampX = (x) => { const { mL, mR } = Smoke.MARGINS; return Math.max(mL, Math.min(canvas.clientWidth - mR, x)); };
+      canvas.addEventListener('mousedown', (e) => {
+        if (!zoomState) return;
+        dragging = true; x0 = clampX(e.offsetX);
+        sel.hidden = false; sel.style.left = x0 + 'px'; sel.style.width = '0px';
+      });
+      canvas.addEventListener('mousemove', (e) => {
+        if (!dragging) return; const x = clampX(e.offsetX);
+        sel.style.left = Math.min(x0, x) + 'px'; sel.style.width = Math.abs(x - x0) + 'px';
+      });
+      const finish = (e) => {
+        if (!dragging) return; dragging = false; sel.hidden = true;
+        if (!zoomState) return;
+        const x1 = clampX(e.offsetX);
+        if (Math.abs(x1 - x0) < 6) return; // a click, not a drag
+        const a = pixelToTime(Math.min(x0, x1), canvas.clientWidth, zoomState.t0, zoomState.t1);
+        const b = pixelToTime(Math.max(x0, x1), canvas.clientWidth, zoomState.t0, zoomState.t1);
+        if (b - a < 1000) return; // ignore sub-second selections
+        zoomTo(a, b);
+      };
+      canvas.addEventListener('mouseup', finish);
+      canvas.addEventListener('mouseleave', finish);
+    })();
+    $('zoomReset').addEventListener('click', () => { if (curTarget && curRange) renderZoom(curTarget, curRange); });
+
     // ---- theme ----
     const btn = $('themeBtn');
     const curTheme = () => document.documentElement.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
@@ -343,7 +445,7 @@
       const v = currentView();
       if (v === 'graphs') { for (const p of panels.values()) if (p.series) renderInto(p.canvas, p.series, RANGES['3h'], 170); }
       else if (v === 'stack') { for (const c of stackCanvases) renderInto(c.canvas, c.series, c.R, 170); }
-      else if (v === 'zoom' && zoomState) { renderInto(zoomState.canvas, zoomState.series, zoomState.R, 360); }
+      else if (v === 'zoom') { drawZoom(); }
     }
     btn.addEventListener('click', () => { const next = curTheme() === 'dark' ? 'light' : 'dark'; document.documentElement.setAttribute('data-theme', next); try { localStorage.setItem('theme', next); } catch (e) {} themeLabel(); refreshKey(); rerender(); });
     matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { themeLabel(); refreshKey(); rerender(); });
@@ -360,7 +462,7 @@
     let rt; window.addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(rerender, 140); });
     setInterval(() => { if (currentView() === 'graphs') refreshGrid(); }, 5000);
     setInterval(() => { if (currentView() === 'overview') refreshOverview(); }, 15000);
-    setInterval(() => { const v = currentView(); if (v === 'stack') renderStack(curTarget); else if (v === 'zoom') { const r = parseRoute(location.hash); renderZoom(r.name, r.range); } }, 30000);
+    setInterval(() => { const v = currentView(); if (v === 'stack') renderStack(curTarget); else if (v === 'zoom' && !(zoomState && zoomState.custom)) { const r = parseRoute(location.hash); renderZoom(r.name, r.range); } }, 30000);
 
     themeLabel();
     route();

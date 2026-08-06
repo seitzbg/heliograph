@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -24,7 +25,7 @@ const rollupInternalErr = `pq: relation "samples_hourly" does not exist`
 // errRollupStore is a Rollupper whose Rollup always fails with an internal error.
 type errRollupStore struct{ *store.MemStore }
 
-func (errRollupStore) Rollup(context.Context, string, string, time.Time) ([]store.RollupPoint, error) {
+func (errRollupStore) Rollup(context.Context, string, string, time.Time, time.Time) ([]store.RollupPoint, error) {
 	return nil, errors.New(rollupInternalErr)
 }
 
@@ -48,21 +49,23 @@ func TestRollupHidesInternalError(t *testing.T) {
 // unavailableRollupStore is a Rollupper whose aggregate was never created.
 type unavailableRollupStore struct{ *store.MemStore }
 
-func (unavailableRollupStore) Rollup(context.Context, string, string, time.Time) ([]store.RollupPoint, error) {
+func (unavailableRollupStore) Rollup(context.Context, string, string, time.Time, time.Time) ([]store.RollupPoint, error) {
 	return nil, store.ErrRollupUnavailable
 }
 
-// resRollupStore records the resolution and since passed to Rollup, so a test can
-// assert /api/rollup routes ?res to the right tier and bounds ?window server-side.
+// resRollupStore records the resolution and since/until passed to Rollup, so a test can
+// assert /api/rollup routes ?res to the right tier and bounds ?window / ?from&to server-side.
 type resRollupStore struct {
 	*store.MemStore
 	gotRes   string
 	gotSince time.Time
+	gotUntil time.Time
 }
 
-func (rs *resRollupStore) Rollup(_ context.Context, _ string, resolution string, since time.Time) ([]store.RollupPoint, error) {
+func (rs *resRollupStore) Rollup(_ context.Context, _ string, resolution string, since, until time.Time) ([]store.RollupPoint, error) {
 	rs.gotRes = resolution
 	rs.gotSince = since
+	rs.gotUntil = until
 	return []store.RollupPoint{{Bucket: time.Unix(1_700_000_000, 0), MedianAvg: 0.01, MedianMin: 0.01, MedianMax: 0.02, Rounds: 3}}, nil
 }
 
@@ -124,6 +127,57 @@ func TestRollupWindow(t *testing.T) {
 	// bad window -> 400.
 	if code := get("?target=x&window=zzz"); code != http.StatusBadRequest {
 		t.Errorf("window=zzz status = %d, want 400", code)
+	}
+}
+
+// /api/rollup?from&to (unix ms) bounds the buckets to an arbitrary sub-range for
+// drag-zoom, passing both bounds to the store; from >= to is 400.
+func TestRollupFromToRange(t *testing.T) {
+	rs := &resRollupStore{MemStore: store.NewMem(10)}
+	srv := New(rs, "")
+	from := time.Unix(1_700_000_000, 0)
+	to := time.Unix(1_700_086_400, 0)
+	rec := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(rec, httptest.NewRequest("GET",
+		fmt.Sprintf("/api/rollup?target=x&res=1h&from=%d&to=%d", from.UnixMilli(), to.UnixMilli()), nil))
+	if rec.Code != 200 {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if !rs.gotSince.Equal(from) || !rs.gotUntil.Equal(to) {
+		t.Errorf("bounds passed to store = [%v, %v], want [%v, %v]", rs.gotSince, rs.gotUntil, from, to)
+	}
+	rec2 := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(rec2, httptest.NewRequest("GET",
+		fmt.Sprintf("/api/rollup?target=x&from=%d&to=%d", to.UnixMilli(), from.UnixMilli()), nil))
+	if rec2.Code != http.StatusBadRequest {
+		t.Errorf("from>=to status = %d, want 400", rec2.Code)
+	}
+}
+
+// /api/series?from&to fetches an arbitrary raw sub-range (drag-zoom) via HistoryBetween.
+func TestSeriesFromToRange(t *testing.T) {
+	st := store.NewMem(100)
+	base := time.Unix(1_700_000_000, 0)
+	for i := 0; i < 5; i++ { // rounds at minutes 0..4
+		st.Add([]scheduler.Outcome{{Target: probe.Target{Name: "x", Host: "h"}, ProbeName: "FPing",
+			When: base.Add(time.Duration(i) * time.Minute), Computed: sample.Compute(2, []float64{0.01, 0.02})}})
+	}
+	srv := New(st, "")
+	from, to := base.Add(time.Minute), base.Add(3*time.Minute) // covers minutes 1,2,3
+	rec := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(rec, httptest.NewRequest("GET",
+		fmt.Sprintf("/api/series?target=x&from=%d&to=%d", from.UnixMilli(), to.UnixMilli()), nil))
+	if rec.Code != 200 {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	var resp struct {
+		Rounds []map[string]any `json:"rounds"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Rounds) != 3 {
+		t.Errorf("got %d rounds, want 3 (minutes 1..3 in range)", len(resp.Rounds))
 	}
 }
 

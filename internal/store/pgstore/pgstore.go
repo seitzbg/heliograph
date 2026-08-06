@@ -336,7 +336,7 @@ func sortedNonNaN(c []float64) []float64 {
 // Rollup returns the downsampled buckets for a target from the continuous
 // aggregate selected by resolution ("1h" default, or "1d"). Requires
 // EnableDownsampling to have run.
-func (s *PGStore) Rollup(ctx context.Context, target, resolution string, since time.Time) ([]store.RollupPoint, error) {
+func (s *PGStore) Rollup(ctx context.Context, target, resolution string, since, until time.Time) ([]store.RollupPoint, error) {
 	// Map resolution to a fixed view name here — never interpolate caller input
 	// into the query. Unknown resolutions are a programming error (the API
 	// validates the param before reaching this point).
@@ -349,14 +349,20 @@ func (s *PGStore) Rollup(ctx context.Context, target, resolution string, since t
 	default:
 		return nil, fmt.Errorf("pgstore: unknown rollup resolution %q", resolution)
 	}
-	// A zero `since` returns the full history; otherwise bound to buckets in-window
-	// so a long-range view doesn't transfer every retained bucket.
+	// Bound to buckets in [since, until]; a zero since means "from the start" and a zero
+	// until means "through now", so a long-range view doesn't transfer every retained
+	// bucket and a drag-zoom fetches only its sub-range. Placeholders are numbered from
+	// the args length so either bound can be absent.
 	q := `SELECT bucket, median_avg, median_min, median_max, loss_frac, rounds
 	        FROM ` + view + ` WHERE target=$1`
 	args := []any{target}
 	if !since.IsZero() {
-		q += ` AND bucket >= $2`
 		args = append(args, since.UTC())
+		q += fmt.Sprintf(` AND bucket >= $%d`, len(args))
+	}
+	if !until.IsZero() {
+		args = append(args, until.UTC())
+		q += fmt.Sprintf(` AND bucket <= $%d`, len(args))
 	}
 	q += ` ORDER BY bucket`
 	rows, err := s.pool.Query(ctx, q, args...)
@@ -464,6 +470,39 @@ func (s *PGStore) HistorySince(ctx context.Context, target string, cutoff time.T
 			"target", target, "cap", maxRangeRounds, "cutoff", cutoff.UTC())
 	}
 	// query is DESC; return oldest->newest to match History/MemStore.
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		out[i], out[j] = out[j], out[i]
+	}
+	return out, nil
+}
+
+// HistoryBetween returns the target's rounds in [from, to], oldest->newest, unbounded by
+// histCap — the drag-zoom path fetching an arbitrary historical sub-range. Same
+// row-cap backstop as HistorySince.
+func (s *PGStore) HistoryBetween(ctx context.Context, target string, from, to time.Time) ([]scheduler.Outcome, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT ts, target, probe, host, pings, loss, median_seconds, rtts_seconds, err, duration_ms
+		   FROM samples WHERE target=$1 AND ts >= $2 AND ts <= $3 ORDER BY ts DESC LIMIT $4`,
+		target, from.UTC(), to.UTC(), maxRangeRounds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []scheduler.Outcome
+	for rows.Next() {
+		o, err := scanOutcome(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, o)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(out) == maxRangeRounds {
+		slog.Warn("pgstore: windowed series hit the row cap; oldest rounds omitted — narrow the window or raise the step",
+			"target", target, "cap", maxRangeRounds, "from", from.UTC(), "to", to.UTC())
+	}
 	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
 		out[i], out[j] = out[j], out[i]
 	}

@@ -42,12 +42,13 @@ type RollupPoint struct {
 // Rollupper is implemented by stores that support downsampled reads (the hourly
 // and daily continuous aggregates). resolution selects the tier: "1h" (default)
 // or "1d" — the daily tier feeds the long-range (400d) drill-down, where the
-// hourly tier would be too many buckets. since bounds the result to buckets at or
-// after it (a zero since returns the full history), so a 10d view fetches ~240
-// hourly buckets server-side rather than the whole retained history. The API
+// hourly tier would be too many buckets. since/until bound the result to buckets in
+// [since, until]; a zero since means "from the start" and a zero until means "through
+// now", so a 10d view fetches ~240 hourly buckets server-side rather than the whole
+// retained history, and a drag-zoom fetches an arbitrary historical sub-range. The API
 // exposes it at /api/rollup.
 type Rollupper interface {
-	Rollup(ctx context.Context, target, resolution string, since time.Time) ([]RollupPoint, error)
+	Rollup(ctx context.Context, target, resolution string, since, until time.Time) ([]RollupPoint, error)
 }
 
 // AvailabilityStat is the aggregate a store computes over a time window: how many
@@ -77,8 +78,11 @@ type Availabler interface {
 // long drill-down range (e.g. 30h of per-round samples) isn't silently truncated
 // to the last N stored rounds. Returned oldest->newest, like History. /api/series
 // prefers this when given a window, falling back to the capped History otherwise.
+// HistoryBetween is the same but bounded on both sides ([from, to]) — the drag-zoom
+// path fetches an arbitrary historical sub-range, not just "the last window".
 type RangeHistorier interface {
 	HistorySince(ctx context.Context, target string, cutoff time.Time) ([]scheduler.Outcome, error)
+	HistoryBetween(ctx context.Context, target string, from, to time.Time) ([]scheduler.Outcome, error)
 }
 
 // LatestAller returns every target's most recent outcome in one call. The live
@@ -214,6 +218,21 @@ func (s *MemStore) HistorySince(_ context.Context, target string, cutoff time.Ti
 	out := make([]scheduler.Outcome, 0, len(h))
 	for _, o := range h {
 		if o.When.Before(cutoff) {
+			continue
+		}
+		out = append(out, o)
+	}
+	return out, nil
+}
+
+// HistoryBetween returns the target's rounds in [from, to], oldest->newest.
+// Best-effort like HistorySince, bounded by the in-memory cap.
+func (s *MemStore) HistoryBetween(_ context.Context, target string, from, to time.Time) ([]scheduler.Outcome, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]scheduler.Outcome, 0)
+	for _, o := range s.history[target] {
+		if o.When.Before(from) || o.When.After(to) {
 			continue
 		}
 		out = append(out, o)
