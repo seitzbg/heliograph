@@ -10,6 +10,7 @@ package scheduler
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"smokeping-modern/internal/probe"
@@ -35,9 +36,27 @@ type Outcome struct {
 	Duration  time.Duration
 }
 
+// runOne measures a single job under its own timeout derived from ctx and derives
+// its Outcome. Shared by RunRound and the Dispatcher.
+func runOne(ctx context.Context, j Job) Outcome {
+	jctx, cancel := context.WithTimeout(ctx, j.Timeout)
+	defer cancel()
+	start := time.Now()
+	res, err := j.Probe.Measure(jctx, j.Target, j.Pings)
+	return Outcome{
+		Target:    j.Target,
+		ProbeName: j.Probe.Name(),
+		Computed:  sample.Compute(j.Pings, res.Samples),
+		Err:       err,
+		When:      start,
+		Duration:  time.Since(start),
+	}
+}
+
 // RunRound executes all jobs concurrently, capped at `workers` in flight, each
 // under its own Timeout derived from the parent ctx. It returns one Outcome per
-// job (index-aligned). It waits for every job to finish or time out.
+// job (index-aligned). It waits for every job to finish or time out — used for the
+// initial synchronous rounds; the serving loop uses a Dispatcher instead.
 func RunRound(ctx context.Context, jobs []Job, workers int) []Outcome {
 	if workers <= 0 {
 		workers = 1
@@ -52,26 +71,95 @@ func RunRound(ctx context.Context, jobs []Job, workers int) []Outcome {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-
-			j := jobs[i]
-			jctx, cancel := context.WithTimeout(ctx, j.Timeout)
-			defer cancel()
-
-			start := time.Now()
-			res, err := j.Probe.Measure(jctx, j.Target, j.Pings)
-			out[i] = Outcome{
-				Target:    j.Target,
-				ProbeName: j.Probe.Name(),
-				Computed:  sample.Compute(j.Pings, res.Samples),
-				Err:       err,
-				When:      start,
-				Duration:  time.Since(start),
-			}
+			out[i] = runOne(ctx, jobs[i])
 		}(i)
 	}
 	wg.Wait()
 	return out
 }
+
+// BatchStat summarizes one Go call's jobs after they all finish.
+type BatchStat struct {
+	Ran      int           // jobs actually run (excludes ones skipped as in-flight)
+	Errs     int           // how many errored
+	Duration time.Duration // wall-clock until the last of them finished
+}
+
+// Dispatcher runs due jobs on a shared bounded worker pool WITHOUT blocking the
+// caller — so the serving loop keeps ticking (and firing fast targets) while a slow
+// target burns down its timeout in the background. Each job is released from the
+// in-flight set the instant IT finishes (not when its batch does), so a fast target
+// sharing a tick with a slow one is not held back, and a target still in flight is
+// skipped rather than overlapping itself (review item #3a). The worker cap is shared
+// across all in-flight jobs, so total concurrency stays bounded.
+type Dispatcher struct {
+	sem      chan struct{}
+	mu       sync.Mutex
+	inflight map[string]bool
+	wg       sync.WaitGroup
+}
+
+// NewDispatcher returns a Dispatcher whose in-flight probes are capped at workers.
+func NewDispatcher(workers int) *Dispatcher {
+	if workers <= 0 {
+		workers = 1
+	}
+	return &Dispatcher{sem: make(chan struct{}, workers), inflight: map[string]bool{}}
+}
+
+// Go runs each job not already in flight on the shared pool. onEach is called with
+// each outcome the moment it completes — so a target's samples are stored in order
+// and a fast target isn't held up by a slow one sharing the tick. onBatch, if
+// non-nil, is called once after all of THIS call's jobs finish, with the summary.
+// Both callbacks run on background goroutines, so Go returns immediately. If every
+// job was skipped as in-flight, neither callback fires. Either callback may be nil.
+func (d *Dispatcher) Go(ctx context.Context, jobs []Job, onEach func(Outcome), onBatch func(BatchStat)) {
+	var run []Job
+	d.mu.Lock()
+	for _, j := range jobs {
+		if d.inflight[j.Target.Name] {
+			continue
+		}
+		d.inflight[j.Target.Name] = true
+		run = append(run, j)
+	}
+	d.mu.Unlock()
+	if len(run) == 0 {
+		return
+	}
+	d.wg.Add(1)
+	go func() {
+		defer d.wg.Done()
+		start := time.Now()
+		var errs atomic.Int32
+		var jwg sync.WaitGroup
+		for _, j := range run {
+			jwg.Add(1)
+			go func(j Job) {
+				defer jwg.Done()
+				d.sem <- struct{}{}
+				o := runOne(ctx, j)
+				<-d.sem // release the worker slot before the (store-write) callback
+				d.mu.Lock()
+				delete(d.inflight, j.Target.Name)
+				d.mu.Unlock()
+				if o.Err != nil {
+					errs.Add(1)
+				}
+				if onEach != nil {
+					onEach(o)
+				}
+			}(j)
+		}
+		jwg.Wait()
+		if onBatch != nil {
+			onBatch(BatchStat{Ran: len(run), Errs: int(errs.Load()), Duration: time.Since(start)})
+		}
+	}()
+}
+
+// Wait blocks until all in-flight jobs have finished — for graceful shutdown.
+func (d *Dispatcher) Wait() { d.wg.Wait() }
 
 // Planner tracks each target's next-fire time so targets can poll on their own
 // per-target `Step` cadence rather than one global interval. A single caller
