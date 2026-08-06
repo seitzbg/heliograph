@@ -65,6 +65,25 @@ window.Smoke = (function () {
     return s * mag;
   }
 
+  // gapThreshold returns the largest consecutive-timestamp gap (ms) that is NOT a
+  // break; a diff beyond it is an outage the renderer pens up across. Cadence is a low
+  // quantile (~25th percentile) of the positive consecutive `.t` diffs, times gapFactor
+  // (default 1.5, RRD-style "a round was missed"). A low quantile — not the median —
+  // keeps a few large gaps (or a sparse two-point series whose single hole would BE the
+  // median) from inflating the cadence and hiding the outage. Infinity when there aren't
+  // two timestamps to diff (nothing can be a gap).
+  function gapThreshold(buckets, gapFactor) {
+    const diffs = [];
+    for (let i = 1; i < buckets.length; i++) {
+      const d = buckets[i].t - buckets[i - 1].t;
+      if (d > 0) diffs.push(d);
+    }
+    if (!diffs.length) return Infinity;
+    diffs.sort((a, b) => a - b);
+    const cadence = diffs[Math.floor(diffs.length * 0.25)]; // low-quantile (nearest-rank p25)
+    return cadence * (gapFactor || 1.5);
+  }
+
   // Per-bucket ping count: rounds can differ in N (a reload retuned pings), so each
   // bucket's loss fraction and band depth use its own denominator, never one
   // series-wide N — which would misreport loss and drop bands for shorter rounds.
@@ -122,18 +141,8 @@ window.Smoke = (function () {
     const colW = Math.ceil(pw / (n - 1)) + 1;
 
     // A time gap wider than the inferred cadence breaks lines/bands, so a collector/DB
-    // outage renders as a blank span, never a straight line bridging it. Cadence =
-    // median of positive consecutive `.t` diffs; gap = diff > gapFactor*cadence
-    // (default 1.5 — RRD-style "a round was missed"). Disabled without a time domain.
-    let gapMs = Infinity;
-    if (useTime && n >= 2) {
-      const diffs = [];
-      for (let i = 1; i < n; i++) { const d = bk[i].t - bk[i - 1].t; if (d > 0) diffs.push(d); }
-      if (diffs.length) {
-        diffs.sort((a, b) => a - b);
-        gapMs = diffs[Math.floor(diffs.length / 2)] * (opts.gapFactor || 1.5);
-      }
-    }
+    // outage renders as a blank span, never a straight line bridging it (gapThreshold).
+    const gapMs = useTime ? gapThreshold(bk, opts.gapFactor) : Infinity;
     const isGap = (i) => useTime && i >= 1 && (bk[i].t - bk[i - 1].t) > gapMs;
 
     ctx.fillStyle = V.plotBg;
@@ -276,5 +285,5 @@ window.Smoke = (function () {
     return { buckets, N: 2, resolution: resp.resolution || '1h' };
   }
 
-  return { LOSS_COLORS, lossColor, smokeGray, robustMax, render, seriesStats, readVars, fromApiSeries, fromApiRollup };
+  return { LOSS_COLORS, lossColor, smokeGray, robustMax, gapThreshold, render, seriesStats, readVars, fromApiSeries, fromApiRollup };
 })();

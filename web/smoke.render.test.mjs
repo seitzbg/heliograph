@@ -172,6 +172,33 @@ check('render breaks the median line across a time gap (pen-up, no bridge)', () 
   assert.ok(!bridges, 'no 2-point loss segment spans the gap');
 });
 
+// #4: a sparse series where the outage itself dominates the diffs must STILL break.
+// Two diffs — 60s then 9min — would let a plain median-of-diffs cadence (which picks
+// the 9-min diff) bridge the hole; a robust low-quantile cadence (~60s) breaks it.
+check('render breaks a sparse outage a median cadence would bridge', () => {
+  const T = Date.parse('2026-08-06T00:00:00Z');
+  const times = [T, T + 60000, T + 60000 + 540000]; // 60s, then a 9-minute hole
+  const s = timedSeries(times);
+  const { canvas, log } = recordingCanvas();
+  Smoke.render(canvas, s, { height: 190, yMax: 20, t0: T, t1: times[2] });
+  const path = longestStroke(log);
+  assert.equal(path.filter((p) => p.op === 'M').length, 2, 'the 9-min hole starts a fresh subpath (pen-up), not one connected line');
+});
+
+// gapThreshold: the break threshold must come from the tight cadence, not be inflated
+// by a few large gaps in an otherwise-regular (or sparse) series.
+check('gapThreshold uses a low quantile so large gaps do not inflate the cadence', () => {
+  const bk = (t) => ({ t });
+  // dense 60s cadence with one 1h hole: hole (3.6M) exceeds the ~90s threshold
+  const dense = Smoke.gapThreshold([bk(0), bk(60000), bk(120000), bk(180000), bk(3780000)], 1.5);
+  assert.ok(3600000 > dense, `dense hole must exceed threshold ${dense}`);
+  // two diffs, 60s then 9min: cadence ~60s, so the 540s hole breaks
+  const sparse = Smoke.gapThreshold([bk(0), bk(60000), bk(600000)], 1.5);
+  assert.ok(540000 > sparse && sparse < 200000, `sparse threshold ${sparse} must be near the 60s cadence, not the 9-min gap`);
+  // fewer than two timestamps -> no gaps possible
+  assert.equal(Smoke.gapThreshold([bk(0)], 1.5), Infinity);
+});
+
 // Short data must occupy only its true fraction of a longer selected window (10 min of
 // data on a 3h axis lives in the rightmost sliver, not stretched across the whole plot).
 check('short data occupies only its true fraction of a longer window', () => {

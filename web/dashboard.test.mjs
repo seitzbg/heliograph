@@ -76,5 +76,33 @@ check('mergeSeries with no new rounds keeps the previous series (trimmed)', () =
   assert.deepEqual(merged.buckets.map((b) => b.t), [1000, 2000, 3000]);
 });
 
+// gridSince (#1): the incremental watermark is the OLDEST frontier among panels that
+// hold data, so the shared `since` never advances past the slowest-updating target — a
+// global max would skip that target's late rounds permanently.
+const panel = (ts) => ({ series: ts == null ? null : { buckets: ts.map((t) => ({ t })) } });
+check('gridSince returns the oldest panel frontier, ignoring empty panels', () => {
+  assert.equal(D.gridSince([panel([1000, 5000]), panel([1000, 3000]), panel([1000, 9000])]), 3000);
+  assert.equal(D.gridSince([panel([1000, 5000]), panel(null)]), 5000); // empty panel ignored
+  assert.equal(D.gridSince([panel(null), panel([])]), null);           // no data anywhere -> full fetch
+  assert.equal(D.gridSince([]), null);
+});
+check('gridSince skips a non-finite frontier timestamp', () => {
+  const p = { series: { buckets: [{ t: 1000 }, { t: NaN }] } }; // NaN frontier -> skip this panel
+  const q = { series: { buckets: [{ t: 2000 }] } };
+  assert.equal(D.gridSince([p, q]), 2000);
+});
+
+// fetchJSON (#2): a non-2xx response must reject (so callers keep last-known state
+// instead of decoding an error body as empty data and wiping the view). 2xx returns JSON.
+async function checkAsync(n, f) { try { await f(); console.log('ok   -', n); } catch (e) { failed++; console.error('FAIL -', n, '\n      ', e.message); } }
+await checkAsync('fetchJSON rejects a non-2xx response instead of decoding it', async () => {
+  globalThis.fetch = async () => ({ ok: false, status: 503, json: async () => ({ error: 'store unavailable' }) });
+  await assert.rejects(() => D.fetchJSON('/api/targets'));
+});
+await checkAsync('fetchJSON returns decoded JSON on a 2xx response', async () => {
+  globalThis.fetch = async () => ({ ok: true, status: 200, json: async () => ({ targets: [{ name: 'a' }] }) });
+  assert.deepEqual(await D.fetchJSON('/api/targets'), { targets: [{ name: 'a' }] });
+});
+
 if (failed) { console.error(`\n${failed} test(s) failed`); process.exit(1); }
 console.log('\nall dashboard tests passed');
