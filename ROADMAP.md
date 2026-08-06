@@ -60,15 +60,20 @@ Not planned for now; pick up only if multi-vantage measurement is requested.
   - `S` (startup sentinel): dropped by design, not implemented. It only existed because
     SmokePing's alert state was in-memory; the durable store answers "already bad at
     startup" from real history (blueprint §07). `==S`/`!=S` are rejected at parse time.
-    Follow-up for the same use case: warm-start the alert window from the store on boot.
+    Follow-up for the same use case: warm-start the alert window from the store on boot —
+    done ✅ (`Engine.SeedWindow`; an already-breaching target fires on its first post-boot
+    round instead of waiting X fresh samples).
 - ✅ Emit each probe's config as JSON Schema (`GET /api/probes/schema`; draft 2020-12,
   probe-level + per-target vars as separate closed objects, from the same VarSpec source
   as runtime validation)
-- ⬜ Overview (small multiples) + multi-range detail (3h/30h/10d/400d) + unison scaling in the SPA
+- 🚧 Overview (small multiples) + multi-range detail (3h/30h/10d/400d) done ✅ (Overview
+  tab + per-target 3h/30h/10d/400d drill-down); unison scaling done ✅ (shared Y-axis
+  across the Graphs grid, toggle in the legend)
 - 🚧 Top-N "charts" (worst by loss/median/stddev) done ✅ (`/api/charts` + dashboard
   "Worst targets" panel); alternate menu hierarchies ⬜
-- 🚧 Drag-to-zoom time range (refetch, not image swap) ⬜; in-app dark-mode toggle
-  persistence done ✅ (localStorage, restored before first paint)
+- ✅ Drag-to-zoom time range — done: drag a range on the detail graph and it refetches
+  that `[from,to]` at the resolution best for the span (raw/hourly/daily), not an image
+  swap. In-app dark-mode toggle persistence done ✅ (localStorage, restored before first paint)
 - ✅ Prometheus metrics export (`/metrics`: median/loss/up per target) for Grafana-native users
 - ✅ Availability/SLA reporting (the tSmoke equivalent) — `GET /api/sla?window=…` per-target
   availability % over a window + dashboard "Availability" panel
