@@ -416,6 +416,58 @@ func TestDailyRollup(t *testing.T) {
 	}
 }
 
+// TestRollupIsolatesByVantage covers the read side of the vantage dimension: the
+// continuous aggregates GROUP BY (bucket, target, vantage), so two vantages probing
+// the same target in the same hour must never blend into one bucket. samples_hourly
+// is created WITH (timescaledb.materialized_only = false), so the just-written rows
+// are already visible via real-time aggregation without a manual refresh — this test
+// refreshes anyway so the assertions don't depend on that continuing to hold. Because
+// real-time aggregation makes exact medians available here, this asserts the precise
+// per-vantage median (not just bucket presence): local's bucket must show only its
+// own 0.01s round, nyc's only its own 0.09s round, with nothing crossing over.
+func TestRollupIsolatesByVantage(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+
+	hour := time.Date(2026, 2, 1, 10, 0, 0, 0, time.UTC)
+	s.Add([]scheduler.Outcome{
+		{Target: probe.Target{Name: "riv", Host: "h"}, ProbeName: "FPing", When: hour,
+			Computed: sample.Compute(1, []float64{0.01})}, // empty Vantage -> "local"
+		{Target: probe.Target{Name: "riv", Host: "h"}, ProbeName: "FPing", When: hour.Add(10 * time.Minute),
+			Computed: sample.Compute(1, []float64{0.09}), Vantage: "nyc"},
+	})
+
+	if err := s.EnableDownsampling(ctx); err != nil {
+		t.Fatalf("EnableDownsampling: %v", err)
+	}
+	if _, err := s.pool.Exec(ctx, "CALL refresh_continuous_aggregate('samples_hourly', NULL, NULL)"); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+
+	local, err := s.Rollup(ctx, "riv", "local", "1h", time.Time{}, time.Time{})
+	if err != nil {
+		t.Fatalf("Rollup local: %v", err)
+	}
+	nyc, err := s.Rollup(ctx, "riv", "nyc", "1h", time.Time{}, time.Time{})
+	if err != nil {
+		t.Fatalf("Rollup nyc: %v", err)
+	}
+
+	approx := func(got, want float64) bool { return math.Abs(got-want) < 1e-9 }
+	if len(local) != 1 || local[0].Rounds != 1 {
+		t.Fatalf("local buckets = %+v, want exactly 1 bucket with 1 round", local)
+	}
+	if !approx(local[0].MedianAvg, 0.01) {
+		t.Errorf("local median_avg = %v, want 0.01 (must not include nyc's 0.09 round)", local[0].MedianAvg)
+	}
+	if len(nyc) != 1 || nyc[0].Rounds != 1 {
+		t.Fatalf("nyc buckets = %+v, want exactly 1 bucket with 1 round", nyc)
+	}
+	if !approx(nyc[0].MedianAvg, 0.09) {
+		t.Errorf("nyc median_avg = %v, want 0.09 (must not include local's 0.01 round)", nyc[0].MedianAvg)
+	}
+}
+
 // LatestAll and AvailabilityAll return every target in one query — the bulk forms
 // the API uses to avoid a per-target fan-out.
 func TestPGStoreBulkReads(t *testing.T) {

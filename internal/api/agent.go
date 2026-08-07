@@ -36,6 +36,10 @@ type assignmentDTO struct {
 // an agent that replays it in If-None-Match gets 304.
 func (srv *Server) agentAssignment(w http.ResponseWriter, r *http.Request) {
 	v := vantageFrom(r)
+	if v == store.DefaultVantage {
+		http.Error(w, `{"error":"reserved vantage"}`, http.StatusForbidden)
+		return
+	}
 	monitors, cv := srv.Assignment(v)
 	if match := r.Header.Get("If-None-Match"); match != "" && match == cv {
 		w.Header().Set("ETag", cv)
@@ -82,6 +86,10 @@ type ingestRespDTO struct {
 // agent retains and retries.
 func (srv *Server) agentResults(w http.ResponseWriter, r *http.Request) {
 	v := vantageFrom(r)
+	if v == store.DefaultVantage {
+		http.Error(w, `{"error":"reserved vantage"}`, http.StatusForbidden)
+		return
+	}
 	ing, ok := srv.store.(store.ResultIngester)
 	if !ok {
 		http.Error(w, `{"error":"ingest not supported by this store"}`, http.StatusNotImplemented)

@@ -78,6 +78,21 @@ func TestAddVerifyListRevoke(t *testing.T) {
 	}
 }
 
+// TestAddRejectsReservedName does not need a DB: Add validates the name (including
+// the reserved-name check) before ever touching the pool, so a nil-pool Store is
+// safe to call this on — a query against a nil pool would panic, so a call reaching
+// the DB would fail loudly rather than silently minting the key.
+func TestAddRejectsReservedName(t *testing.T) {
+	s := &Store{}
+	key, err := s.Add(context.Background(), "local")
+	if err == nil {
+		t.Fatal("Add(\"local\") err = nil, want an error rejecting the reserved vantage")
+	}
+	if key != "" {
+		t.Errorf("Add(\"local\") key = %q, want empty on rejection", key)
+	}
+}
+
 func TestValidName(t *testing.T) {
 	for _, ok := range []string{"nyc", "us-east", "us_east.1", "A9", "local"} {
 		if !ValidName(ok) {

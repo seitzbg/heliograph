@@ -205,6 +205,10 @@ func (srv *Server) targets(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"store unavailable"}`, http.StatusServiceUnavailable)
 		return
 	}
+	var tv map[string][]string
+	if srv.TargetVantages != nil {
+		tv = srv.TargetVantages()
+	}
 	var out []targetDTO
 	for _, o := range latest {
 		dto := targetDTO{
@@ -222,10 +226,8 @@ func (srv *Server) targets(w http.ResponseWriter, r *http.Request) {
 		if o.Err != nil {
 			dto.Error = o.Err.Error()
 		}
-		if srv.TargetVantages != nil {
-			if vs := srv.TargetVantages()[o.Target.Name]; len(vs) > 0 {
-				dto.Vantages = vs
-			}
+		if vs := tv[o.Target.Name]; len(vs) > 0 {
+			dto.Vantages = vs
 		}
 		out = append(out, dto)
 	}

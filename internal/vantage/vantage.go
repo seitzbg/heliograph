@@ -30,6 +30,16 @@ CREATE TABLE IF NOT EXISTS vantage_keys (
 	last_seen  timestamptz
 );`
 
+// reserved is the hub's own vantage name — it mirrors store.DefaultVantage.
+// Verified with `go build` that importing internal/store here does not actually
+// create an import cycle, but this package is the key-minting/auth store and
+// deliberately doesn't depend on internal/store (the timeseries sink) for one
+// scalar, so the value is duplicated here as a small documented const instead.
+// Minting a key named reserved would let an agent authenticate as the hub's own
+// vantage, conflating its ingested rounds with the hub's authoritative
+// locally-probed data.
+const reserved = "local"
+
 // Info is a vantage's public metadata — never its key material.
 type Info struct {
 	Name     string
@@ -71,6 +81,9 @@ func hashSecret(salt []byte, secret string) []byte {
 func (s *Store) Add(ctx context.Context, name string) (string, error) {
 	if !ValidName(name) {
 		return "", errors.New("vantage: invalid name (use letters, digits, . _ -)")
+	}
+	if name == reserved {
+		return "", errors.New(`vantage: "local" is reserved for the hub`)
 	}
 	keyID, err := randHex(6)
 	if err != nil {

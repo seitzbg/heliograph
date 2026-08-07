@@ -184,6 +184,14 @@ func (s *PGStore) EnableDownsampling(ctx context.Context) error {
 // recreate below can add the vantage GROUP BY. One-time: it only fires when an
 // existing samples_hourly still lacks a vantage column, then the recreate makes
 // the guard false forever after (a fresh DB has no view yet, so it is a no-op).
+//
+// A TimescaleDB continuous aggregate's GROUP BY can't be altered in place, so this
+// drop+recreate is unavoidable — but on an existing DB it irreversibly loses every
+// daily rollup bucket older than the 30-day raw retention window (the raw rows
+// behind those buckets are already gone, so they can never be rebuilt). This is a
+// one-time long-range-history loss the first time a pre-vantage hub upgrades and
+// calls EnableDownsampling; see the slog.Warn below, logged only when the drop
+// actually fires.
 func (s *PGStore) migrateAggregatesForVantage(ctx context.Context) error {
 	var hasView, hasVantage bool
 	if err := s.pool.QueryRow(ctx, `SELECT to_regclass('samples_hourly') IS NOT NULL`).Scan(&hasView); err != nil {
@@ -200,6 +208,8 @@ func (s *PGStore) migrateAggregatesForVantage(ctx context.Context) error {
 	if hasVantage {
 		return nil
 	}
+	slog.Warn("pgstore: rebuilding continuous aggregates to add the vantage dimension; " +
+		"daily rollup buckets older than the raw retention window cannot be rebuilt and will be lost (one-time migration)")
 	for _, q := range []string{
 		`DROP MATERIALIZED VIEW IF EXISTS samples_daily CASCADE`,
 		`DROP MATERIALIZED VIEW IF EXISTS samples_hourly CASCADE`,
