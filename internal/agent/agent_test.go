@@ -97,7 +97,17 @@ func TestAgentRunRetriesOnPushFailure(t *testing.T) {
 			w.Header().Set("ETag", cv)
 			_ = json.NewEncoder(w).Encode(agentwire.Assignment{
 				Vantage: "nyc", ConfigVersion: cv,
-				Targets: []agentwire.AssignmentTarget{{Name: "t1", Probe: "AgentTestEcho", Host: "h", StepMs: 1000, Pings: 3}},
+				// StepMs is huge (1h) so the Planner fires this target exactly ONCE
+				// (new targets fire immediately; the next fire is ~1h out, well
+				// outside the test window). With a short step the buffer keeps
+				// refilling with fresh rounds every second, so "some round
+				// eventually got through" would pass even if a FAILED push were
+				// wrongly committed (a real data-loss bug) — a later fresh round
+				// would paper over it. Firing once means the single measured round
+				// can only reach `pushed` if the buffer RETAINED it across both 503s
+				// and delivered it on the retry, which is the actual contract this
+				// test exists to guard.
+				Targets: []agentwire.AssignmentTarget{{Name: "t1", Probe: "AgentTestEcho", Host: "h", StepMs: 3600_000, Pings: 3}},
 			})
 		case "/agent/v1/results":
 			mu.Lock()
@@ -120,14 +130,28 @@ func TestAgentRunRetriesOnPushFailure(t *testing.T) {
 
 	a := New(Options{Hub: srv.URL, Key: "smk_k_s", Vantage: "nyc", Interval: 50 * time.Millisecond,
 		Timeout: time.Second, Workers: 4, BufferCap: 1000, FlushMax: 100})
-	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+	// The window must comfortably cover the retry backoff: first push attempt
+	// ~1-1.5s in (measure loop's own tick + flush loop's idle poll), then two
+	// 503s at backoff ~1s then ~2s before the third attempt succeeds — done by
+	// ~4-5s. 8s leaves ample margin. Run always blocks for the full window (all
+	// three goroutines wait on ctx.Done()), so this is also the test's wall time.
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 	_ = a.Run(ctx)
 
 	mu.Lock()
 	defer mu.Unlock()
 	if len(pushed) == 0 {
-		t.Fatal("agent never delivered rounds despite retry")
+		t.Fatal("agent never delivered the round despite retry — a failed push may have been committed (data loss)")
+	}
+	// Exactly one round was ever measured (the target fires once in this window),
+	// so exactly one round may ever be pushed — commit-on-success delivers it once.
+	if len(pushed) != 1 {
+		t.Fatalf("expected exactly 1 delivered round, got %d: %+v", len(pushed), pushed)
+	}
+	got := pushed[0]
+	if got.Target != "t1" || got.Pings != 3 || len(got.RTTs) != 3 {
+		t.Fatalf("pushed round wrong: %+v", got)
 	}
 	if attempts < 3 {
 		t.Fatalf("expected at least 3 push attempts (2 failures + success), got %d", attempts)
