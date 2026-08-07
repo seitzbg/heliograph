@@ -51,5 +51,25 @@ govulncheck:
     - go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
     - "$GOPATH/bin/govulncheck ./..."
 
-# pgstore integration test is skipped unless SMOKE_TEST_DSN is set, so no DB service is
-# required here; the irtt test is a pure JSON-parser test.
+# Integration tests against a real TimescaleDB. Without SMOKE_TEST_DSN the pgstore/vantage
+# tests skip (as they do in go-test); this job spins up a TimescaleDB service and runs them.
+# allow_failure while the service-readiness is proven in CI — the tests RUN and report, but a
+# transient DB-startup flake doesn't red an MR. Tighten to blocking once it's shown stable.
+db-test:
+  extends: .go-base
+  stage: test
+  allow_failure: true
+  services:
+    - name: timescale/timescaledb:2.29.1-pg16
+      alias: timescaledb
+  variables:
+    POSTGRES_DB: smoke
+    POSTGRES_USER: smoke
+    POSTGRES_PASSWORD: smoke
+    SMOKE_TEST_DSN: "postgres://smoke:smoke@timescaledb:5432/smoke?sslmode=disable"
+  before_script:
+    - go version
+    # TimescaleDB restarts once during first-boot init; wait past it before connecting.
+    - sleep 20
+  script:
+    - go test -count=1 ./internal/store/pgstore/ ./internal/vantage/ ./internal/api/
