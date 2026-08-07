@@ -70,7 +70,12 @@ Not planned for now; pick up only if multi-vantage measurement is requested.
   tab + per-target 3h/30h/10d/400d drill-down); unison scaling done ✅ (shared Y-axis
   across the Graphs grid, toggle in the legend)
 - 🚧 Top-N "charts" (worst by loss/median/stddev) done ✅ (`/api/charts` + dashboard
-  "Worst targets" panel); alternate menu hierarchies ⬜
+  "Worst targets" panel); config-tree menu done ✅ (Graphs-view left nav built from the
+  target name paths: collapsible folders with worst-child status dots + subtree counts,
+  a filter box, deep-linkable subtree scope `#graphs&path=<folder>` that scopes the grid
+  and its unison Y-axis; a leaf opens the target drill-down). Other pivots (by-probe,
+  by-status, flat A–Z) intentionally not built — the config tree is the workhorse and
+  by-status would duplicate the Overview tab (see the decision log); revisit only if asked.
 - ✅ Drag-to-zoom time range — done: drag a range on the detail graph and it refetches
   that `[from,to]` at the resolution best for the span (raw/hourly/daily), not an image
   swap. In-app dark-mode toggle persistence done ✅ (localStorage, restored before first paint)

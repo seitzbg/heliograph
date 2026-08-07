@@ -141,5 +141,65 @@ await checkAsync('fetchJSON returns decoded JSON on a 2xx response', async () =>
   assert.deepEqual(await D.fetchJSON('/api/targets'), { targets: [{ name: 'a' }] });
 });
 
+// buildTree: the config-tree menu (left nav). Splits each target name on '/', nests
+// folders, and marks the exact path that is itself a monitored target.
+check('buildTree nests names into folders and marks targets', () => {
+  const t = D.buildTree(['datacenters/us-east/edge', 'datacenters/us-west/edge', 'cdn/cf']);
+  assert.equal(t.length, 2);
+  const dc = t.find((n) => n.name === 'datacenters');
+  assert.equal(dc.path, 'datacenters'); assert.equal(dc.target, null);
+  assert.deepEqual(dc.children.map((c) => c.name), ['us-east', 'us-west']); // siblings sorted
+  const east = dc.children[0];
+  assert.equal(east.path, 'datacenters/us-east');
+  assert.equal(east.children[0].target, 'datacenters/us-east/edge');
+  const cdn = t.find((n) => n.name === 'cdn');
+  assert.equal(cdn.children[0].target, 'cdn/cf');
+});
+check('buildTree: a node that is both a target and a folder', () => {
+  const t = D.buildTree(['a', 'a/b']);
+  assert.equal(t.length, 1);
+  assert.equal(t[0].name, 'a'); assert.equal(t[0].target, 'a'); // 'a' is a target...
+  assert.equal(t[0].children.length, 1);                        // ...and a folder
+  assert.equal(t[0].children[0].target, 'a/b');
+});
+check('buildTree sorts siblings and tolerates empty input', () => {
+  assert.deepEqual(D.buildTree([]), []);
+  assert.deepEqual(D.buildTree(null), []);
+  const t = D.buildTree(['b', 'a', 'a/z', 'a/a']);
+  assert.deepEqual(t.map((n) => n.name), ['a', 'b']);
+  assert.deepEqual(t[0].children.map((n) => n.name), ['a', 'z']);
+});
+
+// underPath: a target is within a folder scope iff it equals the path or sits beneath it
+// on a '/' boundary — so 'ab' is NOT under 'a'. Empty scope means "everything".
+check('underPath matches exact, descendants, and all for empty', () => {
+  assert.equal(D.underPath('a/b', ''), true);      // no scope -> everything
+  assert.equal(D.underPath('a/b', 'a'), true);     // descendant
+  assert.equal(D.underPath('a/b', 'a/b'), true);   // exact
+  assert.equal(D.underPath('a/bc', 'a/b'), false); // not a '/'-boundary prefix
+  assert.equal(D.underPath('ab', 'a'), false);
+});
+
+// targetStatus: heuristic dot severity for the menu — down on a probe error or heavy
+// loss, degraded on light loss, else ok. (Authoritative availability is the Overview tab.)
+check('targetStatus maps a DTO to a dot severity', () => {
+  assert.equal(D.targetStatus({ error: 'timeout', loss_pct: 0 }), 'down');
+  assert.equal(D.targetStatus({ loss_pct: 100 }), 'down');
+  assert.equal(D.targetStatus({ loss_pct: 50 }), 'down');
+  assert.equal(D.targetStatus({ loss_pct: 5 }), 'degraded');
+  assert.equal(D.targetStatus({ loss_pct: 0.6 }), 'degraded');
+  assert.equal(D.targetStatus({ loss_pct: 0.5 }), 'ok');
+  assert.equal(D.targetStatus({ loss_pct: 0 }), 'ok');
+  assert.equal(D.targetStatus(null), 'ok');
+});
+
+// parseRoute: the Graphs view carries an optional folder scope for the config-tree menu,
+// deep-linkable and decoded once (like target names).
+check('parseRoute: graphs carries an optional folder path', () => {
+  assert.deepEqual(D.parseRoute('#graphs'), { view: 'graphs' });
+  assert.deepEqual(D.parseRoute('#graphs&path=datacenters'), { view: 'graphs', path: 'datacenters' });
+  assert.deepEqual(D.parseRoute('#graphs&path=a%2Fb'), { view: 'graphs', path: 'a/b' }); // decoded once
+});
+
 if (failed) { console.error(`\n${failed} test(s) failed`); process.exit(1); }
 console.log('\nall dashboard tests passed');

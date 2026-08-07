@@ -34,7 +34,12 @@
       const range = p.get('range');
       return (range && RANGES[range]) ? { view: 'zoom', name, range } : { view: 'stack', name };
     }
-    if (h === 'graphs') return { view: 'graphs' };
+    if (h === 'graphs' || h.startsWith('graphs&')) {
+      // Optional subtree scope for the config-tree menu: #graphs&path=<folder>. Decoded
+      // once by URLSearchParams (a second decode would corrupt names with %, like #10).
+      const path = new URLSearchParams(h).get('path') || '';
+      return path ? { view: 'graphs', path } : { view: 'graphs' };
+    }
     return { view: 'overview' };
   }
 
@@ -116,7 +121,49 @@
     return m > 0 ? m : undefined;
   }
 
-  window.Dash = { RANGES, RANGE_ORDER, parseRoute, mergeSeries, gridSince, fetchJSON, zoomResolution, pixelToTime, sharedYMax };
+  // buildTree turns the flat target-name list from /api/targets into the config-tree menu
+  // (left nav). Each name is a '/'-separated path (the config hierarchy); we nest a node
+  // per segment, and set `target` on the node whose exact path is a monitored target — so
+  // a node can be BOTH a target and a folder (a host with children, as SmokePing allows).
+  // Siblings are sorted by name for a stable menu. Returns the top-level nodes:
+  //   node = { name, path, target: <full name>|null, children: node[] }
+  function buildTree(names) {
+    const root = { children: [], _m: new Map() };
+    for (const full of names || []) {
+      if (!full) continue;
+      const parts = String(full).split('/');
+      let cur = root, path = '';
+      for (const seg of parts) {
+        path = path ? path + '/' + seg : seg;
+        let next = cur._m.get(seg);
+        if (!next) { next = { name: seg, path, target: null, children: [], _m: new Map() }; cur._m.set(seg, next); cur.children.push(next); }
+        cur = next;
+      }
+      cur.target = full;
+    }
+    (function finish(n) { n.children.sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0); delete n._m; n.children.forEach(finish); })(root);
+    return root.children;
+  }
+
+  // underPath reports whether target `name` falls within a menu subtree `path`: the whole
+  // set when scope is empty, otherwise an exact match or a '/'-boundary descendant (so a
+  // scope of 'a' contains 'a/b' but NOT 'ab').
+  function underPath(name, path) {
+    if (!path) return true;
+    return name === path || name.startsWith(path + '/');
+  }
+
+  // targetStatus reduces a /api/targets DTO to a menu dot severity: down on a probe error
+  // or heavy loss, degraded on light loss, else ok. It's a glanceable hint in the nav —
+  // the Overview tab remains the authoritative availability/SLA view.
+  function targetStatus(t) {
+    if (!t) return 'ok';
+    if (t.error || (t.loss_pct != null && t.loss_pct >= 50)) return 'down';
+    if (t.loss_pct != null && t.loss_pct > 0.5) return 'degraded';
+    return 'ok';
+  }
+
+  window.Dash = { RANGES, RANGE_ORDER, parseRoute, mergeSeries, gridSince, fetchJSON, zoomResolution, pixelToTime, sharedYMax, buildTree, underPath, targetStatus };
 
   // ---------------------------------------------------------------- init (DOM) --
   function init() {
@@ -229,6 +276,13 @@
 
     // ---- Graphs grid (recent 3h thumbnails) ----
     const panels = new Map();
+    // Config-tree menu (left nav) state: the current subtree scope, the filter query,
+    // collapsed folders, the target-name set the tree is built from, and per-target status
+    // for the menu dots. `treeSig` lets a periodic refresh skip a rebuild when nothing that
+    // affects the tree changed, so scroll position and focus survive the 5s cadence.
+    let gridScope = '', navQuery = '', treeNames = [], treeSig = null;
+    const collapsed = new Set();
+    const statusByTarget = new Map();
     function ensurePanel(t) {
       let p = panels.get(t.name); if (p) return p;
       const grid = $('graphGrid'); if (panels.size === 0) grid.innerHTML = '';
@@ -262,6 +316,10 @@
         try { targets = (await fetchJSON('/api/targets')).targets || []; }
         catch (e) { $('statusText').textContent = 'collector unreachable — showing last known'; return; } // keep panels (#2)
         $('statusText').textContent = targets.length + ' targets · updated ' + new Date().toLocaleTimeString();
+        // Feed the config-tree menu: the name set it's built from and per-target dot status.
+        statusByTarget.clear();
+        for (const t of targets) statusByTarget.set(t.name, targetStatus(t));
+        treeNames = targets.map((t) => t.name);
         // Reconcile ONLY against an authoritative target list (the fetch above succeeded):
         // drop panels for targets no longer reported (e.g. removed on a SIGHUP reload). A
         // failed /api/targets returned early, so a transient 503 never blanks the grid (#2).
@@ -295,15 +353,89 @@
           if (p.series && p.series.buckets.length) gridMeta(p, p.series);
         }));
         if (bulk) gridLoaded = true;
-        renderGridPanels(); // render all panels together so a unison Y-axis can be shared
+        renderGridPanels();     // render the visible (scoped) panels, sharing a Y-axis
+        renderTreeIfChanged();  // refresh the menu dots when a target's status changed
       } finally { gridBusy = false; }
     }
-    // Render every grid panel. In unison mode the whole grid shares one Y-axis max
-    // (sharedYMax) so the small multiples are comparable; otherwise each auto-scales.
+    // Render every VISIBLE grid panel — those under the current subtree scope (gridScope).
+    // In unison mode the visible set shares one Y-axis max (sharedYMax) so the small
+    // multiples are comparable; scoping to a subtree rescales to just that subtree.
     let unisonScale = true;
     function renderGridPanels() {
-      const yMax = unisonScale ? sharedYMax([...panels.values()].map((p) => p.series)) : undefined;
-      for (const p of panels.values()) renderInto(p.canvas, p.series, RANGES['3h'], 170, yMax);
+      const vis = [];
+      for (const p of panels.values()) {
+        const show = underPath(p.el.dataset.target, gridScope);
+        p.el.style.display = show ? '' : 'none';
+        if (show) vis.push(p);
+      }
+      const yMax = unisonScale ? sharedYMax(vis.map((p) => p.series)) : undefined;
+      for (const p of vis) renderInto(p.canvas, p.series, RANGES['3h'], 170, yMax);
+    }
+
+    // ---- config-tree menu (left nav) ----
+    // The nav is a pure function of (treeNames, statusByTarget, collapsed, gridScope,
+    // navQuery): buildTree nests the names, each folder shows its worst-descendant dot and
+    // a subtree count, each leaf its own dot. Rebuilt only when that signature changes.
+    const SEV = { ok: 0, degraded: 1, down: 2 };
+    function countLeaves(n) { let c = n.target ? 1 : 0; for (const ch of n.children) c += countLeaves(ch); return c; }
+    function folderStatus(n) {
+      let worst = 'ok';
+      (function visit(m) { if (m.target) { const s = statusByTarget.get(m.target) || 'ok'; if (SEV[s] > SEV[worst]) worst = s; } m.children.forEach(visit); })(n);
+      return worst;
+    }
+    function nodeHtml(n, depth, filtering) {
+      if (n.children.length) {
+        const isCollapsed = !filtering && collapsed.has(n.path);
+        const sel = n.path === gridScope ? ' sel' : '';
+        const kids = isCollapsed ? '' : '<div class="kids">' + n.children.map((c) => nodeHtml(c, depth + 1, filtering)).join('') + '</div>';
+        return '<div class="node"><div class="row folder' + (isCollapsed ? ' collapsed' : '') + sel + '" data-path="' + esc(n.path) +
+          '" style="--d:' + depth + '" tabindex="0" role="treeitem" aria-expanded="' + !isCollapsed + '">' +
+          '<span class="twist" data-twist="1">▾</span><span class="tdot ' + folderStatus(n) + '"></span>' +
+          '<span class="label">' + esc(n.name) + '</span><span class="tcount">' + countLeaves(n) + '</span></div>' + kids + '</div>';
+      }
+      return '<div class="row leaf" data-target="' + esc(n.target) + '" style="--d:' + depth + '" tabindex="0" role="treeitem">' +
+        '<span class="twist" aria-hidden="true"></span><span class="tdot ' + (statusByTarget.get(n.target) || 'ok') + '"></span>' +
+        '<span class="label">' + esc(n.name) + '</span></div>';
+    }
+    function treeSignature() {
+      return [navQuery, gridScope, [...collapsed].sort().join('~'),
+        treeNames.map((n) => n + ':' + (statusByTarget.get(n) || 'ok')).join(',')].join('|');
+    }
+    function renderTree() {
+      const host = $('navTree'); if (!host) return;
+      treeSig = treeSignature();
+      const q = navQuery.trim().toLowerCase();
+      // Filtering keeps only matching targets (buildTree then drops empty branches) and
+      // force-expands so every match is visible regardless of collapse state.
+      const names = q ? treeNames.filter((n) => n.toLowerCase().includes(q)) : treeNames;
+      const nodes = buildTree(names);
+      host.innerHTML = nodes.length ? nodes.map((n) => nodeHtml(n, 0, !!q)).join('')
+        : '<div class="tree-empty">' + (q ? 'no matches' : 'no targets yet') + '</div>';
+    }
+    function renderTreeIfChanged() { if (treeSignature() !== treeSig) renderTree(); }
+    // Breadcrumb above the grid mirroring the scope, each ancestor a shortcut back up.
+    function renderScope() {
+      const el = $('graphScope'); if (!el) return;
+      if (!gridScope) { el.innerHTML = '<span class="crumb-cur">All targets</span>'; return; }
+      const parts = gridScope.split('/'); let acc = '';
+      const bits = ['<span class="crumb-link" data-path="">All</span>'];
+      parts.forEach((seg, i) => {
+        acc = acc ? acc + '/' + seg : seg;
+        bits.push('<span class="crumb-sep">›</span>' + (i === parts.length - 1
+          ? '<span class="crumb-cur">' + esc(seg) + '</span>'
+          : '<span class="crumb-link" data-path="' + esc(acc) + '">' + esc(seg) + '</span>'));
+      });
+      el.innerHTML = bits.join('');
+    }
+    function navScope(path) { nav(path ? 'graphs&path=' + enc(path) : 'graphs'); }
+    // A folder's chevron toggles collapse in place; the folder row scopes the grid (and
+    // expands so its children show); a leaf opens the target's stacked drill-down.
+    function activateRow(row, viaTwist) {
+      if (row.classList.contains('folder')) {
+        const path = row.dataset.path;
+        if (viaTwist) { collapsed.has(path) ? collapsed.delete(path) : collapsed.add(path); renderTree(); return; }
+        collapsed.delete(path); navScope(path);
+      } else if (row.dataset.target) { nav('target=' + enc(row.dataset.target)); }
     }
 
     // ---- Drill-down: stack (all four) + zoom (one) ----
@@ -408,7 +540,7 @@
     function route() {
       const r = parseRoute(location.hash);
       if (r.view === 'overview') { setTabs('overview'); show('viewOverview'); refreshOverview(); }
-      else if (r.view === 'graphs') { setTabs('graphs'); show('viewGraphs'); refreshGrid(); }
+      else if (r.view === 'graphs') { gridScope = r.path || ''; setTabs('graphs'); show('viewGraphs'); renderScope(); renderTree(); renderGridPanels(); refreshGrid(); }
       else if (r.view === 'stack') { setTabs('stack'); show('viewStack'); renderStack(r.name); }
       else if (r.view === 'zoom') { setTabs('zoom'); show('viewZoom'); renderZoom(r.name, r.range); }
       $('statusText').textContent = (r.view === 'stack' || r.view === 'zoom') ? r.name : $('statusText').textContent;
@@ -458,6 +590,12 @@
     })();
     $('zoomReset').addEventListener('click', () => { if (curTarget && curRange) renderZoom(curTarget, curRange); });
     $('unisonToggle').addEventListener('change', (e) => { unisonScale = e.target.checked; renderGridPanels(); });
+
+    // ---- config-tree menu events ----
+    $('navTree').addEventListener('click', (e) => { const row = e.target.closest('.row'); if (row) activateRow(row, !!e.target.closest('[data-twist]')); });
+    $('navTree').addEventListener('keydown', (e) => { if (e.key !== 'Enter' && e.key !== ' ') return; const row = e.target.closest('.row'); if (!row) return; e.preventDefault(); activateRow(row, false); });
+    $('navFilter').addEventListener('input', (e) => { navQuery = e.target.value; renderTree(); });
+    $('graphScope').addEventListener('click', (e) => { const l = e.target.closest('.crumb-link'); if (l) navScope(l.dataset.path || ''); });
 
     // ---- theme ----
     const btn = $('themeBtn');
