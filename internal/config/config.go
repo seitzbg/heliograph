@@ -23,6 +23,7 @@ import (
 	"smokeping-modern/internal/alert"
 	"smokeping-modern/internal/model"
 	"smokeping-modern/internal/probe"
+	"smokeping-modern/internal/store"
 )
 
 // Duration is a time.Duration that unmarshals from a string like "60s".
@@ -73,8 +74,9 @@ type Node struct {
 	Pings    int               `yaml:"pings"`
 	Step     Duration          `yaml:"step"`
 	Params   map[string]string `yaml:"params"`
-	Alerts   []string          `yaml:"alerts"`  // alert names; inherited down the tree
-	Alertee  []string          `yaml:"alertee"` // extra notifier names; inherited down the tree
+	Alerts   []string          `yaml:"alerts"`   // alert names; inherited down the tree
+	Alertee  []string          `yaml:"alertee"`  // extra notifier names; inherited down the tree
+	Vantages []string          `yaml:"vantages"` // vantage points that probe this target; inherited
 	Children map[string]*Node  `yaml:"children"`
 }
 
@@ -271,12 +273,13 @@ func validateFragment(name string, c *Config) error {
 }
 
 type inherited struct {
-	probe   string
-	pings   int
-	step    time.Duration
-	params  map[string]string
-	alerts  []string
-	alertee []string
+	probe    string
+	pings    int
+	step     time.Duration
+	params   map[string]string
+	alerts   []string
+	alertee  []string
+	vantages []string
 }
 
 func mergeParams(parent, child map[string]string) map[string]string {
@@ -365,18 +368,24 @@ func (c *Config) Monitors() ([]model.Monitor, error) {
 		if n.Alertee != nil {
 			alertee = n.Alertee
 		}
+		vantages := inh.vantages
+		if n.Vantages != nil {
+			vantages = n.Vantages
+		}
 		eff := inherited{
-			probe:   firstNonEmpty(n.Probe, inh.probe),
-			pings:   firstNonZero(n.Pings, inh.pings),
-			step:    firstNonZeroDur(time.Duration(n.Step), inh.step),
-			params:  mergeParams(inh.params, n.Params),
-			alerts:  alerts,
-			alertee: alertee,
+			probe:    firstNonEmpty(n.Probe, inh.probe),
+			pings:    firstNonZero(n.Pings, inh.pings),
+			step:     firstNonZeroDur(time.Duration(n.Step), inh.step),
+			params:   mergeParams(inh.params, n.Params),
+			alerts:   alerts,
+			alertee:  alertee,
+			vantages: vantages,
 		}
 		if n.Host != "" {
 			m := model.Monitor{
 				Name: path, ProbeKind: eff.probe, Host: n.Host,
-				Pings: eff.pings, Step: eff.step, Params: eff.params, Alerts: eff.alerts, Alertee: eff.alertee,
+				Pings: eff.pings, Step: eff.step, Params: eff.params,
+				Alerts: eff.alerts, Alertee: eff.alertee, Vantages: eff.vantages,
 			}
 			if err := validate(path, m, getSchema); err != nil {
 				problems = append(problems, err.Error())
@@ -384,6 +393,14 @@ func (c *Config) Monitors() ([]model.Monitor, error) {
 				for _, an := range m.Alerts {
 					if _, ok := c.Alerts[an]; !ok {
 						problems = append(problems, fmt.Sprintf("%s: references undefined alert %q", path, an))
+					}
+				}
+				if len(m.Vantages) == 0 {
+					problems = append(problems, fmt.Sprintf("%s: no vantages — an explicit `vantages: []`? every target needs at least one vantage (default is [%s])", path, store.DefaultVantage))
+				}
+				for _, v := range m.Vantages {
+					if v == "" {
+						problems = append(problems, fmt.Sprintf("%s: vantages contains a blank entry", path))
 					}
 				}
 				out = append(out, m)
@@ -397,7 +414,7 @@ func (c *Config) Monitors() ([]model.Monitor, error) {
 			walk(child, n.Children[key], eff)
 		}
 	}
-	walk("", c.Targets, inherited{pings: c.Database.Pings, step: time.Duration(c.Database.Step)})
+	walk("", c.Targets, inherited{pings: c.Database.Pings, step: time.Duration(c.Database.Step), vantages: []string{store.DefaultVantage}})
 
 	// The target name is the identity key for the scheduler, store, alert engine and
 	// planner. Two config paths that flatten to the same name (a key containing "/",

@@ -15,4 +15,5 @@ type Monitor struct {
 	Params    map[string]string // per-target probe params (port, packetsize, ...)
 	Alerts    []string          // names of alerts to evaluate for this target
 	Alertee   []string          // extra notifier names for this target's alert events
+	Vantages  []string          // vantage points that probe this target; inherited, default [local]
 }
