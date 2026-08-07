@@ -36,12 +36,25 @@ Full design rationale and the original-system code map live at `~/.claude/plans/
 - ✅ Structured logging (slog; `-log-format` text/json) + operational metrics (round duration/size/errors + per-probe timings on `/metrics`)
 - ✅ Preserve alert firing state across config reload (reload inherits firing state + sample windows, so alerts don't re-fire or lose hysteresis history)
 
-## Phase 4 — Federation (multi-vantage) — deferred (followup if users want it)
-Not planned for now; pick up only if multi-vantage measurement is requested.
-- ⬜ Agent binary that pulls its assignment and pushes results
-- ⬜ gRPC transport + mutual TLS (no eval of server-sent config)
-- ⬜ Per-vantage series (the `~slave` equivalent) + overlay graphs
-- ⬜ Store-and-forward buffering on the agent
+## Phase 4 — Federation (multi-vantage) 🚧 in progress
+Hub-side groundwork is in place; the agent and the agent-facing endpoints are next.
+
+Design (settled): the hub **assigns** work — agents pull a strict, schema-validated assignment
+(no eval of server-sent config); targets declare `vantages: [...]` (inherited, default
+`[local]`); transport is **HTTPS/JSON with a per-vantage API key** behind a **required reverse
+proxy** (a bundled Caddy with Let's Encrypt, or your own) — superseding the earlier gRPC+mTLS
+sketch; agents poll a versioned assignment (`304` when unchanged); keys are managed by a
+`smoked vantage` CLI and a password-gated admin API. Federation requires `-dsn`.
+
+- ✅ Per-round vantage dimension in the store (the hub probes as `local`)
+- ✅ `vantages:` config (inherited down the tree) + a pure per-vantage assignment builder + a
+  content-version hash for the `304` check
+- ✅ Vantage API-key store (salted-hash, constant-time verify) + `smoked vantage add/ls/revoke`
+  CLI + a password-gated `/api/admin/vantages` API with a session login
+- ⬜ Agent-facing endpoints: `GET /agent/v1/assignment` (304-aware) + `POST /agent/v1/results`
+- ⬜ `smoke-agent` binary: pull assignment → probe → push results + store-and-forward buffering
+- ⬜ Per-vantage series (the `~slave` equivalent) overlay graphs + a Vantages admin GUI panel
+- ⬜ Bundled Caddy (Let's Encrypt) + documented external-reverse-proxy deployment
 
 ## Phase 5 — Parity & polish 🚧
 - ✅ Richer alert DSL — pattern `*N*` skip, bare `*`, `U` token, priority suppression,
