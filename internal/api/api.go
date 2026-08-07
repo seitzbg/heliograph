@@ -136,7 +136,7 @@ func (srv *Server) Routes() *http.ServeMux {
 	}
 	if srv.VantageAuth != nil && srv.Assignment != nil {
 		mux.HandleFunc("GET /agent/v1/assignment", srv.requireAgent(srv.agentAssignment))
-		// POST /agent/v1/results added in Task 5
+		mux.HandleFunc("POST /agent/v1/results", srv.requireAgent(srv.agentResults))
 	}
 	if srv.webDir != "" {
 		// Serve the SPA/static assets at the root (same-origin with the API).

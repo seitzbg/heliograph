@@ -1,13 +1,18 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"smokeping-modern/internal/model"
+	"smokeping-modern/internal/scheduler"
+	"smokeping-modern/internal/store"
 )
 
 func testAgentServer() *Server {
@@ -61,5 +66,88 @@ func TestAssignmentNotModified(t *testing.T) {
 	srv.Routes().ServeHTTP(w, r)
 	if w.Code != http.StatusNotModified {
 		t.Fatalf("status=%d want 304", w.Code)
+	}
+}
+
+type fakeIngester struct {
+	got []scheduler.Outcome
+	err error
+}
+
+func (f *fakeIngester) Add(o []scheduler.Outcome)                   { f.got = append(f.got, o...) }
+func (f *fakeIngester) Keys() ([]string, error)                     { return nil, nil }
+func (f *fakeIngester) Latest(string) (scheduler.Outcome, bool)     { return scheduler.Outcome{}, false }
+func (f *fakeIngester) History(string) ([]scheduler.Outcome, error) { return nil, nil }
+func (f *fakeIngester) AddResults(_ context.Context, o []scheduler.Outcome) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.got = append(f.got, o...)
+	return nil
+}
+
+func ingestServer(ing store.Store) *Server {
+	return &Server{
+		store:       ing,
+		VantageAuth: fakeAuth{name: "nyc", ok: true},
+		Assignment: func(v string) ([]model.Monitor, string) {
+			return []model.Monitor{{Name: "cf", ProbeKind: "FPing", Host: "1.1.1.1", Pings: 20, Step: time.Minute, Vantages: []string{"nyc"}}}, "sha256:v1"
+		},
+	}
+}
+
+func postResults(t *testing.T, srv *Server, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	r := httptest.NewRequest("POST", "/agent/v1/results", strings.NewReader(body))
+	r.Header.Set("Authorization", "Bearer smk_x_y")
+	w := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(w, r)
+	return w
+}
+
+func TestIngestAcceptsAssignedTarget(t *testing.T) {
+	ing := &fakeIngester{}
+	srv := ingestServer(ing)
+	w := postResults(t, srv,
+		`{"results":[{"target":"cf","ts":"2026-08-07T12:00:00.5Z","pings":3,"rtts":[0.01,0.02,0.03]}]}`)
+	if w.Code != 200 {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body)
+	}
+	if len(ing.got) != 1 {
+		t.Fatalf("stored %d outcomes, want 1", len(ing.got))
+	}
+	o := ing.got[0]
+	if o.Vantage != "nyc" || o.Target.Host != "1.1.1.1" || o.ProbeName != "FPing" {
+		t.Fatalf("hub must fill canonical vantage/host/probe: %+v", o)
+	}
+	if o.Computed.Loss != 0 || o.Computed.Pings != 3 {
+		t.Fatalf("Compute mismatch: %+v", o.Computed)
+	}
+}
+
+func TestIngestDropsUnassignedTarget(t *testing.T) {
+	ing := &fakeIngester{}
+	srv := ingestServer(ing)
+	w := postResults(t, srv,
+		`{"results":[{"target":"not-mine","ts":"2026-08-07T12:00:00Z","pings":1,"rtts":[0.01]}]}`)
+	if w.Code != 200 {
+		t.Fatalf("status=%d", w.Code)
+	}
+	if len(ing.got) != 0 {
+		t.Fatalf("unassigned target must be dropped, stored %d", len(ing.got))
+	}
+	var resp struct{ Accepted, Dropped int }
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	if resp.Accepted != 0 || resp.Dropped != 1 {
+		t.Fatalf("counts=%+v", resp)
+	}
+}
+
+func TestIngestWriteErrorIs503(t *testing.T) {
+	srv := ingestServer(&fakeIngester{err: errors.New("db down")})
+	w := postResults(t, srv,
+		`{"results":[{"target":"cf","ts":"2026-08-07T12:00:00Z","pings":1,"rtts":[0.01]}]}`)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d want 503", w.Code)
 	}
 }
