@@ -22,11 +22,12 @@ type RoundStats struct {
 
 // roundSnapshot is an immutable, coherent read of the counters for rendering.
 type roundSnapshot struct {
-	total    int64
-	duration time.Duration
-	targets  int64
-	errs     int64
-	lastUnix int64
+	total     int64
+	duration  time.Duration
+	targets   int64
+	errs      int64
+	lastUnix  int64 // round start, whole seconds — exported as the metric
+	lastNanos int64 // round start, nanoseconds — used only for ordering (seconds tie within a second)
 }
 
 // Observe records one completed round. The total always increments; the latest-round
@@ -38,17 +39,18 @@ func (rs *RoundStats) Observe(d time.Duration, targets, errs int, when time.Time
 		return
 	}
 	total := rs.total.Add(1)
-	whenUnix := when.Unix()
+	whenNanos := when.UnixNano()
 	next := &roundSnapshot{
-		total:    total,
-		duration: d,
-		targets:  int64(targets),
-		errs:     int64(errs),
-		lastUnix: whenUnix,
+		total:     total,
+		duration:  d,
+		targets:   int64(targets),
+		errs:      int64(errs),
+		lastUnix:  when.Unix(),
+		lastNanos: whenNanos,
 	}
 	for {
 		cur := rs.last.Load()
-		if cur != nil && whenUnix < cur.lastUnix {
+		if cur != nil && whenNanos < cur.lastNanos {
 			return // older completion: counts toward total (already added), publishes nothing
 		}
 		if rs.last.CompareAndSwap(cur, next) {

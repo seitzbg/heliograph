@@ -258,6 +258,11 @@ func ParsePattern(field, src string) (Pattern, error) {
 	if hard == 0 {
 		return p, fmt.Errorf("pattern %q has no comparison tokens (it would match any history)", src)
 	}
+	// Bound the AGGREGATE window depth, not just each skip: many `*N*` tokens each capped at
+	// maxAlertX still sum (Length) into a very large per-target buffer and expensive matching.
+	if n := p.Length(); n > maxPatternLength {
+		return p, fmt.Errorf("pattern %q needs %d samples of history, over the %d cap (fewer/smaller *N* skips)", src, n, maxPatternLength)
+	}
 	return p, nil
 }
 

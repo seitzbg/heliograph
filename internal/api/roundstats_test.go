@@ -51,3 +51,16 @@ func TestRoundStatsNil(t *testing.T) {
 		t.Error("nil RoundStats snapshot must be !ok")
 	}
 }
+
+// Two rounds completing out of order within the same wall-clock second must order by their
+// sub-second start, so the older one doesn't overwrite the newer's published fields.
+func TestObserveOrdersBySubSecond(t *testing.T) {
+	rs := &RoundStats{}
+	base := time.Unix(1000, 0)
+	rs.Observe(10*time.Millisecond, 5, 0, base.Add(200*time.Millisecond)) // newer
+	rs.Observe(10*time.Millisecond, 9, 0, base.Add(100*time.Millisecond)) // older, same second, out of order
+	snap, ok := rs.snapshot()
+	if !ok || snap.targets != 5 {
+		t.Errorf("targets = %d (ok=%v), want 5 — an older same-second completion must not rewind the round", snap.targets, ok)
+	}
+}
