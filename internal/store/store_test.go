@@ -184,3 +184,27 @@ func TestMemStoreSeriesAll(t *testing.T) {
 		t.Errorf("past-cutoff map len = %d, want 0", len(none))
 	}
 }
+
+func TestMemStoreVantageDefaulting(t *testing.T) {
+	s := NewMem(10)
+	when := time.Unix(1_700_000_000, 0).UTC()
+	s.Add([]scheduler.Outcome{
+		{Target: probe.Target{Name: "a", Host: "h"}, ProbeName: "FPing",
+			Computed: sample.Compute(1, []float64{0.01}), When: when}, // Vantage empty -> local
+		{Target: probe.Target{Name: "b", Host: "h"}, ProbeName: "FPing",
+			Computed: sample.Compute(1, []float64{0.01}), When: when, Vantage: "nyc"},
+	})
+
+	if o, ok := s.Latest("a"); !ok || o.Vantage != "local" {
+		t.Errorf("Latest(a).Vantage = %q (ok=%v), want \"local\"", o.Vantage, ok)
+	}
+	if o, ok := s.Latest("b"); !ok || o.Vantage != "nyc" {
+		t.Errorf("Latest(b).Vantage = %q (ok=%v), want \"nyc\"", o.Vantage, ok)
+	}
+	if h, err := s.History("a"); err != nil || len(h) != 1 || h[0].Vantage != "local" {
+		t.Errorf("History(a) vantage = %v (err %v), want [local]", h, err)
+	}
+	if got := VantageOf(scheduler.Outcome{}); got != "local" {
+		t.Errorf("VantageOf(zero) = %q, want \"local\"", got)
+	}
+}

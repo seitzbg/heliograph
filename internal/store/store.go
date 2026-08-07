@@ -19,6 +19,19 @@ import (
 // hourly mode, rather than a 503 that looks like a transient failure.
 var ErrRollupUnavailable = errors.New("store: rollup aggregate not available")
 
+// DefaultVantage is the hub's own vantage name — the source of every locally probed
+// round. Agent-sourced rounds carry their own vantage.
+const DefaultVantage = "local"
+
+// VantageOf returns o.Vantage, or DefaultVantage when it is empty, so the default lives
+// in exactly one place across the in-memory and PostgreSQL stores.
+func VantageOf(o scheduler.Outcome) string {
+	if o.Vantage == "" {
+		return DefaultVantage
+	}
+	return o.Vantage
+}
+
 // Store is the sink the collector writes each round's outcomes to, and the API
 // reads series back from.
 type Store interface {
@@ -137,6 +150,7 @@ func (s *MemStore) Add(outcomes []scheduler.Outcome) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, o := range outcomes {
+		o.Vantage = VantageOf(o) // resolve "" -> local once, on write
 		k := o.Target.Name
 		if _, seen := s.latest[k]; !seen {
 			s.keys = append(s.keys, k)

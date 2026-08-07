@@ -72,7 +72,7 @@ CREATE TABLE IF NOT EXISTS samples (
 	target         text               NOT NULL,
 	probe          text               NOT NULL,
 	host           text               NOT NULL,
-	vantage        text               NOT NULL DEFAULT 'master',
+	vantage        text               NOT NULL DEFAULT 'local',
 	pings          smallint           NOT NULL,
 	loss           smallint           NOT NULL,
 	median_seconds double precision,
@@ -87,6 +87,33 @@ CREATE INDEX IF NOT EXISTS samples_target_ts ON samples (target, ts DESC);
 func (s *PGStore) migrate(ctx context.Context) error {
 	if _, err := s.pool.Exec(ctx, schema); err != nil {
 		return fmt.Errorf("pgstore: migrate: %w", err)
+	}
+	return s.renameLegacyVantage(ctx)
+}
+
+// renameLegacyVantage renames hub rows written before the vantage was named 'local'
+// (the column shipped defaulting to 'master'). It runs once: it keys off the column's
+// current default, so after it flips the default to 'local' every later boot skips —
+// which also means it never rewrites a legitimate future 'master' value.
+func (s *PGStore) renameLegacyVantage(ctx context.Context) error {
+	var def string
+	if err := s.pool.QueryRow(ctx, `
+		SELECT COALESCE(pg_get_expr(d.adbin, d.adrelid), '')
+		  FROM pg_attribute a
+		  LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+		 WHERE a.attrelid = 'samples'::regclass AND a.attname = 'vantage'`).Scan(&def); err != nil {
+		return fmt.Errorf("pgstore: read vantage default: %w", err)
+	}
+	if !strings.Contains(def, "'master'") {
+		return nil // already on 'local' — nothing to rename
+	}
+	for _, q := range []string{
+		`UPDATE samples SET vantage = 'local' WHERE vantage = 'master'`,
+		`ALTER TABLE samples ALTER COLUMN vantage SET DEFAULT 'local'`,
+	} {
+		if _, err := s.pool.Exec(ctx, q); err != nil {
+			return fmt.Errorf("pgstore: rename legacy vantage: %w", err)
+		}
 	}
 	return nil
 }
@@ -189,7 +216,7 @@ func (s *PGStore) Add(outcomes []scheduler.Outcome) {
 			`INSERT INTO samples
 			   (ts, target, probe, host, vantage, pings, loss, median_seconds, rtts_seconds, err, duration_ms)
 			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
-			o.When.UTC(), o.Target.Name, o.ProbeName, o.Target.Host, "master",
+			o.When.UTC(), o.Target.Name, o.ProbeName, o.Target.Host, store.VantageOf(o),
 			o.Computed.Pings, o.Computed.Loss, nanToNil(o.Computed.Median),
 			centeredToDB(o.Computed.Centered), errText,
 			float64(o.Duration.Microseconds())/1000.0,
