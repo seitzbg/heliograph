@@ -68,6 +68,18 @@ func TestAdminDisabledWhenNoPassword(t *testing.T) {
 	}
 }
 
+func TestAdminDisabledWhenNoSigningKey(t *testing.T) {
+	srv, _ := adminServer("hunter2")
+	srv.AdminKey = nil // password + store set, but no signing key -> must NOT register
+	mux := srv.Routes()
+	r := httptest.NewRequest("POST", "/api/admin/login", strings.NewReader(`{"password":"hunter2"}`))
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, r)
+	if w.Code != http.StatusNotFound {
+		t.Errorf("login with no signing key = %d, want 404 (fail-closed)", w.Code)
+	}
+}
+
 func TestAdminLoginAndCRUD(t *testing.T) {
 	srv, fk := adminServer("hunter2")
 	mux := srv.Routes()

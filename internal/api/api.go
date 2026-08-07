@@ -113,7 +113,7 @@ func (srv *Server) Routes() *http.ServeMux {
 	mux.HandleFunc("GET /api/series/all", srv.seriesAll)
 	mux.HandleFunc("GET /api/rollup", srv.rollup)
 	mux.HandleFunc("GET /metrics", srv.metrics)
-	if srv.AdminPassword != "" && srv.Vantages != nil {
+	if srv.AdminPassword != "" && srv.Vantages != nil && len(srv.AdminKey) > 0 {
 		mux.HandleFunc("POST /api/admin/login", srv.adminLogin)
 		mux.HandleFunc("GET /api/admin/vantages", srv.requireAdmin(srv.listVantages))
 		mux.HandleFunc("POST /api/admin/vantages", srv.requireAdmin(srv.addVantage))
