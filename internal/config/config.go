@@ -265,7 +265,7 @@ func validateFragment(name string, c *Config) error {
 		return fmt.Errorf("config: %s: `alerts` must be set in default.yaml, not in a fragment", where)
 	}
 	if t := c.Targets; t != nil {
-		if t.Probe != "" || t.Host != "" || t.Title != "" || t.Pings != 0 || t.Step != 0 || t.Params != nil || t.Alerts != nil || t.Alertee != nil {
+		if t.Probe != "" || t.Host != "" || t.Title != "" || t.Pings != 0 || t.Step != 0 || t.Params != nil || t.Alerts != nil || t.Alertee != nil || t.Vantages != nil {
 			return fmt.Errorf("config: %s: `targets:` may contain only `children` in a fragment (tree-wide defaults belong in default.yaml)", where)
 		}
 	}

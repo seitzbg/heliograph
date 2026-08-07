@@ -25,6 +25,7 @@ import (
 	"smokeping-modern/internal/alert"
 	"smokeping-modern/internal/api"
 	"smokeping-modern/internal/config"
+	"smokeping-modern/internal/federation"
 	"smokeping-modern/internal/model"
 	"smokeping-modern/internal/probe"
 	"smokeping-modern/internal/scheduler"
@@ -571,6 +572,18 @@ func buildRuntime(configPath string, demoPings int, demoStep, timeout time.Durat
 	} else {
 		monitors = demoMonitors(demoPings, demoStep)
 	}
+
+	// The hub probes only the targets assigned to its own vantage (local). A remote-only
+	// target (e.g. `vantages: [nyc]`) stays dark until its agent connects, rather than being
+	// silently measured here and stored/alerted as a `local` observation (a false location).
+	// Config monitors already default to [local]; demo monitors carry no vantages, so default
+	// them first, then filter. This scopes both the probe jobs and the alert loops below.
+	for i := range monitors {
+		if len(monitors[i].Vantages) == 0 {
+			monitors[i].Vantages = []string{store.DefaultVantage}
+		}
+	}
+	monitors = federation.AssignmentFor(monitors, store.DefaultVantage)
 
 	probes := map[string]probe.Probe{}
 	var jobs []scheduler.Job

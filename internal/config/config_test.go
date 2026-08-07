@@ -357,6 +357,7 @@ func TestLoadDirRejectsNonBranchFragments(t *testing.T) {
 		"probes":   "probes: { FPing: {} }\ntargets:\n  children:\n    X: { host: h }\n",
 		"alerts":   "alerts:\n  a: { type: loss, pattern: \">1\" }\ntargets:\n  children:\n    X: { host: h }\n",
 		"rootnode": "targets:\n  probe: FPing\n  children:\n    X: { host: h }\n",
+		"vantages": "targets:\n  vantages: [nyc]\n  children:\n    X: { host: h }\n",
 	}
 	for name, frag := range cases {
 		t.Run(name, func(t *testing.T) {
