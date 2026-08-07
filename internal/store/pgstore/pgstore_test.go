@@ -632,3 +632,45 @@ func TestPGStoreWritesVantage(t *testing.T) {
 		}
 	}
 }
+
+func TestPGStoreRenamesLegacyMasterVantage(t *testing.T) {
+	dsn := os.Getenv("SMOKE_TEST_DSN")
+	if dsn == "" {
+		t.Skip("set SMOKE_TEST_DSN to run the TimescaleDB integration test")
+	}
+	ctx := context.Background()
+	s, err := New(ctx, dsn, 100, func(e error) { t.Errorf("store error: %v", e) })
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer s.Close()
+
+	// Simulate a pre-upgrade DB: the column default is still 'master' and a hub row
+	// was written under the old name.
+	for _, q := range []string{
+		"TRUNCATE samples",
+		"ALTER TABLE samples ALTER COLUMN vantage SET DEFAULT 'master'",
+		`INSERT INTO samples (ts,target,probe,host,vantage,pings,loss,rtts_seconds)
+		   VALUES (now(),'legacy','FPing','h','master',1,0,'{0.01}')`,
+	} {
+		if _, err := s.pool.Exec(ctx, q); err != nil {
+			t.Fatalf("setup %q: %v", q, err)
+		}
+	}
+
+	if err := s.migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	var got string
+	if err := s.pool.QueryRow(ctx, "SELECT vantage FROM samples WHERE target='legacy'").Scan(&got); err != nil {
+		t.Fatalf("select: %v", err)
+	}
+	if got != "local" {
+		t.Errorf("legacy row vantage = %q, want \"local\" (rename did not run)", got)
+	}
+	// And the rename is idempotent: a second migrate is a no-op and doesn't error.
+	if err := s.migrate(ctx); err != nil {
+		t.Fatalf("second migrate: %v", err)
+	}
+}
