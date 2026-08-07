@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -29,6 +30,7 @@ import (
 	"smokeping-modern/internal/scheduler"
 	"smokeping-modern/internal/store"
 	"smokeping-modern/internal/store/pgstore"
+	"smokeping-modern/internal/vantage"
 
 	// Register probe plugins (blank imports run their init() -> probe.Register).
 	_ "smokeping-modern/internal/probe/dns"
@@ -45,6 +47,10 @@ import (
 var version = "0.1.0"
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "vantage" {
+		os.Exit(vantageCmd(os.Args[2:]))
+	}
+
 	showVersion := flag.Bool("version", false, "print version and exit")
 	rounds := flag.Int("rounds", 2, "number of measurement rounds to run")
 	pings := flag.Int("pings", 10, "pings per round (N)")
@@ -255,6 +261,27 @@ func main() {
 			}
 			return m
 		}
+		// Federation admin API: only with a DB (the key store is TimescaleDB-backed) and a
+		// configured admin password (fail-closed — no password means no admin routes).
+		if *dsn != "" {
+			vst, err := vantage.New(ctx, *dsn)
+			if err != nil {
+				fatal("vantage key store", err)
+			}
+			defer vst.Close()
+			srv.Vantages = vst
+			srv.AdminPassword = os.Getenv("SMOKED_ADMIN_PASSWORD")
+			adminKey := make([]byte, 32)
+			if _, err := rand.Read(adminKey); err != nil {
+				fatal("admin key", err)
+			}
+			srv.AdminKey = adminKey
+			if srv.AdminPassword == "" {
+				slog.Warn("admin key-management API disabled: set SMOKED_ADMIN_PASSWORD to enable /api/admin/vantages")
+			} else {
+				slog.Info("admin key-management API enabled at /api/admin/vantages")
+			}
+		}
 		// Defensive timeouts so a slow or idle client can't tie up a connection
 		// indefinitely (the read endpoints are expensive). WriteTimeout is generous
 		// because an aggregate scan over many targets can take a little while.
@@ -330,6 +357,84 @@ func main() {
 		// creation, which runs on this (and every other) exit path.
 		slog.Info("shutdown complete")
 		fmt.Println("shutdown complete")
+	}
+}
+
+// vantageCmd implements `smoked vantage <add NAME|ls|revoke NAME> [-dsn DSN]` — provisioning
+// against the same TimescaleDB the daemon uses. The subcommand and the vantage NAME are
+// positional (git-style), so flags may follow them: `vantage add nyc -dsn X`. -dsn defaults
+// to SMOKED_DSN.
+func vantageCmd(args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: smoked vantage <add NAME|ls|revoke NAME> [-dsn DSN]")
+		return 2
+	}
+	sub := args[0]
+	fs := flag.NewFlagSet("vantage "+sub, flag.ExitOnError)
+	dsn := fs.String("dsn", os.Getenv("SMOKED_DSN"), "TimescaleDB DSN (or set SMOKED_DSN)")
+	rest := args[1:]
+	var name string
+	if sub == "add" || sub == "revoke" {
+		if len(rest) == 0 || strings.HasPrefix(rest[0], "-") {
+			fmt.Fprintf(os.Stderr, "usage: smoked vantage %s NAME [-dsn DSN]\n", sub)
+			return 2
+		}
+		name, rest = rest[0], rest[1:]
+	}
+	if err := fs.Parse(rest); err != nil {
+		return 2
+	}
+	if *dsn == "" {
+		fmt.Fprintln(os.Stderr, "vantage: -dsn (or SMOKED_DSN) is required — federation uses the database")
+		return 2
+	}
+	ctx := context.Background()
+	st, err := vantage.New(ctx, *dsn)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "vantage: %v\n", err)
+		return 1
+	}
+	defer st.Close()
+
+	switch sub {
+	case "add":
+		key, err := st.Add(ctx, name)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "vantage add: %v\n", err)
+			return 1
+		}
+		fmt.Printf("vantage %q key (shown once — store it now):\n\n%s\n\n%s\n", name, key, vantage.AgentSnippet(name, key))
+		return 0
+	case "ls":
+		infos, err := st.List(ctx)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "vantage ls: %v\n", err)
+			return 1
+		}
+		fmt.Printf("%-24s %-20s %s\n", "NAME", "CREATED", "LAST-SEEN")
+		for _, in := range infos {
+			last := "never"
+			if !in.LastSeen.IsZero() {
+				last = in.LastSeen.UTC().Format(time.RFC3339)
+			}
+			fmt.Printf("%-24s %-20s %s\n", in.Name, in.Created.UTC().Format("2006-01-02 15:04"), last)
+		}
+		return 0
+	case "revoke":
+		removed, err := st.Revoke(ctx, name)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "vantage revoke: %v\n", err)
+			return 1
+		}
+		if !removed {
+			fmt.Fprintf(os.Stderr, "vantage %q not found\n", name)
+			return 1
+		}
+		fmt.Printf("revoked vantage %q\n", name)
+		return 0
+	default:
+		fmt.Fprintf(os.Stderr, "unknown vantage subcommand %q\n", sub)
+		return 2
 	}
 }
 
