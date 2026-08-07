@@ -163,7 +163,17 @@
     return 'ok';
   }
 
-  window.Dash = { RANGES, RANGE_ORDER, parseRoute, mergeSeries, gridSince, fetchJSON, zoomResolution, pixelToTime, sharedYMax, buildTree, underPath, targetStatus };
+  // pickSeries decides what a detail graph renders and caches for one range: a fresh non-null
+  // series is rendered and cached (except the 'unsupported' sentinel, which is not real data);
+  // a null fresh — a transient fetch failure (a non-2xx like a brief 503) — falls back to the
+  // cached last-good so the graph keeps its data instead of blanking to "collecting…" (#5).
+  function pickSeries(fresh, cached) {
+    const prev = cached || null;
+    if (fresh == null) return { series: prev, cache: prev, failed: true };
+    return { series: fresh, cache: fresh.unsupported ? prev : fresh, failed: false };
+  }
+
+  window.Dash = { RANGES, RANGE_ORDER, parseRoute, mergeSeries, gridSince, fetchJSON, zoomResolution, pixelToTime, sharedYMax, buildTree, underPath, targetStatus, pickSeries };
 
   // ---------------------------------------------------------------- init (DOM) --
   function init() {
@@ -353,6 +363,9 @@
           if (p.series && p.series.buckets.length) gridMeta(p, p.series);
         }));
         if (bulk) gridLoaded = true;
+        // Don't claim "updated" when the bulk series fetch failed (a non-2xx/network error left
+        // bulk null): the panels are showing last-known data, so say so instead of lying (#5).
+        if (!bulk) $('statusText').textContent = targets.length + ' targets · graph data degraded (last known) · ' + new Date().toLocaleTimeString();
         renderGridPanels();     // render the visible (scoped) panels, sharing a Y-axis
         renderTreeIfChanged();  // refresh the menu dots when a target's status changed
       } finally { gridBusy = false; }
@@ -440,6 +453,9 @@
 
     // ---- Drill-down: stack (all four) + zoom (one) ----
     let curTarget = null, curRange = null;
+    // Last successful series per `${target}|${rangeKey}`, so a transient fetch failure on a
+    // detail/zoom refresh keeps the graph instead of blanking it to "collecting…" (#5).
+    const lastGood = new Map();
     const stackCanvases = []; // {canvas, series, R}
     let zoomState = null;     // {canvas, series, band, t0, t1, xlabels, custom}
     async function renderStack(name) {
@@ -458,8 +474,10 @@
       const gp = panels.get(name); if (gp) { const probe = gp.el.querySelector('.probe'); if (probe) $('stackTitle').innerHTML = esc(name) + ' <span class="probe">' + esc(probe.textContent) + '</span>'; }
       await Promise.all(cells.map(async (c) => {
         let s = null; try { s = await fetchRange(name, c.key); } catch (e) { /* transient */ }
+        const k = name + '|' + c.key;
+        const pick = pickSeries(s, lastGood.get(k)); lastGood.set(k, pick.cache); s = pick.series;
         stackCanvases.push({ canvas: c.canvas, series: s, R: c.R });
-        if (s && !s.unsupported && s.buckets.length >= 2) c.meta.innerHTML = metaHtml(s);
+        if (s && !s.unsupported && s.buckets.length >= 2) c.meta.innerHTML = metaHtml(s) + (pick.failed ? ' <span class="reslabel">· last known</span>' : '');
         renderInto(c.canvas, s, c.R, 170);
       }));
     }
@@ -485,13 +503,15 @@
       const canvas = $('zoomCanvas');
       let s = null; try { s = await fetchRange(name, range); } catch (e) { /* transient */ }
       if (curTarget !== name || curRange !== range) return; // route moved on while awaiting
+      const k = name + '|' + range;
+      const pick = pickSeries(s, lastGood.get(k)); lastGood.set(k, pick.cache); s = pick.series; // keep last-good on a transient failure (#5)
       // Fixed tier domain [now-windowMs, now], matching the stacked detail view.
       const lastT = s && s.buckets && s.buckets.length ? s.buckets[s.buckets.length - 1].t : NaN;
       const t1 = Math.max(Date.now(), Number.isFinite(lastT) ? lastT : 0);
       zoomState = { canvas, series: s, band: R.mode === 'band', t0: t1 - R.windowMs, t1, xlabels: R.xl, custom: false };
       if (s && !s.unsupported && s.buckets.length >= 2) {
         $('zoomMeta').innerHTML = metaHtml(s);
-        $('zoomRes').textContent = 'resolution: ' + R.desc + ' · ' + s.buckets.length + (R.mode === 'raw' ? ' rounds' : ' buckets') + ' · drag to zoom';
+        $('zoomRes').textContent = 'resolution: ' + R.desc + ' · ' + s.buckets.length + (R.mode === 'raw' ? ' rounds' : ' buckets') + (pick.failed ? ' · last known (refresh failed)' : ' · drag to zoom');
       }
       drawZoom();
     }
