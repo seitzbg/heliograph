@@ -537,3 +537,72 @@ func TestSubSecondStepRejected(t *testing.T) {
 		t.Fatalf("a 1s step should be accepted, got %v", err)
 	}
 }
+
+// vantages inherit down the tree like alerts/alertee; unset defaults to [local];
+// an explicit override replaces; an explicit [] is a config error (no one would probe it).
+func TestVantagesInheritanceAndDefault(t *testing.T) {
+	const y = `
+targets:
+  probe: TCPConnect
+  children:
+    plain:    { host: 1.2.3.4, params: { port: "80" } }                 # -> [local] (default)
+    region:
+      vantages: [nyc, lon]
+      children:
+        edge:  { host: 1.2.3.5, params: { port: "80" } }                # -> [nyc lon] (inherited)
+        both:  { host: 1.2.3.6, params: { port: "80" }, vantages: [local, nyc] }
+`
+	c, err := Parse([]byte(y))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	mons, err := c.Monitors()
+	if err != nil {
+		t.Fatalf("Monitors: %v", err)
+	}
+	byName := map[string]model.Monitor{}
+	for _, m := range mons {
+		byName[m.Name] = m
+	}
+	if got := byName["plain"].Vantages; len(got) != 1 || got[0] != "local" {
+		t.Errorf("plain vantages = %v, want [local] (default)", got)
+	}
+	if got := byName["region/edge"].Vantages; len(got) != 2 || got[0] != "nyc" || got[1] != "lon" {
+		t.Errorf("region/edge vantages = %v, want [nyc lon] (inherited)", got)
+	}
+	if got := byName["region/both"].Vantages; len(got) != 2 || got[0] != "local" || got[1] != "nyc" {
+		t.Errorf("region/both vantages = %v, want [local nyc] (override)", got)
+	}
+}
+
+func TestEmptyVantagesListIsRejected(t *testing.T) {
+	const y = `
+targets:
+  probe: TCPConnect
+  children:
+    orphan: { host: 1.2.3.4, params: { port: "80" }, vantages: [] }
+`
+	c, err := Parse([]byte(y))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if _, err := c.Monitors(); err == nil {
+		t.Fatal("expected an error for a target with no vantages, got none")
+	}
+}
+
+func TestBlankVantageNameIsRejected(t *testing.T) {
+	const y = `
+targets:
+  probe: TCPConnect
+  children:
+    bad: { host: 1.2.3.4, params: { port: "80" }, vantages: ["", "nyc"] }
+`
+	c, err := Parse([]byte(y))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if _, err := c.Monitors(); err == nil {
+		t.Fatal("expected an error for a blank vantage name, got none")
+	}
+}
