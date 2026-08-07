@@ -63,6 +63,10 @@ type Server struct {
 	// -> vantage names) — /api/targets surfaces it so the UI can show which vantages a
 	// target is measured from. nil means the field is omitted (tests/pure API/no federation).
 	TargetVantages func() map[string][]string
+	// VantageAuth, if set, gates the agent routes (requireAgent) behind an API-key check
+	// against the vantage key store. nil means the agent routes are not registered at
+	// all — fail-closed, same pattern as the admin API's AdminPassword gate.
+	VantageAuth VantageAuth
 }
 
 func New(s store.Store, webDir string) *Server { return &Server{store: s, webDir: webDir} }
