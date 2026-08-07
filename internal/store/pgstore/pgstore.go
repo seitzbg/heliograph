@@ -81,7 +81,8 @@ CREATE TABLE IF NOT EXISTS samples (
 	duration_ms    double precision
 );
 SELECT create_hypertable('samples', 'ts', if_not_exists => TRUE);
-CREATE INDEX IF NOT EXISTS samples_target_ts ON samples (target, ts DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS samples_target_vantage_ts ON samples (target, vantage, ts);
+DROP INDEX IF EXISTS samples_target_ts;
 `
 
 func (s *PGStore) migrate(ctx context.Context) error {
@@ -201,10 +202,9 @@ func dbToCentered(a []*float64) []float64 {
 	return out
 }
 
-func (s *PGStore) Add(outcomes []scheduler.Outcome) {
-	if len(outcomes) == 0 {
-		return
-	}
+// buildBatch turns outcomes into an idempotent insert batch. Shared by the
+// fire-and-forget local Add and the error-returning AddResults.
+func buildBatch(outcomes []scheduler.Outcome) *pgx.Batch {
 	batch := &pgx.Batch{}
 	for _, o := range outcomes {
 		var errText *string
@@ -215,18 +215,26 @@ func (s *PGStore) Add(outcomes []scheduler.Outcome) {
 		batch.Queue(
 			`INSERT INTO samples
 			   (ts, target, probe, host, vantage, pings, loss, median_seconds, rtts_seconds, err, duration_ms)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+			 ON CONFLICT (target, vantage, ts) DO NOTHING`,
 			o.When.UTC(), o.Target.Name, o.ProbeName, o.Target.Host, store.VantageOf(o),
 			o.Computed.Pings, o.Computed.Loss, nanToNil(o.Computed.Median),
 			centeredToDB(o.Computed.Centered), errText,
 			float64(o.Duration.Microseconds())/1000.0,
 		)
 	}
+	return batch
+}
+
+func (s *PGStore) Add(outcomes []scheduler.Outcome) {
+	if len(outcomes) == 0 {
+		return
+	}
 	// Bound the write with a deadline derived from the process context, so a stalled DB
 	// connection can't pin the scheduler worker that holds the target in flight.
 	ctx, cancel := context.WithTimeout(s.ctx, writeTimeout)
 	defer cancel()
-	br := s.pool.SendBatch(ctx, batch)
+	br := s.pool.SendBatch(ctx, buildBatch(outcomes))
 	defer br.Close()
 	for range outcomes {
 		if _, err := br.Exec(); err != nil {
@@ -235,6 +243,27 @@ func (s *PGStore) Add(outcomes []scheduler.Outcome) {
 			return
 		}
 	}
+}
+
+// AddResults persists an agent-ingested batch, returning the first write error so
+// the ingest handler can answer 503 and the agent can retain + retry — the caller-
+// visible feedback the fire-and-forget Add deliberately does not give the local
+// collector. Idempotent via ON CONFLICT, so a replayed batch is a no-op.
+func (s *PGStore) AddResults(ctx context.Context, outcomes []scheduler.Outcome) error {
+	if len(outcomes) == 0 {
+		return nil
+	}
+	wctx, cancel := context.WithTimeout(ctx, writeTimeout)
+	defer cancel()
+	br := s.pool.SendBatch(wctx, buildBatch(outcomes))
+	defer br.Close()
+	for range outcomes {
+		if _, err := br.Exec(); err != nil {
+			s.writeFails.Add(1)
+			return fmt.Errorf("pgstore: ingest insert: %w", err)
+		}
+	}
+	return nil
 }
 
 // WriteMetrics appends the persistent-write health counter in Prometheus text format.
@@ -672,4 +701,5 @@ var _ interface {
 	store.LatestAller
 	store.AvailabilityAller
 	store.SeriesAller
+	store.ResultIngester
 } = (*PGStore)(nil)

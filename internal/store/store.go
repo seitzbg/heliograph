@@ -41,6 +41,14 @@ type Store interface {
 	History(key string) ([]scheduler.Outcome, error)
 }
 
+// ResultIngester is implemented by stores that accept an agent-ingested batch and
+// report the write error, so the ingest endpoint can answer 503 (agent retries)
+// rather than silently dropping under a transient store failure. The local
+// collector keeps the fire-and-forget Add; only ingest needs the feedback.
+type ResultIngester interface {
+	AddResults(ctx context.Context, outcomes []scheduler.Outcome) error
+}
+
 // RollupPoint is one downsampled bucket for a target (hourly or daily). Median
 // values are NaN for buckets that were entirely lost.
 type RollupPoint struct {
@@ -162,6 +170,14 @@ func (s *MemStore) Add(outcomes []scheduler.Outcome) {
 		}
 		s.history[k] = h
 	}
+}
+
+// AddResults implements ResultIngester by appending like Add. MemStore is a
+// dev/test store; idempotency (dropping a replayed batch) is a DB guarantee, so
+// this always succeeds.
+func (s *MemStore) AddResults(_ context.Context, outcomes []scheduler.Outcome) error {
+	s.Add(outcomes)
+	return nil
 }
 
 func (s *MemStore) Keys() ([]string, error) {
@@ -311,6 +327,7 @@ func (s *MemStore) AvailabilityAll(ctx context.Context, cutoff time.Time, maxLos
 // compile-time checks
 var (
 	_ Store             = (*MemStore)(nil)
+	_ ResultIngester    = (*MemStore)(nil)
 	_ Availabler        = (*MemStore)(nil)
 	_ RangeHistorier    = (*MemStore)(nil)
 	_ LatestAller       = (*MemStore)(nil)

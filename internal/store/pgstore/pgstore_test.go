@@ -13,6 +13,27 @@ import (
 	"smokeping-modern/internal/scheduler"
 )
 
+// testStore returns a PGStore connected to SMOKE_TEST_DSN with a freshly
+// truncated samples table, skipping the test if the DSN is not set. For tests
+// that don't need a specific histCap or a custom onErr.
+func testStore(t *testing.T) *PGStore {
+	t.Helper()
+	dsn := os.Getenv("SMOKE_TEST_DSN")
+	if dsn == "" {
+		t.Skip("set SMOKE_TEST_DSN to run the TimescaleDB integration test")
+	}
+	ctx := context.Background()
+	s, err := New(ctx, dsn, 100, func(e error) { t.Errorf("store error: %v", e) })
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(s.Close)
+	if _, err := s.pool.Exec(ctx, "TRUNCATE samples"); err != nil {
+		t.Fatalf("truncate: %v", err)
+	}
+	return s
+}
+
 // Run with a live TimescaleDB:
 //
 //	SMOKE_TEST_DSN='postgres://smoke:smoke@127.0.0.1:5433/smoke?sslmode=disable' go test ./internal/store/pgstore
@@ -672,5 +693,36 @@ func TestPGStoreRenamesLegacyMasterVantage(t *testing.T) {
 	// And the rename is idempotent: a second migrate is a no-op and doesn't error.
 	if err := s.migrate(ctx); err != nil {
 		t.Fatalf("second migrate: %v", err)
+	}
+}
+
+// A replayed batch (same target/vantage/ts) must not duplicate rows — the
+// idempotency an agent retrying an ingest POST after a dropped response relies on.
+func TestAddResultsIdempotent(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+
+	tgt := probe.Target{Name: "idem", Host: "10.0.0.1"}
+	when := time.Date(2026, 8, 7, 12, 0, 0, 123_000_000, time.UTC)
+	mk := func() []scheduler.Outcome {
+		return []scheduler.Outcome{{
+			Target: tgt, ProbeName: "FPing", When: when, Vantage: "nyc",
+			Computed: sample.Compute(3, []float64{0.010, 0.011, 0.012}),
+		}}
+	}
+	if err := s.AddResults(ctx, mk()); err != nil {
+		t.Fatalf("AddResults #1: %v", err)
+	}
+	if err := s.AddResults(ctx, mk()); err != nil { // replay
+		t.Fatalf("AddResults #2 (replay): %v", err)
+	}
+	var n int
+	if err := s.pool.QueryRow(ctx,
+		`SELECT count(*) FROM samples WHERE target=$1 AND vantage=$2 AND ts=$3`,
+		tgt.Name, "nyc", when).Scan(&n); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("replayed batch must be idempotent: got %d rows, want 1", n)
 	}
 }
