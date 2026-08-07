@@ -34,6 +34,7 @@ type Outcome struct {
 	Err       error
 	When      time.Time
 	Duration  time.Duration
+	Vantage   string // where this round was measured; "" means the hub (store.DefaultVantage)
 }
 
 // runOne measures a single job under its own timeout derived from ctx and derives
