@@ -78,6 +78,19 @@ func TestAddVerifyListRevoke(t *testing.T) {
 	}
 }
 
+func TestValidName(t *testing.T) {
+	for _, ok := range []string{"nyc", "us-east", "us_east.1", "A9", "local"} {
+		if !ValidName(ok) {
+			t.Errorf("ValidName(%q) = false, want true", ok)
+		}
+	}
+	for _, bad := range []string{"", "-x", ".y", "a b", "a:b", "a\nb", "a/b", "a{b}"} {
+		if ValidName(bad) {
+			t.Errorf("ValidName(%q) = true, want false", bad)
+		}
+	}
+}
+
 func TestAgentSnippet(t *testing.T) {
 	out := AgentSnippet("nyc", "smk_abc_def")
 	if !strings.Contains(out, "nyc") || !strings.Contains(out, "smk_abc_def") {
