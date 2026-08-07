@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"smokeping-modern/internal/federation"
 	"smokeping-modern/internal/probe"
 	"smokeping-modern/internal/scheduler"
 
@@ -86,5 +87,37 @@ targets:
 	}
 	if len(rt.jobs) != 2 {
 		t.Errorf("expected exactly 2 local jobs, got %d (%v)", len(rt.jobs), got)
+	}
+}
+
+// The swappable runtime must retain the FULL post-inheritance monitor set (all
+// vantages), not just the hub's local-filtered slice — the agent assignment endpoint
+// (Task 4/5) computes a remote vantage's targets from it. The hub still builds local
+// probe jobs only for its own vantage.
+//
+// Uses TCPConnect (no external binary dependency) rather than FPing so the test is
+// portable to CI images without fping installed.
+func TestRuntimeRetainsFullMonitorSet(t *testing.T) {
+	dir := t.TempDir()
+	cfg := "targets:\n" +
+		"  probe: TCPConnect\n" +
+		"  children:\n" +
+		"    local-one: {host: 127.0.0.1}\n" +
+		"    nyc-one:   {host: 1.1.1.1, vantages: [nyc]}\n"
+	if err := os.WriteFile(filepath.Join(dir, "default.yaml"), []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rt, err := buildRuntime(dir, 5, time.Second, time.Second, nil)
+	if err != nil {
+		t.Fatalf("buildRuntime: %v", err)
+	}
+	// The hub builds a local job only for the local target...
+	if got := len(rt.jobs); got != 1 {
+		t.Fatalf("local jobs=%d want 1", got)
+	}
+	// ...but retains the full set so it can serve the nyc assignment.
+	nyc := federation.AssignmentFor(rt.monitors, "nyc")
+	if len(nyc) != 1 || nyc[0].Name != "nyc-one" {
+		t.Fatalf("nyc assignment=%+v", nyc)
 	}
 }

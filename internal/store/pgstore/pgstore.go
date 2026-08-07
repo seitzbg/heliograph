@@ -81,7 +81,8 @@ CREATE TABLE IF NOT EXISTS samples (
 	duration_ms    double precision
 );
 SELECT create_hypertable('samples', 'ts', if_not_exists => TRUE);
-CREATE INDEX IF NOT EXISTS samples_target_ts ON samples (target, ts DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS samples_target_vantage_ts ON samples (target, vantage, ts);
+DROP INDEX IF EXISTS samples_target_ts;
 `
 
 func (s *PGStore) migrate(ctx context.Context) error {
@@ -124,13 +125,14 @@ var downsampleStmts = []string{
 	 WITH (timescaledb.continuous, timescaledb.materialized_only = false) AS
 	 SELECT time_bucket('1 hour', ts) AS bucket,
 	        target,
+	        vantage,
 	        avg(median_seconds) AS median_avg,
 	        min(median_seconds) AS median_min,
 	        max(median_seconds) AS median_max,
 	        avg(loss::float / NULLIF(pings, 0)) AS loss_frac,
 	        count(*) AS rounds
 	 FROM samples
-	 GROUP BY bucket, target
+	 GROUP BY bucket, target, vantage
 	 WITH NO DATA`,
 	`SELECT add_continuous_aggregate_policy('samples_hourly',
 	        start_offset => INTERVAL '3 days',
@@ -141,13 +143,14 @@ var downsampleStmts = []string{
 	 WITH (timescaledb.continuous, timescaledb.materialized_only = false) AS
 	 SELECT time_bucket('1 day', ts) AS bucket,
 	        target,
+	        vantage,
 	        avg(median_seconds) AS median_avg,
 	        min(median_seconds) AS median_min,
 	        max(median_seconds) AS median_max,
 	        avg(loss::float / NULLIF(pings, 0)) AS loss_frac,
 	        count(*) AS rounds
 	 FROM samples
-	 GROUP BY bucket, target
+	 GROUP BY bucket, target, vantage
 	 WITH NO DATA`,
 	// Refresh the trailing 30 days of daily buckets hourly, so each day is
 	// materialized well before the 30-day raw retention drops its source rows —
@@ -161,13 +164,58 @@ var downsampleStmts = []string{
 }
 
 // EnableDownsampling creates the hourly and daily continuous aggregates (median
-// avg/min/max + loss per target per bucket — the coarse tiers a long-range view
-// reads, akin to SmokePing's RRAs; daily feeds the 400d range), their refresh
-// policies, and a 30-day retention policy on the raw samples. Idempotent.
+// avg/min/max + loss per target per vantage per bucket — the coarse tiers a
+// long-range view reads, akin to SmokePing's RRAs; daily feeds the 400d range),
+// their refresh policies, and a 30-day retention policy on the raw samples.
+// Idempotent.
 func (s *PGStore) EnableDownsampling(ctx context.Context) error {
+	if err := s.migrateAggregatesForVantage(ctx); err != nil {
+		return err
+	}
 	for _, q := range downsampleStmts {
 		if _, err := s.pool.Exec(ctx, q); err != nil {
 			return fmt.Errorf("pgstore: downsampling: %w", err)
+		}
+	}
+	return nil
+}
+
+// migrateAggregatesForVantage drops the pre-vantage continuous aggregates so the
+// recreate below can add the vantage GROUP BY. One-time: it only fires when an
+// existing samples_hourly still lacks a vantage column, then the recreate makes
+// the guard false forever after (a fresh DB has no view yet, so it is a no-op).
+//
+// A TimescaleDB continuous aggregate's GROUP BY can't be altered in place, so this
+// drop+recreate is unavoidable — but on an existing DB it irreversibly loses every
+// daily rollup bucket older than the 30-day raw retention window (the raw rows
+// behind those buckets are already gone, so they can never be rebuilt). This is a
+// one-time long-range-history loss the first time a pre-vantage hub upgrades and
+// calls EnableDownsampling; see the slog.Warn below, logged only when the drop
+// actually fires.
+func (s *PGStore) migrateAggregatesForVantage(ctx context.Context) error {
+	var hasView, hasVantage bool
+	if err := s.pool.QueryRow(ctx, `SELECT to_regclass('samples_hourly') IS NOT NULL`).Scan(&hasView); err != nil {
+		return fmt.Errorf("pgstore: check aggregate: %w", err)
+	}
+	if !hasView {
+		return nil
+	}
+	if err := s.pool.QueryRow(ctx, `
+		SELECT EXISTS (SELECT 1 FROM information_schema.columns
+		                WHERE table_name='samples_hourly' AND column_name='vantage')`).Scan(&hasVantage); err != nil {
+		return fmt.Errorf("pgstore: check aggregate columns: %w", err)
+	}
+	if hasVantage {
+		return nil
+	}
+	slog.Warn("pgstore: rebuilding continuous aggregates to add the vantage dimension; " +
+		"daily rollup buckets older than the raw retention window cannot be rebuilt and will be lost (one-time migration)")
+	for _, q := range []string{
+		`DROP MATERIALIZED VIEW IF EXISTS samples_daily CASCADE`,
+		`DROP MATERIALIZED VIEW IF EXISTS samples_hourly CASCADE`,
+	} {
+		if _, err := s.pool.Exec(ctx, q); err != nil {
+			return fmt.Errorf("pgstore: migrate aggregates: %w", err)
 		}
 	}
 	return nil
@@ -201,10 +249,9 @@ func dbToCentered(a []*float64) []float64 {
 	return out
 }
 
-func (s *PGStore) Add(outcomes []scheduler.Outcome) {
-	if len(outcomes) == 0 {
-		return
-	}
+// buildBatch turns outcomes into an idempotent insert batch. Shared by the
+// fire-and-forget local Add and the error-returning AddResults.
+func buildBatch(outcomes []scheduler.Outcome) *pgx.Batch {
 	batch := &pgx.Batch{}
 	for _, o := range outcomes {
 		var errText *string
@@ -215,18 +262,26 @@ func (s *PGStore) Add(outcomes []scheduler.Outcome) {
 		batch.Queue(
 			`INSERT INTO samples
 			   (ts, target, probe, host, vantage, pings, loss, median_seconds, rtts_seconds, err, duration_ms)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+			 ON CONFLICT (target, vantage, ts) DO NOTHING`,
 			o.When.UTC(), o.Target.Name, o.ProbeName, o.Target.Host, store.VantageOf(o),
 			o.Computed.Pings, o.Computed.Loss, nanToNil(o.Computed.Median),
 			centeredToDB(o.Computed.Centered), errText,
 			float64(o.Duration.Microseconds())/1000.0,
 		)
 	}
+	return batch
+}
+
+func (s *PGStore) Add(outcomes []scheduler.Outcome) {
+	if len(outcomes) == 0 {
+		return
+	}
 	// Bound the write with a deadline derived from the process context, so a stalled DB
 	// connection can't pin the scheduler worker that holds the target in flight.
 	ctx, cancel := context.WithTimeout(s.ctx, writeTimeout)
 	defer cancel()
-	br := s.pool.SendBatch(ctx, batch)
+	br := s.pool.SendBatch(ctx, buildBatch(outcomes))
 	defer br.Close()
 	for range outcomes {
 		if _, err := br.Exec(); err != nil {
@@ -235,6 +290,27 @@ func (s *PGStore) Add(outcomes []scheduler.Outcome) {
 			return
 		}
 	}
+}
+
+// AddResults persists an agent-ingested batch, returning the first write error so
+// the ingest handler can answer 503 and the agent can retain + retry — the caller-
+// visible feedback the fire-and-forget Add deliberately does not give the local
+// collector. Idempotent via ON CONFLICT, so a replayed batch is a no-op.
+func (s *PGStore) AddResults(ctx context.Context, outcomes []scheduler.Outcome) error {
+	if len(outcomes) == 0 {
+		return nil
+	}
+	wctx, cancel := context.WithTimeout(ctx, writeTimeout)
+	defer cancel()
+	br := s.pool.SendBatch(wctx, buildBatch(outcomes))
+	defer br.Close()
+	for range outcomes {
+		if _, err := br.Exec(); err != nil {
+			s.writeFails.Add(1)
+			return fmt.Errorf("pgstore: ingest insert: %w", err)
+		}
+	}
+	return nil
 }
 
 // WriteMetrics appends the persistent-write health counter in Prometheus text format.
@@ -267,10 +343,13 @@ func (s *PGStore) Keys() ([]string, error) {
 	return keys, nil
 }
 
+// Latest returns the target's most recent LOCAL round — warm-start and any other
+// caller of the base Store interface must never seed from a remote (agent) vantage.
+// Agent-ingested rounds from other vantages are reached via LatestAll(vantage).
 func (s *PGStore) Latest(key string) (scheduler.Outcome, bool) {
 	row := s.pool.QueryRow(s.ctx,
-		`SELECT ts, target, probe, host, pings, loss, median_seconds, rtts_seconds, err, duration_ms
-		   FROM samples WHERE target=$1 ORDER BY ts DESC LIMIT 1`, key)
+		`SELECT ts, target, probe, host, vantage, pings, loss, median_seconds, rtts_seconds, err, duration_ms
+		   FROM samples WHERE target=$1 AND vantage='local' ORDER BY ts DESC LIMIT 1`, key)
 	o, err := scanOutcome(row)
 	if err != nil {
 		if !errors.Is(err, pgx.ErrNoRows) {
@@ -281,10 +360,11 @@ func (s *PGStore) Latest(key string) (scheduler.Outcome, bool) {
 	return o, true
 }
 
+// History returns the target's recent LOCAL rounds — see Latest.
 func (s *PGStore) History(key string) ([]scheduler.Outcome, error) {
 	rows, err := s.pool.Query(s.ctx,
-		`SELECT ts, target, probe, host, pings, loss, median_seconds, rtts_seconds, err, duration_ms
-		   FROM samples WHERE target=$1 ORDER BY ts DESC LIMIT $2`, key, s.histCap)
+		`SELECT ts, target, probe, host, vantage, pings, loss, median_seconds, rtts_seconds, err, duration_ms
+		   FROM samples WHERE target=$1 AND vantage='local' ORDER BY ts DESC LIMIT $2`, key, s.histCap)
 	if err != nil {
 		s.onErr(err)
 		return nil, err
@@ -323,7 +403,7 @@ func scanOutcome(row scannable) (scheduler.Outcome, error) {
 		durationMs *float64
 	)
 	if err := row.Scan(
-		&o.When, &o.Target.Name, &o.ProbeName, &o.Target.Host,
+		&o.When, &o.Target.Name, &o.ProbeName, &o.Target.Host, &o.Vantage,
 		&o.Computed.Pings, &o.Computed.Loss, &median, &centered, &errText, &durationMs,
 	); err != nil {
 		return o, err
@@ -363,7 +443,7 @@ func sortedNonNaN(c []float64) []float64 {
 // Rollup returns the downsampled buckets for a target from the continuous
 // aggregate selected by resolution ("1h" default, or "1d"). Requires
 // EnableDownsampling to have run.
-func (s *PGStore) Rollup(ctx context.Context, target, resolution string, since, until time.Time) ([]store.RollupPoint, error) {
+func (s *PGStore) Rollup(ctx context.Context, target, vantage, resolution string, since, until time.Time) ([]store.RollupPoint, error) {
 	// Map resolution to a fixed view name here — never interpolate caller input
 	// into the query. Unknown resolutions are a programming error (the API
 	// validates the param before reaching this point).
@@ -381,8 +461,8 @@ func (s *PGStore) Rollup(ctx context.Context, target, resolution string, since, 
 	// bucket and a drag-zoom fetches only its sub-range. Placeholders are numbered from
 	// the args length so either bound can be absent.
 	q := `SELECT bucket, median_avg, median_min, median_max, loss_frac, rounds
-	        FROM ` + view + ` WHERE target=$1`
-	args := []any{target}
+	        FROM ` + view + ` WHERE target=$1 AND vantage=$2`
+	args := []any{target, store.VantageOrDefault(vantage)}
 	if !since.IsZero() {
 		args = append(args, since.UTC())
 		q += fmt.Sprintf(` AND bucket >= $%d`, len(args))
@@ -430,21 +510,21 @@ func nanIfNil(p *float64) float64 {
 
 // Availability aggregates availability over the window [cutoff, now) directly in
 // SQL, so it covers the full requested window regardless of the History cap.
-func (s *PGStore) Availability(ctx context.Context, target string, cutoff time.Time, maxLossPct *float64) (store.AvailabilityStat, error) {
+func (s *PGStore) Availability(ctx context.Context, target, vantage string, cutoff time.Time, maxLossPct *float64) (store.AvailabilityStat, error) {
 	// "up" is at least one reply by default; a maxLossPct tightens it to a loss
 	// ceiling. Both forms are fixed strings chosen here (no user input), with the
 	// threshold passed as a bound parameter.
 	upCond := "loss < pings"
-	args := []any{target, cutoff.UTC()}
+	args := []any{target, store.VantageOrDefault(vantage), cutoff.UTC()}
 	if maxLossPct != nil {
-		upCond = "loss * 100.0 <= $3 * pings"
+		upCond = "loss * 100.0 <= $4 * pings"
 		args = append(args, *maxLossPct)
 	}
 	q := `SELECT count(*),
 	             count(*) FILTER (WHERE ` + upCond + `),
 	             coalesce(sum(loss::float / NULLIF(pings,0) * 100), 0),
 	             min(ts), max(ts)
-	        FROM samples WHERE target=$1 AND ts >= $2`
+	        FROM samples WHERE target=$1 AND vantage=$2 AND ts >= $3`
 	var (
 		st             store.AvailabilityStat
 		oldest, latest *time.Time
@@ -473,10 +553,11 @@ var maxRangeRounds = 150_000
 // HistorySince returns the target's rounds at or after cutoff, oldest->newest,
 // unbounded by histCap — so a long raw range (e.g. the 30h drill-down) reads the
 // whole window instead of just the last histCap rounds.
-func (s *PGStore) HistorySince(ctx context.Context, target string, cutoff time.Time) ([]scheduler.Outcome, error) {
+func (s *PGStore) HistorySince(ctx context.Context, target, vantage string, cutoff time.Time) ([]scheduler.Outcome, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT ts, target, probe, host, pings, loss, median_seconds, rtts_seconds, err, duration_ms
-		   FROM samples WHERE target=$1 AND ts >= $2 ORDER BY ts DESC LIMIT $3`, target, cutoff.UTC(), maxRangeRounds)
+		`SELECT ts, target, probe, host, vantage, pings, loss, median_seconds, rtts_seconds, err, duration_ms
+		   FROM samples WHERE target=$1 AND vantage=$2 AND ts >= $3 ORDER BY ts DESC LIMIT $4`,
+		target, store.VantageOrDefault(vantage), cutoff.UTC(), maxRangeRounds)
 	if err != nil {
 		return nil, err
 	}
@@ -506,11 +587,11 @@ func (s *PGStore) HistorySince(ctx context.Context, target string, cutoff time.T
 // HistoryBetween returns the target's rounds in [from, to], oldest->newest, unbounded by
 // histCap — the drag-zoom path fetching an arbitrary historical sub-range. Same
 // row-cap backstop as HistorySince.
-func (s *PGStore) HistoryBetween(ctx context.Context, target string, from, to time.Time) ([]scheduler.Outcome, error) {
+func (s *PGStore) HistoryBetween(ctx context.Context, target, vantage string, from, to time.Time) ([]scheduler.Outcome, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT ts, target, probe, host, pings, loss, median_seconds, rtts_seconds, err, duration_ms
-		   FROM samples WHERE target=$1 AND ts >= $2 AND ts <= $3 ORDER BY ts DESC LIMIT $4`,
-		target, from.UTC(), to.UTC(), maxRangeRounds)
+		`SELECT ts, target, probe, host, vantage, pings, loss, median_seconds, rtts_seconds, err, duration_ms
+		   FROM samples WHERE target=$1 AND vantage=$2 AND ts >= $3 AND ts <= $4 ORDER BY ts DESC LIMIT $5`,
+		target, store.VantageOrDefault(vantage), from.UTC(), to.UTC(), maxRangeRounds)
 	if err != nil {
 		return nil, err
 	}
@@ -540,10 +621,10 @@ func (s *PGStore) HistoryBetween(ctx context.Context, target string, from, to ti
 // so the live endpoints don't fan out to one Latest per target. A query/scan error
 // is returned (not swallowed) so the API can answer 503 instead of a false-empty
 // success.
-func (s *PGStore) LatestAll() (map[string]scheduler.Outcome, error) {
+func (s *PGStore) LatestAll(vantage string) (map[string]scheduler.Outcome, error) {
 	rows, err := s.pool.Query(s.ctx,
-		`SELECT DISTINCT ON (target) ts, target, probe, host, pings, loss, median_seconds, rtts_seconds, err, duration_ms
-		   FROM samples ORDER BY target, ts DESC`)
+		`SELECT DISTINCT ON (target) ts, target, probe, host, vantage, pings, loss, median_seconds, rtts_seconds, err, duration_ms
+		   FROM samples WHERE vantage=$1 ORDER BY target, ts DESC`, store.VantageOrDefault(vantage))
 	if err != nil {
 		s.onErr(err)
 		return nil, err
@@ -567,18 +648,18 @@ func (s *PGStore) LatestAll() (map[string]scheduler.Outcome, error) {
 
 // AvailabilityAll aggregates every target over [cutoff, now) in one grouped query —
 // the bulk form of Availability, so /api/sla is a single scan, not one per target.
-func (s *PGStore) AvailabilityAll(ctx context.Context, cutoff time.Time, maxLossPct *float64) (map[string]store.AvailabilityStat, error) {
+func (s *PGStore) AvailabilityAll(ctx context.Context, vantage string, cutoff time.Time, maxLossPct *float64) (map[string]store.AvailabilityStat, error) {
 	upCond := "loss < pings"
-	args := []any{cutoff.UTC()}
+	args := []any{store.VantageOrDefault(vantage), cutoff.UTC()}
 	if maxLossPct != nil {
-		upCond = "loss * 100.0 <= $2 * pings"
+		upCond = "loss * 100.0 <= $3 * pings"
 		args = append(args, *maxLossPct)
 	}
 	q := `SELECT target, count(*),
 	             count(*) FILTER (WHERE ` + upCond + `),
 	             coalesce(sum(loss::float / NULLIF(pings,0) * 100), 0),
 	             min(ts), max(ts)
-	        FROM samples WHERE ts >= $1 GROUP BY target`
+	        FROM samples WHERE vantage=$1 AND ts >= $2 GROUP BY target`
 	rows, err := s.pool.Query(ctx, q, args...)
 	if err != nil {
 		return nil, err
@@ -623,17 +704,17 @@ var maxSeriesAllPerTarget = 20_000
 // tick. Targets with no rounds after cutoff are absent from the map. Each target is
 // capped to its newest maxSeriesAllPerTarget rounds. A query/scan error is returned
 // (not swallowed) so the API answers 503, not a false-empty grid.
-func (s *PGStore) SeriesAll(ctx context.Context, cutoff time.Time) (map[string][]scheduler.Outcome, error) {
+func (s *PGStore) SeriesAll(ctx context.Context, vantage string, cutoff time.Time) (map[string][]scheduler.Outcome, error) {
 	// row_number() per target keeps the newest N of each (so no target is dropped whole,
 	// as a bare LIMIT would); the outer query then returns them oldest->newest.
 	rows, err := s.pool.Query(ctx,
-		`SELECT ts, target, probe, host, pings, loss, median_seconds, rtts_seconds, err, duration_ms
+		`SELECT ts, target, probe, host, vantage, pings, loss, median_seconds, rtts_seconds, err, duration_ms
 		   FROM (
 		     SELECT *, row_number() OVER (PARTITION BY target ORDER BY ts DESC) AS rn
-		       FROM samples WHERE ts > $1
+		       FROM samples WHERE vantage=$1 AND ts > $2
 		   ) q
-		   WHERE rn <= $2
-		   ORDER BY target, ts`, cutoff.UTC(), maxSeriesAllPerTarget)
+		   WHERE rn <= $3
+		   ORDER BY target, ts`, store.VantageOrDefault(vantage), cutoff.UTC(), maxSeriesAllPerTarget)
 	if err != nil {
 		s.onErr(err)
 		return nil, err
@@ -672,4 +753,5 @@ var _ interface {
 	store.LatestAller
 	store.AvailabilityAller
 	store.SeriesAller
+	store.ResultIngester
 } = (*PGStore)(nil)

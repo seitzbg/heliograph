@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"smokeping-modern/internal/model"
 	"smokeping-modern/internal/probe"
 	"smokeping-modern/internal/scheduler"
 	"smokeping-modern/internal/store"
@@ -59,19 +60,33 @@ type Server struct {
 	Vantages      VantageAdmin
 	AdminPassword string
 	AdminKey      []byte
+	// TargetVantages, if set, returns each configured target's assigned vantage set (name
+	// -> vantage names) — /api/targets surfaces it so the UI can show which vantages a
+	// target is measured from. nil means the field is omitted (tests/pure API/no federation).
+	TargetVantages func() map[string][]string
+	// VantageAuth, if set, gates the agent routes (requireAgent) behind an API-key check
+	// against the vantage key store. nil means the agent routes are not registered at
+	// all — fail-closed, same pattern as the admin API's AdminPassword gate.
+	VantageAuth VantageAuth
+	// Assignment, if set, returns the target list + config_version for a vantage,
+	// computed over the live monitor set. Required (with VantageAuth) for the agent routes.
+	Assignment func(vantage string) (targets []model.Monitor, configVersion string)
 }
 
 func New(s store.Store, webDir string) *Server { return &Server{store: s, webDir: webDir} }
 
-// activeLatest returns each active target's most recent outcome, sorted by name.
-// It uses the store's bulk LatestAll (one query) when available instead of one
-// Latest per target — the live endpoints (targets, charts, metrics, sla) all read
-// this. A backing-store read error is returned so callers answer 503 rather than a
-// false-empty success (CODE_REVIEW #4).
-func (srv *Server) activeLatest() ([]scheduler.Outcome, error) {
+// activeLatest returns each active target's most recent outcome for vantage, sorted
+// by name. It uses the store's bulk LatestAll (one query) when available instead of
+// one Latest per target — the live endpoints (targets, charts, metrics, sla) all
+// read this. A backing-store read error is returned so callers answer 503 rather
+// than a false-empty success (CODE_REVIEW #4). The store.Latest fallback (used only
+// when the store doesn't implement LatestAller) stays local regardless of the
+// requested vantage — it exists for the minimal base Store interface, which has no
+// vantage concept at all.
+func (srv *Server) activeLatest(vantage string) ([]scheduler.Outcome, error) {
 	var all map[string]scheduler.Outcome
 	if la, ok := srv.store.(store.LatestAller); ok {
-		m, err := la.LatestAll()
+		m, err := la.LatestAll(vantage)
 		if err != nil {
 			return nil, err
 		}
@@ -119,6 +134,10 @@ func (srv *Server) Routes() *http.ServeMux {
 		mux.HandleFunc("POST /api/admin/vantages", srv.requireAdmin(srv.addVantage))
 		mux.HandleFunc("DELETE /api/admin/vantages/{name}", srv.requireAdmin(srv.revokeVantage))
 	}
+	if srv.VantageAuth != nil && srv.Assignment != nil {
+		mux.HandleFunc("GET /agent/v1/assignment", srv.requireAgent(srv.agentAssignment))
+		mux.HandleFunc("POST /agent/v1/results", srv.requireAgent(srv.agentResults))
+	}
 	if srv.webDir != "" {
 		// Serve the SPA/static assets at the root (same-origin with the API).
 		mux.Handle("GET /", http.FileServer(http.Dir(srv.webDir)))
@@ -136,6 +155,20 @@ func fnum(v float64) *float64 {
 		return nil
 	}
 	return &v
+}
+
+// readVantage returns the requested read vantage, defaulting to "local". An
+// invalid name is a 400 (returns ok=false after writing the error).
+func readVantage(w http.ResponseWriter, r *http.Request) (string, bool) {
+	v := r.URL.Query().Get("vantage")
+	if v == "" {
+		return store.DefaultVantage, true
+	}
+	if !vantage.ValidName(v) {
+		http.Error(w, `{"error":"invalid vantage name"}`, http.StatusBadRequest)
+		return "", false
+	}
+	return v, true
 }
 
 func (srv *Server) probes(w http.ResponseWriter, _ *http.Request) {
@@ -158,14 +191,23 @@ type targetDTO struct {
 	LossPct  float64  `json:"loss_pct"`
 	When     string   `json:"when"`
 	Error    string   `json:"error,omitempty"`
+	Vantages []string `json:"vantages,omitempty"`
 }
 
-func (srv *Server) targets(w http.ResponseWriter, _ *http.Request) {
-	latest, err := srv.activeLatest()
+func (srv *Server) targets(w http.ResponseWriter, r *http.Request) {
+	v, ok := readVantage(w, r)
+	if !ok {
+		return
+	}
+	latest, err := srv.activeLatest(v)
 	if err != nil {
 		slog.Error("targets: store read failed", "err", err)
 		http.Error(w, `{"error":"store unavailable"}`, http.StatusServiceUnavailable)
 		return
+	}
+	var tv map[string][]string
+	if srv.TargetVantages != nil {
+		tv = srv.TargetVantages()
 	}
 	var out []targetDTO
 	for _, o := range latest {
@@ -183,6 +225,9 @@ func (srv *Server) targets(w http.ResponseWriter, _ *http.Request) {
 		}
 		if o.Err != nil {
 			dto.Error = o.Err.Error()
+		}
+		if vs := tv[o.Target.Name]; len(vs) > 0 {
+			dto.Vantages = vs
 		}
 		out = append(out, dto)
 	}
@@ -233,12 +278,16 @@ func (srv *Server) charts(w http.ResponseWriter, r *http.Request) {
 			n = parsed
 		}
 	}
+	vant, ok := readVantage(w, r)
+	if !ok {
+		return
+	}
 
 	type scored struct {
 		e   chartEntry
 		key float64
 	}
-	latest, err := srv.activeLatest()
+	latest, err := srv.activeLatest(vant)
 	if err != nil {
 		slog.Error("charts: store read failed", "err", err)
 		http.Error(w, `{"error":"store unavailable"}`, http.StatusServiceUnavailable)
@@ -363,6 +412,10 @@ func (srv *Server) sla(w http.ResponseWriter, r *http.Request) {
 		maxLossPct = &max
 		isUp = func(lossPct float64) bool { return lossPct <= max }
 	}
+	vant, ok := readVantage(w, r)
+	if !ok {
+		return
+	}
 
 	cutoff := time.Now().Add(-window)
 	av, _ := srv.store.(store.Availabler)
@@ -373,7 +426,7 @@ func (srv *Server) sla(w http.ResponseWriter, r *http.Request) {
 	// Prefer one bulk availability scan over N per-target queries (#5 fan-out).
 	var statsAll map[string]store.AvailabilityStat
 	if avAll, ok := srv.store.(store.AvailabilityAller); ok {
-		m, err := avAll.AvailabilityAll(r.Context(), cutoff, maxLossPct)
+		m, err := avAll.AvailabilityAll(r.Context(), vant, cutoff, maxLossPct)
 		if err != nil {
 			slog.Error("sla: bulk availability query failed", "err", err)
 			http.Error(w, `{"error":"availability unavailable"}`, http.StatusServiceUnavailable)
@@ -383,7 +436,7 @@ func (srv *Server) sla(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// activeLatest is one bulk query for the active targets + their probe names.
-	active, err := srv.activeLatest()
+	active, err := srv.activeLatest(vant)
 	if err != nil {
 		slog.Error("sla: store read failed", "err", err)
 		http.Error(w, `{"error":"store unavailable"}`, http.StatusServiceUnavailable)
@@ -402,7 +455,7 @@ func (srv *Server) sla(w http.ResponseWriter, r *http.Request) {
 			st := statsAll[k] // zero value (measured 0) if no in-window rounds
 			measured, up, sumLoss, oldest, latest = st.Measured, st.Up, st.SumLossPct, st.Oldest, st.Latest
 		case av != nil:
-			st, err := av.Availability(r.Context(), k, cutoff, maxLossPct)
+			st, err := av.Availability(r.Context(), k, vant, cutoff, maxLossPct)
 			if err != nil {
 				slog.Warn("sla: availability query failed", "target", k, "err", err)
 				continue
@@ -495,6 +548,10 @@ func (srv *Server) series(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"missing target param"}`, http.StatusBadRequest)
 		return
 	}
+	vant, ok := readVantage(w, r)
+	if !ok {
+		return
+	}
 	// Drag-zoom sub-range: explicit [from,to] (unix ms) fetches an arbitrary historical
 	// window and takes precedence over the window-based tail.
 	if from, to, present, errMsg := parseFromTo(r); errMsg != "" {
@@ -503,7 +560,7 @@ func (srv *Server) series(w http.ResponseWriter, r *http.Request) {
 	} else if present {
 		var hist []scheduler.Outcome
 		if rh, ok := srv.store.(store.RangeHistorier); ok {
-			h, err := rh.HistoryBetween(r.Context(), key, from, to)
+			h, err := rh.HistoryBetween(r.Context(), key, vant, from, to)
 			if err != nil {
 				slog.Error("series range query failed", "target", key, "err", err)
 				http.Error(w, `{"error":"series unavailable"}`, http.StatusServiceUnavailable)
@@ -530,7 +587,7 @@ func (srv *Server) series(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if rh, ok := srv.store.(store.RangeHistorier); ok {
-			h, err := rh.HistorySince(r.Context(), key, time.Now().Add(-d))
+			h, err := rh.HistorySince(r.Context(), key, vant, time.Now().Add(-d))
 			if err != nil {
 				slog.Error("series window query failed", "target", key, "err", err)
 				http.Error(w, `{"error":"series unavailable"}`, http.StatusServiceUnavailable)
@@ -617,6 +674,10 @@ func (srv *Server) seriesAll(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"bulk series not supported by this store"}`, http.StatusNotImplemented)
 		return
 	}
+	vant, ok := readVantage(w, r)
+	if !ok {
+		return
+	}
 	// cutoff = max(now-window, since): never scan older than the window, and on an
 	// incremental refresh the watermark dominates so only new rounds come back.
 	cutoff := time.Now().Add(-d)
@@ -630,7 +691,7 @@ func (srv *Server) seriesAll(w http.ResponseWriter, r *http.Request) {
 			cutoff = st
 		}
 	}
-	all, err := sa.SeriesAll(r.Context(), cutoff)
+	all, err := sa.SeriesAll(r.Context(), vant, cutoff)
 	if err != nil {
 		slog.Error("series/all query failed", "err", err)
 		http.Error(w, `{"error":"series unavailable"}`, http.StatusServiceUnavailable)
@@ -681,6 +742,10 @@ func (srv *Server) rollup(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"res must be 1h or 1d"}`, http.StatusBadRequest)
 		return
 	}
+	vant, ok := readVantage(w, r)
+	if !ok {
+		return
+	}
 	// Bounds: an explicit [from,to] (unix ms) drag-zoom sub-range takes precedence;
 	// otherwise an optional window (a Go duration, e.g. 240h) bounds to the recent tail
 	// so a long-range view doesn't transfer the whole retained history.
@@ -703,7 +768,7 @@ func (srv *Server) rollup(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"rollup requires the TimescaleDB store (run with -dsn -downsample)"}`, http.StatusNotImplemented)
 		return
 	}
-	points, err := rp.Rollup(r.Context(), key, res, since, until)
+	points, err := rp.Rollup(r.Context(), key, vant, res, since, until)
 	if err != nil {
 		// A store that implements Rollupper but whose hourly aggregate was never
 		// created (a Compose DB started without -downsample) should look "hourly not
@@ -737,8 +802,10 @@ func (srv *Server) rollup(w http.ResponseWriter, r *http.Request) {
 // Grafana/Alertmanager-native setups can scrape and alert on them.
 func (srv *Server) metrics(w http.ResponseWriter, _ *http.Request) {
 	// Read the store first: a failure must be a 503 so the scrape is marked down,
-	// not a 200 that silently drops every target series (CODE_REVIEW #4).
-	latest, err := srv.activeLatest()
+	// not a 200 that silently drops every target series (CODE_REVIEW #4). Always the
+	// hub's own local vantage — a Prometheus scrape is this hub's own view, not a
+	// remote agent's (no ?vantage= param on /metrics).
+	latest, err := srv.activeLatest(store.DefaultVantage)
 	if err != nil {
 		slog.Error("metrics: store read failed", "err", err)
 		http.Error(w, "store unavailable", http.StatusServiceUnavailable)

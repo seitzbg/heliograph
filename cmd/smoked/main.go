@@ -266,8 +266,10 @@ func main() {
 			}
 			return m
 		}
-		// Federation admin API: only with a DB (the key store is TimescaleDB-backed) and a
-		// configured admin password (fail-closed — no password means no admin routes).
+		// Federation: only with a DB (the vantage key store is TimescaleDB-backed). The
+		// agent routes (below) light up unconditionally here; the admin key-management API
+		// additionally requires a configured admin password (fail-closed — no password
+		// means no admin routes).
 		if *dsn != "" {
 			vst, err := vantage.New(ctx, *dsn)
 			if err != nil {
@@ -275,6 +277,25 @@ func main() {
 			}
 			defer vst.Close()
 			srv.Vantages = vst
+			// Agent endpoints (/agent/v1/assignment, /agent/v1/results) are independent of
+			// the admin API and its password gate below — they light up whenever -dsn is
+			// set, since a remote vantage's agent needs to authenticate and report results
+			// regardless of whether the (human) admin key-management API is enabled.
+			srv.VantageAuth = vst
+			srv.Assignment = func(v string) ([]model.Monitor, string) {
+				ms := current.Load().monitors
+				a := federation.AssignmentFor(ms, v)
+				return a, federation.ConfigVersion(a)
+			}
+			srv.TargetVantages = func() map[string][]string {
+				ms := current.Load().monitors
+				m := make(map[string][]string, len(ms))
+				for _, mon := range ms {
+					m[mon.Name] = mon.Vantages
+				}
+				return m
+			}
+			slog.Info("agent endpoints enabled at /agent/v1/assignment, /agent/v1/results")
 			srv.AdminPassword = os.Getenv("SMOKED_ADMIN_PASSWORD")
 			adminKey := make([]byte, 32)
 			if _, err := rand.Read(adminKey); err != nil {
@@ -512,6 +533,7 @@ func logRound(round int, dur time.Duration, out []scheduler.Outcome) {
 // It is rebuilt (and atomically swapped) on SIGHUP config reload.
 type runtime struct {
 	jobs            []scheduler.Job
+	monitors        []model.Monitor // full post-inheritance set, all vantages (for the agent assignment endpoint)
 	engine          *alert.Engine
 	alertsByTarget  map[string][]string
 	alerteeByTarget map[string][]string
@@ -641,11 +663,14 @@ func buildRuntime(configPath string, demoPings int, demoStep, timeout time.Durat
 			monitors[i].Vantages = []string{store.DefaultVantage}
 		}
 	}
-	monitors = federation.AssignmentFor(monitors, store.DefaultVantage)
+	// Keep the full post-inheritance set (all vantages) for the agent assignment endpoint,
+	// while the hub itself probes + alerts only its own vantage below.
+	fullMonitors := append([]model.Monitor(nil), monitors...)
+	localMonitors := federation.AssignmentFor(monitors, store.DefaultVantage)
 
 	probes := map[string]probe.Probe{}
 	var jobs []scheduler.Job
-	for _, m := range monitors {
+	for _, m := range localMonitors {
 		p, ok := probes[m.ProbeKind]
 		if !ok {
 			var err error
@@ -669,7 +694,7 @@ func buildRuntime(configPath string, demoPings int, demoStep, timeout time.Durat
 
 	alertsByTarget := map[string][]string{}
 	alerteeByTarget := map[string][]string{}
-	for _, m := range monitors {
+	for _, m := range localMonitors {
 		if len(m.Alerts) > 0 {
 			alertsByTarget[m.Name] = m.Alerts
 		}
@@ -681,7 +706,7 @@ func buildRuntime(configPath string, demoPings int, demoStep, timeout time.Durat
 	if len(alertDefs) > 0 {
 		engine = alert.NewEngine(alertDefs, notifiers)
 	}
-	return &runtime{jobs: jobs, engine: engine, alertsByTarget: alertsByTarget, alerteeByTarget: alerteeByTarget}, nil
+	return &runtime{jobs: jobs, monitors: fullMonitors, engine: engine, alertsByTarget: alertsByTarget, alerteeByTarget: alerteeByTarget}, nil
 }
 
 func demoMonitors(pings int, step time.Duration) []model.Monitor {

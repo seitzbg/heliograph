@@ -32,6 +32,15 @@ func VantageOf(o scheduler.Outcome) string {
 	return o.Vantage
 }
 
+// VantageOrDefault normalizes a read-side vantage selector: empty means the hub's
+// own DefaultVantage ("local"). The write-side counterpart is VantageOf.
+func VantageOrDefault(v string) string {
+	if v == "" {
+		return DefaultVantage
+	}
+	return v
+}
+
 // Store is the sink the collector writes each round's outcomes to, and the API
 // reads series back from.
 type Store interface {
@@ -39,6 +48,14 @@ type Store interface {
 	Keys() ([]string, error)
 	Latest(key string) (scheduler.Outcome, bool)
 	History(key string) ([]scheduler.Outcome, error)
+}
+
+// ResultIngester is implemented by stores that accept an agent-ingested batch and
+// report the write error, so the ingest endpoint can answer 503 (agent retries)
+// rather than silently dropping under a transient store failure. The local
+// collector keeps the fire-and-forget Add; only ingest needs the feedback.
+type ResultIngester interface {
+	AddResults(ctx context.Context, outcomes []scheduler.Outcome) error
 }
 
 // RollupPoint is one downsampled bucket for a target (hourly or daily). Median
@@ -61,7 +78,7 @@ type RollupPoint struct {
 // retained history, and a drag-zoom fetches an arbitrary historical sub-range. The API
 // exposes it at /api/rollup.
 type Rollupper interface {
-	Rollup(ctx context.Context, target, resolution string, since, until time.Time) ([]RollupPoint, error)
+	Rollup(ctx context.Context, target, vantage, resolution string, since, until time.Time) ([]RollupPoint, error)
 }
 
 // AvailabilityStat is the aggregate a store computes over a time window: how many
@@ -83,7 +100,7 @@ type AvailabilityStat struct {
 // means "up" is at least one reply (loss < pings); non-nil means up is loss
 // percent <= *maxLossPct. The API prefers this over the History-based fallback.
 type Availabler interface {
-	Availability(ctx context.Context, target string, cutoff time.Time, maxLossPct *float64) (AvailabilityStat, error)
+	Availability(ctx context.Context, target, vantage string, cutoff time.Time, maxLossPct *float64) (AvailabilityStat, error)
 }
 
 // RangeHistorier is implemented by stores that can return a target's rounds over
@@ -94,8 +111,8 @@ type Availabler interface {
 // HistoryBetween is the same but bounded on both sides ([from, to]) — the drag-zoom
 // path fetches an arbitrary historical sub-range, not just "the last window".
 type RangeHistorier interface {
-	HistorySince(ctx context.Context, target string, cutoff time.Time) ([]scheduler.Outcome, error)
-	HistoryBetween(ctx context.Context, target string, from, to time.Time) ([]scheduler.Outcome, error)
+	HistorySince(ctx context.Context, target, vantage string, cutoff time.Time) ([]scheduler.Outcome, error)
+	HistoryBetween(ctx context.Context, target, vantage string, from, to time.Time) ([]scheduler.Outcome, error)
 }
 
 // LatestAller returns every target's most recent outcome in one call. The live
@@ -104,13 +121,13 @@ type RangeHistorier interface {
 // returns an error so a backing-store read failure surfaces as an API 503 rather
 // than a false-empty "0 targets" success (CODE_REVIEW #4).
 type LatestAller interface {
-	LatestAll() (map[string]scheduler.Outcome, error)
+	LatestAll(vantage string) (map[string]scheduler.Outcome, error)
 }
 
 // AvailabilityAller aggregates availability for every target over the window in one
 // call — the bulk form of Availability, so /api/sla is one query instead of N.
 type AvailabilityAller interface {
-	AvailabilityAll(ctx context.Context, cutoff time.Time, maxLossPct *float64) (map[string]AvailabilityStat, error)
+	AvailabilityAll(ctx context.Context, vantage string, cutoff time.Time, maxLossPct *float64) (map[string]AvailabilityStat, error)
 }
 
 // SeriesAller returns every target's rounds strictly after cutoff in one call — the
@@ -122,16 +139,22 @@ type AvailabilityAller interface {
 // Targets with no rounds after cutoff are omitted; returned oldest->newest per target.
 // The error lets a backing-store failure surface as an API 503, not a false-empty view.
 type SeriesAller interface {
-	SeriesAll(ctx context.Context, cutoff time.Time) (map[string][]scheduler.Outcome, error)
+	SeriesAll(ctx context.Context, vantage string, cutoff time.Time) (map[string][]scheduler.Outcome, error)
 }
 
-// MemStore is the in-memory implementation: latest + bounded history per target.
-// Used by default and in tests; not durable.
+// vk is the composite key MemStore's latest/history maps are indexed by, so rounds
+// from different vantages for the same target never mix in memory (mirroring the
+// pgstore samples_target_vantage_ts uniqueness).
+type vk struct{ vantage, target string }
+
+// MemStore is the in-memory implementation: latest + bounded history per
+// (vantage, target). Used by default and in tests; not durable.
 type MemStore struct {
 	mu      sync.RWMutex
-	latest  map[string]scheduler.Outcome
-	history map[string][]scheduler.Outcome
-	keys    []string
+	latest  map[vk]scheduler.Outcome
+	history map[vk][]scheduler.Outcome
+	keys    []string // distinct target names, insertion order (for Keys())
+	seen    map[string]bool
 	cap     int
 }
 
@@ -140,8 +163,9 @@ func NewMem(historyCap int) *MemStore {
 		historyCap = 512
 	}
 	return &MemStore{
-		latest:  map[string]scheduler.Outcome{},
-		history: map[string][]scheduler.Outcome{},
+		latest:  map[vk]scheduler.Outcome{},
+		history: map[vk][]scheduler.Outcome{},
+		seen:    map[string]bool{},
 		cap:     historyCap,
 	}
 }
@@ -151,9 +175,10 @@ func (s *MemStore) Add(outcomes []scheduler.Outcome) {
 	defer s.mu.Unlock()
 	for _, o := range outcomes {
 		o.Vantage = VantageOf(o) // resolve "" -> local once, on write
-		k := o.Target.Name
-		if _, seen := s.latest[k]; !seen {
-			s.keys = append(s.keys, k)
+		k := vk{o.Vantage, o.Target.Name}
+		if !s.seen[o.Target.Name] {
+			s.seen[o.Target.Name] = true
+			s.keys = append(s.keys, o.Target.Name)
 		}
 		s.latest[k] = o
 		h := append(s.history[k], o)
@@ -164,6 +189,14 @@ func (s *MemStore) Add(outcomes []scheduler.Outcome) {
 	}
 }
 
+// AddResults implements ResultIngester by appending like Add. MemStore is a
+// dev/test store; idempotency (dropping a replayed batch) is a DB guarantee, so
+// this always succeeds.
+func (s *MemStore) AddResults(_ context.Context, outcomes []scheduler.Outcome) error {
+	s.Add(outcomes)
+	return nil
+}
+
 func (s *MemStore) Keys() ([]string, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -172,17 +205,21 @@ func (s *MemStore) Keys() ([]string, error) {
 	return out, nil // in-memory reads never fail
 }
 
+// Latest returns the target's most recent LOCAL round — the hub's own vantage.
+// Agent-ingested rounds from other vantages are reached via LatestAll(vantage).
 func (s *MemStore) Latest(key string) (scheduler.Outcome, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	o, ok := s.latest[key]
+	o, ok := s.latest[vk{DefaultVantage, key}]
 	return o, ok
 }
 
+// History returns the target's recent LOCAL rounds — the hub's own vantage. Agent-
+// ingested rounds from other vantages are reached via HistorySince/HistoryBetween.
 func (s *MemStore) History(key string) ([]scheduler.Outcome, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	h := s.history[key]
+	h := s.history[vk{DefaultVantage, key}]
 	out := make([]scheduler.Outcome, len(h))
 	copy(out, h)
 	return out, nil // in-memory reads never fail
@@ -192,11 +229,11 @@ func (s *MemStore) History(key string) ([]scheduler.Outcome, error) {
 // or after cutoff. Unlike a database store it can only see what it currently holds
 // (bounded by the history cap) — best-effort, honest coverage; production uses the
 // pgstore implementation, which is unbounded.
-func (s *MemStore) Availability(_ context.Context, target string, cutoff time.Time, maxLossPct *float64) (AvailabilityStat, error) {
+func (s *MemStore) Availability(_ context.Context, target, vantage string, cutoff time.Time, maxLossPct *float64) (AvailabilityStat, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	var st AvailabilityStat
-	for _, o := range s.history[target] {
+	for _, o := range s.history[vk{VantageOrDefault(vantage), target}] {
 		if o.When.Before(cutoff) {
 			continue
 		}
@@ -225,10 +262,10 @@ func (s *MemStore) Availability(_ context.Context, target string, cutoff time.Ti
 // than the cap covers is reported as far back as it can (honest, not truncated
 // silently the way a DB LIMIT would be); production uses the pgstore implementation,
 // which reads the full window.
-func (s *MemStore) HistorySince(_ context.Context, target string, cutoff time.Time) ([]scheduler.Outcome, error) {
+func (s *MemStore) HistorySince(_ context.Context, target, vantage string, cutoff time.Time) ([]scheduler.Outcome, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	h := s.history[target]
+	h := s.history[vk{VantageOrDefault(vantage), target}]
 	out := make([]scheduler.Outcome, 0, len(h))
 	for _, o := range h {
 		if o.When.Before(cutoff) {
@@ -241,11 +278,11 @@ func (s *MemStore) HistorySince(_ context.Context, target string, cutoff time.Ti
 
 // HistoryBetween returns the target's rounds in [from, to], oldest->newest.
 // Best-effort like HistorySince, bounded by the in-memory cap.
-func (s *MemStore) HistoryBetween(_ context.Context, target string, from, to time.Time) ([]scheduler.Outcome, error) {
+func (s *MemStore) HistoryBetween(_ context.Context, target, vantage string, from, to time.Time) ([]scheduler.Outcome, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out := make([]scheduler.Outcome, 0)
-	for _, o := range s.history[target] {
+	for _, o := range s.history[vk{VantageOrDefault(vantage), target}] {
 		if o.When.Before(from) || o.When.After(to) {
 			continue
 		}
@@ -254,14 +291,17 @@ func (s *MemStore) HistoryBetween(_ context.Context, target string, from, to tim
 	return out, nil
 }
 
-// LatestAll returns a copy of every target's most recent outcome. In-memory reads
-// never fail, so the error is always nil.
-func (s *MemStore) LatestAll() (map[string]scheduler.Outcome, error) {
+// LatestAll returns a copy of every target's most recent outcome for the given
+// vantage. In-memory reads never fail, so the error is always nil.
+func (s *MemStore) LatestAll(vantage string) (map[string]scheduler.Outcome, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	want := VantageOrDefault(vantage)
 	out := make(map[string]scheduler.Outcome, len(s.latest))
 	for k, o := range s.latest {
-		out[k] = o
+		if k.vantage == want {
+			out[k.target] = o
+		}
 	}
 	return out, nil
 }
@@ -270,11 +310,15 @@ func (s *MemStore) LatestAll() (map[string]scheduler.Outcome, error) {
 // oldest->newest (history is kept in insertion order). Best-effort like History,
 // bounded by the in-memory cap; production uses the pgstore implementation. Targets
 // with no rounds after cutoff are omitted.
-func (s *MemStore) SeriesAll(_ context.Context, cutoff time.Time) (map[string][]scheduler.Outcome, error) {
+func (s *MemStore) SeriesAll(_ context.Context, vantage string, cutoff time.Time) (map[string][]scheduler.Outcome, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	want := VantageOrDefault(vantage)
 	out := make(map[string][]scheduler.Outcome)
 	for k, h := range s.history {
+		if k.vantage != want {
+			continue
+		}
 		var rounds []scheduler.Outcome
 		for _, o := range h {
 			if o.When.After(cutoff) {
@@ -282,7 +326,7 @@ func (s *MemStore) SeriesAll(_ context.Context, cutoff time.Time) (map[string][]
 			}
 		}
 		if len(rounds) > 0 {
-			out[k] = rounds
+			out[k.target] = rounds
 		}
 	}
 	return out, nil
@@ -290,14 +334,14 @@ func (s *MemStore) SeriesAll(_ context.Context, cutoff time.Time) (map[string][]
 
 // AvailabilityAll aggregates every target over [cutoff, now) — the same best-effort
 // scan as Availability, once per target it holds.
-func (s *MemStore) AvailabilityAll(ctx context.Context, cutoff time.Time, maxLossPct *float64) (map[string]AvailabilityStat, error) {
+func (s *MemStore) AvailabilityAll(ctx context.Context, vantage string, cutoff time.Time, maxLossPct *float64) (map[string]AvailabilityStat, error) {
 	s.mu.RLock()
 	keys := make([]string, len(s.keys))
 	copy(keys, s.keys)
 	s.mu.RUnlock()
 	out := make(map[string]AvailabilityStat, len(keys))
 	for _, k := range keys {
-		st, err := s.Availability(ctx, k, cutoff, maxLossPct)
+		st, err := s.Availability(ctx, k, vantage, cutoff, maxLossPct)
 		if err != nil {
 			return nil, err
 		}
@@ -311,6 +355,7 @@ func (s *MemStore) AvailabilityAll(ctx context.Context, cutoff time.Time, maxLos
 // compile-time checks
 var (
 	_ Store             = (*MemStore)(nil)
+	_ ResultIngester    = (*MemStore)(nil)
 	_ Availabler        = (*MemStore)(nil)
 	_ RangeHistorier    = (*MemStore)(nil)
 	_ LatestAller       = (*MemStore)(nil)

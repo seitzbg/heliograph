@@ -26,7 +26,7 @@ func TestMemStoreAvailability(t *testing.T) {
 	s.Add([]scheduler.Outcome{mk(5*time.Minute, 4, []float64{.01, .01, .01, .01})})
 
 	// Default: up = at least one reply. 5 of 6 up (only the 100% round is down).
-	st, err := s.Availability(context.Background(), "t", t0, nil)
+	st, err := s.Availability(context.Background(), "t", "", t0, nil)
 	if err != nil {
 		t.Fatalf("Availability: %v", err)
 	}
@@ -42,14 +42,14 @@ func TestMemStoreAvailability(t *testing.T) {
 	}
 
 	// cutoff at t0+2m excludes the first two rounds.
-	st2, _ := s.Availability(context.Background(), "t", t0.Add(2*time.Minute), nil)
+	st2, _ := s.Availability(context.Background(), "t", "", t0.Add(2*time.Minute), nil)
 	if st2.Measured != 4 {
 		t.Errorf("measured after cutoff = %d, want 4", st2.Measured)
 	}
 
 	// maxLossPct=10: the 50%-loss round now counts as down -> 4 up of 6.
 	maxLoss := 10.0
-	st3, _ := s.Availability(context.Background(), "t", t0, &maxLoss)
+	st3, _ := s.Availability(context.Background(), "t", "", t0, &maxLoss)
 	if st3.Up != 4 {
 		t.Errorf("up (maxloss=10) = %d, want 4", st3.Up)
 	}
@@ -68,7 +68,7 @@ func TestMemStoreHistorySince(t *testing.T) {
 	}
 
 	// cutoff at t0+3m -> the rounds at 3,4,5 minutes, oldest first.
-	got, err := s.HistorySince(context.Background(), "t", t0.Add(3*time.Minute))
+	got, err := s.HistorySince(context.Background(), "t", "", t0.Add(3*time.Minute))
 	if err != nil {
 		t.Fatalf("HistorySince: %v", err)
 	}
@@ -83,7 +83,7 @@ func TestMemStoreHistorySince(t *testing.T) {
 	}
 
 	// cutoff after everything -> empty.
-	empty, _ := s.HistorySince(context.Background(), "t", t0.Add(time.Hour))
+	empty, _ := s.HistorySince(context.Background(), "t", "", t0.Add(time.Hour))
 	if len(empty) != 0 {
 		t.Errorf("expected empty, got %d rounds", len(empty))
 	}
@@ -98,7 +98,7 @@ func TestMemStoreLatestAll(t *testing.T) {
 	s.Add([]scheduler.Outcome{{Target: probe.Target{Name: "a"}, When: t0.Add(time.Minute), Computed: sample.Compute(2, []float64{.03, .04})}})
 	s.Add([]scheduler.Outcome{{Target: probe.Target{Name: "b"}, When: t0, Computed: sample.Compute(2, nil)}})
 
-	all, err := s.LatestAll()
+	all, err := s.LatestAll("")
 	if err != nil {
 		t.Fatalf("LatestAll: %v", err)
 	}
@@ -122,7 +122,7 @@ func TestMemStoreAvailabilityAll(t *testing.T) {
 	s.Add([]scheduler.Outcome{{Target: probe.Target{Name: "a"}, When: t0.Add(time.Minute), Computed: sample.Compute(4, []float64{.01, .01})}}) // 50% loss, still up
 	s.Add([]scheduler.Outcome{{Target: probe.Target{Name: "b"}, When: t0, Computed: sample.Compute(4, nil)}})                                  // down
 
-	all, err := s.AvailabilityAll(context.Background(), t0, nil)
+	all, err := s.AvailabilityAll(context.Background(), "", t0, nil)
 	if err != nil {
 		t.Fatalf("AvailabilityAll: %v", err)
 	}
@@ -133,7 +133,7 @@ func TestMemStoreAvailabilityAll(t *testing.T) {
 		t.Errorf("b measured/up = %d/%d, want 1/0", b.Measured, b.Up)
 	}
 	// matches the per-target Availability
-	a1, _ := s.Availability(context.Background(), "a", t0, nil)
+	a1, _ := s.Availability(context.Background(), "a", "", t0, nil)
 	if a1.Measured != all["a"].Measured || a1.Up != all["a"].Up {
 		t.Errorf("AvailabilityAll[a] != Availability(a)")
 	}
@@ -156,7 +156,7 @@ func TestMemStoreSeriesAll(t *testing.T) {
 	add("b", 3*time.Minute)
 
 	// cutoff at t0+1m: strictly-after keeps a@2m and b@3m only.
-	got, err := s.SeriesAll(context.Background(), t0.Add(1*time.Minute))
+	got, err := s.SeriesAll(context.Background(), "", t0.Add(1*time.Minute))
 	if err != nil {
 		t.Fatalf("SeriesAll: %v", err)
 	}
@@ -168,7 +168,7 @@ func TestMemStoreSeriesAll(t *testing.T) {
 	}
 
 	// zero cutoff -> everything, oldest->newest per target.
-	all, _ := s.SeriesAll(context.Background(), time.Time{})
+	all, _ := s.SeriesAll(context.Background(), "", time.Time{})
 	if len(all["a"]) != 3 {
 		t.Fatalf("a full len = %d, want 3", len(all["a"]))
 	}
@@ -179,7 +179,7 @@ func TestMemStoreSeriesAll(t *testing.T) {
 	}
 
 	// cutoff past everything -> no targets in the map.
-	none, _ := s.SeriesAll(context.Background(), t0.Add(1*time.Hour))
+	none, _ := s.SeriesAll(context.Background(), "", t0.Add(1*time.Hour))
 	if len(none) != 0 {
 		t.Errorf("past-cutoff map len = %d, want 0", len(none))
 	}
@@ -198,8 +198,13 @@ func TestMemStoreVantageDefaulting(t *testing.T) {
 	if o, ok := s.Latest("a"); !ok || o.Vantage != "local" {
 		t.Errorf("Latest(a).Vantage = %q (ok=%v), want \"local\"", o.Vantage, ok)
 	}
-	if o, ok := s.Latest("b"); !ok || o.Vantage != "nyc" {
-		t.Errorf("Latest(b).Vantage = %q (ok=%v), want \"nyc\"", o.Vantage, ok)
+	// Latest is pinned to the local vantage: b has no local round, so it must not
+	// be found there — only via LatestAll("nyc") (the #2 isolation this task adds).
+	if _, ok := s.Latest("b"); ok {
+		t.Errorf("Latest(b) found a round, want none (b is nyc-only, Latest is local-only)")
+	}
+	if la, err := s.LatestAll("nyc"); err != nil || la["b"].Vantage != "nyc" {
+		t.Errorf("LatestAll(nyc)[b].Vantage = %q (err %v), want \"nyc\"", la["b"].Vantage, err)
 	}
 	if h, err := s.History("a"); err != nil || len(h) != 1 || h[0].Vantage != "local" {
 		t.Errorf("History(a) vantage = %v (err %v), want [local]", h, err)

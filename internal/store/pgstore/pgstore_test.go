@@ -13,6 +13,27 @@ import (
 	"smokeping-modern/internal/scheduler"
 )
 
+// testStore returns a PGStore connected to SMOKE_TEST_DSN with a freshly
+// truncated samples table, skipping the test if the DSN is not set. For tests
+// that don't need a specific histCap or a custom onErr.
+func testStore(t *testing.T) *PGStore {
+	t.Helper()
+	dsn := os.Getenv("SMOKE_TEST_DSN")
+	if dsn == "" {
+		t.Skip("set SMOKE_TEST_DSN to run the TimescaleDB integration test")
+	}
+	ctx := context.Background()
+	s, err := New(ctx, dsn, 100, func(e error) { t.Errorf("store error: %v", e) })
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(s.Close)
+	if _, err := s.pool.Exec(ctx, "TRUNCATE samples"); err != nil {
+		t.Fatalf("truncate: %v", err)
+	}
+	return s
+}
+
 // Run with a live TimescaleDB:
 //
 //	SMOKE_TEST_DSN='postgres://smoke:smoke@127.0.0.1:5433/smoke?sslmode=disable' go test ./internal/store/pgstore
@@ -126,7 +147,7 @@ func TestPGStoreAvailabilityIgnoresHistoryCap(t *testing.T) {
 	}
 
 	// Availability spans the whole window regardless of the cap.
-	st, err := s.Availability(ctx, "t", base, nil)
+	st, err := s.Availability(ctx, "t", "local", base, nil)
 	if err != nil {
 		t.Fatalf("Availability: %v", err)
 	}
@@ -142,7 +163,7 @@ func TestPGStoreAvailabilityIgnoresHistoryCap(t *testing.T) {
 	}
 
 	// cutoff filters to the in-window subset.
-	st2, err := s.Availability(ctx, "t", base.Add(30*time.Minute), nil)
+	st2, err := s.Availability(ctx, "t", "local", base.Add(30*time.Minute), nil)
 	if err != nil {
 		t.Fatalf("Availability (cutoff): %v", err)
 	}
@@ -152,7 +173,7 @@ func TestPGStoreAvailabilityIgnoresHistoryCap(t *testing.T) {
 
 	// maxLossPct=10: the fully-lost rounds are down; the healthy rounds (0% loss) stay up.
 	maxLoss := 10.0
-	st3, err := s.Availability(ctx, "t", base, &maxLoss)
+	st3, err := s.Availability(ctx, "t", "local", base, &maxLoss)
 	if err != nil {
 		t.Fatalf("Availability (maxloss): %v", err)
 	}
@@ -196,7 +217,7 @@ func TestPGStoreHistorySinceIgnoresHistoryCap(t *testing.T) {
 	}
 
 	// HistorySince spans the whole window regardless of the cap, oldest->newest.
-	got, err := s.HistorySince(ctx, "t", base)
+	got, err := s.HistorySince(ctx, "t", "local", base)
 	if err != nil {
 		t.Fatalf("HistorySince: %v", err)
 	}
@@ -208,7 +229,7 @@ func TestPGStoreHistorySinceIgnoresHistoryCap(t *testing.T) {
 	}
 
 	// cutoff filters to the in-window subset.
-	got2, err := s.HistorySince(ctx, "t", base.Add(30*time.Minute))
+	got2, err := s.HistorySince(ctx, "t", "local", base.Add(30*time.Minute))
 	if err != nil {
 		t.Fatalf("HistorySince (cutoff): %v", err)
 	}
@@ -349,7 +370,7 @@ func TestDailyRollup(t *testing.T) {
 		t.Fatalf("refresh daily: %v", err)
 	}
 
-	pts, err := s.Rollup(ctx, "dr", "1d", time.Time{}, time.Time{}) // zero since/until -> full history
+	pts, err := s.Rollup(ctx, "dr", "local", "1d", time.Time{}, time.Time{}) // zero since/until -> full history
 	if err != nil {
 		t.Fatalf("Rollup 1d: %v", err)
 	}
@@ -373,7 +394,7 @@ func TestDailyRollup(t *testing.T) {
 	// A `since` at the day-2 bucket start bounds the result to day 2 only (daily
 	// buckets are labeled at midnight, so the cutoff is the bucket boundary).
 	day2Start := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
-	pts2, err := s.Rollup(ctx, "dr", "1d", day2Start, time.Time{})
+	pts2, err := s.Rollup(ctx, "dr", "local", "1d", day2Start, time.Time{})
 	if err != nil {
 		t.Fatalf("Rollup 1d since day2: %v", err)
 	}
@@ -386,12 +407,64 @@ func TestDailyRollup(t *testing.T) {
 
 	// An `until` at the day-1 boundary (exclusive of day 2) bounds to day 1 only — the
 	// drag-zoom [from,to] path. `since` zero means "from the start".
-	pts3, err := s.Rollup(ctx, "dr", "1d", time.Time{}, day2Start.Add(-time.Nanosecond))
+	pts3, err := s.Rollup(ctx, "dr", "local", "1d", time.Time{}, day2Start.Add(-time.Nanosecond))
 	if err != nil {
 		t.Fatalf("Rollup 1d until day1: %v", err)
 	}
 	if len(pts3) != 1 || !approx(pts3[0].MedianAvg, 0.03) {
 		t.Fatalf("bounded daily [.., day1] = %d buckets avg %v, want 1 / .03 (day 1 only)", len(pts3), pts3[0].MedianAvg)
+	}
+}
+
+// TestRollupIsolatesByVantage covers the read side of the vantage dimension: the
+// continuous aggregates GROUP BY (bucket, target, vantage), so two vantages probing
+// the same target in the same hour must never blend into one bucket. samples_hourly
+// is created WITH (timescaledb.materialized_only = false), so the just-written rows
+// are already visible via real-time aggregation without a manual refresh — this test
+// refreshes anyway so the assertions don't depend on that continuing to hold. Because
+// real-time aggregation makes exact medians available here, this asserts the precise
+// per-vantage median (not just bucket presence): local's bucket must show only its
+// own 0.01s round, nyc's only its own 0.09s round, with nothing crossing over.
+func TestRollupIsolatesByVantage(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+
+	hour := time.Date(2026, 2, 1, 10, 0, 0, 0, time.UTC)
+	s.Add([]scheduler.Outcome{
+		{Target: probe.Target{Name: "riv", Host: "h"}, ProbeName: "FPing", When: hour,
+			Computed: sample.Compute(1, []float64{0.01})}, // empty Vantage -> "local"
+		{Target: probe.Target{Name: "riv", Host: "h"}, ProbeName: "FPing", When: hour.Add(10 * time.Minute),
+			Computed: sample.Compute(1, []float64{0.09}), Vantage: "nyc"},
+	})
+
+	if err := s.EnableDownsampling(ctx); err != nil {
+		t.Fatalf("EnableDownsampling: %v", err)
+	}
+	if _, err := s.pool.Exec(ctx, "CALL refresh_continuous_aggregate('samples_hourly', NULL, NULL)"); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+
+	local, err := s.Rollup(ctx, "riv", "local", "1h", time.Time{}, time.Time{})
+	if err != nil {
+		t.Fatalf("Rollup local: %v", err)
+	}
+	nyc, err := s.Rollup(ctx, "riv", "nyc", "1h", time.Time{}, time.Time{})
+	if err != nil {
+		t.Fatalf("Rollup nyc: %v", err)
+	}
+
+	approx := func(got, want float64) bool { return math.Abs(got-want) < 1e-9 }
+	if len(local) != 1 || local[0].Rounds != 1 {
+		t.Fatalf("local buckets = %+v, want exactly 1 bucket with 1 round", local)
+	}
+	if !approx(local[0].MedianAvg, 0.01) {
+		t.Errorf("local median_avg = %v, want 0.01 (must not include nyc's 0.09 round)", local[0].MedianAvg)
+	}
+	if len(nyc) != 1 || nyc[0].Rounds != 1 {
+		t.Fatalf("nyc buckets = %+v, want exactly 1 bucket with 1 round", nyc)
+	}
+	if !approx(nyc[0].MedianAvg, 0.09) {
+		t.Errorf("nyc median_avg = %v, want 0.09 (must not include local's 0.01 round)", nyc[0].MedianAvg)
 	}
 }
 
@@ -420,7 +493,7 @@ func TestPGStoreBulkReads(t *testing.T) {
 		{Target: probe.Target{Name: "b", Host: "h"}, ProbeName: "TCPConnect", When: base, Computed: sample.Compute(4, nil)},
 	})
 
-	all, err := s.LatestAll()
+	all, err := s.LatestAll("local")
 	if err != nil {
 		t.Fatalf("LatestAll: %v", err)
 	}
@@ -434,7 +507,7 @@ func TestPGStoreBulkReads(t *testing.T) {
 		t.Errorf("b probe = %q, want TCPConnect", all["b"].ProbeName)
 	}
 
-	av, err := s.AvailabilityAll(ctx, base, nil)
+	av, err := s.AvailabilityAll(ctx, "local", base, nil)
 	if err != nil {
 		t.Fatalf("AvailabilityAll: %v", err)
 	}
@@ -445,7 +518,7 @@ func TestPGStoreBulkReads(t *testing.T) {
 		t.Errorf("b measured/up = %d/%d, want 1/0", b.Measured, b.Up)
 	}
 	// matches the per-target Availability
-	a1, _ := s.Availability(ctx, "a", base, nil)
+	a1, _ := s.Availability(ctx, "a", "local", base, nil)
 	if a1.Measured != av["a"].Measured || a1.Up != av["a"].Up {
 		t.Errorf("AvailabilityAll[a] != Availability(a)")
 	}
@@ -483,7 +556,7 @@ func TestPGStoreHistorySinceCap(t *testing.T) {
 	}
 	s.Add(outs)
 
-	got, err := s.HistorySince(ctx, "t", base)
+	got, err := s.HistorySince(ctx, "t", "local", base)
 	if err != nil {
 		t.Fatalf("HistorySince: %v", err)
 	}
@@ -521,7 +594,7 @@ func TestPGStoreHistoryBetween(t *testing.T) {
 	}
 	s.Add(outs)
 
-	got, err := s.HistoryBetween(ctx, "t", base.Add(time.Minute), base.Add(4*time.Minute)) // [min1, min4]
+	got, err := s.HistoryBetween(ctx, "t", "local", base.Add(time.Minute), base.Add(4*time.Minute)) // [min1, min4]
 	if err != nil {
 		t.Fatalf("HistoryBetween: %v", err)
 	}
@@ -570,7 +643,7 @@ func TestPGStoreSeriesAllPerTargetCap(t *testing.T) {
 	}
 	s.Add(outs)
 
-	all, err := s.SeriesAll(ctx, base.Add(-time.Second)) // everything is after this
+	all, err := s.SeriesAll(ctx, "local", base.Add(-time.Second)) // everything is after this
 	if err != nil {
 		t.Fatalf("SeriesAll: %v", err)
 	}
@@ -585,7 +658,7 @@ func TestPGStoreSeriesAllPerTargetCap(t *testing.T) {
 		t.Errorf("a cap kept %v..%v, want rounds 2..4 (newest 3)", all["a"][0].When, all["a"][2].When)
 	}
 	// strictly-after cutoff: a cutoff at round 2's ts drops a's 0..2 and all of b.
-	after, err := s.SeriesAll(ctx, base.Add(2*time.Minute))
+	after, err := s.SeriesAll(ctx, "local", base.Add(2*time.Minute))
 	if err != nil {
 		t.Fatalf("SeriesAll (cutoff): %v", err)
 	}
@@ -672,5 +745,96 @@ func TestPGStoreRenamesLegacyMasterVantage(t *testing.T) {
 	// And the rename is idempotent: a second migrate is a no-op and doesn't error.
 	if err := s.migrate(ctx); err != nil {
 		t.Fatalf("second migrate: %v", err)
+	}
+}
+
+// A replayed batch (same target/vantage/ts) must not duplicate rows — the
+// idempotency an agent retrying an ingest POST after a dropped response relies on.
+func TestAddResultsIdempotent(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+
+	tgt := probe.Target{Name: "idem", Host: "10.0.0.1"}
+	when := time.Date(2026, 8, 7, 12, 0, 0, 123_000_000, time.UTC)
+	mk := func() []scheduler.Outcome {
+		return []scheduler.Outcome{{
+			Target: tgt, ProbeName: "FPing", When: when, Vantage: "nyc",
+			Computed: sample.Compute(3, []float64{0.010, 0.011, 0.012}),
+		}}
+	}
+	if err := s.AddResults(ctx, mk()); err != nil {
+		t.Fatalf("AddResults #1: %v", err)
+	}
+	if err := s.AddResults(ctx, mk()); err != nil { // replay
+		t.Fatalf("AddResults #2 (replay): %v", err)
+	}
+	var n int
+	if err := s.pool.QueryRow(ctx,
+		`SELECT count(*) FROM samples WHERE target=$1 AND vantage=$2 AND ts=$3`,
+		tgt.Name, "nyc", when).Scan(&n); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("replayed batch must be idempotent: got %d rows, want 1", n)
+	}
+}
+
+// The #2 conflation regression: two vantages writing to the same target must never
+// be mixed on read. LatestAll and HistorySince must each see only their own vantage.
+func TestVantageReadIsolation(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+	if err := s.EnableDownsampling(ctx); err != nil {
+		t.Fatalf("EnableDownsampling: %v", err)
+	}
+	tgt := probe.Target{Name: "iso", Host: "10.0.0.9"}
+	base := time.Now().UTC().Add(-2 * time.Hour).Truncate(time.Second)
+	write := func(vant string, i int, rtt float64) {
+		o := scheduler.Outcome{
+			Target: tgt, ProbeName: "FPing", When: base.Add(time.Duration(i) * time.Minute),
+			Vantage: vant, Computed: sample.Compute(2, []float64{rtt, rtt}),
+		}
+		if err := s.AddResults(ctx, []scheduler.Outcome{o}); err != nil {
+			t.Fatalf("write %s/%d: %v", vant, i, err)
+		}
+	}
+	for i := 0; i < 5; i++ {
+		write("local", i, 0.010) // hub rows
+		write("nyc", i, 0.050)   // remote rows, distinct latency
+	}
+
+	// LatestAll is per-vantage: local sees ~10ms, nyc sees ~50ms — never mixed.
+	for _, tc := range []struct {
+		vant string
+		want float64 // median seconds
+	}{{"local", 0.010}, {"nyc", 0.050}} {
+		la, err := s.LatestAll(tc.vant)
+		if err != nil {
+			t.Fatalf("LatestAll(%s): %v", tc.vant, err)
+		}
+		o, ok := la[tgt.Name]
+		if !ok {
+			t.Fatalf("LatestAll(%s): missing target", tc.vant)
+		}
+		if o.Vantage != tc.vant {
+			t.Errorf("LatestAll(%s): got vantage %q", tc.vant, o.Vantage)
+		}
+		if math.Abs(o.Computed.Median-tc.want) > 1e-9 {
+			t.Errorf("LatestAll(%s): median %.4f, want %.4f", tc.vant, o.Computed.Median, tc.want)
+		}
+	}
+
+	// HistorySince isolates too.
+	h, err := s.HistorySince(ctx, tgt.Name, "nyc", base.Add(-time.Minute))
+	if err != nil {
+		t.Fatalf("HistorySince(nyc): %v", err)
+	}
+	if len(h) != 5 {
+		t.Fatalf("HistorySince(nyc): got %d rounds, want 5", len(h))
+	}
+	for _, o := range h {
+		if o.Vantage != "nyc" {
+			t.Fatalf("HistorySince(nyc): leaked vantage %q", o.Vantage)
+		}
 	}
 }
