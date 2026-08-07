@@ -88,6 +88,35 @@ func TestWebhookRetriesThenDelivers(t *testing.T) {
 
 // A full queue must drop the newest event without blocking Notify (bounding both
 // memory and goroutines), and the drop must be counted, not silent.
+// A graceful drain must spend its deadline retrying a queued event, not give it a single
+// attempt: an edge-triggered FIRING is emitted once, so one failed attempt would lose it (#9).
+func TestWebhookRetriesDuringDrain(t *testing.T) {
+	attempt1Done := make(chan struct{})
+	var attempts atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if attempts.Add(1) == 1 {
+			w.WriteHeader(http.StatusInternalServerError) // fail the first attempt
+			close(attempt1Done)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent) // succeed the retry
+	}))
+	defer srv.Close()
+
+	// A 50ms backoff so the retry has not yet fired when we start the drain.
+	n := NewWebhookNotifierConfig(srv.URL, nil, WebhookConfig{Workers: 1, QueueSize: 8, MaxAttempts: 5, BaseBackoff: 50 * time.Millisecond, Timeout: time.Second})
+	n.Notify(Event{Target: "t", Alert: "loss", Firing: true, RTTms: 1, When: time.Unix(1_700_000_000, 0)})
+
+	<-attempt1Done // the first attempt has failed; the worker is now in backoff
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	n.Close(ctx) // the retry must run within this deadline (old code gave up immediately)
+
+	if d := n.Stats().Delivered; d != 1 {
+		t.Errorf("delivered = %d after drain, want 1 (the retry must run within the drain deadline)", d)
+	}
+}
+
 func TestWebhookDropsWhenQueueFull(t *testing.T) {
 	release := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { <-release }))
