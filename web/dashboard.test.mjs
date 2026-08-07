@@ -201,5 +201,18 @@ check('parseRoute: graphs carries an optional folder path', () => {
   assert.deepEqual(D.parseRoute('#graphs&path=a%2Fb'), { view: 'graphs', path: 'a/b' }); // decoded once
 });
 
+// pickSeries (#5): a transient fetch failure (null) keeps the cached last-good so a detail
+// graph isn't blanked; a real series is rendered and cached; the 'unsupported' sentinel is
+// rendered but not cached as data.
+check('pickSeries keeps last-good on failure and caches real series', () => {
+  const good = { buckets: [{}, {}] };
+  assert.deepEqual(D.pickSeries(good, null), { series: good, cache: good, failed: false });
+  assert.deepEqual(D.pickSeries(null, good), { series: good, cache: good, failed: true });
+  assert.deepEqual(D.pickSeries(null, null), { series: null, cache: null, failed: true });
+  const uns = { unsupported: true };
+  assert.deepEqual(D.pickSeries(uns, good), { series: uns, cache: good, failed: false });
+  assert.deepEqual(D.pickSeries(uns, null), { series: uns, cache: null, failed: false });
+});
+
 if (failed) { console.error(`\n${failed} test(s) failed`); process.exit(1); }
 console.log('\nall dashboard tests passed');
