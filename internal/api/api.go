@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"smokeping-modern/internal/model"
 	"smokeping-modern/internal/probe"
 	"smokeping-modern/internal/scheduler"
 	"smokeping-modern/internal/store"
@@ -67,6 +68,9 @@ type Server struct {
 	// against the vantage key store. nil means the agent routes are not registered at
 	// all — fail-closed, same pattern as the admin API's AdminPassword gate.
 	VantageAuth VantageAuth
+	// Assignment, if set, returns the target list + config_version for a vantage,
+	// computed over the live monitor set. Required (with VantageAuth) for the agent routes.
+	Assignment func(vantage string) (targets []model.Monitor, configVersion string)
 }
 
 func New(s store.Store, webDir string) *Server { return &Server{store: s, webDir: webDir} }
@@ -129,6 +133,10 @@ func (srv *Server) Routes() *http.ServeMux {
 		mux.HandleFunc("GET /api/admin/vantages", srv.requireAdmin(srv.listVantages))
 		mux.HandleFunc("POST /api/admin/vantages", srv.requireAdmin(srv.addVantage))
 		mux.HandleFunc("DELETE /api/admin/vantages/{name}", srv.requireAdmin(srv.revokeVantage))
+	}
+	if srv.VantageAuth != nil && srv.Assignment != nil {
+		mux.HandleFunc("GET /agent/v1/assignment", srv.requireAgent(srv.agentAssignment))
+		// POST /agent/v1/results added in Task 5
 	}
 	if srv.webDir != "" {
 		// Serve the SPA/static assets at the root (same-origin with the API).
