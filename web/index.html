@@ -112,6 +112,40 @@
   .spanel h3 { font-size:13px; margin:0; display:flex; align-items:baseline; gap:9px; }
   .detail .meta { display:flex; gap:22px; flex-wrap:wrap; margin:6px 0 12px; }
   .hidden { display:none !important; }
+  /* Graphs view: config-tree left nav + graph grid */
+  .graphs-layout { display:grid; grid-template-columns:264px minmax(0,1fr); gap:18px; align-items:start; margin-top:18px; }
+  @media (max-width:820px){ .graphs-layout { grid-template-columns:1fr; } }
+  .graphs-layout .grid { margin-top:14px; grid-template-columns:repeat(auto-fit, minmax(320px,1fr)); }
+  .graphs-layout .legend { margin-top:14px; }
+  .nav { padding:12px 12px 10px; position:sticky; top:12px; }
+  @media (max-width:820px){ .nav { position:static; } }
+  .nav-head { display:flex; align-items:baseline; justify-content:space-between; margin-bottom:8px; }
+  .nav-title { font-family:ui-monospace,Menlo,monospace; font-size:10px; letter-spacing:.14em; text-transform:uppercase; color:var(--ink-faint); }
+  .nav-filter { width:100%; margin-bottom:9px; background:var(--bg); border:1px solid var(--border); border-radius:8px; padding:6px 9px; font-family:ui-monospace,Menlo,monospace; font-size:12px; color:var(--ink); }
+  .nav-filter::placeholder { color:var(--ink-faint); }
+  .nav-filter:focus-visible { outline:2px solid var(--accent); outline-offset:1px; border-color:var(--accent); }
+  .tree { display:flex; flex-direction:column; gap:1px; max-height:calc(100vh - 150px); overflow:auto; margin:0 -4px; padding:0 4px; }
+  @media (max-width:820px){ .tree { max-height:320px; } }
+  .tree .node { display:flex; flex-direction:column; }
+  .tree .row { display:flex; align-items:center; gap:7px; padding:5px 8px; padding-left:calc(8px + var(--d,0) * 15px); border-radius:7px; cursor:pointer; font-family:ui-monospace,Menlo,monospace; font-size:12.5px; color:var(--ink); border:1px solid transparent; }
+  .tree .row:hover { background:var(--bg); }
+  .tree .row.sel { background:var(--accent-soft); border-color:var(--accent); }
+  .tree .row:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
+  .tree .row .twist { flex:0 0 10px; text-align:center; color:var(--ink-faint); font-size:9px; transition:transform .12s; }
+  .tree .row.collapsed .twist { transform:rotate(-90deg); }
+  .tree .row.folder .label { font-weight:600; }
+  .tree .row .label { flex:1 1 auto; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .tree .row .tcount { flex:0 0 auto; font-size:10px; color:var(--ink-faint); background:var(--bg); border:1px solid var(--border); border-radius:20px; padding:0 6px; font-variant-numeric:tabular-nums; }
+  .tree .row.sel .tcount { background:transparent; }
+  .tree .kids { display:flex; flex-direction:column; gap:1px; }
+  .tdot { width:8px; height:8px; border-radius:50%; flex:0 0 auto; }
+  .tdot.ok { background:var(--ok); } .tdot.degraded { background:var(--warn); } .tdot.down { background:var(--bad); }
+  .tree-empty { color:var(--ink-faint); font-family:ui-monospace,monospace; font-size:12px; padding:14px 6px; }
+  .graph-scope { display:flex; align-items:center; gap:8px; flex-wrap:wrap; font-family:ui-monospace,Menlo,monospace; font-size:12px; color:var(--ink-soft); }
+  .graph-scope .crumb-link { color:var(--accent); cursor:pointer; }
+  .graph-scope .crumb-link:hover { text-decoration:underline; }
+  .graph-scope .crumb-sep { color:var(--ink-faint); }
+  .graph-scope .crumb-cur { color:var(--ink); }
   footer { margin-top:28px; color:var(--ink-faint); font-family:ui-monospace,Menlo,monospace; font-size:11.5px; }
   @media (prefers-reduced-motion: reduce){ * { transition:none !important; } }
 </style>
@@ -161,13 +195,23 @@
 
   <!-- GRAPHS -->
   <section id="viewGraphs" class="hidden">
-    <div class="legend" aria-label="How to read the graph">
-      <span class="lbl">Jitter</span><span class="smoke-key" id="smokeKey" aria-hidden="true"></span>
-      <span class="swatch" style="color:var(--ink-faint)">min → median → max</span>
-      <span class="lbl" style="margin-left:8px">Loss</span><span id="lossLegend" style="display:inline-flex;gap:12px;flex-wrap:wrap"></span>
-      <label class="lbl" style="margin-left:auto; cursor:pointer; display:inline-flex; align-items:center; gap:5px" title="Share one Y-axis across all graphs so they're comparable"><input type="checkbox" id="unisonToggle" checked> unison scale</label>
+    <div class="graphs-layout">
+      <aside class="panel nav" aria-label="Target menu">
+        <div class="nav-head"><span class="nav-title">Targets</span></div>
+        <input class="nav-filter" id="navFilter" type="search" placeholder="filter targets…" aria-label="Filter targets">
+        <div class="tree" id="navTree" role="tree"><div class="tree-empty">no targets yet</div></div>
+      </aside>
+      <div class="graphs-main">
+        <div class="graph-scope" id="graphScope"><span class="crumb-cur">All targets</span></div>
+        <div class="legend" aria-label="How to read the graph">
+          <span class="lbl">Jitter</span><span class="smoke-key" id="smokeKey" aria-hidden="true"></span>
+          <span class="swatch" style="color:var(--ink-faint)">min → median → max</span>
+          <span class="lbl" style="margin-left:8px">Loss</span><span id="lossLegend" style="display:inline-flex;gap:12px;flex-wrap:wrap"></span>
+          <label class="lbl" style="margin-left:auto; cursor:pointer; display:inline-flex; align-items:center; gap:5px" title="Share one Y-axis across all graphs so they're comparable"><input type="checkbox" id="unisonToggle" checked> unison scale</label>
+        </div>
+        <div class="grid" id="graphGrid"><div class="empty">Waiting for the collector…</div></div>
+      </div>
     </div>
-    <div class="grid" id="graphGrid"><div class="empty">Waiting for the collector…</div></div>
   </section>
 
   <!-- DRILL-DOWN: all four ranges stacked -->
