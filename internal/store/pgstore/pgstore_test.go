@@ -596,3 +596,39 @@ func TestPGStoreSeriesAllPerTargetCap(t *testing.T) {
 		t.Errorf("b should be absent after the cutoff (its newest round is at the cutoff)")
 	}
 }
+
+func TestPGStoreWritesVantage(t *testing.T) {
+	dsn := os.Getenv("SMOKE_TEST_DSN")
+	if dsn == "" {
+		t.Skip("set SMOKE_TEST_DSN to run the TimescaleDB integration test")
+	}
+	ctx := context.Background()
+	s, err := New(ctx, dsn, 100, func(e error) { t.Errorf("store error: %v", e) })
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.pool.Exec(ctx, "TRUNCATE samples"); err != nil {
+		t.Fatalf("truncate: %v", err)
+	}
+
+	when := time.Unix(1_700_000_000, 0).UTC()
+	s.Add([]scheduler.Outcome{
+		{Target: probe.Target{Name: "hub", Host: "h"}, ProbeName: "FPing",
+			Computed: sample.Compute(1, []float64{0.01}), When: when}, // empty -> local
+		{Target: probe.Target{Name: "remote", Host: "h"}, ProbeName: "FPing",
+			Computed: sample.Compute(1, []float64{0.01}), When: when, Vantage: "nyc"},
+	})
+
+	want := map[string]string{"hub": "local", "remote": "nyc"}
+	for target, wv := range want {
+		var got string
+		if err := s.pool.QueryRow(ctx,
+			`SELECT vantage FROM samples WHERE target=$1 LIMIT 1`, target).Scan(&got); err != nil {
+			t.Fatalf("select vantage for %s: %v", target, err)
+		}
+		if got != wv {
+			t.Errorf("target %s vantage = %q, want %q", target, got, wv)
+		}
+	}
+}

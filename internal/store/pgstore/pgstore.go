@@ -189,7 +189,7 @@ func (s *PGStore) Add(outcomes []scheduler.Outcome) {
 			`INSERT INTO samples
 			   (ts, target, probe, host, vantage, pings, loss, median_seconds, rtts_seconds, err, duration_ms)
 			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
-			o.When.UTC(), o.Target.Name, o.ProbeName, o.Target.Host, "master",
+			o.When.UTC(), o.Target.Name, o.ProbeName, o.Target.Host, store.VantageOf(o),
 			o.Computed.Pings, o.Computed.Loss, nanToNil(o.Computed.Median),
 			centeredToDB(o.Computed.Centered), errText,
 			float64(o.Duration.Microseconds())/1000.0,
