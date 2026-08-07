@@ -534,20 +534,23 @@ func (n *WebhookNotifier) Close(ctx context.Context) {
 		return
 	}
 	n.closed = true
-	close(n.done)  // interrupt in-flight backoffs so the drain is prompt
-	close(n.queue) // workers finish the remaining items then exit their range loop
+	close(n.queue) // stop accepting; workers finish the remaining items then exit their range loop
 	n.mu.Unlock()
 
+	// Do NOT interrupt retries yet: a graceful drain should spend its deadline retrying
+	// queued events (an edge-triggered FIRING is emitted once, so a single failed attempt
+	// would lose it). n.done is closed only when the deadline hits (#9).
 	drained := make(chan struct{})
 	go func() { n.wg.Wait(); close(drained) }()
 	select {
 	case <-drained:
+		close(n.done)  // everything delivered/given-up within budget
 		n.baseCancel() // release the base context
 		slog.Info("webhook: delivery drained", n.statsKV()...)
 	case <-ctx.Done():
-		// Deadline hit: cancel in-flight requests so a hung endpoint can't keep a worker
-		// (and its HTTP request) running past the shutdown budget, then let the workers
-		// finish exiting.
+		// Deadline hit: stop the remaining backoff waits and cancel in-flight requests so a
+		// hung endpoint can't keep a worker (and its HTTP request) past the shutdown budget.
+		close(n.done)
 		n.baseCancel()
 		<-drained
 		slog.Warn("webhook: drain deadline exceeded; in-flight deliveries cancelled", n.statsKV()...)

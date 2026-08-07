@@ -6,8 +6,51 @@ import (
 	"testing"
 	"time"
 
+	"smokeping-modern/internal/probe"
+	"smokeping-modern/internal/scheduler"
+
 	_ "smokeping-modern/internal/probe/tcpconnect" // register TCPConnect for the config
 )
+
+// warm-start must seed only the recent, cadence-contiguous, same-host/probe suffix — never
+// stale or semantically-different history, which could fire a false alert at boot (#6).
+func TestRecentContiguous(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	m := warmMeta{host: "h", probe: "FPing", step: time.Minute}
+	rnd := func(ago time.Duration, host, pk string) scheduler.Outcome {
+		return scheduler.Outcome{Target: probe.Target{Name: "t", Host: host}, ProbeName: pk, When: now.Add(-ago)}
+	}
+
+	// Old breaching rounds followed by a recent contiguous block: only the recent block seeds.
+	hist := []scheduler.Outcome{
+		rnd(90*24*time.Hour, "h", "FPing"),
+		rnd(90*24*time.Hour-time.Minute, "h", "FPing"),
+		rnd(2*time.Minute, "h", "FPing"),
+		rnd(1*time.Minute, "h", "FPing"),
+		rnd(0, "h", "FPing"),
+	}
+	if got := recentContiguous(hist, m, now); len(got) != 3 {
+		t.Errorf("expected the 3 recent contiguous rounds, got %d", len(got))
+	}
+
+	// Newest stored round is stale -> seed nothing (the target is dark).
+	stale := []scheduler.Outcome{rnd(2*time.Hour, "h", "FPing"), rnd(2*time.Hour-time.Minute, "h", "FPing")}
+	if got := recentContiguous(stale, m, now); got != nil {
+		t.Errorf("stale newest round should seed nothing, got %d", len(got))
+	}
+
+	// Newest round is from a different host (name reused) -> seed nothing.
+	mismatch := []scheduler.Outcome{rnd(time.Minute, "h", "FPing"), rnd(0, "other", "FPing")}
+	if got := recentContiguous(mismatch, m, now); got != nil {
+		t.Errorf("host mismatch on the newest round should seed nothing, got %d", len(got))
+	}
+
+	// A cadence gap truncates to the contiguous suffix after it.
+	gapped := []scheduler.Outcome{rnd(10*time.Minute, "h", "FPing"), rnd(time.Minute, "h", "FPing"), rnd(0, "h", "FPing")}
+	if got := recentContiguous(gapped, m, now); len(got) != 2 {
+		t.Errorf("expected 2 rounds after the gap, got %d", len(got))
+	}
+}
 
 // The hub builds local probe jobs only for targets assigned to its own vantage (local):
 // a remote-only target (`vantages: [nyc]`) must NOT be probed here (it would be a false

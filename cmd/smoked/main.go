@@ -189,7 +189,11 @@ func main() {
 	// Boot-only: a SIGHUP reload carries windows via InheritStateFrom, and a fresh
 	// in-memory store has no history, so this is a no-op there.
 	if rt := current.Load(); rt.engine != nil {
-		warmStartAlerts(rt.engine, rt.alertsByTarget, st)
+		meta := make(map[string]warmMeta, len(rt.jobs))
+		for _, j := range rt.jobs {
+			meta[j.Target.Name] = warmMeta{host: j.Target.Host, probe: j.Probe.Name(), step: j.Step}
+		}
+		warmStartAlerts(rt.engine, rt.alertsByTarget, meta, st, time.Now())
 	}
 
 	roundStats := &api.RoundStats{}
@@ -351,6 +355,13 @@ func main() {
 			_ = httpSrv.Shutdown(shutCtx)
 		}()
 		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			// Drain queued webhook deliveries before the fatal os.Exit, which would otherwise
+			// skip the top-level deferred Close. Close is idempotent, so the defer stays a no-op.
+			if webhookN != nil {
+				drainCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				webhookN.Close(drainCtx)
+				cancel()
+			}
 			fatal("http server failed", err)
 		}
 		<-pollDone // wait for the polling goroutine to drain in-flight probes before exiting
@@ -526,20 +537,67 @@ func (rt *runtime) eval(out []scheduler.Outcome) {
 // history (loss% and rtt median per round, oldest->newest — the same values eval feeds
 // Evaluate), so an already-breaching target fires immediately after boot. Best-effort: a
 // target with no history or a read error is skipped.
-func warmStartAlerts(engine *alert.Engine, alertsByTarget map[string][]string, st store.Store) {
+// warmMeta is the current job identity used to decide which stored history may seed a
+// target's alert window: only rounds matching the current host+probe and cadence count.
+type warmMeta struct {
+	host  string
+	probe string
+	step  time.Duration
+}
+
+func warmStartAlerts(engine *alert.Engine, alertsByTarget map[string][]string, meta map[string]warmMeta, st store.Store, now time.Time) {
 	for target, names := range alertsByTarget {
+		m, ok := meta[target]
+		if !ok {
+			continue // not a currently-probed local target
+		}
 		hist, err := st.History(target)
 		if err != nil || len(hist) == 0 {
 			continue
 		}
-		loss := make([]float64, len(hist))
-		rtt := make([]float64, len(hist))
-		for i, o := range hist {
+		// Seed only the recent, cadence-contiguous suffix that matches the current host/probe,
+		// so stale or semantically-different history can't satisfy a consecutive-sample matcher
+		// (e.g. two bad samples from months ago + one bad post-restart sample) (#6).
+		suffix := recentContiguous(hist, m, now)
+		if len(suffix) == 0 {
+			continue
+		}
+		loss := make([]float64, len(suffix))
+		rtt := make([]float64, len(suffix))
+		for i, o := range suffix {
 			loss[i] = o.Computed.LossFraction() * 100
 			rtt[i] = o.Computed.Median // NaN for a lost round
 		}
 		engine.SeedWindow(target, names, loss, rtt)
 	}
+}
+
+// recentContiguous returns the newest run of rounds (oldest->newest) that all match the
+// current host+probe (m) and are cadence-contiguous — no neighbor gap larger than 2×step —
+// ending at a round recent enough to be "current" (within 2×step of now). If the newest
+// stored round is stale or from a different host/probe, it returns nil: the target is
+// effectively dark, and seeding old data would fire a false alert at boot.
+func recentContiguous(hist []scheduler.Outcome, m warmMeta, now time.Time) []scheduler.Outcome {
+	if len(hist) == 0 {
+		return nil
+	}
+	gap := 2 * m.step
+	if gap <= 0 {
+		gap = 2 * time.Minute // unknown cadence: a conservative fallback
+	}
+	last := hist[len(hist)-1] // History returns oldest->newest
+	if now.Sub(last.When) > gap || last.Target.Host != m.host || last.ProbeName != m.probe {
+		return nil
+	}
+	start := len(hist) - 1
+	for start > 0 {
+		cur, prev := hist[start], hist[start-1]
+		if prev.Target.Host != m.host || prev.ProbeName != m.probe || cur.When.Sub(prev.When) > gap {
+			break
+		}
+		start--
+	}
+	return hist[start:]
 }
 
 // buildRuntime loads targets (from YAML config, or the demo set) and builds the
