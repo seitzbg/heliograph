@@ -8,6 +8,25 @@ breaking changes.
 ## [Unreleased]
 
 ### Added
+- **Federation groundwork (multi-vantage), hub side.** The collector now records which *vantage*
+  produced each round (the hub probes as `local`); targets declare `vantages: [...]` (inherited
+  down the tree, default `[local]`), and a pure builder projects each vantage's assignment plus a
+  content-version hash. A TimescaleDB-backed API-key store lets an operator register vantages —
+  `smoked vantage add/ls/revoke` mints a one-time key (salted-hash at rest, constant-time verify)
+  — with a password-gated `/api/admin/vantages` API + session login (`SMOKED_ADMIN_PASSWORD`,
+  fail-closed). Dark until an agent connects; federation requires `-dsn`. The agent binary + its
+  endpoints, per-vantage overlay graphs, and the bundled reverse proxy are still to come.
+- **Config-tree menu** in the Graphs view: a left nav built from the target name paths
+  (collapsible folders with worst-child status dots + subtree counts, a filter box, and a
+  deep-linkable subtree scope that also scopes the unison Y-axis).
+- **Drag-to-zoom on the detail graph.** Drag a time range on the enlarged (zoom) view and it
+  refetches finer data for that span (raw ≤30h, hourly ≤10d, else daily); `GET /api/series` and
+  `GET /api/rollup` accept optional `from`/`to`. A "reset zoom" restores the tier.
+- **Unison Y-scaling** across the Graphs grid — small multiples share one Y-axis so a fast and a
+  slow target are comparable (toggle in the legend).
+- **Alert warm-start from the store.** At boot the alert engine seeds each alerted target's
+  sample window from stored history, so a target that is already breaching fires on its first
+  post-boot round instead of waiting for fresh samples to accumulate.
 - **Tabbed dashboard with per-target drill-down.** An **Overview** tab (worst-targets +
   availability/coverage leaderboards) and a **Graphs** tab (per-target smoke grid). Clicking a
   target opens a SmokePing-style drill-down with all four ranges stacked — 3h/30h per-round
