@@ -111,7 +111,7 @@ sketch; agents poll a versioned assignment (`304` when unchanged); keys are mana
 
 ## Notes / decisions
 - Stack: Go collector · TimescaleDB (raw samples; bands via SQL quantiles) · REST+JSON API ·
-  vanilla-JS/canvas frontend · gRPC+mTLS for federation. (See blueprint §1.)
+  vanilla-JS/canvas frontend · HTTPS/JSON + per-vantage API keys for federation. (See blueprint §1.)
 - Storage deliberately keeps the raw N samples per round — the smoke bands need the
   distribution, not just the median.
 - Probe binaries that are unavailable are skipped with a warning, never fatal.
