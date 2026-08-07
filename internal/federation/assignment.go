@@ -6,10 +6,9 @@ package federation
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"slices"
 	"sort"
-	"strconv"
-	"strings"
 
 	"smokeping-modern/internal/model"
 )
@@ -29,38 +28,38 @@ func AssignmentFor(monitors []model.Monitor, v string) []model.Monitor {
 }
 
 // ConfigVersion is a stable content hash of an assignment — the fields an agent acts on
-// (name, probe, host, params, step, pings), canonically encoded so it is independent of
-// slice order and Params map iteration order. The agent sends the version it holds; the
-// hub answers 304 Not Modified when it is unchanged. Format: "sha256:<hex>".
+// (name, probe, host, params, step, pings). It encodes them as canonical JSON (monitors
+// sorted by name; Params flattened to a name-sorted [k,v] list) and hashes that. JSON
+// string-escaping makes the encoding unambiguous, so two distinct configs can never
+// collide the way a bare-delimiter join would (e.g. Params{"a":"b=c"} vs {"a=b":"c"}).
+// The agent sends the version it holds; the hub answers 304 Not Modified when unchanged.
+// Format: "sha256:<hex>".
 func ConfigVersion(assignment []model.Monitor) string {
-	ms := make([]model.Monitor, len(assignment))
-	copy(ms, assignment)
-	sort.Slice(ms, func(i, j int) bool { return ms[i].Name < ms[j].Name })
-	var b strings.Builder
-	for _, m := range ms {
-		b.WriteString(m.Name)
-		b.WriteByte(0x1f)
-		b.WriteString(m.ProbeKind)
-		b.WriteByte(0x1f)
-		b.WriteString(m.Host)
-		b.WriteByte(0x1f)
-		b.WriteString(strconv.Itoa(m.Pings))
-		b.WriteByte(0x1f)
-		b.WriteString(strconv.FormatInt(int64(m.Step), 10))
-		b.WriteByte(0x1f)
+	type kv struct{ K, V string }
+	type entry struct {
+		Name, Probe, Host string
+		Pings             int
+		StepNs            int64
+		Params            []kv
+	}
+	entries := make([]entry, 0, len(assignment))
+	for _, m := range assignment {
 		keys := make([]string, 0, len(m.Params))
 		for k := range m.Params {
 			keys = append(keys, k)
 		}
 		sort.Strings(keys)
-		for _, k := range keys {
-			b.WriteString(k)
-			b.WriteByte('=')
-			b.WriteString(m.Params[k])
-			b.WriteByte(';')
+		params := make([]kv, len(keys))
+		for i, k := range keys {
+			params[i] = kv{K: k, V: m.Params[k]}
 		}
-		b.WriteByte('\n')
+		entries = append(entries, entry{
+			Name: m.Name, Probe: m.ProbeKind, Host: m.Host,
+			Pings: m.Pings, StepNs: int64(m.Step), Params: params,
+		})
 	}
-	sum := sha256.Sum256([]byte(b.String()))
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name < entries[j].Name })
+	buf, _ := json.Marshal(entries) // marshaling a fixed struct of strings/ints cannot error
+	sum := sha256.Sum256(buf)
 	return "sha256:" + hex.EncodeToString(sum[:])
 }

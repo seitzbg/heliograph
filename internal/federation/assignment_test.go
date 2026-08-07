@@ -36,24 +36,53 @@ func TestAssignmentFor(t *testing.T) {
 	}
 }
 
+func monP(name, host string, params map[string]string, vantages ...string) model.Monitor {
+	return model.Monitor{Name: name, ProbeKind: "FPing", Host: host, Pings: 3,
+		Step: 60 * time.Second, Params: params, Vantages: vantages}
+}
+
 func TestConfigVersionStableAndSensitive(t *testing.T) {
-	a := []model.Monitor{mon("a", "local"), mon("b", "nyc")}
-	// Same content, different slice order + different Params map insertion order -> same version.
+	a := []model.Monitor{
+		monP("a", "h", map[string]string{"port": "80", "path": "/x"}, "local"),
+		monP("b", "h", map[string]string{"q": "1"}, "nyc"),
+	}
 	b := []model.Monitor{
-		{Name: "b", ProbeKind: "FPing", Host: "h", Pings: 3, Step: 60 * time.Second, Params: map[string]string{"a": "1"}, Vantages: []string{"nyc"}},
-		{Name: "a", ProbeKind: "FPing", Host: "h", Pings: 3, Step: 60 * time.Second, Params: map[string]string{"a": "1"}, Vantages: []string{"local"}},
+		monP("b", "h", map[string]string{"q": "1"}, "nyc"),
+		monP("a", "h", map[string]string{"path": "/x", "port": "80"}, "local"),
 	}
 	if ConfigVersion(a) != ConfigVersion(b) {
-		t.Errorf("ConfigVersion not order-independent:\n a=%s\n b=%s", ConfigVersion(a), ConfigVersion(b))
+		t.Errorf("not order-independent:\n a=%s\n b=%s", ConfigVersion(a), ConfigVersion(b))
 	}
-	// A changed field changes the version.
-	c := []model.Monitor{mon("a", "local"), mon("b", "nyc")}
-	c[0].Host = "h2"
-	if ConfigVersion(a) == ConfigVersion(c) {
-		t.Error("ConfigVersion unchanged after Host changed")
+
+	base := ConfigVersion(a)
+	mut := func(f func(x *model.Monitor)) string {
+		x := monP("a", "h", map[string]string{"port": "80", "path": "/x"}, "local")
+		f(&x)
+		return ConfigVersion([]model.Monitor{x, a[1]})
 	}
-	// Format sanity.
-	if v := ConfigVersion(a); len(v) < 8 || v[:7] != "sha256:" {
-		t.Errorf("ConfigVersion format = %q, want sha256: prefix", v)
+	if mut(func(x *model.Monitor) { x.Host = "h2" }) == base {
+		t.Error("host change not reflected")
+	}
+	if mut(func(x *model.Monitor) { x.Pings = 4 }) == base {
+		t.Error("pings change not reflected")
+	}
+	if mut(func(x *model.Monitor) { x.Step = 30 * time.Second }) == base {
+		t.Error("step change not reflected")
+	}
+	if mut(func(x *model.Monitor) { x.ProbeKind = "HTTP" }) == base {
+		t.Error("probe change not reflected")
+	}
+	if mut(func(x *model.Monitor) { x.Params = map[string]string{"port": "80", "path": "/y"} }) == base {
+		t.Error("param value change not reflected")
+	}
+
+	c1 := []model.Monitor{monP("a", "h", map[string]string{"a": "b=c"}, "local")}
+	c2 := []model.Monitor{monP("a", "h", map[string]string{"a=b": "c"}, "local")}
+	if ConfigVersion(c1) == ConfigVersion(c2) {
+		t.Error(`param separator collision: {"a":"b=c"} and {"a=b":"c"} hash equal`)
+	}
+
+	if v := base; len(v) < 8 || v[:7] != "sha256:" {
+		t.Errorf("format = %q, want sha256: prefix", v)
 	}
 }
