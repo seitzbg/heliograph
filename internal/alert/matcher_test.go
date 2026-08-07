@@ -201,3 +201,14 @@ func TestParsePatternRejectsBadTokens(t *testing.T) {
 		}
 	}
 }
+
+// Each *N* skip is individually capped, but their sum sizes the per-target window — a
+// pattern whose aggregate length exceeds the cap must be rejected, not silently huge.
+func TestAggregatePatternLengthRejected(t *testing.T) {
+	if _, err := ParsePattern("rtt", ">0,*10000*,*10000*"); err == nil {
+		t.Fatal("expected an over-cap aggregate pattern length to be rejected")
+	}
+	if _, err := ParsePattern("rtt", ">0,*5*,>0"); err != nil {
+		t.Fatalf("a modest pattern should still be accepted: %v", err)
+	}
+}

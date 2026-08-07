@@ -625,6 +625,11 @@ func ParseMatcher(spec string) (Matcher, error) {
 // window buffer.
 const maxAlertX = 10000
 
+// maxPatternLength bounds a pattern's AGGREGATE window depth (Pattern.Length) — each *N*
+// skip is individually capped at maxAlertX, but their sum could still size a huge per-target
+// buffer, so cap the whole thing at two full skips' worth.
+const maxPatternLength = 2 * maxAlertX
+
 // requireLX validates the l (threshold) and x (consecutive samples) args common to
 // the hysteresis matchers. A missing, zero, non-finite, unknown, or fractional arg
 // would otherwise produce a silently broken alert — x=0 never raises (dead), l=0
