@@ -55,6 +55,41 @@ func login(t *testing.T, mux *http.ServeMux, pass string) *http.Cookie {
 	return nil
 }
 
+func TestAddVantageRejectsInvalidNameAndSetsNoStore(t *testing.T) {
+	srv, _ := adminServer("hunter2")
+	mux := srv.Routes()
+	cookie := login(t, mux, "hunter2")
+
+	// invalid name -> 400 before the store is touched
+	r := httptest.NewRequest("POST", "/api/admin/vantages", strings.NewReader(`{"name":"bad name"}`))
+	r.AddCookie(cookie)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, r)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("invalid vantage name = %d, want 400", w.Code)
+	}
+
+	// valid name -> 200 with Cache-Control: no-store (the one-time key is in the body)
+	r = httptest.NewRequest("POST", "/api/admin/vantages", strings.NewReader(`{"name":"nyc"}`))
+	r.AddCookie(cookie)
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("valid add = %d, want 200", w.Code)
+	}
+	if w.Header().Get("Cache-Control") != "no-store" {
+		t.Errorf("add response Cache-Control = %q, want no-store", w.Header().Get("Cache-Control"))
+	}
+
+	// the login response is also no-store
+	r = httptest.NewRequest("POST", "/api/admin/login", strings.NewReader(`{"password":"hunter2"}`))
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, r)
+	if w.Header().Get("Cache-Control") != "no-store" {
+		t.Errorf("login response Cache-Control = %q, want no-store", w.Header().Get("Cache-Control"))
+	}
+}
+
 func TestAdminDisabledWhenNoPassword(t *testing.T) {
 	srv, _ := adminServer("") // fail-closed
 	mux := srv.Routes()

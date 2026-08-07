@@ -12,6 +12,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -68,8 +69,8 @@ func hashSecret(salt []byte, secret string) []byte {
 // Add mints a fresh key for name — rotating any existing one — and returns the one-time
 // full key `smk_<keyId>_<secret>`. Only the salted hash is stored.
 func (s *Store) Add(ctx context.Context, name string) (string, error) {
-	if name == "" {
-		return "", errors.New("vantage: empty name")
+	if !ValidName(name) {
+		return "", errors.New("vantage: invalid name (use letters, digits, . _ -)")
 	}
 	keyID, err := randHex(6)
 	if err != nil {
@@ -151,7 +152,16 @@ func (s *Store) Revoke(ctx context.Context, name string) (bool, error) {
 	return tag.RowsAffected() > 0, nil
 }
 
+// nameRe restricts vantage identifiers to a safe charset — they flow into API keys, URLs,
+// DB rows, and the YAML agent snippet, so a name can't carry spaces, colons, or newlines.
+var nameRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$`)
+
+// ValidName reports whether name is an acceptable vantage identifier.
+func ValidName(name string) bool { return nameRe.MatchString(name) }
+
 // AgentSnippet renders a ready-to-paste smoke-agent config block for a freshly minted key.
+// Names are validated (ValidName) at mint time, but the scalars are still quoted so the
+// snippet is well-formed YAML regardless of the input.
 func AgentSnippet(name, fullKey string) string {
-	return fmt.Sprintf("# smoke-agent config for vantage %q\n# hub URL: set to your https reverse-proxy endpoint\nvantage: %s\nkey: %s\n", name, name, fullKey)
+	return fmt.Sprintf("# smoke-agent config for vantage %q\n# hub URL: set to your https reverse-proxy endpoint\nvantage: %q\nkey: %q\n", name, name, fullKey)
 }

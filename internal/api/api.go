@@ -565,7 +565,7 @@ func roundsDTO(hist []scheduler.Outcome) []roundDTO {
 	rounds := make([]roundDTO, 0, len(hist))
 	for _, o := range hist {
 		rd := roundDTO{
-			T:     o.When.UTC().Format("2006-01-02T15:04:05Z"),
+			T:     o.When.UTC().Format("2006-01-02T15:04:05.000Z"), // ms precision: the grid cursor is this string parsed to ms; whole seconds let two rounds in one second collide and drop one (#3)
 			Loss:  o.Computed.Loss,
 			Pings: o.Computed.Pings,
 		}
@@ -826,6 +826,7 @@ func (srv *Server) adminLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"invalid password"}`, http.StatusUnauthorized)
 		return
 	}
+	w.Header().Set("Cache-Control", "no-store") // never cache a session-issuing response
 	http.SetCookie(w, &http.Cookie{
 		Name: adminCookie, Value: signSession(srv.AdminKey, time.Now().Add(12*time.Hour)),
 		Path: "/api/admin", HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode, MaxAge: 12 * 3600,
@@ -869,11 +870,16 @@ func (srv *Server) addVantage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"name required"}`, http.StatusBadRequest)
 		return
 	}
+	if !vantage.ValidName(body.Name) {
+		http.Error(w, `{"error":"invalid vantage name (use letters, digits, . _ -)"}`, http.StatusBadRequest)
+		return
+	}
 	key, err := srv.Vantages.Add(r.Context(), body.Name)
 	if err != nil {
 		http.Error(w, `{"error":"store unavailable"}`, http.StatusServiceUnavailable)
 		return
 	}
+	w.Header().Set("Cache-Control", "no-store") // the one-time key is in this body — never cache it
 	writeJSON(w, map[string]any{"name": body.Name, "key": key, "snippet": vantage.AgentSnippet(body.Name, key)})
 }
 
