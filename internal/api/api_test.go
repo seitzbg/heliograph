@@ -25,7 +25,7 @@ const rollupInternalErr = `pq: relation "samples_hourly" does not exist`
 // errRollupStore is a Rollupper whose Rollup always fails with an internal error.
 type errRollupStore struct{ *store.MemStore }
 
-func (errRollupStore) Rollup(context.Context, string, string, time.Time, time.Time) ([]store.RollupPoint, error) {
+func (errRollupStore) Rollup(context.Context, string, string, string, time.Time, time.Time) ([]store.RollupPoint, error) {
 	return nil, errors.New(rollupInternalErr)
 }
 
@@ -49,7 +49,7 @@ func TestRollupHidesInternalError(t *testing.T) {
 // unavailableRollupStore is a Rollupper whose aggregate was never created.
 type unavailableRollupStore struct{ *store.MemStore }
 
-func (unavailableRollupStore) Rollup(context.Context, string, string, time.Time, time.Time) ([]store.RollupPoint, error) {
+func (unavailableRollupStore) Rollup(context.Context, string, string, string, time.Time, time.Time) ([]store.RollupPoint, error) {
 	return nil, store.ErrRollupUnavailable
 }
 
@@ -62,7 +62,7 @@ type resRollupStore struct {
 	gotUntil time.Time
 }
 
-func (rs *resRollupStore) Rollup(_ context.Context, _ string, resolution string, since, until time.Time) ([]store.RollupPoint, error) {
+func (rs *resRollupStore) Rollup(_ context.Context, _, _, resolution string, since, until time.Time) ([]store.RollupPoint, error) {
 	rs.gotRes = resolution
 	rs.gotSince = since
 	rs.gotUntil = until
@@ -574,7 +574,7 @@ type rangeStore struct {
 	gotCutoff time.Time
 }
 
-func (rs *rangeStore) HistorySince(_ context.Context, target string, cutoff time.Time) ([]scheduler.Outcome, error) {
+func (rs *rangeStore) HistorySince(_ context.Context, target, _ string, cutoff time.Time) ([]scheduler.Outcome, error) {
 	rs.called = true
 	rs.gotCutoff = cutoff
 	return []scheduler.Outcome{
@@ -651,26 +651,26 @@ type countingStore struct {
 	latest, latestAll, avail, availAll, seriesAll int
 }
 
-func (c *countingStore) SeriesAll(ctx context.Context, cutoff time.Time) (map[string][]scheduler.Outcome, error) {
+func (c *countingStore) SeriesAll(ctx context.Context, vantage string, cutoff time.Time) (map[string][]scheduler.Outcome, error) {
 	c.seriesAll++
-	return c.MemStore.SeriesAll(ctx, cutoff)
+	return c.MemStore.SeriesAll(ctx, vantage, cutoff)
 }
 
 func (c *countingStore) Latest(k string) (scheduler.Outcome, bool) {
 	c.latest++
 	return c.MemStore.Latest(k)
 }
-func (c *countingStore) LatestAll() (map[string]scheduler.Outcome, error) {
+func (c *countingStore) LatestAll(vantage string) (map[string]scheduler.Outcome, error) {
 	c.latestAll++
-	return c.MemStore.LatestAll()
+	return c.MemStore.LatestAll(vantage)
 }
-func (c *countingStore) Availability(ctx context.Context, t string, cut time.Time, m *float64) (store.AvailabilityStat, error) {
+func (c *countingStore) Availability(ctx context.Context, t, vantage string, cut time.Time, m *float64) (store.AvailabilityStat, error) {
 	c.avail++
-	return c.MemStore.Availability(ctx, t, cut, m)
+	return c.MemStore.Availability(ctx, t, vantage, cut, m)
 }
-func (c *countingStore) AvailabilityAll(ctx context.Context, cut time.Time, m *float64) (map[string]store.AvailabilityStat, error) {
+func (c *countingStore) AvailabilityAll(ctx context.Context, vantage string, cut time.Time, m *float64) (map[string]store.AvailabilityStat, error) {
 	c.availAll++
-	return c.MemStore.AvailabilityAll(ctx, cut, m)
+	return c.MemStore.AvailabilityAll(ctx, vantage, cut, m)
 }
 
 func TestEndpointsUseBulkQueries(t *testing.T) {
@@ -780,7 +780,7 @@ func TestSeriesAllBulk(t *testing.T) {
 // 503, not a false-empty grid (CODE_REVIEW #4 discipline extended to the new endpoint).
 type errSeriesStore struct{ *store.MemStore }
 
-func (errSeriesStore) SeriesAll(context.Context, time.Time) (map[string][]scheduler.Outcome, error) {
+func (errSeriesStore) SeriesAll(context.Context, string, time.Time) (map[string][]scheduler.Outcome, error) {
 	return nil, errors.New("db read failed")
 }
 
@@ -812,7 +812,7 @@ func TestExtraMetricsHook(t *testing.T) {
 // outage. The live endpoints must answer 503, not a false-empty 200 (CODE_REVIEW #4).
 type errLatestStore struct{ *store.MemStore }
 
-func (errLatestStore) LatestAll() (map[string]scheduler.Outcome, error) {
+func (errLatestStore) LatestAll(string) (map[string]scheduler.Outcome, error) {
 	return nil, errors.New("db read failed")
 }
 
@@ -863,5 +863,43 @@ func TestSLAMaxlossRange(t *testing.T) {
 		if c := code("?maxloss=" + ok); c != 200 {
 			t.Errorf("maxloss=%s status = %d, want 200", ok, c)
 		}
+	}
+}
+
+// /api/series?vantage defaults to "local" (unchanged behavior with no param), reads
+// the requested vantage when given, and rejects an invalid name with 400 — the
+// endpoint-level counterpart of the store's #2 isolation regression.
+func TestSeriesVantageParam(t *testing.T) {
+	st := store.NewMem(100)
+	now := time.Now()
+	st.Add([]scheduler.Outcome{
+		{Target: probe.Target{Name: "x", Host: "h"}, ProbeName: "FPing",
+			When: now.Add(-time.Minute), Computed: sample.Compute(2, []float64{0.01, 0.01})}, // Vantage "" -> local
+		{Target: probe.Target{Name: "x", Host: "h"}, ProbeName: "FPing", Vantage: "nyc",
+			When: now.Add(-time.Minute), Computed: sample.Compute(2, []float64{0.05, 0.05})},
+	})
+	srv := New(st, "")
+
+	rounds := func(q string) (int, []map[string]any) {
+		rec := httptest.NewRecorder()
+		srv.Routes().ServeHTTP(rec, httptest.NewRequest("GET", "/api/series?target=x&window=1h"+q, nil))
+		var resp struct {
+			Rounds []map[string]any `json:"rounds"`
+		}
+		_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+		return rec.Code, resp.Rounds
+	}
+
+	// No ?vantage= -> default "local": only the local round, unchanged behavior.
+	if code, rs := rounds(""); code != 200 || len(rs) != 1 || rs[0]["median_ms"].(float64) != 10 {
+		t.Errorf("default vantage: code=%d rounds=%v, want 200/[10ms] (local only)", code, rs)
+	}
+	// ?vantage=nyc -> only the nyc round (never the local one).
+	if code, rs := rounds("&vantage=nyc"); code != 200 || len(rs) != 1 || rs[0]["median_ms"].(float64) != 50 {
+		t.Errorf("vantage=nyc: code=%d rounds=%v, want 200/[50ms] (nyc only)", code, rs)
+	}
+	// Invalid vantage name -> 400.
+	if code, _ := rounds("&vantage=bad%20name"); code != http.StatusBadRequest {
+		t.Errorf("vantage=%q: status = %d, want 400", "bad name", code)
 	}
 }
