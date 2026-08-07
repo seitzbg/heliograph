@@ -4,6 +4,8 @@
 package api
 
 import (
+	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,7 +20,16 @@ import (
 	"smokeping-modern/internal/probe"
 	"smokeping-modern/internal/scheduler"
 	"smokeping-modern/internal/store"
+	"smokeping-modern/internal/vantage"
 )
+
+// VantageAdmin is the subset of the vantage key store the admin API uses. Kept an
+// interface so the handlers test with a fake and api needs no live DB.
+type VantageAdmin interface {
+	Add(ctx context.Context, name string) (fullKey string, err error)
+	List(ctx context.Context) ([]vantage.Info, error)
+	Revoke(ctx context.Context, name string) (removed bool, err error)
+}
 
 type Server struct {
 	store  store.Store
@@ -41,6 +52,13 @@ type Server struct {
 	// probe and round metrics — the webhook notifier wires its delivery counters here
 	// (a plain func so api needs no dependency on the alert package). nil = none.
 	ExtraMetrics func(*strings.Builder)
+	// Vantages, AdminPassword, AdminKey enable the admin key-management API. All three
+	// must be set (Vantages requires -dsn; AdminPassword is SMOKED_ADMIN_PASSWORD; AdminKey
+	// is a random per-process HMAC key). If AdminPassword is "" the admin routes are not
+	// registered at all — fail-closed.
+	Vantages      VantageAdmin
+	AdminPassword string
+	AdminKey      []byte
 }
 
 func New(s store.Store, webDir string) *Server { return &Server{store: s, webDir: webDir} }
@@ -95,6 +113,12 @@ func (srv *Server) Routes() *http.ServeMux {
 	mux.HandleFunc("GET /api/series/all", srv.seriesAll)
 	mux.HandleFunc("GET /api/rollup", srv.rollup)
 	mux.HandleFunc("GET /metrics", srv.metrics)
+	if srv.AdminPassword != "" && srv.Vantages != nil {
+		mux.HandleFunc("POST /api/admin/login", srv.adminLogin)
+		mux.HandleFunc("GET /api/admin/vantages", srv.requireAdmin(srv.listVantages))
+		mux.HandleFunc("POST /api/admin/vantages", srv.requireAdmin(srv.addVantage))
+		mux.HandleFunc("DELETE /api/admin/vantages/{name}", srv.requireAdmin(srv.revokeVantage))
+	}
 	if srv.webDir != "" {
 		// Serve the SPA/static assets at the root (same-origin with the API).
 		mux.Handle("GET /", http.FileServer(http.Dir(srv.webDir)))
@@ -786,4 +810,83 @@ func escapeLabel(s string) string {
 	s = strings.ReplaceAll(s, `"`, `\"`)
 	s = strings.ReplaceAll(s, "\n", `\n`)
 	return s
+}
+
+const adminCookie = "smoked_admin"
+
+func (srv *Server) adminLogin(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&body); err != nil {
+		http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
+		return
+	}
+	if subtle.ConstantTimeCompare([]byte(body.Password), []byte(srv.AdminPassword)) != 1 {
+		http.Error(w, `{"error":"invalid password"}`, http.StatusUnauthorized)
+		return
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name: adminCookie, Value: signSession(srv.AdminKey, time.Now().Add(12*time.Hour)),
+		Path: "/api/admin", HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode, MaxAge: 12 * 3600,
+	})
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (srv *Server) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		c, err := r.Cookie(adminCookie)
+		if err != nil || !verifySession(srv.AdminKey, c.Value, time.Now()) {
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+		next(w, r)
+	}
+}
+
+func (srv *Server) listVantages(w http.ResponseWriter, r *http.Request) {
+	infos, err := srv.Vantages.List(r.Context())
+	if err != nil {
+		http.Error(w, `{"error":"store unavailable"}`, http.StatusServiceUnavailable)
+		return
+	}
+	out := make([]map[string]any, 0, len(infos))
+	for _, in := range infos {
+		var last any
+		if !in.LastSeen.IsZero() {
+			last = in.LastSeen.UTC().Format(time.RFC3339)
+		}
+		out = append(out, map[string]any{"name": in.Name, "created": in.Created.UTC().Format(time.RFC3339), "last_seen": last})
+	}
+	writeJSON(w, map[string]any{"vantages": out})
+}
+
+func (srv *Server) addVantage(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&body); err != nil || body.Name == "" {
+		http.Error(w, `{"error":"name required"}`, http.StatusBadRequest)
+		return
+	}
+	key, err := srv.Vantages.Add(r.Context(), body.Name)
+	if err != nil {
+		http.Error(w, `{"error":"store unavailable"}`, http.StatusServiceUnavailable)
+		return
+	}
+	writeJSON(w, map[string]any{"name": body.Name, "key": key, "snippet": vantage.AgentSnippet(body.Name, key)})
+}
+
+func (srv *Server) revokeVantage(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	removed, err := srv.Vantages.Revoke(r.Context(), name)
+	if err != nil {
+		http.Error(w, `{"error":"store unavailable"}`, http.StatusServiceUnavailable)
+		return
+	}
+	if !removed {
+		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+		return
+	}
+	writeJSON(w, map[string]any{"removed": true, "name": name})
 }
