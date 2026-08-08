@@ -158,6 +158,9 @@
   // the Overview tab remains the authoritative availability/SLA view.
   function targetStatus(t) {
     if (!t) return 'ok';
+    // A configured target with no stored round for this vantage (e.g. a remote-only
+    // target seen from the local view) gets a neutral dot, not a false green (P1-3).
+    if (t.no_data) return 'nodata';
     if (t.error || (t.loss_pct != null && t.loss_pct >= 50)) return 'down';
     if (t.loss_pct != null && t.loss_pct > 0.5) return 'degraded';
     return 'ok';
@@ -417,13 +420,20 @@
         catch (e) { $('statusText').textContent = 'collector unreachable — showing last known'; return; } // keep panels (#2)
         $('statusText').textContent = targets.length + ' targets · updated ' + new Date().toLocaleTimeString();
         // Feed the config-tree menu: the name set it's built from and per-target dot status.
+        // ALL configured targets go in the tree (so a remote-only target is navigable), but
+        // only those with local data get a grid thumbnail — the grid reads the local vantage,
+        // so a no-data (remote-only) target would otherwise show an empty "collecting…" panel
+        // forever. It stays reachable via the tree; its real series shows in the detail view,
+        // which focuses the target's own vantage (CODE_REVIEW #3 / P1-3).
         statusByTarget.clear(); vantagesByTarget.clear();
         for (const t of targets) { statusByTarget.set(t.name, targetStatus(t)); vantagesByTarget.set(t.name, vantageList(t)); }
         treeNames = targets.map((t) => t.name);
+        const gridTargets = targets.filter((t) => !t.no_data);
         // Reconcile ONLY against an authoritative target list (the fetch above succeeded):
-        // drop panels for targets no longer reported (e.g. removed on a SIGHUP reload). A
-        // failed /api/targets returned early, so a transient 503 never blanks the grid (#2).
-        const live = new Set(targets.map((t) => t.name));
+        // drop panels for targets no longer reported (e.g. removed on a SIGHUP reload, or a
+        // target that became no-data). A failed /api/targets returned early, so a transient
+        // 503 never blanks the grid (#2).
+        const live = new Set(gridTargets.map((t) => t.name));
         for (const [name, p] of panels) {
           if (!live.has(name)) { p.el.remove(); panels.delete(name); }
         }
@@ -434,7 +444,7 @@
         const since = gridLoaded ? gridSince([...panels.values()]) : null;
         let bulk = null;
         try { bulk = await fetchGridSeries(since); } catch (e) { /* transient: keep panels */ }
-        await Promise.all(targets.map(async (t) => {
+        await Promise.all(gridTargets.map(async (t) => {
           const p = ensurePanel(t);
           let incoming = null;
           const raw = bulk && bulk.targets && bulk.targets[t.name];
@@ -479,7 +489,7 @@
     // The nav is a pure function of (treeNames, statusByTarget, collapsed, gridScope,
     // navQuery): buildTree nests the names, each folder shows its worst-descendant dot and
     // a subtree count, each leaf its own dot. Rebuilt only when that signature changes.
-    const SEV = { ok: 0, degraded: 1, down: 2 };
+    const SEV = { nodata: 0, ok: 0, degraded: 1, down: 2 };
     function countLeaves(n) { let c = n.target ? 1 : 0; for (const ch of n.children) c += countLeaves(ch); return c; }
     function folderStatus(n) {
       let worst = 'ok';
@@ -620,11 +630,14 @@
       const gp = panels.get(name); if (gp) { const probe = gp.el.querySelector('.probe'); if (probe) $('stackTitle').innerHTML = esc(name) + ' <span class="probe">' + esc(probe.textContent) + '</span>'; }
 
       if (vs.length <= 1) {
-        // Single-vantage: the original code path, byte-for-byte — no fetch fan-out, no
-        // overlays, no chips (renderStackChips() clears #stackVantages via the length<=1 check).
+        // Single-vantage: no fetch fan-out, no overlays, no chips (renderStackChips() clears
+        // #stackVantages via the length<=1 check). Fetch the target's OWN vantage — which may
+        // be a remote one (a `vantages: [nyc]` target has no local data) — not the implicit
+        // local default, else a remote-only target's graphs would be blank (CODE_REVIEW #3 / P1-3).
         renderStackChips();
+        const focus = vs[0] && vs[0] !== 'local' ? vs[0] : '';
         await Promise.all(cells.map(async (c) => {
-          let s = null; try { s = await fetchRange(name, c.key); } catch (e) { /* transient */ }
+          let s = null; try { s = await fetchRange(name, c.key, focus); } catch (e) { /* transient */ }
           if (gen !== stackGen) return; // superseded mid-fetch — don't push/render into a detached/reused cell
           const k = name + '|' + c.key;
           const pick = pickSeries(s, lastGood.get(k)); lastGood.set(k, pick.cache); s = pick.series;
@@ -692,9 +705,11 @@
       zoomVantages = vs;
 
       if (vs.length <= 1) {
-        // Single-vantage: the original code path, byte-for-byte — no overlays, no chips.
+        // Single-vantage: no overlays, no chips. Fetch the target's own vantage (may be a
+        // remote one for a remote-only target), not the implicit local default (P1-3).
         renderZoomChips();
-        let s = null; try { s = await fetchRange(name, range); } catch (e) { /* transient */ }
+        const focus = vs[0] && vs[0] !== 'local' ? vs[0] : '';
+        let s = null; try { s = await fetchRange(name, range, focus); } catch (e) { /* transient */ }
         if (gen !== zoomGen) return; // a newer zoom call superseded this one
         const k = name + '|' + range;
         const pick = pickSeries(s, lastGood.get(k)); lastGood.set(k, pick.cache); s = pick.series; // keep last-good on a transient failure (#5)
@@ -760,7 +775,9 @@
       const vs = zoomVantages.length ? zoomVantages : ['local'];
       let s, byV;
       if (vs.length <= 1) {
-        s = await fetchCustomRange(name, zr, fromMs, toMs, null);
+        // Fetch the single vantage's own data — remote for a remote-only target (P1-3).
+        const focus = vs[0] && vs[0] !== 'local' ? vs[0] : '';
+        s = await fetchCustomRange(name, zr, fromMs, toMs, focus);
       } else {
         const fetched = await Promise.all(vs.map((v) => fetchCustomRange(name, zr, fromMs, toMs, v)));
         if (gen !== zoomGen) return; // superseded mid-fetch — don't touch the shared zoomFocus

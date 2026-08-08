@@ -140,6 +140,46 @@ breaking changes.
   as a real blank span — the median line and smoke bands break across it instead of drawing a
   straight line over the gap.
 
+#### Federation hardening (code review, 2026-08-08)
+- **Pre-vantage databases upgrade cleanly.** Migration now `ADD COLUMN IF NOT EXISTS vantage`
+  before building the `(target, vantage, ts)` index, so a 0.1-era install (created before the
+  vantage column existed) no longer fails startup with “column vantage does not exist”; existing
+  rows backfill to `local`. Covered by a pre-vantage-schema upgrade fixture.
+- **Remote agents honor the hub's probe-level config.** The assignment now carries each target's
+  effective `probes.<Kind>` config and folds it into the config-version hash, and the agent builds
+  probes with it — so DNS `protocol: tcp`, HTTP `method: HEAD`, etc. take effect remotely, and a
+  probe-config change bumps the version (no more stale 304s) instead of silently using defaults.
+- **Remote-only targets are reachable in the UI/API.** `/api/targets` now lists the full
+  configured catalog (with each target's vantages), and `Active`/`Steps` are built from all
+  vantages — so a `vantages: [nyc]` target appears in the tree, its deep link resolves to its own
+  vantage, and `/api/targets?vantage=nyc` / `/charts` / `/sla` no longer drop it. The menu shows a
+  neutral “no data” dot rather than a false green for a target with no data in the viewed vantage.
+- **Agent ingest validates samples and timestamps.** Ingested rounds with non-finite, negative, or
+  absurdly large RTTs/durations, or timestamps beyond an allowed future skew / past horizon, are
+  rejected — so clock skew, an agent bug, or a stolen key can't poison the latest/rollup data.
+- **Alerts evaluate per vantage.** Remote rounds are alert-evaluated after durable ingest; alert
+  windows, firing state, event identity, and webhook idempotency keys now include the vantage, and
+  warm-start seeds each vantage from its own history — so a local outage and an nyc outage on one
+  target fire independently instead of sharing (or deduping) state.
+- **Rollup median weighting excludes lost rounds.** The continuous aggregates expose
+  `median_rounds` (rounds that produced a median) alongside total `rounds`; the detail summary now
+  weights the median by `median_rounds` and loss by total rounds, so a mostly-lost bucket's one
+  slow surviving round no longer skews the long-range median average. (One-time aggregate rebuild.)
+- **`/api/series?vantage=` honored without a window.** The no-window recent-tail path now reads the
+  selected vantage (vantage-aware capped read) instead of always returning local data.
+- **Agent shutdown drains its whole buffer.** The final flush loops over all buffered batches
+  (bounded by a fresh deadline) instead of sending just one — a controlled shutdown after a hub
+  outage no longer strands every buffered round past the first batch.
+- **`smoke-agent` rejects invalid config.** Strict YAML decode (unknown keys error), all
+  file+flag values merged before a single validation, and positive-bound checks — so
+  `flush_max: -1` (which panicked the buffer) and other non-positive/negative values are refused;
+  `agent.Options` is validated at the package boundary too.
+- **Graceful shutdown no longer loses the final local rounds.** `PGStore.Add` bounds its write
+  with a fresh timeout context, not the (already-cancelled) process context, so rounds draining
+  through the dispatcher at shutdown still persist.
+- **Config rejects unprovisionable / duplicate vantage names** at load time (same validator as the
+  key store and read API), instead of leaving a typo'd remote-only target permanently dark.
+
 ### CI / ops
 - **CI hardening.** The pipeline now also enforces `gofmt` and `go mod tidy` cleanliness, runs
   the test suite under the race detector, runs the checked-in Node frontend tests, and runs a

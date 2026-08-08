@@ -81,6 +81,14 @@ CREATE TABLE IF NOT EXISTS samples (
 	duration_ms    double precision
 );
 SELECT create_hypertable('samples', 'ts', if_not_exists => TRUE);
+-- Upgrade a pre-federation database (created before the vantage column existed):
+-- CREATE TABLE IF NOT EXISTS above never alters a table that already exists, so a
+-- 0.1-era 'samples' would still lack the column the unique index below references.
+-- ADD COLUMN IF NOT EXISTS is a no-op on a fresh table (the CREATE already has the
+-- column) and, on an old one, adds it and backfills every existing row to 'local'
+-- (all pre-federation rows were hub-local measurements) — which also keeps
+-- renameLegacyVantage a no-op for them.
+ALTER TABLE samples ADD COLUMN IF NOT EXISTS vantage text NOT NULL DEFAULT 'local';
 CREATE UNIQUE INDEX IF NOT EXISTS samples_target_vantage_ts ON samples (target, vantage, ts);
 DROP INDEX IF EXISTS samples_target_ts;
 `
@@ -130,7 +138,8 @@ var downsampleStmts = []string{
 	        min(median_seconds) AS median_min,
 	        max(median_seconds) AS median_max,
 	        avg(loss::float / NULLIF(pings, 0)) AS loss_frac,
-	        count(*) AS rounds
+	        count(*) AS rounds,
+	        count(median_seconds) AS median_rounds
 	 FROM samples
 	 GROUP BY bucket, target, vantage
 	 WITH NO DATA`,
@@ -148,7 +157,8 @@ var downsampleStmts = []string{
 	        min(median_seconds) AS median_min,
 	        max(median_seconds) AS median_max,
 	        avg(loss::float / NULLIF(pings, 0)) AS loss_frac,
-	        count(*) AS rounds
+	        count(*) AS rounds,
+	        count(median_seconds) AS median_rounds
 	 FROM samples
 	 GROUP BY bucket, target, vantage
 	 WITH NO DATA`,
@@ -169,7 +179,7 @@ var downsampleStmts = []string{
 // their refresh policies, and a 30-day retention policy on the raw samples.
 // Idempotent.
 func (s *PGStore) EnableDownsampling(ctx context.Context) error {
-	if err := s.migrateAggregatesForVantage(ctx); err != nil {
+	if err := s.migrateAggregates(ctx); err != nil {
 		return err
 	}
 	for _, q := range downsampleStmts {
@@ -180,36 +190,38 @@ func (s *PGStore) EnableDownsampling(ctx context.Context) error {
 	return nil
 }
 
-// migrateAggregatesForVantage drops the pre-vantage continuous aggregates so the
-// recreate below can add the vantage GROUP BY. One-time: it only fires when an
-// existing samples_hourly still lacks a vantage column, then the recreate makes
-// the guard false forever after (a fresh DB has no view yet, so it is a no-op).
+// migrateAggregates drops the existing continuous aggregates when their stored shape no
+// longer matches the current definition, so the recreate below can rebuild them. It fires
+// when an existing samples_hourly lacks either the vantage dimension (federation) or the
+// median_rounds column (CODE_REVIEW #6 / P2-6). One-time per change: after the recreate the
+// columns exist and the guard is false forever after (a fresh DB has no view yet — no-op).
 //
-// A TimescaleDB continuous aggregate's GROUP BY can't be altered in place, so this
-// drop+recreate is unavoidable — but on an existing DB it irreversibly loses every
-// daily rollup bucket older than the 30-day raw retention window (the raw rows
-// behind those buckets are already gone, so they can never be rebuilt). This is a
-// one-time long-range-history loss the first time a pre-vantage hub upgrades and
-// calls EnableDownsampling; see the slog.Warn below, logged only when the drop
-// actually fires.
-func (s *PGStore) migrateAggregatesForVantage(ctx context.Context) error {
-	var hasView, hasVantage bool
+// A TimescaleDB continuous aggregate's SELECT/GROUP BY can't be altered in place, so this
+// drop+recreate is unavoidable — but on an existing DB it irreversibly loses every daily
+// rollup bucket older than the 30-day raw retention window (the raw rows behind those
+// buckets are already gone, so they can never be rebuilt). This is a one-time long-range-
+// history loss the first time an older hub upgrades and calls EnableDownsampling; see the
+// slog.Warn below, logged only when the drop actually fires.
+func (s *PGStore) migrateAggregates(ctx context.Context) error {
+	var hasView bool
 	if err := s.pool.QueryRow(ctx, `SELECT to_regclass('samples_hourly') IS NOT NULL`).Scan(&hasView); err != nil {
 		return fmt.Errorf("pgstore: check aggregate: %w", err)
 	}
 	if !hasView {
 		return nil
 	}
+	var hasVantage, hasMedianRounds bool
 	if err := s.pool.QueryRow(ctx, `
-		SELECT EXISTS (SELECT 1 FROM information_schema.columns
-		                WHERE table_name='samples_hourly' AND column_name='vantage')`).Scan(&hasVantage); err != nil {
+		SELECT bool_or(column_name='vantage'), bool_or(column_name='median_rounds')
+		  FROM information_schema.columns WHERE table_name='samples_hourly'`).Scan(&hasVantage, &hasMedianRounds); err != nil {
 		return fmt.Errorf("pgstore: check aggregate columns: %w", err)
 	}
-	if hasVantage {
+	if hasVantage && hasMedianRounds {
 		return nil
 	}
-	slog.Warn("pgstore: rebuilding continuous aggregates to add the vantage dimension; " +
-		"daily rollup buckets older than the raw retention window cannot be rebuilt and will be lost (one-time migration)")
+	slog.Warn("pgstore: rebuilding continuous aggregates to match the current definition " +
+		"(vantage dimension and/or median_rounds); daily rollup buckets older than the raw " +
+		"retention window cannot be rebuilt and will be lost (one-time migration)")
 	for _, q := range []string{
 		`DROP MATERIALIZED VIEW IF EXISTS samples_daily CASCADE`,
 		`DROP MATERIALIZED VIEW IF EXISTS samples_hourly CASCADE`,
@@ -277,9 +289,13 @@ func (s *PGStore) Add(outcomes []scheduler.Outcome) {
 	if len(outcomes) == 0 {
 		return
 	}
-	// Bound the write with a deadline derived from the process context, so a stalled DB
-	// connection can't pin the scheduler worker that holds the target in flight.
-	ctx, cancel := context.WithTimeout(s.ctx, writeTimeout)
+	// Bound the write with a fresh timeout context, NOT the process context: on a graceful
+	// shutdown the process context is already cancelled while the dispatcher drains in-flight
+	// probes, whose completed rounds reach Add. Deriving the deadline from the process context
+	// cancelled those final writes immediately, losing the last local rounds (CODE_REVIEW #10 /
+	// P2-10). writeTimeout still bounds a stalled DB, and the pool is closed only after the
+	// drain (disp.Wait) returns, so a drained write has time to land.
+	ctx, cancel := context.WithTimeout(context.Background(), writeTimeout)
 	defer cancel()
 	br := s.pool.SendBatch(ctx, buildBatch(outcomes))
 	defer br.Close()
@@ -361,10 +377,19 @@ func (s *PGStore) Latest(key string) (scheduler.Outcome, bool) {
 }
 
 // History returns the target's recent LOCAL rounds — see Latest.
+// History returns the target's recent LOCAL rounds (the hub's own vantage), capped to
+// histCap. It delegates to HistoryVantage so the local and per-vantage paths share one query.
 func (s *PGStore) History(key string) ([]scheduler.Outcome, error) {
-	rows, err := s.pool.Query(s.ctx,
+	return s.HistoryVantage(s.ctx, key, store.DefaultVantage)
+}
+
+// HistoryVantage returns the target's most recent rounds for a specific vantage, capped to
+// histCap — the vantage-aware form History delegates to, and the no-window /api/series read
+// so ?vantage=nyc returns nyc's recent rounds rather than local (CODE_REVIEW #7 / P2-7).
+func (s *PGStore) HistoryVantage(ctx context.Context, target, vantage string) ([]scheduler.Outcome, error) {
+	rows, err := s.pool.Query(ctx,
 		`SELECT ts, target, probe, host, vantage, pings, loss, median_seconds, rtts_seconds, err, duration_ms
-		   FROM samples WHERE target=$1 AND vantage='local' ORDER BY ts DESC LIMIT $2`, key, s.histCap)
+		   FROM samples WHERE target=$1 AND vantage=$2 ORDER BY ts DESC LIMIT $3`, target, store.VantageOrDefault(vantage), s.histCap)
 	if err != nil {
 		s.onErr(err)
 		return nil, err
@@ -460,7 +485,7 @@ func (s *PGStore) Rollup(ctx context.Context, target, vantage, resolution string
 	// until means "through now", so a long-range view doesn't transfer every retained
 	// bucket and a drag-zoom fetches only its sub-range. Placeholders are numbered from
 	// the args length so either bound can be absent.
-	q := `SELECT bucket, median_avg, median_min, median_max, loss_frac, rounds
+	q := `SELECT bucket, median_avg, median_min, median_max, loss_frac, rounds, median_rounds
 	        FROM ` + view + ` WHERE target=$1 AND vantage=$2`
 	args := []any{target, store.VantageOrDefault(vantage)}
 	if !since.IsZero() {
@@ -489,7 +514,7 @@ func (s *PGStore) Rollup(ctx context.Context, target, vantage, resolution string
 			p                      store.RollupPoint
 			mAvg, mMin, mMax, loss *float64
 		)
-		if err := rows.Scan(&p.Bucket, &mAvg, &mMin, &mMax, &loss, &p.Rounds); err != nil {
+		if err := rows.Scan(&p.Bucket, &mAvg, &mMin, &mMax, &loss, &p.Rounds, &p.MedianRounds); err != nil {
 			return nil, err
 		}
 		p.MedianAvg = nanIfNil(mAvg)
@@ -750,6 +775,7 @@ var _ interface {
 	store.Rollupper
 	store.Availabler
 	store.RangeHistorier
+	store.RecentHistorier
 	store.LatestAller
 	store.AvailabilityAller
 	store.SeriesAller

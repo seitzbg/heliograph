@@ -7,11 +7,24 @@ package store
 import (
 	"context"
 	"errors"
+	"regexp"
 	"sync"
 	"time"
 
 	"smokeping-modern/internal/scheduler"
 )
+
+// vantageNameRe bounds a vantage identifier: an alphanumeric start, then up to 63 more of
+// alphanumeric / dot / dash / underscore. Lives here (a pgx-free package config, the key
+// store, and the read API all import) so the same rule validates a name everywhere and the
+// agent binary doesn't transitively link the database driver just to check a name.
+var vantageNameRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$`)
+
+// ValidVantageName reports whether name is an acceptable vantage identifier — the single
+// source of truth shared by config loading, key minting, and vantage-scoped reads, so a
+// name that can never be provisioned (e.g. "new york") is rejected at config load rather
+// than leaving a target permanently dark (CODE_REVIEW #11 / P3-11).
+func ValidVantageName(name string) bool { return vantageNameRe.MatchString(name) }
 
 // ErrRollupUnavailable is returned by a Rollupper whose downsampled aggregate has
 // not been created (e.g. a PostgreSQL store started without -downsample, so the
@@ -60,13 +73,19 @@ type ResultIngester interface {
 
 // RollupPoint is one downsampled bucket for a target (hourly or daily). Median
 // values are NaN for buckets that were entirely lost.
+//
+// Rounds is the total rounds in the bucket (weight for loss); MedianRounds is the count
+// of rounds that produced a median — i.e. not fully lost (weight for the median stats).
+// They differ during an outage, and weighting the median by Rounds instead of MedianRounds
+// biases a bucket's median toward its few surviving rounds (CODE_REVIEW #6 / P2-6).
 type RollupPoint struct {
-	Bucket    time.Time
-	MedianAvg float64
-	MedianMin float64
-	MedianMax float64
-	LossFrac  float64
-	Rounds    int
+	Bucket       time.Time
+	MedianAvg    float64
+	MedianMin    float64
+	MedianMax    float64
+	LossFrac     float64
+	Rounds       int
+	MedianRounds int
 }
 
 // Rollupper is implemented by stores that support downsampled reads (the hourly
@@ -113,6 +132,14 @@ type Availabler interface {
 type RangeHistorier interface {
 	HistorySince(ctx context.Context, target, vantage string, cutoff time.Time) ([]scheduler.Outcome, error)
 	HistoryBetween(ctx context.Context, target, vantage string, from, to time.Time) ([]scheduler.Outcome, error)
+}
+
+// RecentHistorier returns a target's most recent rounds for a specific vantage, capped to
+// the configured history cap — like History, but vantage-aware. The no-window /api/series
+// path uses it so ?vantage=nyc returns nyc's recent rounds instead of the local-only
+// History (CODE_REVIEW #7 / P2-7). Returned oldest->newest, like History.
+type RecentHistorier interface {
+	HistoryVantage(ctx context.Context, target, vantage string) ([]scheduler.Outcome, error)
 }
 
 // LatestAller returns every target's most recent outcome in one call. The live
@@ -215,11 +242,16 @@ func (s *MemStore) Latest(key string) (scheduler.Outcome, bool) {
 }
 
 // History returns the target's recent LOCAL rounds — the hub's own vantage. Agent-
-// ingested rounds from other vantages are reached via HistorySince/HistoryBetween.
+// ingested rounds from other vantages are reached via HistoryVantage/HistorySince.
 func (s *MemStore) History(key string) ([]scheduler.Outcome, error) {
+	return s.HistoryVantage(context.Background(), key, DefaultVantage)
+}
+
+// HistoryVantage returns the target's recent rounds for a specific vantage (P2-7).
+func (s *MemStore) HistoryVantage(_ context.Context, target, vantage string) ([]scheduler.Outcome, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	h := s.history[vk{DefaultVantage, key}]
+	h := s.history[vk{VantageOrDefault(vantage), target}]
 	out := make([]scheduler.Outcome, len(h))
 	copy(out, h)
 	return out, nil // in-memory reads never fail
@@ -358,6 +390,7 @@ var (
 	_ ResultIngester    = (*MemStore)(nil)
 	_ Availabler        = (*MemStore)(nil)
 	_ RangeHistorier    = (*MemStore)(nil)
+	_ RecentHistorier   = (*MemStore)(nil)
 	_ LatestAller       = (*MemStore)(nil)
 	_ AvailabilityAller = (*MemStore)(nil)
 	_ SeriesAller       = (*MemStore)(nil)

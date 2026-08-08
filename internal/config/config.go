@@ -398,10 +398,18 @@ func (c *Config) Monitors() ([]model.Monitor, error) {
 				if len(m.Vantages) == 0 {
 					problems = append(problems, fmt.Sprintf("%s: no vantages — an explicit `vantages: []`? every target needs at least one vantage (default is [%s])", path, store.DefaultVantage))
 				}
+				// Reject names that can never be provisioned (a key can't be minted for them,
+				// and ?vantage= reads reject them), and duplicates within one target's list —
+				// both silently leave a target's data unreachable (CODE_REVIEW #11 / P3-11).
+				seenV := make(map[string]bool, len(m.Vantages))
 				for _, v := range m.Vantages {
-					if v == "" {
-						problems = append(problems, fmt.Sprintf("%s: vantages contains a blank entry", path))
+					if !store.ValidVantageName(v) {
+						problems = append(problems, fmt.Sprintf("%s: invalid vantage name %q (letters/digits then letters/digits/._-, max 64)", path, v))
 					}
+					if seenV[v] {
+						problems = append(problems, fmt.Sprintf("%s: duplicate vantage %q", path, v))
+					}
+					seenV[v] = true
 				}
 				out = append(out, m)
 			}

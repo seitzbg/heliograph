@@ -38,9 +38,11 @@ type Server struct {
 	// Rounds, if set, adds collector round-level metrics (duration, size, error
 	// count) to /metrics. Optional; nil in tests and pure-API use.
 	Rounds *RoundStats
-	// Active, if set, returns the set of currently-configured target names. The
-	// live endpoints (targets, charts, sla, metrics) filter the store's keys
-	// through it, so a target removed or renamed on a config reload stops being
+	// Active, if set, returns the set of currently-configured target names across
+	// ALL vantages (not just the hub's locally-probed jobs), so a remote-only
+	// target's stored rows survive the filter for its own vantage (CODE_REVIEW #3 /
+	// P1-3). The live endpoints (targets, charts, sla, metrics) filter the store's
+	// keys through it, so a target removed or renamed on a config reload stops being
 	// reported as healthy — its historical rows remain in the store but are no
 	// longer surfaced in the live views. nil means no filtering (tests/pure API).
 	Active func() map[string]bool
@@ -64,13 +66,25 @@ type Server struct {
 	// -> vantage names) — /api/targets surfaces it so the UI can show which vantages a
 	// target is measured from. nil means the field is omitted (tests/pure API/no federation).
 	TargetVantages func() map[string][]string
+	// Configured, if set, returns the full configured target catalog (all vantages), so
+	// /api/targets lists a target even when it has no stored row for the requested vantage
+	// yet — e.g. a remote-only target the hub never probes locally (CODE_REVIEW #3 / P1-3).
+	// Without it, /api/targets shows only targets that already have a latest row, hiding
+	// remote-only targets from the tree and their deep links. nil = latest-only listing.
+	Configured func() []model.Monitor
 	// VantageAuth, if set, gates the agent routes (requireAgent) behind an API-key check
 	// against the vantage key store. nil means the agent routes are not registered at
 	// all — fail-closed, same pattern as the admin API's AdminPassword gate.
 	VantageAuth VantageAuth
-	// Assignment, if set, returns the target list + config_version for a vantage,
+	// Assignment, if set, returns the target list, the effective probe-level config
+	// (probe kind -> its `probes.<Kind>` block), and a config_version for a vantage,
 	// computed over the live monitor set. Required (with VantageAuth) for the agent routes.
-	Assignment func(vantage string) (targets []model.Monitor, configVersion string)
+	Assignment func(vantage string) (targets []model.Monitor, probeCfgs map[string]map[string]string, configVersion string)
+	// OnIngest, if set, is called with the accepted remote outcomes AFTER they are durably
+	// stored, so the hub evaluates alerts for remote vantages (each outcome carries its
+	// vantage) — the post-ingest hook that closes CODE_REVIEW #5 / P2-5. nil = no alerting
+	// on ingest (e.g. pure API tests).
+	OnIngest func(outcomes []scheduler.Outcome)
 }
 
 func New(s store.Store, webDir string) *Server { return &Server{store: s, webDir: webDir} }
@@ -192,6 +206,35 @@ type targetDTO struct {
 	When     string   `json:"when"`
 	Error    string   `json:"error,omitempty"`
 	Vantages []string `json:"vantages,omitempty"`
+	// NoData marks a configured target that has no stored round for the requested
+	// vantage yet — e.g. a remote-only target before its agent reports. Such a target
+	// is listed (so it appears in the tree and its deep link resolves) but carries no
+	// median/loss/when, and the UI shows a neutral status rather than a false "healthy".
+	NoData bool `json:"no_data,omitempty"`
+}
+
+// latestDTO builds a target DTO from a stored latest round, attaching the target's
+// vantage set. Shared by the live and catalog-driven listings.
+func latestDTO(o scheduler.Outcome, tv map[string][]string) targetDTO {
+	dto := targetDTO{
+		Name:    o.Target.Name,
+		Probe:   o.ProbeName,
+		Loss:    o.Computed.Loss,
+		Pings:   o.Computed.Pings,
+		LossPct: o.Computed.LossFraction() * 100,
+		When:    o.When.UTC().Format("2006-01-02T15:04:05Z"),
+	}
+	if m := fnum(o.Computed.Median); m != nil {
+		ms := *m * 1000
+		dto.MedianMs = &ms
+	}
+	if o.Err != nil {
+		dto.Error = o.Err.Error()
+	}
+	if vs := tv[o.Target.Name]; len(vs) > 0 {
+		dto.Vantages = vs
+	}
+	return dto
 }
 
 func (srv *Server) targets(w http.ResponseWriter, r *http.Request) {
@@ -209,28 +252,34 @@ func (srv *Server) targets(w http.ResponseWriter, r *http.Request) {
 	if srv.TargetVantages != nil {
 		tv = srv.TargetVantages()
 	}
-	var out []targetDTO
+	byName := make(map[string]scheduler.Outcome, len(latest))
 	for _, o := range latest {
-		dto := targetDTO{
-			Name:    o.Target.Name,
-			Probe:   o.ProbeName,
-			Loss:    o.Computed.Loss,
-			Pings:   o.Computed.Pings,
-			LossPct: o.Computed.LossFraction() * 100,
-			When:    o.When.UTC().Format("2006-01-02T15:04:05Z"),
-		}
-		if m := fnum(o.Computed.Median); m != nil {
-			ms := *m * 1000
-			dto.MedianMs = &ms
-		}
-		if o.Err != nil {
-			dto.Error = o.Err.Error()
-		}
-		if vs := tv[o.Target.Name]; len(vs) > 0 {
-			dto.Vantages = vs
-		}
-		out = append(out, dto)
+		byName[o.Target.Name] = o
 	}
+	var out []targetDTO
+	if srv.Configured != nil {
+		// Catalog-driven: list every configured target so remote-only targets (no local
+		// row) still appear and their deep links resolve; merge live data where present,
+		// otherwise emit a no-data entry carrying the target's vantage set (CODE_REVIEW #3).
+		for _, m := range srv.Configured() {
+			if o, ok := byName[m.Name]; ok {
+				out = append(out, latestDTO(o, tv))
+				continue
+			}
+			dto := targetDTO{Name: m.Name, Probe: m.ProbeKind, NoData: true}
+			if vs := tv[m.Name]; len(vs) > 0 {
+				dto.Vantages = vs
+			} else if len(m.Vantages) > 0 {
+				dto.Vantages = m.Vantages
+			}
+			out = append(out, dto)
+		}
+	} else {
+		for _, o := range latest {
+			out = append(out, latestDTO(o, tv))
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	writeJSON(w, map[string]any{"targets": out})
 }
 
@@ -604,7 +653,16 @@ func (srv *Server) series(w http.ResponseWriter, r *http.Request) {
 			hist = h
 		}
 	} else {
-		h, err := srv.store.History(key)
+		// No window: the recent capped tail for the SELECTED vantage. Use the vantage-aware
+		// read when the store supports it so ?vantage=nyc returns nyc's rounds, not the
+		// local-only History (CODE_REVIEW #7 / P2-7); a bare store degrades to local History.
+		var h []scheduler.Outcome
+		var err error
+		if rv, ok := srv.store.(store.RecentHistorier); ok {
+			h, err = rv.HistoryVantage(r.Context(), key, vant)
+		} else {
+			h, err = srv.store.History(key)
+		}
 		if err != nil {
 			slog.Error("series query failed", "target", key, "err", err)
 			http.Error(w, `{"error":"series unavailable"}`, http.StatusServiceUnavailable)
@@ -714,6 +772,9 @@ type rollupDTO struct {
 	MedianMaxMs *float64 `json:"median_max_ms"`
 	LossPct     float64  `json:"loss_pct"`
 	Rounds      int      `json:"rounds"`
+	// MedianRounds is the rounds that produced a median (not fully lost) — the weight the
+	// client uses for median statistics, distinct from Rounds (loss weight) (P2-6).
+	MedianRounds int `json:"median_rounds"`
 }
 
 func msPtr(seconds float64) *float64 {
@@ -787,12 +848,13 @@ func (srv *Server) rollup(w http.ResponseWriter, r *http.Request) {
 	buckets := make([]rollupDTO, 0, len(points))
 	for _, p := range points {
 		buckets = append(buckets, rollupDTO{
-			Bucket:      p.Bucket.UTC().Format("2006-01-02T15:04:05Z"),
-			MedianAvgMs: msPtr(p.MedianAvg),
-			MedianMinMs: msPtr(p.MedianMin),
-			MedianMaxMs: msPtr(p.MedianMax),
-			LossPct:     p.LossFrac * 100,
-			Rounds:      p.Rounds,
+			Bucket:       p.Bucket.UTC().Format("2006-01-02T15:04:05Z"),
+			MedianAvgMs:  msPtr(p.MedianAvg),
+			MedianMinMs:  msPtr(p.MedianMin),
+			MedianMaxMs:  msPtr(p.MedianMax),
+			LossPct:      p.LossFrac * 100,
+			Rounds:       p.Rounds,
+			MedianRounds: p.MedianRounds,
 		})
 	}
 	writeJSON(w, map[string]any{"target": key, "resolution": res, "buckets": buckets})

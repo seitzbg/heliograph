@@ -4,13 +4,20 @@
 package agentwire
 
 // AssignmentTarget is one monitor target handed to a vantage agent.
+//
+// Params are per-target probe params (the target's `params:` block); ProbeConfig
+// is the hub's effective probe-level config for this target's kind (the
+// `probes.<Kind>` block) so a remote agent constructs the probe with the same
+// settings the hub uses locally — e.g. DNS protocol tcp, HTTP method HEAD —
+// instead of bare probe defaults (CODE_REVIEW #2 / P1-2).
 type AssignmentTarget struct {
-	Name   string            `json:"name"`
-	Probe  string            `json:"probe"`
-	Host   string            `json:"host"`
-	Params map[string]string `json:"params,omitempty"`
-	StepMs int64             `json:"step_ms"`
-	Pings  int               `json:"pings"`
+	Name        string            `json:"name"`
+	Probe       string            `json:"probe"`
+	Host        string            `json:"host"`
+	Params      map[string]string `json:"params,omitempty"`
+	ProbeConfig map[string]string `json:"probe_config,omitempty"`
+	StepMs      int64             `json:"step_ms"`
+	Pings       int               `json:"pings"`
 }
 
 // Assignment is the response body for GET /agent/v1/assignment: the full

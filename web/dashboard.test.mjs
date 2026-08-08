@@ -191,6 +191,9 @@ check('targetStatus maps a DTO to a dot severity', () => {
   assert.equal(D.targetStatus({ loss_pct: 0.5 }), 'ok');
   assert.equal(D.targetStatus({ loss_pct: 0 }), 'ok');
   assert.equal(D.targetStatus(null), 'ok');
+  // A configured target with no stored round for this vantage is neutral, not a false green (P1-3).
+  assert.equal(D.targetStatus({ no_data: true }), 'nodata');
+  assert.equal(D.targetStatus({ no_data: true, loss_pct: 0 }), 'nodata');
 });
 
 // parseRoute: the Graphs view carries an optional folder scope for the config-tree menu,

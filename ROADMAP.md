@@ -52,9 +52,10 @@ sketch; agents poll a versioned assignment (`304` when unchanged); keys are mana
   content-version hash for the `304` check
 - ✅ Vantage API-key store (salted-hash, constant-time verify) + `smoked vantage add/ls/revoke`
   CLI + a password-gated `/api/admin/vantages` API with a session login
-- ✅ Agent-facing endpoints: `GET /agent/v1/assignment` (304-aware) + `POST /agent/v1/results`
-  (API-key auth); vantage-aware storage reads + continuous aggregates (default `local`) so
-  multi-vantage data no longer conflates
+- ✅ Agent-facing endpoints: `GET /agent/v1/assignment` (304-aware, carries effective probe-level
+  config) + `POST /agent/v1/results` (API-key auth, validated + idempotent ingest); vantage-aware
+  storage reads + continuous aggregates (default `local`) so multi-vantage data no longer
+  conflates; remote rounds are alert-evaluated per vantage after durable ingest
 - ✅ `smoke-agent` binary: pull assignment → probe → push results + in-memory store-and-forward
 - ✅ Per-vantage overlay graphs (the `~slave` equivalent) in the detail views — a median line per
   vantage, the smoke band on the focused one, a chip legend/selector

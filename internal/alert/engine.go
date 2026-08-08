@@ -35,6 +35,7 @@ type Alert struct {
 // Event is emitted when an alert changes/holds state for a target.
 type Event struct {
 	Target  string    `json:"target"`
+	Vantage string    `json:"vantage,omitempty"` // measuring vantage; "local" is the hub's own
 	Alert   string    `json:"alert"`
 	Comment string    `json:"comment"`
 	Firing  bool      `json:"firing"` // true = raised, false = resolved
@@ -53,7 +54,27 @@ func (e Event) Status() string {
 // Notifier delivers an event.
 type Notifier interface{ Notify(Event) }
 
-// Engine tracks per-target sample windows and per-(target,alert) firing state.
+// winKey and stKey namespace engine state by vantage, so one target measured from
+// several vantages keeps independent sample windows and firing state: a local outage
+// and an nyc outage on the same target never share hysteresis, and their events never
+// dedupe each other (CODE_REVIEW #5 / P2-5). The hub's own measurements use "local".
+func winKey(vantage, target string) string { return vantage + "\x00" + target }
+func stKey(vantage, target, name string) string {
+	return vantage + "\x00" + target + "\x00" + name
+}
+
+// splitStateKey extracts (target, name) from a vantage\x00target\x00name state key,
+// discarding the vantage prefix — the two fields InheritStateFrom filters on.
+func splitStateKey(key string) (target, name string, ok bool) {
+	parts := strings.SplitN(key, "\x00", 3)
+	if len(parts) != 3 {
+		return "", "", false
+	}
+	return parts[1], parts[2], true
+}
+
+// Engine tracks per-(vantage,target) sample windows and per-(vantage,target,alert)
+// firing state.
 type Engine struct {
 	mu        sync.Mutex
 	alerts    map[string]*Alert
@@ -103,17 +124,21 @@ func (e *Engine) InheritStateFrom(prev *Engine, validTargets map[string]bool) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	for target, w := range prev.win {
+	for key, w := range prev.win {
+		_, target, ok := strings.Cut(key, "\x00") // key is vantage\x00target
+		if !ok {
+			continue
+		}
 		if validTargets != nil && !validTargets[target] {
 			continue
 		}
-		e.win[target] = &Window{
+		e.win[key] = &Window{
 			Loss: append([]float64(nil), w.Loss...),
 			RTT:  append([]float64(nil), w.RTT...),
 		}
 	}
 	for key, firing := range prev.state {
-		target, name, ok := strings.Cut(key, "\x00")
+		target, name, ok := splitStateKey(key) // key is vantage\x00target\x00name
 		if !ok {
 			continue
 		}
@@ -128,7 +153,7 @@ func (e *Engine) InheritStateFrom(prev *Engine, validTargets map[string]bool) {
 	// Carry the delivered-firing view too, so a reload mid-inhibition neither
 	// resurrects an orphan RESOLVED nor drops a real one.
 	for key, vis := range prev.visible {
-		target, name, ok := strings.Cut(key, "\x00")
+		target, name, ok := splitStateKey(key)
 		if !ok {
 			continue
 		}
@@ -142,17 +167,19 @@ func (e *Engine) InheritStateFrom(prev *Engine, validTargets map[string]bool) {
 	}
 }
 
-// Evaluate pushes a new sample for target, runs the attached alerts, updates
-// state, and returns any events produced this round.
-func (e *Engine) Evaluate(target string, alertNames []string, lossPct, rttSec float64, when time.Time) []Event {
+// Evaluate pushes a new sample for (target, vantage), runs the attached alerts, updates
+// state, and returns any events produced this round. Each vantage keeps an independent
+// window and firing state, so alerts fire per measuring location (P2-5).
+func (e *Engine) Evaluate(target, vantage string, alertNames []string, lossPct, rttSec float64, when time.Time) []Event {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
 	cap := e.windowCap(alertNames)
-	w := e.win[target]
+	wk := winKey(vantage, target)
+	w := e.win[wk]
 	if w == nil {
 		w = &Window{}
-		e.win[target] = w
+		e.win[wk] = w
 	}
 	w.Loss = appendCap(w.Loss, lossPct, cap)
 	w.RTT = appendCap(w.RTT, rttSec, cap)
@@ -173,7 +200,7 @@ func (e *Engine) Evaluate(target string, alertNames []string, lossPct, rttSec fl
 		if a == nil {
 			continue
 		}
-		key := target + "\x00" + name
+		key := stKey(vantage, target, name)
 		prev := e.state[key]
 		now := a.Matcher.Test(*w, prev)
 		e.state[key] = now
@@ -194,7 +221,7 @@ func (e *Engine) Evaluate(target string, alertNames []string, lossPct, rttSec fl
 	var events []Event
 	rttms := rttSec * 1000
 	for _, p := range pend {
-		key := target + "\x00" + p.a.Name
+		key := stKey(vantage, target, p.a.Name)
 		if p.firing {
 			// Suppress while a strictly-higher-priority alert fires on this target.
 			if p.a.Priority >= 1 && topFiring != 0 && p.a.Priority > topFiring {
@@ -216,7 +243,7 @@ func (e *Engine) Evaluate(target string, alertNames []string, lossPct, rttSec fl
 			e.visible[key] = false
 		}
 		events = append(events, Event{
-			Target: target, Alert: p.a.Name, Comment: p.a.Comment, Firing: p.firing,
+			Target: target, Vantage: vantage, Alert: p.a.Name, Comment: p.a.Comment, Firing: p.firing,
 			LossPct: lossPct, RTTms: rttms, When: when,
 		})
 	}
@@ -292,11 +319,11 @@ func (e *Engine) windowCap(alertNames []string) int {
 // fire on its first new round instead of waiting X fresh samples — the durable-store
 // replacement for SmokePing's S startup sentinel. It seeds only the window, never firing
 // state, so it emits no events by itself; a reload carries state via InheritStateFrom.
-func (e *Engine) SeedWindow(target string, alertNames []string, loss, rtt []float64) {
+func (e *Engine) SeedWindow(target, vantage string, alertNames []string, loss, rtt []float64) {
 	cap := e.windowCap(alertNames)
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.win[target] = &Window{Loss: tailCopy(loss, cap), RTT: tailCopy(rtt, cap)}
+	e.win[winKey(vantage, target)] = &Window{Loss: tailCopy(loss, cap), RTT: tailCopy(rtt, cap)}
 }
 
 // tailCopy returns a fresh slice holding the last n elements of s (all of s if shorter).
@@ -317,8 +344,12 @@ func (n LogNotifier) Notify(e Event) {
 	if math.IsNaN(e.RTTms) {
 		rtt = "--"
 	}
+	target := e.Target
+	if e.Vantage != "" {
+		target = e.Target + "@" + e.Vantage
+	}
 	fmt.Fprintf(n.W, "[ALERT %s] %s / %s — %s (loss %.0f%%, rtt %s) @ %s\n",
-		e.Status(), e.Target, e.Alert, e.Comment, e.LossPct, rtt, e.When.Format(time.RFC3339))
+		e.Status(), target, e.Alert, e.Comment, e.LossPct, rtt, e.When.Format(time.RFC3339))
 }
 
 // WebhookNotifier POSTs each event as JSON through a bounded worker pool with
@@ -420,6 +451,7 @@ func NewWebhookNotifierConfig(url string, client *http.Client, cfg WebhookConfig
 // POSTed an empty request for exactly the outage case alerting matters most.
 type webhookPayload struct {
 	Target  string    `json:"target"`
+	Vantage string    `json:"vantage,omitempty"`
 	Alert   string    `json:"alert"`
 	Comment string    `json:"comment"`
 	Firing  bool      `json:"firing"`
@@ -436,7 +468,7 @@ func (n *WebhookNotifier) Notify(e Event) {
 		rtt = &v
 	}
 	body, err := json.Marshal(webhookPayload{
-		Target: e.Target, Alert: e.Alert, Comment: e.Comment, Firing: e.Firing,
+		Target: e.Target, Vantage: e.Vantage, Alert: e.Alert, Comment: e.Comment, Firing: e.Firing,
 		Status: strings.ToLower(e.Status()), LossPct: e.LossPct, RTTms: rtt, When: e.When,
 	})
 	if err != nil {
@@ -462,9 +494,10 @@ func (n *WebhookNotifier) Notify(e Event) {
 }
 
 // idemKey is a stable per-event key, so every retry and every level-triggered repeat
-// of the same event carries one X-Idempotency-Key the receiver can dedupe on.
+// of the same event carries one X-Idempotency-Key the receiver can dedupe on. Vantage
+// is part of the identity so the same alert firing from two vantages isn't deduped to one.
 func idemKey(e Event) string {
-	return fmt.Sprintf("%s|%s|%s|%d", e.Target, e.Alert, strings.ToLower(e.Status()), e.When.UnixNano())
+	return fmt.Sprintf("%s|%s|%s|%s|%d", e.Vantage, e.Target, e.Alert, strings.ToLower(e.Status()), e.When.UnixNano())
 }
 
 func (n *WebhookNotifier) worker() {
