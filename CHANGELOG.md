@@ -15,7 +15,7 @@ breaking changes.
   `smoked vantage add/ls/revoke` mints a one-time key (salted-hash at rest, constant-time verify)
   — with a password-gated `/api/admin/vantages` API + session login (`SMOKED_ADMIN_PASSWORD`,
   fail-closed). Dark until an agent connects; federation requires `-dsn`. Still to come: the
-  bundled reverse proxy and a Vantages admin GUI panel.
+  bundled reverse proxy.
 - **Federation: agent endpoints + `smoke-agent` remote collector.** Agents authenticate with a
   per-vantage API key and pull `GET /agent/v1/assignment` (304-aware via `config_version`), then
   `POST /agent/v1/results`; the hub is authoritative for probe/host and ingests idempotently. The
@@ -26,6 +26,12 @@ breaking changes.
   vantage's median line (distinct colors) in the detail views, with a chip legend that doubles as
   a focus selector; the smoke band renders for the focused vantage. Single-vantage targets and the
   Graphs grid are unchanged.
+- **Vantages admin panel.** A login-gated **Vantages** tab manages federation vantages over the
+  password-gated admin API: add (one-time key + agent-snippet reveal), list (name, created,
+  last-seen, target count), regenerate, and revoke. `/api/admin/vantages` now reports a
+  per-vantage **target count**. The admin session cookie is `Secure`, so the panel logs in only
+  over HTTPS (via the reverse proxy) or `localhost`, and it says so explicitly if the cookie
+  can't be set. Disabled (with a notice) when `SMOKED_ADMIN_PASSWORD` is unset.
 - **Config-tree menu** in the Graphs view: a left nav built from the target name paths
   (collapsible folders with worst-child status dots + subtree counts, a filter box, and a
   deep-linkable subtree scope that also scopes the unison Y-axis).
