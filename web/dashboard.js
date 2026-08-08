@@ -866,17 +866,18 @@
     $('vantLogin').addEventListener('submit', async (e) => {
       e.preventDefault();
       $('vantLoginErr').textContent = '';
+      const pass = $('vantPass').value;
+      $('vantPass').value = ''; // clear immediately — don't leave the password in the field
       let lr;
       try {
         lr = await fetch('/api/admin/login', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ password: $('vantPass').value }),
+          body: JSON.stringify({ password: pass }),
         });
       } catch (err) { $('vantLoginErr').textContent = 'Network error.'; return; }
-      $('vantPass').value = ''; // don't leave the password in the field
       if (lr.status === 401) { $('vantLoginErr').textContent = 'Invalid password.'; return; }
       if (lr.status !== 204) { $('vantLoginErr').textContent = 'Login failed (HTTP ' + lr.status + ').'; return; }
-      renderVantages({ afterLogin: true }); // re-fetch; the afterLogin probe catches a lost cookie
+      renderVantages({ afterLogin: true });
     });
 
     // ---- routing ----
