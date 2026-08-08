@@ -37,7 +37,8 @@ Full design rationale and the original-system code map live at `~/.claude/plans/
 - ✅ Preserve alert firing state across config reload (reload inherits firing state + sample windows, so alerts don't re-fire or lose hysteresis history)
 
 ## Phase 4 — Federation (multi-vantage) 🚧 in progress
-Hub-side groundwork is in place; the agent and the agent-facing endpoints are next.
+The hub, the `smoke-agent` remote collector, and the per-vantage overlay UI are in; a Vantages
+admin GUI panel, the bundled reverse proxy, and docs remain.
 
 Design (settled): the hub **assigns** work — agents pull a strict, schema-validated assignment
 (no eval of server-sent config); targets declare `vantages: [...]` (inherited, default
@@ -51,10 +52,15 @@ sketch; agents poll a versioned assignment (`304` when unchanged); keys are mana
   content-version hash for the `304` check
 - ✅ Vantage API-key store (salted-hash, constant-time verify) + `smoked vantage add/ls/revoke`
   CLI + a password-gated `/api/admin/vantages` API with a session login
-- ⬜ Agent-facing endpoints: `GET /agent/v1/assignment` (304-aware) + `POST /agent/v1/results`
-- ⬜ `smoke-agent` binary: pull assignment → probe → push results + store-and-forward buffering
-- ⬜ Per-vantage series (the `~slave` equivalent) overlay graphs + a Vantages admin GUI panel
+- ✅ Agent-facing endpoints: `GET /agent/v1/assignment` (304-aware) + `POST /agent/v1/results`
+  (API-key auth); vantage-aware storage reads + continuous aggregates (default `local`) so
+  multi-vantage data no longer conflates
+- ✅ `smoke-agent` binary: pull assignment → probe → push results + in-memory store-and-forward
+- ✅ Per-vantage overlay graphs (the `~slave` equivalent) in the detail views — a median line per
+  vantage, the smoke band on the focused one, a chip legend/selector
+- ⬜ Vantages admin GUI panel (over the `/api/admin/vantages/*` API)
 - ⬜ Bundled Caddy (Let's Encrypt) + documented external-reverse-proxy deployment
+- ⬜ Docs: README + an operator guide (provision a vantage end-to-end)
 
 ## Phase 5 — Parity & polish 🚧
 - ✅ Richer alert DSL — pattern `*N*` skip, bare `*`, `U` token, priority suppression,
