@@ -289,8 +289,9 @@
     <p class="lede">Federation vantages and their agent API keys. Managing keys requires the admin password.</p>
 
     <div id="vantDisabled" class="panel vadmin-note hidden">
-      Admin key management is disabled. Set <code>SMOKED_ADMIN_PASSWORD</code> on the hub to enable this
-      panel, or provision from the host with <code>smoked vantage add / ls / revoke</code>.
+      Admin key management is disabled. It requires federation (<code>-dsn</code>) and
+      <code>SMOKED_ADMIN_PASSWORD</code> on the hub; or provision from the host with
+      <code>smoked vantage add / ls / revoke</code> (also needs <code>-dsn</code>).
     </div>
 
     <form id="vantLogin" class="panel vadmin-row hidden" autocomplete="off">

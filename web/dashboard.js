@@ -900,7 +900,8 @@
         reportMintError(isRegen, msg);
         return;
       }
-      const data = await r.json();
+      let data;
+      try { data = await r.json(); } catch (e) { reportMintError(isRegen, 'Malformed server response.'); return; }
       $('vantName').value = '';
       $('vantAddErr').textContent = '';
       showReveal(data.name, data.snippet || data.key || '');
@@ -971,6 +972,8 @@
     }
     function currentView() { return parseRoute(location.hash).view; }
     function route() {
+      // Never leave a one-time key in the DOM across navigations: clear any open reveal.
+      { const rev = $('vantReveal'); if (rev && !rev.classList.contains('hidden')) { $('vantRevealSnippet').textContent = ''; rev.classList.add('hidden'); } }
       const r = parseRoute(location.hash);
       if (r.view === 'overview') { setTabs('overview'); show('viewOverview'); refreshOverview(); }
       else if (r.view === 'graphs') { gridScope = r.path || ''; setTabs('graphs'); show('viewGraphs'); renderScope(); renderTree(); renderGridPanels(); refreshGrid(); }
