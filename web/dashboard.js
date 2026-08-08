@@ -40,6 +40,7 @@
       const path = new URLSearchParams(h).get('path') || '';
       return path ? { view: 'graphs', path } : { view: 'graphs' };
     }
+    if (h === 'vantages') return { view: 'vantages' };
     return { view: 'overview' };
   }
 
@@ -813,12 +814,63 @@
       if (vs.length > 1) renderZoomChips();
     }
 
+    // ---- Vantages admin panel (federation): thin client over /api/admin/*. The first
+    // GET decides the mode (disabled / login / list / error) via Dash.adminMode. ----
+    const vadmin = { rows: [] };
+    function vShow(id) {
+      for (const s of ['vantDisabled', 'vantLogin', 'vantList', 'vantError']) $(s).classList.toggle('hidden', s !== id);
+    }
+    function renderVantageRows() {
+      const now = Date.now();
+      if (!vadmin.rows.length) {
+        $('vantRows').innerHTML = '<tr><td colspan="5" class="vadmin-empty">No vantages yet — add one below.</td></tr>';
+        return;
+      }
+      $('vantRows').innerHTML = vadmin.rows.map((v) => {
+        const nm = esc(v.name);
+        const created = v.created ? new Date(v.created).toLocaleDateString([], { year: 'numeric', month: 'short', day: 'numeric' }) : '—';
+        const seen = Dash.relTime(v.last_seen, now);
+        const tgts = (v.targets == null) ? '—' : String(v.targets);
+        return '<tr><td>' + nm + '</td><td>' + created + '</td><td>' + seen + '</td><td>' + tgts +
+          '</td><td style="text-align:right; white-space:nowrap">' +
+          '<button class="vadmin-btn" data-regen="' + nm + '">Regenerate</button>' +
+          '<button class="vadmin-btn" data-revoke="' + nm + '">Revoke</button></td></tr>';
+      }).join('');
+    }
+    async function renderVantages(opts) {
+      const afterLogin = !!(opts && opts.afterLogin);
+      let r;
+      try { r = await fetch('/api/admin/vantages', { cache: 'no-store' }); }
+      catch (e) { vShow('vantError'); return; }
+      const mode = Dash.adminMode(r.status);
+      if (mode === 'disabled') { vShow('vantDisabled'); return; }
+      if (mode === 'error') { vShow('vantError'); return; }
+      if (mode === 'login') {
+        vShow('vantLogin');
+        // Secure-cookie probe: a 204 login followed by a 401 here means the session cookie
+        // didn't stick (plain-HTTP LAN, not a secure context). Make that legible.
+        $('vantLoginErr').textContent = afterLogin
+          ? "Login didn't persist — the admin session needs a secure context (HTTPS via the proxy, or localhost). You are on " + location.origin + '.'
+          : '';
+        if (!afterLogin) $('vantPass').focus();
+        return;
+      }
+      // mode === 'list'
+      let data;
+      try { data = await r.json(); } catch (e) { vShow('vantError'); return; }
+      vadmin.rows = data.vantages || [];
+      renderVantageRows();
+      vShow('vantList');
+    }
+    $('vantRetry').addEventListener('click', () => renderVantages());
+
     // ---- routing ----
-    function show(id) { for (const v of ['viewOverview', 'viewGraphs', 'viewStack', 'viewZoom']) $(v).classList.toggle('hidden', v !== id); }
+    function show(id) { for (const v of ['viewOverview', 'viewGraphs', 'viewStack', 'viewZoom', 'viewVantages']) $(v).classList.toggle('hidden', v !== id); }
     function setTabs(view) {
       const g = (view === 'graphs' || view === 'stack' || view === 'zoom');
       $('tabOverview').setAttribute('aria-selected', String(view === 'overview'));
       $('tabGraphs').setAttribute('aria-selected', String(g));
+      $('tabVantages').setAttribute('aria-selected', String(view === 'vantages'));
     }
     function currentView() { return parseRoute(location.hash).view; }
     function route() {
@@ -827,6 +879,7 @@
       else if (r.view === 'graphs') { gridScope = r.path || ''; setTabs('graphs'); show('viewGraphs'); renderScope(); renderTree(); renderGridPanels(); refreshGrid(); }
       else if (r.view === 'stack') { setTabs('stack'); show('viewStack'); renderStack(r.name); }
       else if (r.view === 'zoom') { setTabs('zoom'); show('viewZoom'); renderZoom(r.name, r.range); }
+      else if (r.view === 'vantages') { setTabs('vantages'); show('viewVantages'); renderVantages(); }
       $('statusText').textContent = (r.view === 'stack' || r.view === 'zoom') ? r.name : $('statusText').textContent;
       window.scrollTo(0, 0);
     }
@@ -836,6 +889,7 @@
     // ---- events ----
     $('tabOverview').addEventListener('click', () => nav('overview'));
     $('tabGraphs').addEventListener('click', () => nav('graphs'));
+    $('tabVantages').addEventListener('click', () => nav('vantages'));
     $('backStack').addEventListener('click', () => { if (history.length > 1) history.back(); else nav('graphs'); });
     $('backZoom').addEventListener('click', () => { if (history.length > 1) history.back(); else nav('target=' + enc(curTarget || '')); });
     $('worstSeg').addEventListener('click', (e) => { const b = e.target.closest('button'); if (!b) return; worstBy = b.dataset.by; document.querySelectorAll('#worstSeg button').forEach((x) => x.setAttribute('aria-pressed', String(x === b))); refreshWorst(); });
