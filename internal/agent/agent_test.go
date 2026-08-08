@@ -157,3 +157,58 @@ func TestAgentRunRetriesOnPushFailure(t *testing.T) {
 		t.Fatalf("expected at least 3 push attempts (2 failures + success), got %d", attempts)
 	}
 }
+
+// TestAgentRunTerminatesPromptlyOnCancel guards against a shutdown hang: after
+// the fix that makes flushLoop wait for measureLoop's drain signal before its
+// final flush (a bounded wait — see awaitMeasureDrain), Run must still return
+// quickly when nothing is stuck (a healthy hub, a fast probe). This does not
+// assert the internal drain ORDERING (that's a timing window, not something a
+// deterministic test can pin without flaking); it asserts the externally
+// observable, deterministic property that actually matters: Run doesn't hang.
+func TestAgentRunTerminatesPromptlyOnCancel(t *testing.T) {
+	const cv = "sha256:v3"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/agent/v1/assignment":
+			if r.Header.Get("If-None-Match") == cv {
+				w.WriteHeader(http.StatusNotModified)
+				return
+			}
+			w.Header().Set("ETag", cv)
+			_ = json.NewEncoder(w).Encode(agentwire.Assignment{
+				Vantage: "nyc", ConfigVersion: cv,
+				Targets: []agentwire.AssignmentTarget{{Name: "t1", Probe: "AgentTestEcho", Host: "h", StepMs: 1000, Pings: 3}},
+			})
+		case "/agent/v1/results":
+			var req agentwire.ResultsRequest
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			_ = json.NewEncoder(w).Encode(agentwire.ResultsResponse{Accepted: len(req.Results)})
+		}
+	}))
+	defer srv.Close()
+
+	a := New(Options{Hub: srv.URL, Key: "smk_k_s", Vantage: "nyc", Interval: 50 * time.Millisecond,
+		Timeout: time.Second, Workers: 4, BufferCap: 1000, FlushMax: 100})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		_ = a.Run(ctx)
+		close(done)
+	}()
+
+	time.Sleep(300 * time.Millisecond) // let poll + at least one measure tick happen
+	cancelAt := time.Now()
+	cancel()
+
+	const hangBound = 5 * time.Second // drainWait(5s) + finalFlushTTL(5s) is the worst-case
+	// bound with a stuck probe; a healthy hub + fast probe should return in
+	// well under a second, so 5s has ample margin without being flaky.
+	select {
+	case <-done:
+		if elapsed := time.Since(cancelAt); elapsed > hangBound {
+			t.Fatalf("Run took too long to return after cancel: %s (possible shutdown hang)", elapsed)
+		}
+	case <-time.After(hangBound):
+		t.Fatal("Run did not return within the bound after ctx cancellation — shutdown hang")
+	}
+}

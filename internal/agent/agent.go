@@ -40,14 +40,22 @@ type Agent struct {
 	// It is written by the poll goroutine and read by the measure goroutine;
 	// an atomic pointer avoids a lock on the hot measure-tick path.
 	jobs atomic.Pointer[[]scheduler.Job]
+
+	// measureDone is closed by measureLoop, exactly once, after it has fully
+	// drained in-flight probes (disp.Wait()) on shutdown. flushLoop waits on
+	// it (bounded) before its final flush, so a round completing during
+	// shutdown is buffered before the last peek — otherwise it would land in
+	// the buffer after finalFlush's one-time peek and be silently discarded.
+	measureDone chan struct{}
 }
 
 // New builds an Agent from opts. It does not start any goroutines — call Run.
 func New(opts Options) *Agent {
 	a := &Agent{
-		opts:   opts,
-		client: NewClient(opts.Hub, opts.Key, opts.Insecure, opts.Timeout),
-		buf:    newBuffer(opts.BufferCap),
+		opts:        opts,
+		client:      NewClient(opts.Hub, opts.Key, opts.Insecure, opts.Timeout),
+		buf:         newBuffer(opts.BufferCap),
+		measureDone: make(chan struct{}),
 	}
 	empty := []scheduler.Job{}
 	a.jobs.Store(&empty)
@@ -56,9 +64,10 @@ func New(opts Options) *Agent {
 
 // Run blocks until ctx is cancelled, running the poll, measure, and flush
 // loops as goroutines coordinated by ctx and an internal WaitGroup. On
-// shutdown it joins all three (the measure loop drains in-flight probes via
-// Dispatcher.Wait, and the flush loop makes one final best-effort push of
-// whatever remains buffered) before returning.
+// shutdown it joins all three: the measure loop drains in-flight probes via
+// Dispatcher.Wait and signals measureDone, the flush loop waits (bounded) for
+// that signal and then makes one final best-effort push of whatever remains
+// buffered — so a round completing during shutdown is captured, not dropped.
 func (a *Agent) Run(ctx context.Context) error {
 	slog.Info("smoke-agent starting", "hub", a.opts.Hub, "vantage", a.opts.Vantage, "interval", a.opts.Interval)
 
@@ -130,7 +139,8 @@ func (a *Agent) measureLoop(ctx context.Context) {
 		sleep := planner.SleepToNext(time.Now(), maxSleep)
 		select {
 		case <-ctx.Done():
-			disp.Wait()
+			disp.Wait()          // let in-flight probes finish and buffer their outcome
+			close(a.measureDone) // signal flushLoop it's now safe to take the final peek
 			return
 		case <-time.After(sleep):
 		}
@@ -141,19 +151,27 @@ func (a *Agent) measureLoop(ctx context.Context) {
 // with exponential backoff on failure (capped, and the batch is retained —
 // never committed — so nothing is lost across a hub blip; the hub dedups on
 // (target,vantage,ts) so a retried batch is safe to resend). On ctx.Done it
-// makes one final best-effort push with a short bounded context and returns.
+// waits (bounded) for the measure loop to finish draining in-flight probes —
+// so a round that completes during shutdown is buffered before the final
+// peek, not lost after it — then makes one final best-effort push with a
+// short bounded context and returns.
 func (a *Agent) flushLoop(ctx context.Context) {
 	const (
 		baseIdle      = 500 * time.Millisecond
 		backoffStart  = time.Second
 		backoffCap    = 30 * time.Second
+		drainWait     = 5 * time.Second // bound on waiting for measureLoop to drain
 		finalFlushTTL = 5 * time.Second
 	)
+	shutdown := func() {
+		a.awaitMeasureDrain(drainWait)
+		a.finalFlush(finalFlushTTL)
+	}
 	backoff := backoffStart
 	for {
 		select {
 		case <-ctx.Done():
-			a.finalFlush(finalFlushTTL)
+			shutdown()
 			return
 		default:
 		}
@@ -161,7 +179,7 @@ func (a *Agent) flushLoop(ctx context.Context) {
 		if a.buf.len() == 0 {
 			select {
 			case <-ctx.Done():
-				a.finalFlush(finalFlushTTL)
+				shutdown()
 				return
 			case <-time.After(baseIdle):
 			}
@@ -173,7 +191,7 @@ func (a *Agent) flushLoop(ctx context.Context) {
 			slog.Warn("push failed, will retry", "err", err, "batch", len(batch), "backoff", backoff)
 			select {
 			case <-ctx.Done():
-				a.finalFlush(finalFlushTTL)
+				shutdown()
 				return
 			case <-time.After(backoff):
 			}
@@ -186,6 +204,21 @@ func (a *Agent) flushLoop(ctx context.Context) {
 		a.buf.commit(upto)
 		backoff = backoffStart
 		slog.Debug("pushed results", "batch", len(batch), "remaining", a.buf.len(), "dropped", a.buf.dropped())
+	}
+}
+
+// awaitMeasureDrain blocks until measureLoop has signaled it fully drained
+// in-flight probes (every completed round is buffered), or until wait
+// elapses — whichever comes first. The bound keeps shutdown from hanging
+// if a probe ignores context cancellation; measureDone is already closed by
+// the time this runs in the common case (disp.Wait() only needs to unwind
+// well-behaved probes, which inherit ctx's cancellation), so the wait is a
+// safety net, not the expected path.
+func (a *Agent) awaitMeasureDrain(wait time.Duration) {
+	select {
+	case <-a.measureDone:
+	case <-time.After(wait):
+		slog.Warn("measure loop did not drain within bound, final flush may miss in-flight rounds", "wait", wait)
 	}
 }
 
