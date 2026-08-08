@@ -8,6 +8,12 @@ breaking changes.
 ## [Unreleased]
 
 ### Added
+- **Federation operator guide** (`docs/federation.md`) — the end-to-end walkthrough for
+  provisioning a vantage: declaring `vantages:` on targets, minting a per-vantage key
+  (`smoked vantage add` or the GUI), running `smoke-agent` at the remote location, and reading the
+  overlay, plus the security model, an upgrade note (the one-time continuous-aggregate rebuild
+  drops daily rollups older than the 30-day raw retention), and troubleshooting. Linked from the
+  README. Marks **Phase 4 — Federation complete.**
 - **Bundled Caddy reverse proxy (federation deployment).** An opt-in `federation` Docker Compose
   profile adds a Caddy service that terminates TLS with an automatically issued and auto-renewed
   Let's Encrypt certificate (`DOMAIN` + `ACME_EMAIL` from `.env`) and reverse-proxies smoked with

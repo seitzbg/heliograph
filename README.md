@@ -64,6 +64,9 @@ surfaces with two auth models: the **agent API** (`/agent/v1/*`) authenticated b
 API key, and the **dashboard + read API + admin panel** behind **HTTP Basic Auth** (smoked's read
 API has no auth of its own).
 
+> For the end-to-end walkthrough — declaring `vantages:`, minting a key, running an agent, and
+> reading the overlay — see the **[federation operator guide](docs/federation.md)**.
+
 **Bundled Caddy** (automatic Let's Encrypt) — opt-in via the `federation` compose profile:
 
 ```sh
@@ -180,4 +183,6 @@ web/
 
 ## Not built yet (roadmap)
 
-**Federation (multi-vantage) is nearly complete** — the hub, the `smoke-agent` remote collector, the per-vantage overlay UI, the Vantages admin GUI panel, and the bundled reverse proxy are all built: a per-vantage storage dimension (the hub probes as `local`), `vantages:` config with a per-vantage assignment builder, a TimescaleDB-backed API-key store with a `smoked vantage` CLI + a password-gated admin API and login-gated GUI panel, the agent-facing endpoints (`GET /agent/v1/assignment`, `POST /agent/v1/results`) with idempotent ingest and per-vantage alert evaluation, per-vantage overlay graphs in the detail views, and a bundled Caddy compose profile that terminates TLS (automatic Let's Encrypt) and serves the agent API by key + the dashboard behind Basic Auth (see [Federation deployment](#federation-deployment-reverse-proxy)). Transport is HTTPS/JSON with per-vantage API keys behind a required reverse proxy (the bundled Caddy, or your own) — superseding the earlier gRPC+mTLS plan. Still to come: the end-to-end operator guide. Also planned: config sourced from a database (today it's YAML files only) · richer notifier integrations beyond log + webhook. See `07-modernization-blueprint.md` §8.
+**Federation (multi-vantage) is complete** — the hub, the `smoke-agent` remote collector, the per-vantage overlay UI, the Vantages admin GUI panel, and the bundled reverse proxy: a per-vantage storage dimension (the hub probes as `local`), `vantages:` config with a per-vantage assignment builder, a TimescaleDB-backed API-key store with a `smoked vantage` CLI + a password-gated admin API and login-gated GUI panel, the agent-facing endpoints (`GET /agent/v1/assignment`, `POST /agent/v1/results`) with idempotent ingest and per-vantage alert evaluation, per-vantage overlay graphs in the detail views, and a bundled Caddy compose profile that terminates TLS (automatic Let's Encrypt / DNS-01) and serves the agent API by key + the dashboard behind Basic Auth. Transport is HTTPS/JSON with per-vantage API keys behind a required reverse proxy (the bundled Caddy, or your own) — superseding the earlier gRPC+mTLS plan. See the **[federation operator guide](docs/federation.md)** and [Federation deployment](#federation-deployment-reverse-proxy).
+
+Still planned: config sourced from a database (today it's YAML files only) · richer notifier integrations beyond log + webhook. See `07-modernization-blueprint.md` §8.
