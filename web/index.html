@@ -169,6 +169,29 @@
   .graph-scope .crumb-cur { color:var(--ink); }
   footer { margin-top:28px; color:var(--ink-faint); font-family:ui-monospace,Menlo,monospace; font-size:11.5px; }
   @media (prefers-reduced-motion: reduce){ * { transition:none !important; } }
+
+  /* Vantages admin panel */
+  .vadmin-title { margin-top:18px; }
+  .vadmin-note { margin-top:14px; padding:16px; color:var(--ink-soft); }
+  .vadmin-note code { font-family:ui-monospace,Menlo,monospace; color:var(--ink); }
+  .vadmin-row { margin-top:14px; padding:16px; display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  .vadmin-lbl { font-family:ui-monospace,Menlo,monospace; font-size:10px; letter-spacing:.14em; text-transform:uppercase; color:var(--ink-faint); }
+  .vadmin-input { background:var(--bg); border:1px solid var(--border); border-radius:8px; padding:7px 10px; font-family:ui-monospace,Menlo,monospace; font-size:13px; color:var(--ink); }
+  .vadmin-input:focus-visible { outline:2px solid var(--accent); outline-offset:1px; border-color:var(--accent); }
+  .vadmin-btn { font-family:ui-monospace,Menlo,monospace; font-size:12px; color:var(--ink); background:var(--accent-soft); border:1px solid var(--accent); border-radius:8px; padding:7px 12px; cursor:pointer; }
+  .vadmin-btn:hover { background:var(--accent); color:var(--bg); }
+  .vadmin-btn:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+  .vadmin-err { color:var(--bad); font-size:12.5px; }
+  .vadmin-table { width:100%; border-collapse:collapse; font-size:13px; }
+  .vadmin-table th { text-align:left; font-family:ui-monospace,Menlo,monospace; font-size:10px; letter-spacing:.12em; text-transform:uppercase; color:var(--ink-faint); padding:6px 10px; border-bottom:1px solid var(--border); }
+  .vadmin-table td { padding:8px 10px; border-bottom:1px solid var(--border); color:var(--ink); vertical-align:middle; }
+  .vadmin-table td.vadmin-empty { color:var(--ink-faint); text-align:center; }
+  .vadmin-table td .vadmin-btn { padding:4px 9px; font-size:11.5px; margin-left:6px; }
+  .vadmin-reveal-backdrop { position:fixed; inset:0; background:rgba(0,0,0,.45); display:flex; align-items:center; justify-content:center; padding:20px; z-index:50; }
+  .vadmin-reveal { max-width:640px; width:100%; box-shadow:var(--shadow); }
+  .vadmin-warn { color:var(--warn); font-weight:600; font-size:13px; }
+  .vadmin-pre { background:var(--plot-bg); border:1px solid var(--border); border-radius:8px; padding:12px; font-family:ui-monospace,Menlo,monospace; font-size:12px; color:var(--ink); overflow-x:auto; white-space:pre-wrap; word-break:break-all; }
+  .vadmin-reveal-actions { display:flex; gap:10px; margin-top:12px; }
 </style>
 <script>
   // Restore a saved theme before first paint (avoids a light/dark flash).
@@ -186,6 +209,7 @@
       <div class="tabs" role="tablist">
         <button id="tabOverview" role="tab" aria-selected="true">Overview</button>
         <button id="tabGraphs" role="tab" aria-selected="false">Graphs</button>
+        <button id="tabVantages" role="tab" aria-selected="false">Vantages</button>
       </div>
     </div>
     <div class="controls">
@@ -258,6 +282,56 @@
         <div id="zoomSel" class="zoom-sel" hidden></div>
       </div>
       <div class="reslabel" id="zoomRes" style="margin-top:8px">drag on the graph to zoom into a time range</div>
+    </div>
+  </section>
+
+  <!-- VANTAGES (federation admin) -->
+  <section id="viewVantages" class="hidden">
+    <h2 class="vadmin-title">Vantages</h2>
+    <p class="lede">Federation vantages and their agent API keys. Managing keys requires the admin password.</p>
+
+    <div id="vantDisabled" class="panel vadmin-note hidden">
+      Admin key management is disabled. It requires federation (<code>-dsn</code>) and
+      <code>SMOKED_ADMIN_PASSWORD</code> on the hub; or provision from the host with
+      <code>smoked vantage add / ls / revoke</code> (also needs <code>-dsn</code>).
+    </div>
+
+    <form id="vantLogin" class="panel vadmin-row hidden" autocomplete="off">
+      <label class="vadmin-lbl" for="vantPass">Admin password</label>
+      <input id="vantPass" type="password" class="vadmin-input" autocomplete="current-password">
+      <button type="submit" class="vadmin-btn">Sign in</button>
+      <span id="vantLoginErr" class="vadmin-err" role="alert"></span>
+    </form>
+
+    <div id="vantList" class="hidden">
+      <div class="panel">
+        <table class="vadmin-table" aria-label="Vantages">
+          <thead><tr><th>Name</th><th>Created</th><th>Last seen</th><th>Targets</th><th></th></tr></thead>
+          <tbody id="vantRows"></tbody>
+        </table>
+      </div>
+      <form id="vantAdd" class="panel vadmin-row" autocomplete="off">
+        <label class="vadmin-lbl" for="vantName">Add vantage</label>
+        <input id="vantName" type="text" class="vadmin-input" placeholder="e.g. nyc" autocomplete="off">
+        <button type="submit" class="vadmin-btn">Add &amp; mint key</button>
+        <span id="vantAddErr" class="vadmin-err" role="alert"></span>
+      </form>
+    </div>
+
+    <div id="vantError" class="panel vadmin-note hidden">
+      Couldn't reach the admin API. <button id="vantRetry" class="vadmin-btn">Retry</button>
+    </div>
+
+    <div id="vantReveal" class="vadmin-reveal-backdrop hidden">
+      <div class="panel vadmin-reveal" role="dialog" aria-modal="true" aria-labelledby="vantRevealTitle">
+        <h3 id="vantRevealTitle">Agent key for <span id="vantRevealName"></span></h3>
+        <p class="vadmin-warn">Shown once — store it now. You can't retrieve it later; you can only regenerate a new one.</p>
+        <pre id="vantRevealSnippet" class="vadmin-pre"></pre>
+        <div class="vadmin-reveal-actions">
+          <button id="vantCopy" class="vadmin-btn">Copy</button>
+          <button id="vantRevealClose" class="vadmin-btn">Done</button>
+        </div>
+      </div>
     </div>
   </section>
 

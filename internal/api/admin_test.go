@@ -175,3 +175,113 @@ func TestAdminLoginAndCRUD(t *testing.T) {
 		t.Errorf("Revoke not called with nyc: %v", fk.revoked)
 	}
 }
+
+func TestListVantagesTargetCount(t *testing.T) {
+	srv, _ := adminServer("hunter2")
+	srv.TargetVantages = func() map[string][]string {
+		return map[string][]string{"a": {"nyc", "local"}, "b": {"nyc"}}
+	}
+	mux := srv.Routes()
+	cookie := login(t, mux, "hunter2")
+
+	r := httptest.NewRequest("GET", "/api/admin/vantages", nil)
+	r.AddCookie(cookie)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("list = %d, want 200", w.Code)
+	}
+	var resp struct {
+		Vantages []map[string]any `json:"vantages"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Vantages) != 1 {
+		t.Fatalf("want 1 vantage row, got %d", len(resp.Vantages))
+	}
+	if got := resp.Vantages[0]["targets"]; got != float64(2) { // JSON numbers decode to float64
+		t.Errorf("nyc targets = %v, want 2", got)
+	}
+}
+
+func TestListVantagesOmitsCountWithoutTargetVantages(t *testing.T) {
+	srv, _ := adminServer("hunter2") // TargetVantages left nil
+	mux := srv.Routes()
+	cookie := login(t, mux, "hunter2")
+
+	r := httptest.NewRequest("GET", "/api/admin/vantages", nil)
+	r.AddCookie(cookie)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, r)
+	var resp struct {
+		Vantages []map[string]any `json:"vantages"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if _, present := resp.Vantages[0]["targets"]; present {
+		t.Errorf("targets field present with nil TargetVantages; want omitted")
+	}
+}
+
+func TestListVantagesDeduplicatesVantagesPerTarget(t *testing.T) {
+	srv, _ := adminServer("hunter2")
+	srv.TargetVantages = func() map[string][]string {
+		return map[string][]string{"a": {"nyc", "nyc"}, "b": {"nyc"}}
+	}
+	mux := srv.Routes()
+	cookie := login(t, mux, "hunter2")
+
+	r := httptest.NewRequest("GET", "/api/admin/vantages", nil)
+	r.AddCookie(cookie)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("list = %d, want 200", w.Code)
+	}
+	var resp struct {
+		Vantages []map[string]any `json:"vantages"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Vantages) != 1 {
+		t.Fatalf("want 1 vantage row, got %d", len(resp.Vantages))
+	}
+	if got := resp.Vantages[0]["targets"]; got != float64(2) {
+		t.Errorf("nyc targets = %v, want 2 (deduped per target)", got)
+	}
+}
+
+func TestListVantagesZeroCountWhenVantageNotAssigned(t *testing.T) {
+	srv, _ := adminServer("hunter2")
+	srv.TargetVantages = func() map[string][]string {
+		return map[string][]string{"a": {"local"}}
+	}
+	mux := srv.Routes()
+	cookie := login(t, mux, "hunter2")
+
+	r := httptest.NewRequest("GET", "/api/admin/vantages", nil)
+	r.AddCookie(cookie)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("list = %d, want 200", w.Code)
+	}
+	var resp struct {
+		Vantages []map[string]any `json:"vantages"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Vantages) != 1 {
+		t.Fatalf("want 1 vantage row, got %d", len(resp.Vantages))
+	}
+	if got := resp.Vantages[0]["targets"]; got != float64(0) {
+		t.Errorf("nyc targets = %v, want 0 (present, not omitted)", got)
+	}
+	if _, present := resp.Vantages[0]["targets"]; !present {
+		t.Errorf("targets field absent when TargetVantages is set; want present with value 0")
+	}
+}

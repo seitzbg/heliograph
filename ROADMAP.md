@@ -37,8 +37,8 @@ Full design rationale and the original-system code map live at `~/.claude/plans/
 - ✅ Preserve alert firing state across config reload (reload inherits firing state + sample windows, so alerts don't re-fire or lose hysteresis history)
 
 ## Phase 4 — Federation (multi-vantage) 🚧 in progress
-The hub, the `smoke-agent` remote collector, and the per-vantage overlay UI are in; a Vantages
-admin GUI panel, the bundled reverse proxy, and docs remain.
+The hub, the `smoke-agent` remote collector, the per-vantage overlay UI, and the Vantages admin
+panel are in; the bundled reverse proxy and docs remain.
 
 Design (settled): the hub **assigns** work — agents pull a strict, schema-validated assignment
 (no eval of server-sent config); targets declare `vantages: [...]` (inherited, default
@@ -59,7 +59,7 @@ sketch; agents poll a versioned assignment (`304` when unchanged); keys are mana
 - ✅ `smoke-agent` binary: pull assignment → probe → push results + in-memory store-and-forward
 - ✅ Per-vantage overlay graphs (the `~slave` equivalent) in the detail views — a median line per
   vantage, the smoke band on the focused one, a chip legend/selector
-- ⬜ Vantages admin GUI panel (over the `/api/admin/vantages/*` API)
+- ✅ Vantages admin GUI panel — a login-gated tab to add / list / regenerate / revoke vantages and copy the agent snippet (one-time key reveal); `/api/admin/vantages` reports a per-vantage target count
 - ⬜ Bundled Caddy (Let's Encrypt) + documented external-reverse-proxy deployment
 - ⬜ Docs: README + an operator guide (provision a vantage end-to-end)
 

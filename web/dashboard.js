@@ -40,6 +40,7 @@
       const path = new URLSearchParams(h).get('path') || '';
       return path ? { view: 'graphs', path } : { view: 'graphs' };
     }
+    if (h === 'vantages') return { view: 'vantages' };
     return { view: 'overview' };
   }
 
@@ -214,7 +215,32 @@
     return VPAL[(i < 0 ? 0 : i) % VPAL.length];
   }
 
-  window.Dash = { RANGES, RANGE_ORDER, parseRoute, mergeSeries, gridSince, fetchJSON, zoomResolution, pixelToTime, sharedYMax, buildTree, underPath, targetStatus, pickSeries, vantageList, orderVantages, defaultFocus, vantageColorVar };
+  // adminMode maps the status of GET /api/admin/vantages to the Vantages panel's display
+  // mode: 200 authorized (show the list), 401 log in, 404 admin management disabled (no
+  // SMOKED_ADMIN_PASSWORD -> routes unregistered), anything else a transient error.
+  function adminMode(status) {
+    if (status === 200) return 'list';
+    if (status === 401) return 'login';
+    if (status === 404) return 'disabled';
+    return 'error';
+  }
+
+  // relTime renders a short "time ago" for a last-seen instant. `then` is ms-epoch or an
+  // RFC3339 string; null/empty/zero/unparseable is "never". `now` defaults to Date.now().
+  function relTime(then, now) {
+    if (then == null || then === '' || then === 0) return 'never';
+    const t = typeof then === 'number' ? then : Date.parse(then);
+    if (isNaN(t)) return 'never';
+    const s = Math.max(0, Math.round(((now == null ? Date.now() : now) - t) / 1000));
+    if (s < 45) return 'just now';
+    const m = Math.round(s / 60);
+    if (m < 60) return m + 'm ago';
+    const h = Math.round(m / 60);
+    if (h < 24) return h + 'h ago';
+    return Math.round(h / 24) + 'd ago';
+  }
+
+  window.Dash = { RANGES, RANGE_ORDER, parseRoute, mergeSeries, gridSince, fetchJSON, zoomResolution, pixelToTime, sharedYMax, buildTree, underPath, targetStatus, pickSeries, vantageList, orderVantages, defaultFocus, vantageColorVar, adminMode, relTime };
 
   // ---------------------------------------------------------------- init (DOM) --
   function init() {
@@ -805,20 +831,172 @@
       if (vs.length > 1) renderZoomChips();
     }
 
+    // ---- Vantages admin panel (federation): thin client over /api/admin/*. The first
+    // GET decides the mode (disabled / login / list / error) via Dash.adminMode. ----
+    const vadmin = { rows: [] };
+    function vShow(id) {
+      for (const s of ['vantDisabled', 'vantLogin', 'vantList', 'vantError']) $(s).classList.toggle('hidden', s !== id);
+    }
+    function renderVantageRows() {
+      const now = Date.now();
+      if (!vadmin.rows.length) {
+        $('vantRows').innerHTML = '<tr><td colspan="5" class="vadmin-empty">No vantages yet — add one below.</td></tr>';
+        return;
+      }
+      $('vantRows').innerHTML = vadmin.rows.map((v) => {
+        const nm = esc(v.name);
+        const created = v.created ? new Date(v.created).toLocaleDateString([], { year: 'numeric', month: 'short', day: 'numeric' }) : '—';
+        const seen = Dash.relTime(v.last_seen, now);
+        const tgts = (v.targets == null) ? '—' : String(v.targets);
+        return '<tr><td>' + nm + '</td><td>' + created + '</td><td>' + seen + '</td><td>' + tgts +
+          '</td><td style="text-align:right; white-space:nowrap">' +
+          '<button class="vadmin-btn" data-regen="' + nm + '">Regenerate</button>' +
+          '<button class="vadmin-btn" data-revoke="' + nm + '">Revoke</button></td></tr>';
+      }).join('');
+    }
+    async function renderVantages(opts) {
+      const afterLogin = !!(opts && opts.afterLogin);
+      let r;
+      try { r = await fetch('/api/admin/vantages', { cache: 'no-store' }); }
+      catch (e) { vShow('vantError'); return; }
+      const mode = Dash.adminMode(r.status);
+      if (mode === 'disabled') { vShow('vantDisabled'); return; }
+      if (mode === 'error') { vShow('vantError'); return; }
+      if (mode === 'login') {
+        vShow('vantLogin');
+        // Secure-cookie probe: a 204 login followed by a 401 here means the session cookie
+        // didn't stick (plain-HTTP LAN, not a secure context). Make that legible.
+        $('vantLoginErr').textContent = afterLogin
+          ? "Login didn't persist — the admin session needs a secure context (HTTPS via the proxy, or localhost). You are on " + location.origin + '.'
+          : '';
+        if (!afterLogin) $('vantPass').focus();
+        return;
+      }
+      // mode === 'list'
+      let data;
+      try { data = await r.json(); } catch (e) { vShow('vantError'); return; }
+      vadmin.rows = data.vantages || [];
+      renderVantageRows();
+      vShow('vantList');
+    }
+    $('vantRetry').addEventListener('click', () => renderVantages());
+    $('vantLogin').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      $('vantLoginErr').textContent = '';
+      const pass = $('vantPass').value;
+      $('vantPass').value = ''; // clear immediately — don't leave the password in the field
+      let lr;
+      try {
+        lr = await fetch('/api/admin/login', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ password: pass }),
+        });
+      } catch (err) { $('vantLoginErr').textContent = 'Network error.'; return; }
+      if (lr.status === 401) { $('vantLoginErr').textContent = 'Invalid password.'; return; }
+      if (lr.status !== 204) { $('vantLoginErr').textContent = 'Login failed (HTTP ' + lr.status + ').'; return; }
+      renderVantages({ afterLogin: true });
+    });
+    function reportMintError(isRegen, msg) {
+      if (isRegen) window.alert('Regenerate failed: ' + msg);
+      else $('vantAddErr').textContent = msg;
+    }
+    // mintVantage POSTs a name; the store creates or rotates (regenerate == re-POST the
+    // same name). On success it reveals the one-time key/snippet.
+    async function mintVantage(name, isRegen) {
+      let r;
+      try {
+        r = await fetch('/api/admin/vantages', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name }),
+        });
+      } catch (err) { reportMintError(isRegen, 'Network error.'); return; }
+      if (r.status === 401) { renderVantages(); return; } // session expired -> back to login
+      if (!r.ok) {
+        let msg = 'HTTP ' + r.status;
+        try { msg = (await r.json()).error || msg; } catch (e) { /* keep default */ }
+        reportMintError(isRegen, msg);
+        return;
+      }
+      let data;
+      try { data = await r.json(); } catch (e) { reportMintError(isRegen, 'Malformed server response.'); return; }
+      $('vantName').value = '';
+      $('vantAddErr').textContent = '';
+      showReveal(data.name, data.snippet || data.key || '');
+    }
+    function showReveal(name, snippet) {
+      $('vantRevealName').textContent = name;
+      $('vantRevealSnippet').textContent = snippet; // contains the smk_ key
+      $('vantReveal').classList.remove('hidden');
+      $('vantRevealClose').focus();
+    }
+    function closeReveal() {
+      $('vantRevealSnippet').textContent = ''; // never leave key material in the DOM
+      $('vantReveal').classList.add('hidden');
+      renderVantages(); // refresh the list (new/rotated row, updated counts)
+    }
+    $('vantRevealClose').addEventListener('click', closeReveal);
+    $('vantReveal').addEventListener('click', (e) => { if (e.target === $('vantReveal')) closeReveal(); }); // backdrop
+    $('vantCopy').addEventListener('click', async () => {
+      const text = $('vantRevealSnippet').textContent;
+      try {
+        await navigator.clipboard.writeText(text);
+        $('vantCopy').textContent = 'Copied';
+        setTimeout(() => { $('vantCopy').textContent = 'Copy'; }, 1500);
+      } catch (e) {
+        const rng = document.createRange(); rng.selectNodeContents($('vantRevealSnippet'));
+        const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(rng);
+      }
+    });
+    $('vantAdd').addEventListener('submit', (e) => {
+      e.preventDefault();
+      $('vantAddErr').textContent = '';
+      const name = $('vantName').value.trim();
+      if (!name) { $('vantAddErr').textContent = 'Name required.'; return; }
+      if (!/^[A-Za-z0-9._-]+$/.test(name)) { $('vantAddErr').textContent = 'Use letters, digits, . _ - only.'; return; }
+      // "local" is the hub's own vantage — agents don't use it. Hint, but don't hard-block
+      // (design §11: allowed-but-hinted): let the user proceed via confirm.
+      if (name === 'local' && !window.confirm('"local" is the hub’s own vantage — agents don’t use it. Mint a key anyway?')) return;
+      mintVantage(name, false);
+    });
+    $('vantRows').addEventListener('click', async (e) => {
+      const regen = e.target.closest('[data-regen]');
+      if (regen) {
+        const name = regen.getAttribute('data-regen');
+        if (window.confirm('Regenerate the key for "' + name + '"? This invalidates the current key; the agent must be reconfigured with the new one.')) {
+          mintVantage(name, true);
+        }
+        return;
+      }
+      const revoke = e.target.closest('[data-revoke]');
+      if (revoke) {
+        const name = revoke.getAttribute('data-revoke');
+        if (!window.confirm('Revoke "' + name + '"? Its agent will no longer be able to submit results.')) return;
+        let r;
+        try { r = await fetch('/api/admin/vantages/' + enc(name), { method: 'DELETE' }); }
+        catch (err) { window.alert('Network error revoking.'); return; }
+        if (r.status === 401) { renderVantages(); return; }
+        renderVantages(); // 200 removed or 404 already-gone -> refresh either way
+      }
+    });
+
     // ---- routing ----
-    function show(id) { for (const v of ['viewOverview', 'viewGraphs', 'viewStack', 'viewZoom']) $(v).classList.toggle('hidden', v !== id); }
+    function show(id) { for (const v of ['viewOverview', 'viewGraphs', 'viewStack', 'viewZoom', 'viewVantages']) $(v).classList.toggle('hidden', v !== id); }
     function setTabs(view) {
       const g = (view === 'graphs' || view === 'stack' || view === 'zoom');
       $('tabOverview').setAttribute('aria-selected', String(view === 'overview'));
       $('tabGraphs').setAttribute('aria-selected', String(g));
+      $('tabVantages').setAttribute('aria-selected', String(view === 'vantages'));
     }
     function currentView() { return parseRoute(location.hash).view; }
     function route() {
+      // Never leave a one-time key in the DOM across navigations: clear any open reveal.
+      { const rev = $('vantReveal'); if (rev && !rev.classList.contains('hidden')) { $('vantRevealSnippet').textContent = ''; rev.classList.add('hidden'); } }
       const r = parseRoute(location.hash);
       if (r.view === 'overview') { setTabs('overview'); show('viewOverview'); refreshOverview(); }
       else if (r.view === 'graphs') { gridScope = r.path || ''; setTabs('graphs'); show('viewGraphs'); renderScope(); renderTree(); renderGridPanels(); refreshGrid(); }
       else if (r.view === 'stack') { setTabs('stack'); show('viewStack'); renderStack(r.name); }
       else if (r.view === 'zoom') { setTabs('zoom'); show('viewZoom'); renderZoom(r.name, r.range); }
+      else if (r.view === 'vantages') { setTabs('vantages'); show('viewVantages'); renderVantages(); }
       $('statusText').textContent = (r.view === 'stack' || r.view === 'zoom') ? r.name : $('statusText').textContent;
       window.scrollTo(0, 0);
     }
@@ -828,6 +1006,7 @@
     // ---- events ----
     $('tabOverview').addEventListener('click', () => nav('overview'));
     $('tabGraphs').addEventListener('click', () => nav('graphs'));
+    $('tabVantages').addEventListener('click', () => nav('vantages'));
     $('backStack').addEventListener('click', () => { if (history.length > 1) history.back(); else nav('graphs'); });
     $('backZoom').addEventListener('click', () => { if (history.length > 1) history.back(); else nav('target=' + enc(curTarget || '')); });
     $('worstSeg').addEventListener('click', (e) => { const b = e.target.closest('button'); if (!b) return; worstBy = b.dataset.by; document.querySelectorAll('#worstSeg button').forEach((x) => x.setAttribute('aria-pressed', String(x === b))); refreshWorst(); });
