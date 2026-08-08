@@ -36,9 +36,9 @@ Full design rationale and the original-system code map live at `~/.claude/plans/
 - ✅ Structured logging (slog; `-log-format` text/json) + operational metrics (round duration/size/errors + per-probe timings on `/metrics`)
 - ✅ Preserve alert firing state across config reload (reload inherits firing state + sample windows, so alerts don't re-fire or lose hysteresis history)
 
-## Phase 4 — Federation (multi-vantage) 🚧 in progress
+## Phase 4 — Federation (multi-vantage) ✅
 The hub, the `smoke-agent` remote collector, the per-vantage overlay UI, the Vantages admin
-panel, and the bundled reverse proxy are in; the end-to-end operator guide remains.
+panel, the bundled reverse proxy, and the operator guide are all in — the feature is complete.
 
 Design (settled): the hub **assigns** work — agents pull a strict, schema-validated assignment
 (no eval of server-sent config); targets declare `vantages: [...]` (inherited, default
@@ -60,8 +60,10 @@ sketch; agents poll a versioned assignment (`304` when unchanged); keys are mana
 - ✅ Per-vantage overlay graphs (the `~slave` equivalent) in the detail views — a median line per
   vantage, the smoke band on the focused one, a chip legend/selector
 - ✅ Vantages admin GUI panel — a login-gated tab to add / list / regenerate / revoke vantages and copy the agent snippet (one-time key reveal); `/api/admin/vantages` reports a per-vantage target count
-- ⬜ Bundled Caddy (Let's Encrypt) + documented external-reverse-proxy deployment
-- ⬜ Docs: README + an operator guide (provision a vantage end-to-end)
+- ✅ Bundled Caddy (Let's Encrypt HTTP-01/DNS-01, `federation` compose profile, dashboard behind
+  Basic Auth) + documented external-reverse-proxy deployment
+- ✅ Docs: README federation-deployment section + an operator guide (`docs/federation.md`,
+  provision a vantage end-to-end)
 
 ## Phase 5 — Parity & polish 🚧
 - ✅ Richer alert DSL — pattern `*N*` skip, bare `*`, `U` token, priority suppression,
