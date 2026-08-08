@@ -1,5 +1,12 @@
 # One-command bring-up: TimescaleDB + the smoked collector serving the dashboard.
 #   docker compose up --build   ->   http://localhost:8087/
+#
+# Federation (multi-vantage) adds a bundled Caddy reverse proxy behind the
+# `federation` profile — it terminates TLS (automatic Let's Encrypt) and serves
+# the agent API (/agent/v1/*) by API key + the dashboard behind Basic Auth:
+#   cp .env.example .env   # then set DOMAIN + ACME_EMAIL + DASH_PASSWORD_HASH
+#   docker compose --profile federation up --build
+# The default `docker compose up` above is unchanged and starts no proxy.
 services:
   timescaledb:
     # Pinned to a specific release rather than a moving `latest-pg16` tag, so a
@@ -26,6 +33,11 @@ services:
     # published on localhost only.
     cap_add:
       - NET_RAW          # fping ICMP (via fping's file capability, non-root)
+    environment:
+      # Optional: enable the password-gated admin key-management API + Vantages
+      # GUI panel. Empty (the default) leaves it fail-closed/disabled. Set it in
+      # .env to provision vantages from the browser instead of the CLI.
+      SMOKED_ADMIN_PASSWORD: ${SMOKED_ADMIN_PASSWORD:-}
     command:
       - "-serve"
       - "-addr"
@@ -47,5 +59,53 @@ services:
       timescaledb:
         condition: service_healthy
 
+  # Bundled reverse proxy for federation (opt-in via the `federation` profile).
+  # Terminates TLS with an auto-issued, auto-renewed Let's Encrypt cert for
+  # $DOMAIN and serves smoked with two auth models (see Caddyfile): /agent/v1/*
+  # by per-vantage API key, the dashboard/read/admin API behind HTTP Basic Auth.
+  # smoked itself never does TLS (the API key + Basic Auth ride inside Caddy's TLS).
+  caddy:
+    profiles: ["federation"]
+    # Built from Caddy.Dockerfile so DNS-challenge provider plugins are compiled
+    # in — the stock image has none. Bundles cloudflare, route53, digitalocean,
+    # duckdns, namecheap, gandi; pick one at runtime via CADDY_ACME_DNS.
+    build:
+      context: .
+      dockerfile: Caddy.Dockerfile
+    restart: unless-stopped
+    ports:
+      - "80:80"     # HTTP-01 challenge + HTTP->HTTPS redirect (not needed for DNS-01)
+      - "443:443"   # public agent API + dashboard over TLS
+    environment:
+      # From .env (see .env.example). Set DOMAIN=localhost to smoke-test with a
+      # self-signed cert instead of hitting Let's Encrypt.
+      DOMAIN: ${DOMAIN}
+      ACME_EMAIL: ${ACME_EMAIL}
+      # HTTP Basic Auth for the dashboard/read API (smoked's read API has no auth
+      # of its own). DASH_PASSWORD_HASH is a bcrypt hash from `caddy hash-password`.
+      DASH_USER: ${DASH_USER:-admin}
+      DASH_PASSWORD_HASH: ${DASH_PASSWORD_HASH}
+      # TLS challenge. Empty = HTTP-01. For DNS-01 set CADDY_ACME_DNS to your
+      # provider's acme_dns line + its credential var(s); see .env.example.
+      CADDY_ACME_DNS: ${CADDY_ACME_DNS:-}
+      # Credentials for the bundled DNS providers (only the one you use matters).
+      CF_API_TOKEN: ${CF_API_TOKEN:-}                    # cloudflare
+      DO_AUTH_TOKEN: ${DO_AUTH_TOKEN:-}                  # digitalocean
+      DUCKDNS_API_TOKEN: ${DUCKDNS_API_TOKEN:-}          # duckdns
+      GANDI_BEARER_TOKEN: ${GANDI_BEARER_TOKEN:-}        # gandi
+      NAMECHEAP_API_KEY: ${NAMECHEAP_API_KEY:-}          # namecheap
+      NAMECHEAP_API_USER: ${NAMECHEAP_API_USER:-}        # namecheap
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}          # route53
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}  # route53
+      AWS_REGION: ${AWS_REGION:-}                        # route53
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data       # persists issued certs across restarts (LE rate limits)
+      - caddy_config:/config
+    depends_on:
+      - smoked
+
 volumes:
   tsdata: {}
+  caddy_data: {}
+  caddy_config: {}

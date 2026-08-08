@@ -10,6 +10,9 @@
 go.work
 go.work.sum
 
+# local compose env (holds DOMAIN/ACME_EMAIL/admin password); .env.example is tracked
+/.env
+
 # editor / OS
 .DS_Store
 *.swp

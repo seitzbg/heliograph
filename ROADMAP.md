@@ -37,8 +37,8 @@ Full design rationale and the original-system code map live at `~/.claude/plans/
 - ✅ Preserve alert firing state across config reload (reload inherits firing state + sample windows, so alerts don't re-fire or lose hysteresis history)
 
 ## Phase 4 — Federation (multi-vantage) 🚧 in progress
-The hub, the `smoke-agent` remote collector, the per-vantage overlay UI, and the Vantages admin
-panel are in; the bundled reverse proxy and docs remain.
+The hub, the `smoke-agent` remote collector, the per-vantage overlay UI, the Vantages admin
+panel, and the bundled reverse proxy are in; the end-to-end operator guide remains.
 
 Design (settled): the hub **assigns** work — agents pull a strict, schema-validated assignment
 (no eval of server-sent config); targets declare `vantages: [...]` (inherited, default
