@@ -246,7 +246,9 @@
     }
     // yMax (optional) forces a shared Y-axis maximum — the Graphs grid passes one so its
     // small multiples share a scale (unison); omitted, each graph auto-scales to its own data.
-    function renderInto(canvas, s, R, height, yMax) {
+    // overlays (optional) — extra per-vantage median-only context lines (Task 3); see
+    // buildOverlays. Absent/undefined ⇒ identical output to before overlays existed.
+    function renderInto(canvas, s, R, height, yMax, overlays) {
       if (s && s.unsupported) { drawNote(canvas, 'needs the TimescaleDB store (-dsn -downsample)', height); return; }
       if (!s || s.buckets.length < 2) { drawNote(canvas, 'collecting…', height); return; }
       // Fixed wall-clock domain [now-windowMs, now]. t1 extends to the newest sample if
@@ -255,13 +257,45 @@
       const lastT = s.buckets[s.buckets.length - 1].t;
       const t1 = Math.max(Date.now(), Number.isFinite(lastT) ? lastT : 0);
       const t0 = R.windowMs ? t1 - R.windowMs : undefined;
-      Smoke.render(canvas, s, { height, band: R.mode === 'band', xlabels: R.xl, t0, t1: t0 == null ? undefined : t1, yMax });
+      Smoke.render(canvas, s, { height, band: R.mode === 'band', xlabels: R.xl, t0, t1: t0 == null ? undefined : t1, yMax, overlays });
     }
     function metaHtml(s) {
       const st = Smoke.seriesStats(s); const lcls = st.lossAvg > 2 ? 'bad' : st.lossAvg > 0.5 ? 'warn' : '';
       return '<span class="stat"><span class="k">median avg</span><span class="v">' + fmt(st.medAvg, 1) + ' ms</span></span>' +
              '<span class="stat"><span class="k">median max</span><span class="v">' + fmt(st.medMax, 1) + ' ms</span></span>' +
              '<span class="stat"><span class="k">loss avg</span><span class="v ' + lcls + '">' + fmt(st.lossAvg, 2) + ' %</span></span>';
+    }
+
+    // ---- per-vantage overlay helpers (Task 3) ----
+    // cssVar resolves a CSS var NAME (e.g. '--v-a') to its current value, read fresh from
+    // computed style each call so overlay colors track the live theme (light/dark toggle)
+    // without any extra re-render hook — callers just re-invoke this at render time.
+    function cssVar(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+    // buildOverlays turns a per-vantage series map into Smoke.render's opts.overlays: every
+    // vantage in `vs` except the focused one, dropping any that failed to fetch (null) or
+    // are the 'unsupported' sentinel (not real data) — never pass a bucket-less object.
+    function buildOverlays(byV, vs, focus) {
+      return (vs || []).filter((v) => v !== focus && byV[v] && !byV[v].unsupported)
+        .map((v) => ({ series: byV[v], color: cssVar(Dash.vantageColorVar(v, vs)) }));
+    }
+    // lastMedian returns the newest non-NaN median in a series, for a chip's at-a-glance
+    // value; null when there's no series or every bucket is NaN (fully lost/no data yet).
+    function lastMedian(s) {
+      if (!s || !s.buckets) return null;
+      for (let i = s.buckets.length - 1; i >= 0; i--) { const m = s.buckets[i].median; if (!isNaN(m)) return m; }
+      return null;
+    }
+    // vchipsHtml renders the legend/selector chips for an ordered vantage list: a colored
+    // swatch (the resolved overlay color), the vantage name, and its last value (via
+    // valueFor). aria-pressed marks the focused chip, doubling the legend as a toggle.
+    function vchipsHtml(vs, focus, valueFor) {
+      return vs.map((v) => {
+        const color = cssVar(Dash.vantageColorVar(v, vs));
+        const lv = valueFor(v);
+        return '<button type="button" class="vchip" aria-pressed="' + (v === focus) + '" data-v="' + esc(v) + '">' +
+          '<i style="background:' + color + '"></i><span class="vname">' + esc(v) + '</span>' +
+          '<span class="vval">' + (lv == null ? '—' : fmt(lv, 1) + ' ms') + '</span></button>';
+      }).join('');
     }
 
     // ---- Overview: worst-targets + availability ----
@@ -509,15 +543,59 @@
 
     // ---- Drill-down: stack (all four) + zoom (one) ----
     let curTarget = null, curRange = null;
-    // Last successful series per `${target}|${rangeKey}`, so a transient fetch failure on a
+    // Last successful series per `${target}|${rangeKey}` (single-vantage) or
+    // `${target}|${rangeKey}|${vantage}` (multi-vantage), so a transient fetch failure on a
     // detail/zoom refresh keeps the graph instead of blanking it to "collecting…" (#5).
     const lastGood = new Map();
-    const stackCanvases = []; // {canvas, series, R}
-    let zoomState = null;     // {canvas, series, band, t0, t1, xlabels, custom}
+    // stackCanvases: one entry per open range cell. Single-vantage cell: {canvas, meta, R,
+    // key, series, failed}. Multi-vantage cell: {canvas, meta, R, key, byV, failed} (no
+    // `series` — the rendered series is derived from byV[stackFocus] at render time so a
+    // chip click or theme toggle can re-render from cache without refetching).
+    const stackCanvases = [];
+    let stackVantages = [];  // ordered vantage list for the open stack (Dash.orderVantages); length<=1 => single-vantage path, no overlay/chips
+    let stackFocus = null;   // focused vantage for the open stack (meaningful only when stackVantages.length>1)
+    // zoomState: {canvas, series, band, t0, t1, xlabels, custom} plus, in multi-vantage mode,
+    // {byV, vantages, focus} — series is always byV[focus] so the single-vantage draw path
+    // (drawZoom) and its null/unsupported/too-short guards stay exactly as before.
+    let zoomState = null;
+    let zoomVantages = [];   // ordered vantage list for the open zoom view
+    let zoomFocus = null;    // focused vantage for the open zoom view
+
+    // renderStackCell (re)draws one range cell from its stored state — used for the initial
+    // fetch-driven render, a chip click (re-render from cache, no refetch), and a theme
+    // toggle / resize (rerender()); the same function for all three keeps them consistent.
+    function renderStackCell(c) {
+      if (c.byV) {
+        const focused = c.byV[stackFocus];
+        const overlays = buildOverlays(c.byV, stackVantages, stackFocus);
+        if (focused && !focused.unsupported && focused.buckets.length >= 2) {
+          c.meta.innerHTML = metaHtml(focused) + (c.failed ? ' <span class="reslabel">· last known</span>' : '');
+        } else { c.meta.innerHTML = ''; }
+        renderInto(c.canvas, focused, c.R, 170, undefined, overlays);
+      } else {
+        const s = c.series;
+        if (s && !s.unsupported && s.buckets.length >= 2) c.meta.innerHTML = metaHtml(s) + (c.failed ? ' <span class="reslabel">· last known</span>' : '');
+        renderInto(c.canvas, s, c.R, 170);
+      }
+    }
+    // renderStackChips renders (or, for a single-vantage target, clears) the #stackVantages
+    // legend/selector. Chip values come from the '3h' cell (the freshest data) for each
+    // vantage's last median — independent of which vantage is currently focused.
+    function renderStackChips() {
+      const host = $('stackVantages'); if (!host) return;
+      if (stackVantages.length <= 1) { host.innerHTML = ''; return; }
+      const ref = stackCanvases.find((c) => c.key === '3h' && c.byV);
+      host.innerHTML = vchipsHtml(stackVantages, stackFocus, (v) => lastMedian(ref && ref.byV[v]));
+    }
     async function renderStack(name) {
       curTarget = name; stackCanvases.length = 0;
       $('stackTitle').innerHTML = esc(name);
       const grid = $('stackGrid'); grid.innerHTML = '';
+
+      await ensureVantages(name);
+      const vs = Dash.orderVantages(vantagesFor(name));
+      stackVantages = vs;
+
       const cells = RANGE_ORDER.map((key) => {
         const R = RANGES[key];
         const el = document.createElement('div'); el.className = 'panel spanel'; el.dataset.range = key;
@@ -528,22 +606,56 @@
       });
       // probe label from the grid cache if we have it
       const gp = panels.get(name); if (gp) { const probe = gp.el.querySelector('.probe'); if (probe) $('stackTitle').innerHTML = esc(name) + ' <span class="probe">' + esc(probe.textContent) + '</span>'; }
+
+      if (vs.length <= 1) {
+        // Single-vantage: the original code path, byte-for-byte — no fetch fan-out, no
+        // overlays, no chips (renderStackChips() clears #stackVantages via the length<=1 check).
+        renderStackChips();
+        await Promise.all(cells.map(async (c) => {
+          let s = null; try { s = await fetchRange(name, c.key); } catch (e) { /* transient */ }
+          const k = name + '|' + c.key;
+          const pick = pickSeries(s, lastGood.get(k)); lastGood.set(k, pick.cache); s = pick.series;
+          const entry = { canvas: c.canvas, meta: c.meta, R: c.R, key: c.key, series: s, failed: pick.failed };
+          stackCanvases.push(entry);
+          renderStackCell(entry);
+        }));
+        return;
+      }
+
+      stackFocus = Dash.defaultFocus(vs);
       await Promise.all(cells.map(async (c) => {
-        let s = null; try { s = await fetchRange(name, c.key); } catch (e) { /* transient */ }
-        const k = name + '|' + c.key;
-        const pick = pickSeries(s, lastGood.get(k)); lastGood.set(k, pick.cache); s = pick.series;
-        stackCanvases.push({ canvas: c.canvas, series: s, R: c.R });
-        if (s && !s.unsupported && s.buckets.length >= 2) c.meta.innerHTML = metaHtml(s) + (pick.failed ? ' <span class="reslabel">· last known</span>' : '');
-        renderInto(c.canvas, s, c.R, 170);
+        const fetched = await Promise.all(vs.map((v) => fetchRange(name, c.key, v).catch(() => null)));
+        const byV = {}; let failed = false;
+        vs.forEach((v, i) => {
+          const k = name + '|' + c.key + '|' + v;
+          const pick = pickSeries(fetched[i], lastGood.get(k)); lastGood.set(k, pick.cache);
+          byV[v] = pick.series;
+          if (pick.failed) failed = true;
+        });
+        const entry = { canvas: c.canvas, meta: c.meta, R: c.R, key: c.key, byV, failed };
+        stackCanvases.push(entry);
+        renderStackCell(entry);
       }));
+      renderStackChips();
     }
     // drawZoom renders the current zoomState onto the zoom canvas with its explicit
-    // wall-clock domain [t0,t1] (a tier default, or a dragged sub-range).
+    // wall-clock domain [t0,t1] (a tier default, or a dragged sub-range). In multi-vantage
+    // mode zoomState.series is already byV[focus], so the null/unsupported/too-short guards
+    // below are unchanged from the single-vantage path — only the extra overlays differ.
     function drawZoom() {
       const z = zoomState; if (!z) return;
       if (z.series && z.series.unsupported) { drawNote(z.canvas, 'needs the TimescaleDB store (-dsn -downsample)', 360); return; }
       if (!z.series || !z.series.buckets || z.series.buckets.length < 2) { drawNote(z.canvas, 'collecting…', 360); return; }
-      Smoke.render(z.canvas, z.series, { height: 360, band: z.band, xlabels: z.xlabels, t0: z.t0, t1: z.t1 });
+      const overlays = z.byV ? buildOverlays(z.byV, z.vantages, z.focus) : undefined;
+      Smoke.render(z.canvas, z.series, { height: 360, band: z.band, xlabels: z.xlabels, t0: z.t0, t1: z.t1, overlays });
+    }
+    // renderZoomChips renders (or clears) the #zoomVantages legend/selector from the
+    // currently-open zoomState's byV (no refetch — mirrors renderStackChips).
+    function renderZoomChips() {
+      const host = $('zoomVantages'); if (!host) return;
+      if (zoomVantages.length <= 1) { host.innerHTML = ''; return; }
+      const byV = zoomState && zoomState.byV;
+      host.innerHTML = vchipsHtml(zoomVantages, zoomFocus, (v) => lastMedian(byV && byV[v]));
     }
     // Four axis labels for an arbitrary [t0,t1]: clock times for short spans, dates for long.
     function rangeLabels(t0, t1) {
@@ -557,41 +669,93 @@
       $('zoomMeta').innerHTML = ''; $('zoomReset').hidden = true;
       $('zoomRes').textContent = 'drag on the graph to zoom into a time range';
       const canvas = $('zoomCanvas');
-      let s = null; try { s = await fetchRange(name, range); } catch (e) { /* transient */ }
+
+      await ensureVantages(name);
       if (curTarget !== name || curRange !== range) return; // route moved on while awaiting
-      const k = name + '|' + range;
-      const pick = pickSeries(s, lastGood.get(k)); lastGood.set(k, pick.cache); s = pick.series; // keep last-good on a transient failure (#5)
-      // Fixed tier domain [now-windowMs, now], matching the stacked detail view.
+      const vs = Dash.orderVantages(vantagesFor(name));
+      zoomVantages = vs;
+
+      if (vs.length <= 1) {
+        // Single-vantage: the original code path, byte-for-byte — no overlays, no chips.
+        renderZoomChips();
+        let s = null; try { s = await fetchRange(name, range); } catch (e) { /* transient */ }
+        if (curTarget !== name || curRange !== range) return; // route moved on while awaiting
+        const k = name + '|' + range;
+        const pick = pickSeries(s, lastGood.get(k)); lastGood.set(k, pick.cache); s = pick.series; // keep last-good on a transient failure (#5)
+        // Fixed tier domain [now-windowMs, now], matching the stacked detail view.
+        const lastT = s && s.buckets && s.buckets.length ? s.buckets[s.buckets.length - 1].t : NaN;
+        const t1 = Math.max(Date.now(), Number.isFinite(lastT) ? lastT : 0);
+        zoomState = { canvas, series: s, band: R.mode === 'band', t0: t1 - R.windowMs, t1, xlabels: R.xl, custom: false };
+        if (s && !s.unsupported && s.buckets.length >= 2) {
+          $('zoomMeta').innerHTML = metaHtml(s);
+          $('zoomRes').textContent = 'resolution: ' + R.desc + ' · ' + s.buckets.length + (R.mode === 'raw' ? ' rounds' : ' buckets') + (pick.failed ? ' · last known (refresh failed)' : ' · drag to zoom');
+        }
+        drawZoom();
+        return;
+      }
+
+      zoomFocus = Dash.defaultFocus(vs);
+      const fetched = await Promise.all(vs.map((v) => fetchRange(name, range, v).catch(() => null)));
+      if (curTarget !== name || curRange !== range) return; // route moved on while awaiting
+      const byV = {}; let failed = false;
+      vs.forEach((v, i) => {
+        const k = name + '|' + range + '|' + v;
+        const pick = pickSeries(fetched[i], lastGood.get(k)); lastGood.set(k, pick.cache);
+        byV[v] = pick.series;
+        if (pick.failed) failed = true;
+      });
+      const s = byV[zoomFocus];
+      // Fixed tier domain [now-windowMs, now], anchored to the focused vantage's data.
       const lastT = s && s.buckets && s.buckets.length ? s.buckets[s.buckets.length - 1].t : NaN;
       const t1 = Math.max(Date.now(), Number.isFinite(lastT) ? lastT : 0);
-      zoomState = { canvas, series: s, band: R.mode === 'band', t0: t1 - R.windowMs, t1, xlabels: R.xl, custom: false };
+      zoomState = { canvas, series: s, band: R.mode === 'band', t0: t1 - R.windowMs, t1, xlabels: R.xl, custom: false, byV, vantages: vs, focus: zoomFocus };
       if (s && !s.unsupported && s.buckets.length >= 2) {
         $('zoomMeta').innerHTML = metaHtml(s);
-        $('zoomRes').textContent = 'resolution: ' + R.desc + ' · ' + s.buckets.length + (R.mode === 'raw' ? ' rounds' : ' buckets') + (pick.failed ? ' · last known (refresh failed)' : ' · drag to zoom');
+        $('zoomRes').textContent = 'resolution: ' + R.desc + ' · ' + s.buckets.length + (R.mode === 'raw' ? ' rounds' : ' buckets') + (failed ? ' · last known (refresh failed)' : ' · drag to zoom');
       }
       drawZoom();
+      renderZoomChips();
+    }
+    // fetchCustomRange fetches one vantage's series for an arbitrary dragged [fromMs,toMs]
+    // span at resolution `zr` (zoomResolution's pick) — the zoomTo counterpart of fetchRange,
+    // which only knows the fixed range tiers. Returns null on any fetch/parse failure.
+    async function fetchCustomRange(name, zr, fromMs, toMs, vantage) {
+      const vq = vantage ? '&vantage=' + enc(vantage) : '';
+      const qs = '&from=' + Math.round(fromMs) + '&to=' + Math.round(toMs) + vq;
+      try {
+        if (zr.mode === 'raw') {
+          const r = await fetch('/api/series?target=' + enc(name) + qs, { cache: 'no-store' });
+          return r.ok ? Smoke.fromApiSeries(await r.json()) : null;
+        }
+        const r = await fetch('/api/rollup?target=' + enc(name) + '&res=' + zr.res + qs, { cache: 'no-store' });
+        if (r.status === 501) return { unsupported: true };
+        return r.ok ? Smoke.fromApiRollup(await r.json()) : null;
+      } catch (e) { return null; }
     }
     // zoomTo refetches an arbitrary dragged sub-range [fromMs,toMs] at the resolution best
     // for its span, then renders it (refetch, not image swap). A reset restores the tier.
+    // Multi-vantage: refetches ALL vantages for the new span and keeps the current focus.
     async function zoomTo(fromMs, toMs) {
       const name = curTarget; if (!name) return;
       const zr = zoomResolution(toMs - fromMs);
       const canvas = $('zoomCanvas');
       $('zoomRes').textContent = 'loading zoom…';
-      const qs = '&from=' + Math.round(fromMs) + '&to=' + Math.round(toMs);
-      let s = null;
-      try {
-        if (zr.mode === 'raw') {
-          const r = await fetch('/api/series?target=' + enc(name) + qs, { cache: 'no-store' });
-          if (r.ok) s = Smoke.fromApiSeries(await r.json());
-        } else {
-          const r = await fetch('/api/rollup?target=' + enc(name) + '&res=' + zr.res + qs, { cache: 'no-store' });
-          if (r.status === 501) s = { unsupported: true };
-          else if (r.ok) s = Smoke.fromApiRollup(await r.json());
-        }
-      } catch (e) { /* transient */ }
+      const vs = zoomVantages.length ? zoomVantages : ['local'];
+      let s, byV;
+      if (vs.length <= 1) {
+        s = await fetchCustomRange(name, zr, fromMs, toMs, null);
+      } else {
+        const fetched = await Promise.all(vs.map((v) => fetchCustomRange(name, zr, fromMs, toMs, v)));
+        byV = {};
+        vs.forEach((v, i) => { byV[v] = fetched[i]; });
+        zoomFocus = (zoomFocus && vs.includes(zoomFocus)) ? zoomFocus : Dash.defaultFocus(vs);
+        s = byV[zoomFocus];
+      }
       if (curTarget !== name) return;
-      zoomState = { canvas, series: s, band: zr.mode === 'band', t0: fromMs, t1: toMs, xlabels: rangeLabels(fromMs, toMs), custom: true };
+      zoomState = {
+        canvas, series: s, band: zr.mode === 'band', t0: fromMs, t1: toMs, xlabels: rangeLabels(fromMs, toMs), custom: true,
+        byV, vantages: vs.length > 1 ? vs : undefined, focus: vs.length > 1 ? zoomFocus : undefined,
+      };
       $('zoomReset').hidden = false;
       const desc = zr.mode === 'raw' ? 'per-round' : (zr.res === '1h' ? 'hourly band' : 'daily band');
       if (s && !s.unsupported && s.buckets && s.buckets.length >= 2) {
@@ -603,6 +767,7 @@
         $('zoomMeta').innerHTML = ''; $('zoomRes').textContent = 'no data in the selected range · reset to exit';
       }
       drawZoom();
+      if (vs.length > 1) renderZoomChips();
     }
 
     // ---- routing ----
@@ -635,6 +800,25 @@
       const sp = e.target.closest('.spanel'); if (sp) { nav('target=' + enc(curTarget) + '&range=' + sp.dataset.range); return; }
       const g = e.target.closest('.gpanel'); if (g) { nav('target=' + enc(g.dataset.target)); return; }
       const who = e.target.closest('.who[data-target]'); if (who) { nav('target=' + enc(who.dataset.target)); }
+    });
+
+    // ---- vantage chip legend/selector: click focuses that vantage and re-renders from
+    // the already-fetched per-vantage series (byV) — no refetch. ----
+    $('stackVantages').addEventListener('click', (e) => {
+      const b = e.target.closest('.vchip'); if (!b) return;
+      const v = b.dataset.v; if (!v || v === stackFocus) return;
+      stackFocus = v;
+      for (const c of stackCanvases) renderStackCell(c);
+      renderStackChips();
+    });
+    $('zoomVantages').addEventListener('click', (e) => {
+      const b = e.target.closest('.vchip'); if (!b) return;
+      const v = b.dataset.v; if (!v || v === zoomFocus || !zoomState || !zoomState.byV) return;
+      zoomFocus = v;
+      zoomState.focus = v;
+      zoomState.series = zoomState.byV[v];
+      drawZoom();
+      renderZoomChips();
     });
 
     // ---- drag-to-zoom on the detail graph ----
@@ -680,8 +864,10 @@
     function rerender() {
       const v = currentView();
       if (v === 'graphs') { renderGridPanels(); }
-      else if (v === 'stack') { for (const c of stackCanvases) renderInto(c.canvas, c.series, c.R, 170); }
-      else if (v === 'zoom') { drawZoom(); }
+      // renderStackCell (not renderInto directly) so a theme toggle/resize re-resolves
+      // overlay colors via cssVar and keeps rendering focused+overlays in multi-vantage mode.
+      else if (v === 'stack') { for (const c of stackCanvases) renderStackCell(c); }
+      else if (v === 'zoom') { drawZoom(); } // drawZoom already re-resolves overlay colors via cssVar
     }
     btn.addEventListener('click', () => { const next = curTheme() === 'dark' ? 'light' : 'dark'; document.documentElement.setAttribute('data-theme', next); try { localStorage.setItem('theme', next); } catch (e) {} themeLabel(); refreshKey(); rerender(); });
     matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { themeLabel(); refreshKey(); rerender(); });
