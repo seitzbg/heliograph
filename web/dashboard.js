@@ -543,6 +543,16 @@
 
     // ---- Drill-down: stack (all four) + zoom (one) ----
     let curTarget = null, curRange = null;
+    // stackGen/zoomGen: per-call generation counters. curTarget/curRange are still the
+    // source of truth for "what's open" (nav, click handlers, zoomReset) — but comparing an
+    // in-flight resume to them by NAME can't tell "still this call" from "a newer call that
+    // happens to target the same name" (A -> B -> A: the third call resets curTarget back to
+    // A, so a stale first call's `curTarget !== name` check passes and it appends anyway).
+    // Every renderStack/renderZoom/zoomTo call instead captures `const gen = ++stackGen` (or
+    // zoomGen) BEFORE its first await; any resume point that would mutate shared DOM/state
+    // checks `gen !== stackGen` (or zoomGen) — true for ANY newer call, same-name or not.
+    let stackGen = 0;
+    let zoomGen = 0;
     // Last successful series per `${target}|${rangeKey}` (single-vantage) or
     // `${target}|${rangeKey}|${vantage}` (multi-vantage), so a transient fetch failure on a
     // detail/zoom refresh keeps the graph instead of blanking it to "collecting…" (#5).
@@ -588,12 +598,13 @@
       host.innerHTML = vchipsHtml(stackVantages, stackFocus, (v) => lastMedian(ref && ref.byV[v]));
     }
     async function renderStack(name) {
+      const gen = ++stackGen; // captured before any await — invalidates any earlier in-flight renderStack, same name or not
       curTarget = name; stackCanvases.length = 0;
       $('stackTitle').innerHTML = esc(name);
       const grid = $('stackGrid'); grid.innerHTML = '';
 
       await ensureVantages(name);
-      if (curTarget !== name) return; // route moved on during the await — don't append a superseded target's panels
+      if (gen !== stackGen) return; // a newer renderStack call superseded this one — don't append its panels
       const vs = Dash.orderVantages(vantagesFor(name));
       stackVantages = vs;
 
@@ -614,6 +625,7 @@
         renderStackChips();
         await Promise.all(cells.map(async (c) => {
           let s = null; try { s = await fetchRange(name, c.key); } catch (e) { /* transient */ }
+          if (gen !== stackGen) return; // superseded mid-fetch — don't push/render into a detached/reused cell
           const k = name + '|' + c.key;
           const pick = pickSeries(s, lastGood.get(k)); lastGood.set(k, pick.cache); s = pick.series;
           const entry = { canvas: c.canvas, meta: c.meta, R: c.R, key: c.key, series: s, failed: pick.failed };
@@ -626,6 +638,7 @@
       stackFocus = Dash.defaultFocus(vs);
       await Promise.all(cells.map(async (c) => {
         const fetched = await Promise.all(vs.map((v) => fetchRange(name, c.key, v).catch(() => null)));
+        if (gen !== stackGen) return; // superseded mid-fetch — don't push/render into a detached/reused cell
         const byV = {}; let failed = false;
         vs.forEach((v, i) => {
           const k = name + '|' + c.key + '|' + v;
@@ -637,7 +650,7 @@
         stackCanvases.push(entry);
         renderStackCell(entry);
       }));
-      if (curTarget !== name) return; // route moved on while awaiting — don't render a superseded target's chips
+      if (gen !== stackGen) return; // a newer renderStack call superseded this one — don't render its chips
       renderStackChips();
     }
     // drawZoom renders the current zoomState onto the zoom canvas with its explicit
@@ -666,6 +679,7 @@
       return [fmt(t0), fmt(t0 + span / 3), fmt(t0 + 2 * span / 3), fmt(t1)];
     }
     async function renderZoom(name, range) {
+      const gen = ++zoomGen; // captured before any await — invalidates any earlier in-flight zoom call (renderZoom or zoomTo), same name/range or not
       curTarget = name; curRange = range; const R = RANGES[range];
       $('zoomTitle').innerHTML = esc(name) + ' <span class="reslabel">· ' + R.label + '</span>';
       $('zoomMeta').innerHTML = ''; $('zoomReset').hidden = true;
@@ -673,7 +687,7 @@
       const canvas = $('zoomCanvas');
 
       await ensureVantages(name);
-      if (curTarget !== name || curRange !== range) return; // route moved on while awaiting
+      if (gen !== zoomGen) return; // a newer zoom call superseded this one
       const vs = Dash.orderVantages(vantagesFor(name));
       zoomVantages = vs;
 
@@ -681,7 +695,7 @@
         // Single-vantage: the original code path, byte-for-byte — no overlays, no chips.
         renderZoomChips();
         let s = null; try { s = await fetchRange(name, range); } catch (e) { /* transient */ }
-        if (curTarget !== name || curRange !== range) return; // route moved on while awaiting
+        if (gen !== zoomGen) return; // a newer zoom call superseded this one
         const k = name + '|' + range;
         const pick = pickSeries(s, lastGood.get(k)); lastGood.set(k, pick.cache); s = pick.series; // keep last-good on a transient failure (#5)
         // Fixed tier domain [now-windowMs, now], matching the stacked detail view.
@@ -698,7 +712,7 @@
 
       zoomFocus = Dash.defaultFocus(vs);
       const fetched = await Promise.all(vs.map((v) => fetchRange(name, range, v).catch(() => null)));
-      if (curTarget !== name || curRange !== range) return; // route moved on while awaiting
+      if (gen !== zoomGen) return; // a newer zoom call superseded this one
       const byV = {}; let failed = false;
       vs.forEach((v, i) => {
         const k = name + '|' + range + '|' + v;
@@ -738,6 +752,7 @@
     // for its span, then renders it (refetch, not image swap). A reset restores the tier.
     // Multi-vantage: refetches ALL vantages for the new span and keeps the current focus.
     async function zoomTo(fromMs, toMs) {
+      const gen = ++zoomGen; // captured before any await — a drag also invalidates any earlier in-flight zoom call (renderZoom or a prior zoomTo)
       const name = curTarget; if (!name) return;
       const zr = zoomResolution(toMs - fromMs);
       const canvas = $('zoomCanvas');
@@ -748,12 +763,13 @@
         s = await fetchCustomRange(name, zr, fromMs, toMs, null);
       } else {
         const fetched = await Promise.all(vs.map((v) => fetchCustomRange(name, zr, fromMs, toMs, v)));
+        if (gen !== zoomGen) return; // superseded mid-fetch — don't touch the shared zoomFocus
         byV = {};
         vs.forEach((v, i) => { byV[v] = fetched[i]; });
         zoomFocus = (zoomFocus && vs.includes(zoomFocus)) ? zoomFocus : Dash.defaultFocus(vs);
         s = byV[zoomFocus];
       }
-      if (curTarget !== name) return;
+      if (gen !== zoomGen) return; // a newer zoom call superseded this drag (also covers the single-vantage branch's await)
       zoomState = {
         canvas, series: s, band: zr.mode === 'band', t0: fromMs, t1: toMs, xlabels: rangeLabels(fromMs, toMs), custom: true,
         byV, vantages: vs.length > 1 ? vs : undefined, focus: vs.length > 1 ? zoomFocus : undefined,
