@@ -863,6 +863,21 @@
       vShow('vantList');
     }
     $('vantRetry').addEventListener('click', () => renderVantages());
+    $('vantLogin').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      $('vantLoginErr').textContent = '';
+      let lr;
+      try {
+        lr = await fetch('/api/admin/login', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ password: $('vantPass').value }),
+        });
+      } catch (err) { $('vantLoginErr').textContent = 'Network error.'; return; }
+      $('vantPass').value = ''; // don't leave the password in the field
+      if (lr.status === 401) { $('vantLoginErr').textContent = 'Invalid password.'; return; }
+      if (lr.status !== 204) { $('vantLoginErr').textContent = 'Login failed (HTTP ' + lr.status + ').'; return; }
+      renderVantages({ afterLogin: true }); // re-fetch; the afterLogin probe catches a lost cookie
+    });
 
     // ---- routing ----
     function show(id) { for (const v of ['viewOverview', 'viewGraphs', 'viewStack', 'viewZoom', 'viewVantages']) $(v).classList.toggle('hidden', v !== id); }
