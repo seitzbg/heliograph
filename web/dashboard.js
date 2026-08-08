@@ -879,6 +879,87 @@
       if (lr.status !== 204) { $('vantLoginErr').textContent = 'Login failed (HTTP ' + lr.status + ').'; return; }
       renderVantages({ afterLogin: true });
     });
+    function reportMintError(isRegen, msg) {
+      if (isRegen) window.alert('Regenerate failed: ' + msg);
+      else $('vantAddErr').textContent = msg;
+    }
+    // mintVantage POSTs a name; the store creates or rotates (regenerate == re-POST the
+    // same name). On success it reveals the one-time key/snippet.
+    async function mintVantage(name, isRegen) {
+      let r;
+      try {
+        r = await fetch('/api/admin/vantages', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name }),
+        });
+      } catch (err) { reportMintError(isRegen, 'Network error.'); return; }
+      if (r.status === 401) { renderVantages(); return; } // session expired -> back to login
+      if (!r.ok) {
+        let msg = 'HTTP ' + r.status;
+        try { msg = (await r.json()).error || msg; } catch (e) { /* keep default */ }
+        reportMintError(isRegen, msg);
+        return;
+      }
+      const data = await r.json();
+      $('vantName').value = '';
+      $('vantAddErr').textContent = '';
+      showReveal(data.name, data.snippet || data.key || '');
+    }
+    function showReveal(name, snippet) {
+      $('vantRevealName').textContent = name;
+      $('vantRevealSnippet').textContent = snippet; // contains the smk_ key
+      $('vantReveal').classList.remove('hidden');
+      $('vantRevealClose').focus();
+    }
+    function closeReveal() {
+      $('vantRevealSnippet').textContent = ''; // never leave key material in the DOM
+      $('vantReveal').classList.add('hidden');
+      renderVantages(); // refresh the list (new/rotated row, updated counts)
+    }
+    $('vantRevealClose').addEventListener('click', closeReveal);
+    $('vantReveal').addEventListener('click', (e) => { if (e.target === $('vantReveal')) closeReveal(); }); // backdrop
+    $('vantCopy').addEventListener('click', async () => {
+      const text = $('vantRevealSnippet').textContent;
+      try {
+        await navigator.clipboard.writeText(text);
+        $('vantCopy').textContent = 'Copied';
+        setTimeout(() => { $('vantCopy').textContent = 'Copy'; }, 1500);
+      } catch (e) {
+        const rng = document.createRange(); rng.selectNodeContents($('vantRevealSnippet'));
+        const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(rng);
+      }
+    });
+    $('vantAdd').addEventListener('submit', (e) => {
+      e.preventDefault();
+      $('vantAddErr').textContent = '';
+      const name = $('vantName').value.trim();
+      if (!name) { $('vantAddErr').textContent = 'Name required.'; return; }
+      if (!/^[A-Za-z0-9._-]+$/.test(name)) { $('vantAddErr').textContent = 'Use letters, digits, . _ - only.'; return; }
+      // "local" is the hub's own vantage — agents don't use it. Hint, but don't hard-block
+      // (design §11: allowed-but-hinted): let the user proceed via confirm.
+      if (name === 'local' && !window.confirm('"local" is the hub’s own vantage — agents don’t use it. Mint a key anyway?')) return;
+      mintVantage(name, false);
+    });
+    $('vantRows').addEventListener('click', async (e) => {
+      const regen = e.target.closest('[data-regen]');
+      if (regen) {
+        const name = regen.getAttribute('data-regen');
+        if (window.confirm('Regenerate the key for "' + name + '"? This invalidates the current key; the agent must be reconfigured with the new one.')) {
+          mintVantage(name, true);
+        }
+        return;
+      }
+      const revoke = e.target.closest('[data-revoke]');
+      if (revoke) {
+        const name = revoke.getAttribute('data-revoke');
+        if (!window.confirm('Revoke "' + name + '"? Its agent will no longer be able to submit results.')) return;
+        let r;
+        try { r = await fetch('/api/admin/vantages/' + enc(name), { method: 'DELETE' }); }
+        catch (err) { window.alert('Network error revoking.'); return; }
+        if (r.status === 401) { renderVantages(); return; }
+        renderVantages(); // 200 removed or 404 already-gone -> refresh either way
+      }
+    });
 
     // ---- routing ----
     function show(id) { for (const v of ['viewOverview', 'viewGraphs', 'viewStack', 'viewZoom', 'viewVantages']) $(v).classList.toggle('hidden', v !== id); }
