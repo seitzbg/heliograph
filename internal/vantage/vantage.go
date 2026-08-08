@@ -174,7 +174,10 @@ func ValidName(name string) bool { return nameRe.MatchString(name) }
 
 // AgentSnippet renders a ready-to-paste smoke-agent config block for a freshly minted key.
 // Names are validated (ValidName) at mint time, but the scalars are still quoted so the
-// snippet is well-formed YAML regardless of the input.
+// snippet is well-formed YAML regardless of the input. The hub value is a placeholder —
+// callers paste this block into agent.yaml and replace it with their own reverse-proxy
+// endpoint — but its presence makes the block a complete smoke-agent config on its own.
 func AgentSnippet(name, fullKey string) string {
-	return fmt.Sprintf("# smoke-agent config for vantage %q\n# hub URL: set to your https reverse-proxy endpoint\nvantage: %q\nkey: %q\n", name, name, fullKey)
+	return fmt.Sprintf("# smoke-agent config for vantage %q\nhub: %q   # set to your https reverse-proxy endpoint\nvantage: %q\nkey: %q\n",
+		name, "https://your-hub.example", name, fullKey)
 }

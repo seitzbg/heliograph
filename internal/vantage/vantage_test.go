@@ -111,4 +111,7 @@ func TestAgentSnippet(t *testing.T) {
 	if !strings.Contains(out, "nyc") || !strings.Contains(out, "smk_abc_def") {
 		t.Errorf("AgentSnippet missing name or key:\n%s", out)
 	}
+	if !strings.Contains(out, "hub:") {
+		t.Errorf("AgentSnippet missing hub: line:\n%s", out)
+	}
 }
