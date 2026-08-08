@@ -238,5 +238,24 @@ check('vantageColorVar: local neutral, others stable palette', () => {
   assert.equal(D.vantageColorVar('nyc', ord), D.vantageColorVar('nyc', ord)); // stable
 });
 
+check('adminMode maps HTTP status -> panel mode', () => {
+  assert.equal(D.adminMode(200), 'list');
+  assert.equal(D.adminMode(401), 'login');
+  assert.equal(D.adminMode(404), 'disabled');
+  assert.equal(D.adminMode(503), 'error');
+  assert.equal(D.adminMode(0), 'error');
+});
+check('relTime: never / just now / minutes / hours / days', () => {
+  const now = Date.parse('2026-08-08T12:00:00Z');
+  assert.equal(D.relTime(null, now), 'never');
+  assert.equal(D.relTime('', now), 'never');
+  assert.equal(D.relTime(0, now), 'never');
+  assert.equal(D.relTime('not-a-date', now), 'never');
+  assert.equal(D.relTime('2026-08-08T11:59:50Z', now), 'just now');
+  assert.equal(D.relTime('2026-08-08T11:58:00Z', now), '2m ago');
+  assert.equal(D.relTime('2026-08-08T09:00:00Z', now), '3h ago');
+  assert.equal(D.relTime('2026-08-06T12:00:00Z', now), '2d ago');
+});
+
 if (failed) { console.error(`\n${failed} test(s) failed`); process.exit(1); }
 console.log('\nall dashboard tests passed');

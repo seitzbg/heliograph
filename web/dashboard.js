@@ -211,7 +211,32 @@
     return VPAL[(i < 0 ? 0 : i) % VPAL.length];
   }
 
-  window.Dash = { RANGES, RANGE_ORDER, parseRoute, mergeSeries, gridSince, fetchJSON, zoomResolution, pixelToTime, sharedYMax, buildTree, underPath, targetStatus, pickSeries, vantageList, orderVantages, defaultFocus, vantageColorVar };
+  // adminMode maps the status of GET /api/admin/vantages to the Vantages panel's display
+  // mode: 200 authorized (show the list), 401 log in, 404 admin management disabled (no
+  // SMOKED_ADMIN_PASSWORD -> routes unregistered), anything else a transient error.
+  function adminMode(status) {
+    if (status === 200) return 'list';
+    if (status === 401) return 'login';
+    if (status === 404) return 'disabled';
+    return 'error';
+  }
+
+  // relTime renders a short "time ago" for a last-seen instant. `then` is ms-epoch or an
+  // RFC3339 string; null/empty/zero/unparseable is "never". `now` defaults to Date.now().
+  function relTime(then, now) {
+    if (then == null || then === '' || then === 0) return 'never';
+    const t = typeof then === 'number' ? then : Date.parse(then);
+    if (isNaN(t)) return 'never';
+    const s = Math.max(0, Math.round(((now == null ? Date.now() : now) - t) / 1000));
+    if (s < 45) return 'just now';
+    const m = Math.round(s / 60);
+    if (m < 60) return m + 'm ago';
+    const h = Math.round(m / 60);
+    if (h < 24) return h + 'h ago';
+    return Math.round(h / 24) + 'd ago';
+  }
+
+  window.Dash = { RANGES, RANGE_ORDER, parseRoute, mergeSeries, gridSince, fetchJSON, zoomResolution, pixelToTime, sharedYMax, buildTree, underPath, targetStatus, pickSeries, vantageList, orderVantages, defaultFocus, vantageColorVar, adminMode, relTime };
 
   // ---------------------------------------------------------------- init (DOM) --
   function init() {
