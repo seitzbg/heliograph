@@ -365,7 +365,7 @@ func (s *PGStore) Keys() ([]string, error) {
 func (s *PGStore) Latest(key string) (scheduler.Outcome, bool) {
 	row := s.pool.QueryRow(s.ctx,
 		`SELECT ts, target, probe, host, vantage, pings, loss, median_seconds, rtts_seconds, err, duration_ms
-		   FROM samples WHERE target=$1 AND vantage='local' ORDER BY ts DESC LIMIT 1`, key)
+		   FROM samples WHERE target=$1 AND vantage=$2 ORDER BY ts DESC LIMIT 1`, key, store.DefaultVantage)
 	o, err := scanOutcome(row)
 	if err != nil {
 		if !errors.Is(err, pgx.ErrNoRows) {
@@ -376,7 +376,6 @@ func (s *PGStore) Latest(key string) (scheduler.Outcome, bool) {
 	return o, true
 }
 
-// History returns the target's recent LOCAL rounds — see Latest.
 // History returns the target's recent LOCAL rounds (the hub's own vantage), capped to
 // histCap. It delegates to HistoryVantage so the local and per-vantage paths share one query.
 func (s *PGStore) History(key string) ([]scheduler.Outcome, error) {

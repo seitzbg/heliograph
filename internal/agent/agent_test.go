@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -281,5 +282,80 @@ func TestAgentRunTerminatesPromptlyOnCancel(t *testing.T) {
 		}
 	case <-time.After(hangBound):
 		t.Fatal("Run did not return within the bound after ctx cancellation — shutdown hang")
+	}
+}
+
+// captureHandler is a concurrency-safe slog.Handler that records emitted records
+// so a test can assert on log output.
+type captureHandler struct {
+	mu      *sync.Mutex
+	records *[]slog.Record
+}
+
+func (h captureHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h captureHandler) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	*h.records = append(*h.records, r.Clone())
+	return nil
+}
+func (h captureHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h captureHandler) WithGroup(string) slog.Handler      { return h }
+
+// The hub derives the vantage from the API key; the configured `vantage` is only a
+// label. When they disagree, the agent must surface the mismatch so its rounds can't
+// be silently attributed to the wrong vantage.
+func TestPollLoopWarnsOnVantageMismatch(t *testing.T) {
+	var mu sync.Mutex
+	var records []slog.Record
+	prev := slog.Default()
+	slog.SetDefault(slog.New(captureHandler{mu: &mu, records: &records}))
+	defer slog.SetDefault(prev)
+
+	const cv = "sha256:v1"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/agent/v1/assignment":
+			w.Header().Set("ETag", cv)
+			_ = json.NewEncoder(w).Encode(agentwire.Assignment{
+				Vantage: "nyc", ConfigVersion: cv,
+				Targets: []agentwire.AssignmentTarget{{Name: "t1", Probe: "AgentTestEcho", Host: "h", StepMs: 1000, Pings: 1}},
+			})
+		case "/agent/v1/results":
+			_ = json.NewEncoder(w).Encode(agentwire.ResultsResponse{Accepted: 0})
+		}
+	}))
+	defer srv.Close()
+
+	// Configured "lax", but the hub (key-derived) assigns "nyc": expect a warning naming both.
+	a := New(Options{Hub: srv.URL, Key: "smk_k_s", Vantage: "lax", Interval: 50 * time.Millisecond,
+		Timeout: time.Second, Workers: 2, BufferCap: 100, FlushMax: 10})
+	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
+	defer cancel()
+	_ = a.Run(ctx)
+
+	mu.Lock()
+	defer mu.Unlock()
+	found := false
+	for _, r := range records {
+		if r.Level != slog.LevelWarn {
+			continue
+		}
+		var configured, assigned string
+		r.Attrs(func(at slog.Attr) bool {
+			switch at.Key {
+			case "configured":
+				configured = at.Value.String()
+			case "assigned":
+				assigned = at.Value.String()
+			}
+			return true
+		})
+		if configured == "lax" && assigned == "nyc" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("expected a warning naming the configured (lax) and assigned (nyc) vantages")
 	}
 }

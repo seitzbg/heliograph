@@ -120,7 +120,8 @@ func (a *Agent) Run(ctx context.Context) error {
 // so the next poll can 304 again.
 func (a *Agent) pollLoop(ctx context.Context) {
 	var etag string
-	t := time.NewTimer(0) // fire immediately
+	var vantageChecked bool // warn at most once if the configured vantage label disagrees with the hub's
+	t := time.NewTimer(0)   // fire immediately
 	defer t.Stop()
 	for {
 		select {
@@ -135,9 +136,18 @@ func (a *Agent) pollLoop(ctx context.Context) {
 				if len(skipped) > 0 {
 					slog.Warn("assignment: skipped invalid targets", "skipped", skipped)
 				}
+				// The hub derives the vantage from the API key and returns it here; the
+				// configured `vantage` is only a label. Warn once if the operator's label
+				// disagrees (e.g. a key minted for a different vantage), so the logs can't
+				// quietly attribute this agent's rounds to the wrong vantage.
+				if !vantageChecked && a.opts.Vantage != "" && a.opts.Vantage != asg.Vantage {
+					slog.Warn("configured vantage does not match the hub-assigned vantage; the hub's key-derived value wins",
+						"configured", a.opts.Vantage, "assigned", asg.Vantage)
+				}
+				vantageChecked = true
 				a.jobs.Store(&jobs)
 				etag = asg.ConfigVersion
-				slog.Info("assignment updated", "targets", len(jobs), "config_version", etag)
+				slog.Info("assignment updated", "vantage", asg.Vantage, "targets", len(jobs), "config_version", etag)
 			}
 			t.Reset(a.opts.Interval)
 		}

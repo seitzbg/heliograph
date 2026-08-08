@@ -39,10 +39,7 @@ const DefaultVantage = "local"
 // VantageOf returns o.Vantage, or DefaultVantage when it is empty, so the default lives
 // in exactly one place across the in-memory and PostgreSQL stores.
 func VantageOf(o scheduler.Outcome) string {
-	if o.Vantage == "" {
-		return DefaultVantage
-	}
-	return o.Vantage
+	return VantageOrDefault(o.Vantage)
 }
 
 // VantageOrDefault normalizes a read-side vantage selector: empty means the hub's
