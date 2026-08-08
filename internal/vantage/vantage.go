@@ -12,12 +12,13 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"regexp"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"smokeping-modern/internal/store"
 )
 
 const schema = `
@@ -165,12 +166,11 @@ func (s *Store) Revoke(ctx context.Context, name string) (bool, error) {
 	return tag.RowsAffected() > 0, nil
 }
 
-// nameRe restricts vantage identifiers to a safe charset — they flow into API keys, URLs,
-// DB rows, and the YAML agent snippet, so a name can't carry spaces, colons, or newlines.
-var nameRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$`)
-
-// ValidName reports whether name is an acceptable vantage identifier.
-func ValidName(name string) bool { return nameRe.MatchString(name) }
+// ValidName reports whether name is an acceptable vantage identifier. It delegates to
+// store.ValidVantageName, the single source of truth shared with config loading and the
+// read API — names flow into API keys, URLs, DB rows, and the YAML agent snippet, so a name
+// can't carry spaces, colons, or newlines.
+func ValidName(name string) bool { return store.ValidVantageName(name) }
 
 // AgentSnippet renders a ready-to-paste smoke-agent config block for a freshly minted key.
 // Names are validated (ValidName) at mint time, but the scalars are still quoted so the

@@ -607,3 +607,39 @@ targets:
 		t.Fatal("expected an error for a blank vantage name, got none")
 	}
 }
+
+// A vantage name that can never be provisioned (a key can't be minted for it, and
+// ?vantage= reads reject it) must fail at config load rather than leave the target
+// permanently dark (CODE_REVIEW #11 / P3-11).
+func TestUnprovisionableVantageNameIsRejected(t *testing.T) {
+	const y = `
+targets:
+  probe: TCPConnect
+  children:
+    bad: { host: 1.2.3.4, params: { port: "80" }, vantages: ["new york"] }
+`
+	c, err := Parse([]byte(y))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if _, err := c.Monitors(); err == nil {
+		t.Fatal(`expected an error for the unprovisionable vantage name "new york", got none`)
+	}
+}
+
+// A vantage listed twice on one target is a config error — it silently does nothing useful.
+func TestDuplicateVantageIsRejected(t *testing.T) {
+	const y = `
+targets:
+  probe: TCPConnect
+  children:
+    dup: { host: 1.2.3.4, params: { port: "80" }, vantages: [nyc, nyc] }
+`
+	c, err := Parse([]byte(y))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if _, err := c.Monitors(); err == nil {
+		t.Fatal("expected an error for a duplicate vantage, got none")
+	}
+}

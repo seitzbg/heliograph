@@ -189,11 +189,7 @@ func main() {
 	// Boot-only: a SIGHUP reload carries windows via InheritStateFrom, and a fresh
 	// in-memory store has no history, so this is a no-op there.
 	if rt := current.Load(); rt.engine != nil {
-		meta := make(map[string]warmMeta, len(rt.jobs))
-		for _, j := range rt.jobs {
-			meta[j.Target.Name] = warmMeta{host: j.Target.Host, probe: j.Probe.Name(), step: j.Step}
-		}
-		warmStartAlerts(rt.engine, rt.alertsByTarget, meta, st, time.Now())
+		warmStartAlerts(ctx, rt.engine, rt.monitors, st, time.Now())
 	}
 
 	roundStats := &api.RoundStats{}
@@ -248,24 +244,30 @@ func main() {
 		}
 		// Live views report only currently-configured targets, so a target removed or
 		// renamed on a SIGHUP reload stops showing as healthy (its history stays in
-		// the store but ages out via retention / the bounded cap).
+		// the store but ages out via retention / the bounded cap). Built from the full
+		// monitor set (all vantages), not just the hub's local jobs, so a remote-only
+		// target survives the activeLatest filter for its own vantage (CODE_REVIEW #3 / P1-3).
 		srv.Active = func() map[string]bool {
-			jobs := current.Load().jobs
-			m := make(map[string]bool, len(jobs))
-			for _, j := range jobs {
-				m[j.Target.Name] = true
+			ms := current.Load().monitors
+			m := make(map[string]bool, len(ms))
+			for _, mon := range ms {
+				m[mon.Name] = true
 			}
 			return m
 		}
 		// Per-target step drives /api/sla's coverage (expected rounds = window/step).
 		srv.Steps = func() map[string]time.Duration {
-			jobs := current.Load().jobs
-			m := make(map[string]time.Duration, len(jobs))
-			for _, j := range jobs {
-				m[j.Target.Name] = j.Step
+			ms := current.Load().monitors
+			m := make(map[string]time.Duration, len(ms))
+			for _, mon := range ms {
+				m[mon.Name] = mon.Step
 			}
 			return m
 		}
+		// The configured-target catalog lets /api/targets list a target that has no stored
+		// row for the requested vantage yet — chiefly a remote-only target the hub never
+		// probes locally — so it appears in the tree and its deep link resolves (P1-3).
+		srv.Configured = func() []model.Monitor { return current.Load().monitors }
 		// Federation: only with a DB (the vantage key store is TimescaleDB-backed). The
 		// agent routes (below) light up unconditionally here; the admin key-management API
 		// additionally requires a configured admin password (fail-closed — no password
@@ -282,10 +284,17 @@ func main() {
 			// set, since a remote vantage's agent needs to authenticate and report results
 			// regardless of whether the (human) admin key-management API is enabled.
 			srv.VantageAuth = vst
-			srv.Assignment = func(v string) ([]model.Monitor, string) {
-				ms := current.Load().monitors
-				a := federation.AssignmentFor(ms, v)
-				return a, federation.ConfigVersion(a)
+			srv.Assignment = func(v string) ([]model.Monitor, map[string]map[string]string, string) {
+				rt := current.Load()
+				a := federation.AssignmentFor(rt.monitors, v)
+				return a, rt.probeCfgs, federation.ConfigVersion(a, rt.probeCfgs)
+			}
+			// Evaluate alerts for ingested remote rounds on the live runtime, serialized with
+			// the local measure loop's eval and any reload swap via evalMu (P2-5).
+			srv.OnIngest = func(out []scheduler.Outcome) {
+				evalMu.Lock()
+				current.Load().eval(out)
+				evalMu.Unlock()
 			}
 			srv.TargetVantages = func() map[string][]string {
 				ms := current.Load().monitors
@@ -533,13 +542,16 @@ func logRound(round int, dur time.Duration, out []scheduler.Outcome) {
 // It is rebuilt (and atomically swapped) on SIGHUP config reload.
 type runtime struct {
 	jobs            []scheduler.Job
-	monitors        []model.Monitor // full post-inheritance set, all vantages (for the agent assignment endpoint)
+	monitors        []model.Monitor              // full post-inheritance set, all vantages (for the agent assignment endpoint)
+	probeCfgs       map[string]map[string]string // probe kind -> effective probe-level config, served to agents so remote probes match the hub's
 	engine          *alert.Engine
 	alertsByTarget  map[string][]string
 	alerteeByTarget map[string][]string
 }
 
 // eval runs the alert engine over a round's outcomes and dispatches notifications.
+// Each outcome is evaluated under its own vantage (local for hub rounds, the agent's
+// vantage for ingested remote rounds), so alert state is per measuring location (P2-5).
 func (rt *runtime) eval(out []scheduler.Outcome) {
 	if rt.engine == nil {
 		return
@@ -549,17 +561,13 @@ func (rt *runtime) eval(out []scheduler.Outcome) {
 		if len(names) == 0 {
 			continue
 		}
-		events := rt.engine.Evaluate(o.Target.Name, names,
+		events := rt.engine.Evaluate(o.Target.Name, store.VantageOf(o), names,
 			o.Computed.LossFraction()*100, o.Computed.Median, o.When)
 		rt.engine.Dispatch(events, rt.alerteeByTarget[o.Target.Name]...)
 	}
 }
 
-// warmStartAlerts seeds each alerted target's alert window from the store's recent
-// history (loss% and rtt median per round, oldest->newest — the same values eval feeds
-// Evaluate), so an already-breaching target fires immediately after boot. Best-effort: a
-// target with no history or a read error is skipped.
-// warmMeta is the current job identity used to decide which stored history may seed a
+// warmMeta is the current target identity used to decide which stored history may seed a
 // target's alert window: only rounds matching the current host+probe and cadence count.
 type warmMeta struct {
 	host  string
@@ -567,30 +575,51 @@ type warmMeta struct {
 	step  time.Duration
 }
 
-func warmStartAlerts(engine *alert.Engine, alertsByTarget map[string][]string, meta map[string]warmMeta, st store.Store, now time.Time) {
-	for target, names := range alertsByTarget {
-		m, ok := meta[target]
-		if !ok {
-			continue // not a currently-probed local target
-		}
-		hist, err := st.History(target)
-		if err != nil || len(hist) == 0 {
+// warmStartLookback bounds how far back a remote vantage's warm-start history read goes.
+// SeedWindow trims to the deepest matcher window anyway; this just caps the query.
+const warmStartLookback = 24 * time.Hour
+
+// warmStartAlerts seeds each alerted target's per-vantage alert window from that vantage's
+// recent history (loss% and rtt median per round, oldest->newest — the same values eval
+// feeds Evaluate), so an already-breaching target fires immediately after boot. It reads
+// the matching vantage: the hub's own "local" via History, every remote vantage via
+// HistorySince, so a remote outage warm-starts too (P2-5). Best-effort: a (target,vantage)
+// with no history, a read error, or a store that can't range-read remote vantages is skipped.
+func warmStartAlerts(ctx context.Context, engine *alert.Engine, monitors []model.Monitor, st store.Store, now time.Time) {
+	rh, _ := st.(store.RangeHistorier)
+	for _, m := range monitors {
+		if len(m.Alerts) == 0 {
 			continue
 		}
-		// Seed only the recent, cadence-contiguous suffix that matches the current host/probe,
-		// so stale or semantically-different history can't satisfy a consecutive-sample matcher
-		// (e.g. two bad samples from months ago + one bad post-restart sample) (#6).
-		suffix := recentContiguous(hist, m, now)
-		if len(suffix) == 0 {
-			continue
+		meta := warmMeta{host: m.Host, probe: m.ProbeKind, step: m.Step}
+		for _, v := range m.Vantages {
+			var hist []scheduler.Outcome
+			var err error
+			if v == store.DefaultVantage {
+				hist, err = st.History(m.Name)
+			} else if rh != nil {
+				hist, err = rh.HistorySince(ctx, m.Name, v, now.Add(-warmStartLookback))
+			} else {
+				continue
+			}
+			if err != nil || len(hist) == 0 {
+				continue
+			}
+			// Seed only the recent, cadence-contiguous suffix matching the current host/probe,
+			// so stale or semantically-different history can't satisfy a consecutive-sample
+			// matcher (e.g. two bad samples from months ago + one bad post-restart sample) (#6).
+			suffix := recentContiguous(hist, meta, now)
+			if len(suffix) == 0 {
+				continue
+			}
+			loss := make([]float64, len(suffix))
+			rtt := make([]float64, len(suffix))
+			for i, o := range suffix {
+				loss[i] = o.Computed.LossFraction() * 100
+				rtt[i] = o.Computed.Median // NaN for a lost round
+			}
+			engine.SeedWindow(m.Name, v, m.Alerts, loss, rtt)
 		}
-		loss := make([]float64, len(suffix))
-		rtt := make([]float64, len(suffix))
-		for i, o := range suffix {
-			loss[i] = o.Computed.LossFraction() * 100
-			rtt[i] = o.Computed.Median // NaN for a lost round
-		}
-		engine.SeedWindow(target, names, loss, rtt)
 	}
 }
 
@@ -692,9 +721,14 @@ func buildRuntime(configPath string, demoPings int, demoStep, timeout time.Durat
 		})
 	}
 
+	// Alert maps cover the full monitor set (all vantages), not just local jobs: remote
+	// outcomes are now evaluated per-vantage on ingest, and eval is vantage-scoped, so a
+	// remote-only target's alerts fire on its own data without the hub ever probing it
+	// locally (P2-5). The local measure loop only ever feeds local outcomes, so including
+	// remote targets here cannot make the hub alert them against local data.
 	alertsByTarget := map[string][]string{}
 	alerteeByTarget := map[string][]string{}
-	for _, m := range localMonitors {
+	for _, m := range fullMonitors {
 		if len(m.Alerts) > 0 {
 			alertsByTarget[m.Name] = m.Alerts
 		}
@@ -706,7 +740,7 @@ func buildRuntime(configPath string, demoPings int, demoStep, timeout time.Durat
 	if len(alertDefs) > 0 {
 		engine = alert.NewEngine(alertDefs, notifiers)
 	}
-	return &runtime{jobs: jobs, monitors: fullMonitors, engine: engine, alertsByTarget: alertsByTarget, alerteeByTarget: alerteeByTarget}, nil
+	return &runtime{jobs: jobs, monitors: fullMonitors, probeCfgs: probeCfgs, engine: engine, alertsByTarget: alertsByTarget, alerteeByTarget: alerteeByTarget}, nil
 }
 
 func demoMonitors(pings int, step time.Duration) []model.Monitor {

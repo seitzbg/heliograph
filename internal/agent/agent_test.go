@@ -77,6 +77,76 @@ func TestAgentRunPullsMeasuresPushes(t *testing.T) {
 	}
 }
 
+// Options.Validate is the package boundary that stops a non-CLI caller from building a
+// dangerous agent — notably FlushMax<1, which panics peekBatch (CODE_REVIEW #9 / P2-9).
+func TestOptionsValidate(t *testing.T) {
+	ok := Options{Hub: "https://h", Key: "k", Interval: time.Minute, Timeout: time.Second, Workers: 1, BufferCap: 1, FlushMax: 1}
+	if err := ok.Validate(); err != nil {
+		t.Fatalf("valid options rejected: %v", err)
+	}
+	bad := func(f func(*Options)) Options { o := ok; f(&o); return o }
+	cases := map[string]Options{
+		"no hub":        bad(func(o *Options) { o.Hub = "" }),
+		"no key":        bad(func(o *Options) { o.Key = "" }),
+		"zero interval": bad(func(o *Options) { o.Interval = 0 }),
+		"neg timeout":   bad(func(o *Options) { o.Timeout = -1 }),
+		"zero workers":  bad(func(o *Options) { o.Workers = 0 }),
+		"zero buffer":   bad(func(o *Options) { o.BufferCap = 0 }),
+		"neg flushmax":  bad(func(o *Options) { o.FlushMax = -1 }),
+	}
+	for name, o := range cases {
+		if err := o.Validate(); err == nil {
+			t.Errorf("%s: expected a validation error, got nil", name)
+		}
+	}
+}
+
+// finalFlush must drain the WHOLE buffer at shutdown, looping over FlushMax batches,
+// not stop after one — otherwise a controlled shutdown after a hub outage strands every
+// buffered round past the first batch (CODE_REVIEW #8 / P2-8).
+func TestFinalFlushDrainsAllBatches(t *testing.T) {
+	var (
+		mu      sync.Mutex
+		rounds  int
+		batches int
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/agent/v1/results" {
+			http.NotFound(w, r)
+			return
+		}
+		var req agentwire.ResultsRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		mu.Lock()
+		rounds += len(req.Results)
+		batches++
+		mu.Unlock()
+		_ = json.NewEncoder(w).Encode(agentwire.ResultsResponse{Accepted: len(req.Results)})
+	}))
+	defer srv.Close()
+
+	a := New(Options{Hub: srv.URL, Key: "smk_k_s", Vantage: "nyc",
+		Timeout: time.Second, Workers: 1, BufferCap: 1000, FlushMax: 10})
+	// Buffer 25 rounds -> 3 batches of {10,10,5} must all be delivered.
+	for i := 0; i < 25; i++ {
+		a.buf.add(agentwire.RoundReport{Target: "t1", Pings: 1, RTTs: []float64{0.01}})
+	}
+
+	a.finalFlush(5 * time.Second)
+
+	if n := a.buf.len(); n != 0 {
+		t.Errorf("buffer not drained: %d rounds left", n)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if rounds != 25 {
+		t.Errorf("hub received %d rounds, want 25 (final flush stopped early)", rounds)
+	}
+	if batches < 3 {
+		t.Errorf("hub received %d batches, want >=3 (loop over FlushMax batches)", batches)
+	}
+}
+
 // TestAgentRunRetriesOnPushFailure proves the flush loop retains a batch across a
 // transient push failure (503) and eventually delivers it once the hub recovers —
 // the retain+retry contract (do NOT commit on error).

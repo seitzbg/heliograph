@@ -5,9 +5,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/url"
 	"os"
@@ -65,19 +68,34 @@ type fileConfig struct {
 	FlushMax int    `yaml:"flush_max"`
 }
 
-// resolveConfig builds the effective agentConfig: it starts from the YAML
-// file at path (if non-empty), applies any non-zero flag overrides on top,
-// fills in defaults for anything still unset, and validates the result. A
-// zero-value flag argument (e.g. hubFlag == "") means "not passed" and never
-// overrides a file value.
-func resolveConfig(path, hubFlag, keyFlag string, intervalFlag, timeoutFlag time.Duration, insecureFlag bool) (agentConfig, error) {
+// cliFlags carries the CLI flag overrides for resolveConfig. A zero value for a field
+// means "flag not passed" and never overrides a value the config file provided.
+type cliFlags struct {
+	hub, key, vantage string
+	interval, timeout time.Duration
+	insecure          bool
+	workers, buffer   int
+	flushMax          int
+}
+
+// resolveConfig builds the effective agentConfig: it starts from the YAML file at path
+// (if non-empty), applies any non-zero flag overrides on top, fills in defaults for
+// anything still unset, and then runs ONE final validation over the fully-merged result.
+// Merging before validating is what makes the check authoritative: previously numeric
+// flag overrides were applied in main() AFTER validation, so an invalid value passed by
+// flag slipped through — including flush_max: -1, which panics peekBatch's make([], -1)
+// (CODE_REVIEW #9 / P2-9). The YAML decode is strict (KnownFields), so a misspelled key
+// is a startup error, not a silently-ignored setting.
+func resolveConfig(path string, f cliFlags) (agentConfig, error) {
 	var fc fileConfig
 	if path != "" {
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return agentConfig{}, fmt.Errorf("reading config %s: %w", path, err)
 		}
-		if err := yaml.Unmarshal(data, &fc); err != nil {
+		dec := yaml.NewDecoder(bytes.NewReader(data))
+		dec.KnownFields(true)
+		if err := dec.Decode(&fc); err != nil && !errors.Is(err, io.EOF) { // EOF = empty file, treat as no settings
 			return agentConfig{}, fmt.Errorf("parsing config %s: %w", path, err)
 		}
 	}
@@ -106,24 +124,37 @@ func resolveConfig(path, hubFlag, keyFlag string, intervalFlag, timeoutFlag time
 		cfg.Timeout = d
 	}
 
-	// Non-zero flag values override the file. A flag left at its zero value
-	// (unset) never clobbers a value the file provided.
-	if hubFlag != "" {
-		cfg.Hub = hubFlag
+	// Merge ALL non-zero flag values over the file, before any validation.
+	if f.hub != "" {
+		cfg.Hub = f.hub
 	}
-	if keyFlag != "" {
-		cfg.Key = keyFlag
+	if f.key != "" {
+		cfg.Key = f.key
 	}
-	if intervalFlag != 0 {
-		cfg.Interval = intervalFlag
+	if f.vantage != "" {
+		cfg.Vantage = f.vantage
 	}
-	if timeoutFlag != 0 {
-		cfg.Timeout = timeoutFlag
+	if f.interval != 0 {
+		cfg.Interval = f.interval
 	}
-	if insecureFlag {
+	if f.timeout != 0 {
+		cfg.Timeout = f.timeout
+	}
+	if f.insecure {
 		cfg.Insecure = true
 	}
+	if f.workers != 0 {
+		cfg.Workers = f.workers
+	}
+	if f.buffer != 0 {
+		cfg.Buffer = f.buffer
+	}
+	if f.flushMax != 0 {
+		cfg.FlushMax = f.flushMax
+	}
 
+	// Defaults for anything still unset (zero). A negative value is NOT zero, so it skips
+	// the default and is caught by validation below rather than being silently replaced.
 	if cfg.Interval == 0 {
 		cfg.Interval = 60 * time.Second
 	}
@@ -140,11 +171,27 @@ func resolveConfig(path, hubFlag, keyFlag string, intervalFlag, timeoutFlag time
 		cfg.FlushMax = 5000
 	}
 
+	// Single authoritative validation over the fully-merged config.
 	if u, err := url.Parse(cfg.Hub); err != nil || !u.IsAbs() || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return agentConfig{}, fmt.Errorf("hub must be an absolute http(s) URL, got %q", cfg.Hub)
 	}
 	if cfg.Key == "" {
 		return agentConfig{}, fmt.Errorf("key is required")
+	}
+	if cfg.Interval <= 0 {
+		return agentConfig{}, fmt.Errorf("interval must be positive, got %s", cfg.Interval)
+	}
+	if cfg.Timeout <= 0 {
+		return agentConfig{}, fmt.Errorf("timeout must be positive, got %s", cfg.Timeout)
+	}
+	if cfg.Workers < 1 {
+		return agentConfig{}, fmt.Errorf("workers must be at least 1, got %d", cfg.Workers)
+	}
+	if cfg.Buffer < 1 {
+		return agentConfig{}, fmt.Errorf("buffer must be at least 1, got %d", cfg.Buffer)
+	}
+	if cfg.FlushMax < 1 {
+		return agentConfig{}, fmt.Errorf("flush_max must be at least 1, got %d", cfg.FlushMax)
 	}
 
 	return cfg, nil
@@ -173,22 +220,14 @@ func main() {
 
 	setupLogger(*logFormat, *logLevel)
 
-	cfg, err := resolveConfig(*configPath, *hub, *key, *interval, *timeout, *insecure)
+	cfg, err := resolveConfig(*configPath, cliFlags{
+		hub: *hub, key: *key, vantage: *vantage,
+		interval: *interval, timeout: *timeout, insecure: *insecure,
+		workers: *workers, buffer: *buffer, flushMax: *flushMax,
+	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "smoke-agent: %v\n", err)
 		os.Exit(1)
-	}
-	if *vantage != "" {
-		cfg.Vantage = *vantage
-	}
-	if *workers != 0 {
-		cfg.Workers = *workers
-	}
-	if *buffer != 0 {
-		cfg.Buffer = *buffer
-	}
-	if *flushMax != 0 {
-		cfg.FlushMax = *flushMax
 	}
 
 	slog.Info("smoke-agent starting", "hub", cfg.Hub, "vantage", cfg.Vantage, "probes", strings.Join(probe.Registered(), ", "))

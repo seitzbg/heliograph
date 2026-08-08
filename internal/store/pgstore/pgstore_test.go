@@ -2,16 +2,42 @@ package pgstore
 
 import (
 	"context"
+	"errors"
 	"math"
 	"os"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
+
 	"smokeping-modern/internal/probe"
 	"smokeping-modern/internal/sample"
 	"smokeping-modern/internal/scheduler"
 )
+
+// refreshAgg manually refreshes a continuous aggregate, retrying on TimescaleDB's
+// "concurrent refresh" error (SQLSTATE 55P03): a background refresh-policy job can overlap
+// a test's manual refresh. That is a test-timing race — not a real failure — so retry
+// briefly rather than let it flake the suite (which must be reliable enough to gate CI).
+func refreshAgg(ctx context.Context, t *testing.T, s *PGStore, view string) {
+	t.Helper()
+	var lastErr error
+	for i := 0; i < 40; i++ {
+		if _, err := s.pool.Exec(ctx, "CALL refresh_continuous_aggregate('"+view+"', NULL, NULL)"); err == nil {
+			return
+		} else {
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) && pgErr.Code == "55P03" {
+				lastErr = err
+				time.Sleep(50 * time.Millisecond)
+				continue
+			}
+			t.Fatalf("refresh %s: %v", view, err)
+		}
+	}
+	t.Fatalf("refresh %s: still blocked by a concurrent refresh after retries: %v", view, lastErr)
+}
 
 // testStore returns a PGStore connected to SMOKE_TEST_DSN with a freshly
 // truncated samples table, skipping the test if the DSN is not set. For tests
@@ -314,9 +340,7 @@ func TestEnableDownsampling(t *testing.T) {
 		t.Fatalf("EnableDownsampling (2nd): %v", err)
 	}
 
-	if _, err := s.pool.Exec(ctx, "CALL refresh_continuous_aggregate('samples_hourly', NULL, NULL)"); err != nil {
-		t.Fatalf("refresh: %v", err)
-	}
+	refreshAgg(ctx, t, s, "samples_hourly")
 	var rounds int
 	var medAvg float64
 	if err := s.pool.QueryRow(ctx,
@@ -328,6 +352,122 @@ func TestEnableDownsampling(t *testing.T) {
 	}
 	if medAvg != 0.03 { // median of the 5 samples
 		t.Errorf("aggregate median_avg = %v, want 0.03", medAvg)
+	}
+}
+
+// An existing continuous aggregate created before median_rounds existed must be rebuilt by
+// EnableDownsampling — the migrateAggregates drop+recreate — so the new column appears
+// (CODE_REVIEW #6 / P2-6). Without the rebuild, Rollup's SELECT of median_rounds would fail.
+func TestMigrateAggregatesAddsMedianRounds(t *testing.T) {
+	dsn := os.Getenv("SMOKE_TEST_DSN")
+	if dsn == "" {
+		t.Skip("set SMOKE_TEST_DSN to run the TimescaleDB integration test")
+	}
+	ctx := context.Background()
+	s, err := New(ctx, dsn, 100, func(e error) { t.Errorf("store error: %v", e) })
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer s.Close()
+
+	// Build the PRE-median_rounds aggregate shape (has vantage, but count(*) AS rounds only).
+	for _, q := range []string{
+		"DROP MATERIALIZED VIEW IF EXISTS samples_daily CASCADE",
+		"DROP MATERIALIZED VIEW IF EXISTS samples_hourly CASCADE",
+		"TRUNCATE samples",
+		`CREATE MATERIALIZED VIEW samples_hourly
+		 WITH (timescaledb.continuous, timescaledb.materialized_only = false) AS
+		 SELECT time_bucket('1 hour', ts) AS bucket, target, vantage,
+		        avg(median_seconds) AS median_avg, min(median_seconds) AS median_min,
+		        max(median_seconds) AS median_max,
+		        avg(loss::float / NULLIF(pings, 0)) AS loss_frac, count(*) AS rounds
+		 FROM samples GROUP BY bucket, target, vantage WITH NO DATA`,
+	} {
+		if _, err := s.pool.Exec(ctx, q); err != nil {
+			t.Fatalf("setup %q: %v", q, err)
+		}
+	}
+	// Precondition: the old shape lacks median_rounds.
+	var has bool
+	if err := s.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM information_schema.columns
+		WHERE table_name='samples_hourly' AND column_name='median_rounds')`).Scan(&has); err != nil {
+		t.Fatalf("precheck: %v", err)
+	}
+	if has {
+		t.Fatal("precondition failed: old-shape aggregate already has median_rounds")
+	}
+
+	if err := s.EnableDownsampling(ctx); err != nil {
+		t.Fatalf("EnableDownsampling (migration): %v", err)
+	}
+	if err := s.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM information_schema.columns
+		WHERE table_name='samples_hourly' AND column_name='median_rounds')`).Scan(&has); err != nil {
+		t.Fatalf("postcheck: %v", err)
+	}
+	if !has {
+		t.Error("EnableDownsampling did not rebuild the aggregate to add median_rounds")
+	}
+}
+
+// A bucket containing fully-lost rounds must report median_rounds (rounds that produced a
+// median) distinct from rounds (all rounds), and its median_avg must exclude the lost
+// rounds. This is what lets the client weight the median by surviving rounds rather than
+// total rounds during an outage (CODE_REVIEW #6 / P2-6).
+func TestRollupMedianRoundsExcludesLostRounds(t *testing.T) {
+	dsn := os.Getenv("SMOKE_TEST_DSN")
+	if dsn == "" {
+		t.Skip("set SMOKE_TEST_DSN to run the TimescaleDB integration test")
+	}
+	ctx := context.Background()
+	s, err := New(ctx, dsn, 100, func(e error) { t.Errorf("store error: %v", e) })
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer s.Close()
+	for _, q := range []string{
+		"DROP MATERIALIZED VIEW IF EXISTS samples_daily CASCADE",
+		"DROP MATERIALIZED VIEW IF EXISTS samples_hourly CASCADE",
+		"TRUNCATE samples",
+	} {
+		if _, err := s.pool.Exec(ctx, q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+
+	// One successful round (median 0.02) and three fully-lost rounds, all in one hour bucket.
+	base := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	outs := []scheduler.Outcome{
+		{Target: probe.Target{Name: "mr", Host: "h"}, ProbeName: "FPing", When: base, Computed: sample.Compute(3, []float64{0.01, 0.02, 0.03})},
+	}
+	for i := 1; i <= 3; i++ {
+		outs = append(outs, scheduler.Outcome{
+			Target: probe.Target{Name: "mr", Host: "h"}, ProbeName: "FPing",
+			When: base.Add(time.Duration(i) * time.Minute), Computed: sample.Compute(3, nil), // total loss -> NULL median
+		})
+	}
+	s.Add(outs)
+
+	if err := s.EnableDownsampling(ctx); err != nil {
+		t.Fatalf("EnableDownsampling: %v", err)
+	}
+	refreshAgg(ctx, t, s, "samples_hourly")
+
+	pts, err := s.Rollup(ctx, "mr", "local", "1h", time.Time{}, time.Time{})
+	if err != nil {
+		t.Fatalf("Rollup: %v", err)
+	}
+	if len(pts) != 1 {
+		t.Fatalf("got %d buckets, want 1: %+v", len(pts), pts)
+	}
+	p := pts[0]
+	if p.Rounds != 4 {
+		t.Errorf("Rounds = %d, want 4 (all rounds)", p.Rounds)
+	}
+	if p.MedianRounds != 1 {
+		t.Errorf("MedianRounds = %d, want 1 (only the surviving round produced a median)", p.MedianRounds)
+	}
+	if p.MedianAvg < 0.019 || p.MedianAvg > 0.021 {
+		t.Errorf("MedianAvg = %v, want ~0.02 (lost rounds excluded)", p.MedianAvg)
 	}
 }
 
@@ -366,9 +506,7 @@ func TestDailyRollup(t *testing.T) {
 	if err := s.EnableDownsampling(ctx); err != nil {
 		t.Fatalf("EnableDownsampling: %v", err)
 	}
-	if _, err := s.pool.Exec(ctx, "CALL refresh_continuous_aggregate('samples_daily', NULL, NULL)"); err != nil {
-		t.Fatalf("refresh daily: %v", err)
-	}
+	refreshAgg(ctx, t, s, "samples_daily")
 
 	pts, err := s.Rollup(ctx, "dr", "local", "1d", time.Time{}, time.Time{}) // zero since/until -> full history
 	if err != nil {
@@ -440,9 +578,7 @@ func TestRollupIsolatesByVantage(t *testing.T) {
 	if err := s.EnableDownsampling(ctx); err != nil {
 		t.Fatalf("EnableDownsampling: %v", err)
 	}
-	if _, err := s.pool.Exec(ctx, "CALL refresh_continuous_aggregate('samples_hourly', NULL, NULL)"); err != nil {
-		t.Fatalf("refresh: %v", err)
-	}
+	refreshAgg(ctx, t, s, "samples_hourly")
 
 	local, err := s.Rollup(ctx, "riv", "local", "1h", time.Time{}, time.Time{})
 	if err != nil {
@@ -745,6 +881,120 @@ func TestPGStoreRenamesLegacyMasterVantage(t *testing.T) {
 	// And the rename is idempotent: a second migrate is a no-op and doesn't error.
 	if err := s.migrate(ctx); err != nil {
 		t.Fatalf("second migrate: %v", err)
+	}
+}
+
+// A database created before the vantage column existed (a 0.1-era install) must
+// upgrade cleanly: migrate has to ADD the column before it builds the
+// (target, vantage, ts) index that references it, because CREATE TABLE
+// IF NOT EXISTS never alters a table that already exists. Reproduces CODE_REVIEW #1
+// (P1-1) — without the ADD COLUMN step the index build fails with
+// "column vantage does not exist" and smoked cannot start.
+func TestPGStoreMigratesPreVantageSchema(t *testing.T) {
+	dsn := os.Getenv("SMOKE_TEST_DSN")
+	if dsn == "" {
+		t.Skip("set SMOKE_TEST_DSN to run the TimescaleDB integration test")
+	}
+	ctx := context.Background()
+	s, err := New(ctx, dsn, 100, func(e error) { t.Errorf("store error: %v", e) })
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer s.Close()
+
+	// Rebuild the exact pre-federation schema: no vantage column, the old
+	// (target, ts) unique index, and one row written under it.
+	for _, q := range []string{
+		"DROP TABLE IF EXISTS samples CASCADE",
+		`CREATE TABLE samples (
+			ts             timestamptz        NOT NULL,
+			target         text               NOT NULL,
+			probe          text               NOT NULL,
+			host           text               NOT NULL,
+			pings          smallint           NOT NULL,
+			loss           smallint           NOT NULL,
+			median_seconds double precision,
+			rtts_seconds   double precision[] NOT NULL,
+			err            text,
+			duration_ms    double precision
+		)`,
+		"SELECT create_hypertable('samples','ts', if_not_exists => TRUE)",
+		"CREATE UNIQUE INDEX samples_target_ts ON samples (target, ts)",
+		`INSERT INTO samples (ts,target,probe,host,pings,loss,rtts_seconds)
+		   VALUES (now(),'legacy','FPing','h',1,0,'{0.01}')`,
+	} {
+		if _, err := s.pool.Exec(ctx, q); err != nil {
+			t.Fatalf("setup %q: %v", q, err)
+		}
+	}
+
+	// The upgrade must succeed and backfill the pre-existing row to 'local'
+	// (every pre-federation row was a hub-local measurement).
+	if err := s.migrate(ctx); err != nil {
+		t.Fatalf("migrate pre-vantage schema: %v", err)
+	}
+	var got string
+	if err := s.pool.QueryRow(ctx, "SELECT vantage FROM samples WHERE target='legacy'").Scan(&got); err != nil {
+		t.Fatalf("select vantage: %v", err)
+	}
+	if got != "local" {
+		t.Errorf("legacy row vantage = %q, want \"local\"", got)
+	}
+	// The composite unique index must now exist and the legacy (target, ts) index
+	// must be gone; a second migrate is a no-op.
+	if err := s.migrate(ctx); err != nil {
+		t.Fatalf("second migrate: %v", err)
+	}
+	var oldIdx int
+	if err := s.pool.QueryRow(ctx,
+		"SELECT count(*) FROM pg_indexes WHERE tablename='samples' AND indexname='samples_target_ts'").Scan(&oldIdx); err != nil {
+		t.Fatalf("index check: %v", err)
+	}
+	if oldIdx != 0 {
+		t.Errorf("legacy index samples_target_ts still present after migrate")
+	}
+	// Leave a clean current-schema table for later tests in this serial package.
+	if _, err := s.pool.Exec(ctx, "TRUNCATE samples"); err != nil {
+		t.Fatalf("cleanup truncate: %v", err)
+	}
+}
+
+// At the shutdown boundary the process context is cancelled and then the dispatcher
+// drains in-flight probes, whose completed outcomes reach Add. Add must still persist
+// them: its write deadline is a fresh bounded context, not the (now-cancelled) process
+// context, so the final local rounds are not lost on a graceful shutdown (CODE_REVIEW #10 /
+// P2-10).
+func TestAddPersistsAcrossContextCancel(t *testing.T) {
+	dsn := os.Getenv("SMOKE_TEST_DSN")
+	if dsn == "" {
+		t.Skip("set SMOKE_TEST_DSN to run the TimescaleDB integration test")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	var storeErr error
+	s, err := New(ctx, dsn, 100, func(e error) { storeErr = e })
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.pool.Exec(context.Background(), "TRUNCATE samples"); err != nil {
+		t.Fatalf("truncate: %v", err)
+	}
+
+	cancel() // process shutting down
+	s.Add([]scheduler.Outcome{{
+		Target: probe.Target{Name: "drain", Host: "h"}, ProbeName: "FPing",
+		Computed: sample.Compute(1, []float64{0.01}), When: time.Unix(1_700_000_100, 0).UTC(),
+	}})
+
+	if storeErr != nil {
+		t.Fatalf("Add after context cancel reported a write error (round lost on shutdown): %v", storeErr)
+	}
+	var n int
+	if err := s.pool.QueryRow(context.Background(), "SELECT count(*) FROM samples WHERE target='drain'").Scan(&n); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("row count = %d, want 1 (Add must drain the write past process-context cancel)", n)
 	}
 }
 

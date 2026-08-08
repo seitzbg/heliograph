@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"math"
 	"net/http"
 	"time"
 
@@ -26,7 +27,7 @@ func (srv *Server) agentAssignment(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"reserved vantage"}`, http.StatusForbidden)
 		return
 	}
-	monitors, cv := srv.Assignment(v)
+	monitors, probeCfgs, cv := srv.Assignment(v)
 	if match := r.Header.Get("If-None-Match"); match != "" && match == cv {
 		w.Header().Set("ETag", cv)
 		w.WriteHeader(http.StatusNotModified)
@@ -36,7 +37,8 @@ func (srv *Server) agentAssignment(w http.ResponseWriter, r *http.Request) {
 	for _, m := range monitors {
 		out.Targets = append(out.Targets, agentwire.AssignmentTarget{
 			Name: m.Name, Probe: m.ProbeKind, Host: m.Host,
-			Params: m.Params, StepMs: m.Step.Milliseconds(), Pings: m.Pings,
+			Params: m.Params, ProbeConfig: probeCfgs[m.ProbeKind],
+			StepMs: m.Step.Milliseconds(), Pings: m.Pings,
 		})
 	}
 	w.Header().Set("ETag", cv)
@@ -45,6 +47,47 @@ func (srv *Server) agentAssignment(w http.ResponseWriter, r *http.Request) {
 
 const maxIngestBytes = 16 << 20 // 16 MiB body cap
 const maxIngestBatch = 5000     // rounds per request
+
+// Ingest sanity bounds. An authenticated agent's samples are still validated: clock
+// skew, an agent bug, or a stolen vantage key could otherwise write a year-9999 row
+// that stays "latest" forever, or inject negative/infinite/absurd latency that poisons
+// the raw series and continuous aggregates (CODE_REVIEW #4 / P1-4).
+const (
+	// maxRTTSeconds bounds one received RTT. No real measurement waits an hour; a value
+	// above this (or NaN/Inf/negative) is bogus and would distort the median/bands.
+	maxRTTSeconds = 3600
+	// maxDurationMs bounds a round's reported wall-clock duration (also 1 hour).
+	maxDurationMs = 3600 * 1000
+	// maxFutureSkew is how far ahead of the hub clock an ingested timestamp may be — a
+	// small allowance for agent/hub clock drift. Beyond it the row is rejected, so a
+	// far-future sample can never pin itself as the permanent "latest".
+	maxFutureSkew = 5 * time.Minute
+	// maxPastSkew is how old an ingested timestamp may be: generous enough for an agent
+	// replaying an offline store-and-forward backlog, but bounded so ancient/forged
+	// timestamps are rejected (older rounds fall outside raw retention anyway).
+	maxPastSkew = 30 * 24 * time.Hour
+)
+
+// validSamples reports whether every RTT and the duration are finite, non-negative, and
+// within the documented upper bounds. A round with any bad value is dropped whole rather
+// than silently partially accepted.
+func validSamples(rtts []float64, durationMs float64) bool {
+	if math.IsNaN(durationMs) || math.IsInf(durationMs, 0) || durationMs < 0 || durationMs > maxDurationMs {
+		return false
+	}
+	for _, v := range rtts {
+		if math.IsNaN(v) || math.IsInf(v, 0) || v < 0 || v > maxRTTSeconds {
+			return false
+		}
+	}
+	return true
+}
+
+// withinSkew reports whether ts is within the accepted [now-maxPastSkew, now+maxFutureSkew]
+// window relative to the hub clock.
+func withinSkew(ts, now time.Time) bool {
+	return !ts.After(now.Add(maxFutureSkew)) && !ts.Before(now.Add(-maxPastSkew))
+}
 
 // agentResults ingests a batch of measured rounds from the authenticated vantage.
 // The hub is authoritative for probe/host (looked up in the current assignment);
@@ -72,13 +115,14 @@ func (srv *Server) agentResults(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"batch too large"}`, http.StatusRequestEntityTooLarge)
 		return
 	}
-	monitors, _ := srv.Assignment(v)
+	monitors, _, _ := srv.Assignment(v)
 	allowed := make(map[string]model.Monitor, len(monitors))
 	for _, m := range monitors {
 		allowed[m.Name] = m
 	}
 	outcomes := make([]scheduler.Outcome, 0, len(req.Results))
 	dropped := 0
+	now := time.Now()
 	for _, rd := range req.Results {
 		m, ok := allowed[rd.Target]
 		if !ok {
@@ -87,6 +131,10 @@ func (srv *Server) agentResults(w http.ResponseWriter, r *http.Request) {
 		}
 		ts, err := time.Parse(time.RFC3339Nano, rd.TS)
 		if err != nil || rd.Pings < 1 || rd.Pings > config.MaxPings || len(rd.RTTs) > rd.Pings {
+			dropped++
+			continue
+		}
+		if !withinSkew(ts, now) || !validSamples(rd.RTTs, rd.DurationMs) {
 			dropped++
 			continue
 		}
@@ -108,6 +156,11 @@ func (srv *Server) agentResults(w http.ResponseWriter, r *http.Request) {
 			slog.Error("agent ingest: write failed", "vantage", v, "err", err)
 			http.Error(w, `{"error":"store unavailable"}`, http.StatusServiceUnavailable)
 			return
+		}
+		// Evaluate alerts for the accepted remote rounds only AFTER they are durably stored,
+		// so a firing is backed by persisted data (P2-5). Each outcome carries its vantage.
+		if srv.OnIngest != nil {
+			srv.OnIngest(outcomes)
 		}
 	}
 	if dropped > 0 {

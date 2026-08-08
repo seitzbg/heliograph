@@ -37,7 +37,10 @@ func BuildJobs(targets []agentwire.AssignmentTarget, timeout time.Duration) (job
 			skipped = append(skipped, fmt.Sprintf("%s: %s", t.Name, bad))
 			continue
 		}
-		p, err := probe.New(t.Probe, nil) // probe-level defaults; per-target params ride on Target
+		// Build the probe with the hub's effective probe-level config for this kind
+		// (probes.<Kind>), so a remote probe behaves like the hub's local one; per-target
+		// params ride on Target. A bad config errors here and skips just this target.
+		p, err := probe.New(t.Probe, t.ProbeConfig)
 		if err != nil {
 			skipped = append(skipped, fmt.Sprintf("%s: probe construct: %v", t.Name, err))
 			continue

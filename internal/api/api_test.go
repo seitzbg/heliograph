@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"smokeping-modern/internal/model"
 	"smokeping-modern/internal/probe"
 	"smokeping-modern/internal/sample"
 	"smokeping-modern/internal/scheduler"
@@ -230,6 +231,85 @@ func TestLiveEndpointsFilterToActiveTargets(t *testing.T) {
 	}
 	if !strings.Contains(body, `smokeping_probe_last_sample_timestamp_seconds{target="kept",probe="FPing"} 1700000000`) {
 		t.Errorf("/metrics missing per-target last-sample timestamp:\n%s", body)
+	}
+}
+
+// A remote-only target (measured only from vantage nyc, no local row) must still be
+// listed by /api/targets so it appears in the tree and its deep link resolves, and it
+// must carry its vantage set. Requesting its vantage returns its live data. This is the
+// core of CODE_REVIEW #3 (P1-3): configured catalog vs. locally-runnable jobs.
+func TestTargetsListsRemoteOnlyTarget(t *testing.T) {
+	st := store.NewMem(10)
+	st.Add([]scheduler.Outcome{
+		{Target: probe.Target{Name: "hub", Host: "h"}, ProbeName: "FPing",
+			Computed: sample.Compute(2, []float64{0.01, 0.02}), When: time.Unix(1_700_000_000, 0)}, // local
+		{Target: probe.Target{Name: "nyc-only", Host: "h"}, ProbeName: "FPing",
+			Computed: sample.Compute(2, []float64{0.03, 0.04}), When: time.Unix(1_700_000_000, 0), Vantage: "nyc"},
+	})
+	srv := New(st, "")
+	srv.Active = func() map[string]bool { return map[string]bool{"hub": true, "nyc-only": true} }
+	srv.Configured = func() []model.Monitor {
+		return []model.Monitor{
+			{Name: "hub", ProbeKind: "FPing", Vantages: []string{"local"}},
+			{Name: "nyc-only", ProbeKind: "FPing", Vantages: []string{"nyc"}},
+		}
+	}
+	srv.TargetVantages = func() map[string][]string {
+		return map[string][]string{"hub": {"local"}, "nyc-only": {"nyc"}}
+	}
+
+	type tdto struct {
+		Name     string   `json:"name"`
+		Vantages []string `json:"vantages"`
+		NoData   bool     `json:"no_data"`
+		MedianMs *float64 `json:"median_ms"`
+	}
+	get := func(url string) []tdto {
+		rec := httptest.NewRecorder()
+		srv.Routes().ServeHTTP(rec, httptest.NewRequest("GET", url, nil))
+		if rec.Code != 200 {
+			t.Fatalf("%s status=%d", url, rec.Code)
+		}
+		var tj struct {
+			Targets []tdto `json:"targets"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &tj); err != nil {
+			t.Fatalf("%s json: %v", url, err)
+		}
+		return tj.Targets
+	}
+
+	// Default (local) listing: both targets present; nyc-only shows as no-data with its vantage.
+	local := get("/api/targets")
+	if len(local) != 2 {
+		t.Fatalf("/api/targets returned %d targets, want 2 (%+v)", len(local), local)
+	}
+	var nyc *tdto
+	for i := range local {
+		if local[i].Name == "nyc-only" {
+			nyc = &local[i]
+		}
+	}
+	if nyc == nil {
+		t.Fatal("remote-only target missing from /api/targets — it would never appear in the tree")
+	}
+	if !nyc.NoData || nyc.MedianMs != nil {
+		t.Errorf("remote-only target must be no-data under local vantage, got %+v", *nyc)
+	}
+	if len(nyc.Vantages) != 1 || nyc.Vantages[0] != "nyc" {
+		t.Errorf("remote-only target vantages = %v, want [nyc] (deep link needs it)", nyc.Vantages)
+	}
+
+	// Requesting its vantage returns its live data (median present, not no-data).
+	remote := get("/api/targets?vantage=nyc")
+	var live *tdto
+	for i := range remote {
+		if remote[i].Name == "nyc-only" {
+			live = &remote[i]
+		}
+	}
+	if live == nil || live.NoData || live.MedianMs == nil {
+		t.Errorf("/api/targets?vantage=nyc must return live data for the remote-only target, got %+v", live)
 	}
 }
 
@@ -827,12 +907,16 @@ func TestReadFailureReturns503(t *testing.T) {
 	}
 }
 
-// errHistoryStore is a Store whose base History read fails. The no-window /api/series
-// path reads History, so it must answer 503 rather than a false-empty 200 (the #4
-// remainder — the base read interface now returns errors).
+// errHistoryStore is a Store whose recent-history read fails. The no-window /api/series
+// path reads it (HistoryVantage, or History on a bare store), so it must answer 503 rather
+// than a false-empty 200 (the #4 remainder — the read interfaces now return errors).
 type errHistoryStore struct{ *store.MemStore }
 
 func (errHistoryStore) History(string) ([]scheduler.Outcome, error) {
+	return nil, errors.New("db read failed")
+}
+
+func (errHistoryStore) HistoryVantage(context.Context, string, string) ([]scheduler.Outcome, error) {
 	return nil, errors.New("db read failed")
 }
 
@@ -901,5 +985,37 @@ func TestSeriesVantageParam(t *testing.T) {
 	// Invalid vantage name -> 400.
 	if code, _ := rounds("&vantage=bad%20name"); code != http.StatusBadRequest {
 		t.Errorf("vantage=%q: status = %d, want 400", "bad name", code)
+	}
+}
+
+// The no-window /api/series path (recent capped tail) must ALSO honor ?vantage=, via the
+// vantage-aware RecentHistorier read — not fall back to the local-only History (P2-7). The
+// window-based test above never exercised this branch.
+func TestSeriesNoWindowVantageParam(t *testing.T) {
+	st := store.NewMem(100)
+	now := time.Now()
+	st.Add([]scheduler.Outcome{
+		{Target: probe.Target{Name: "x", Host: "h"}, ProbeName: "FPing",
+			When: now.Add(-time.Minute), Computed: sample.Compute(2, []float64{0.01, 0.01})}, // local
+		{Target: probe.Target{Name: "x", Host: "h"}, ProbeName: "FPing", Vantage: "nyc",
+			When: now.Add(-time.Minute), Computed: sample.Compute(2, []float64{0.05, 0.05})},
+	})
+	srv := New(st, "")
+
+	rounds := func(q string) (int, []map[string]any) {
+		rec := httptest.NewRecorder()
+		srv.Routes().ServeHTTP(rec, httptest.NewRequest("GET", "/api/series?target=x"+q, nil)) // NO window
+		var resp struct {
+			Rounds []map[string]any `json:"rounds"`
+		}
+		_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+		return rec.Code, resp.Rounds
+	}
+
+	if code, rs := rounds(""); code != 200 || len(rs) != 1 || rs[0]["median_ms"].(float64) != 10 {
+		t.Errorf("default vantage (no window): code=%d rounds=%v, want 200/[10ms] (local only)", code, rs)
+	}
+	if code, rs := rounds("&vantage=nyc"); code != 200 || len(rs) != 1 || rs[0]["median_ms"].(float64) != 50 {
+		t.Errorf("vantage=nyc (no window): code=%d rounds=%v, want 200/[50ms] (nyc only), not local", code, rs)
 	}
 }

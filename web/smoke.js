@@ -90,15 +90,17 @@ window.Smoke = (function () {
   function bucketPings(b) { return b.pings || b.centered.length; }
 
   function seriesStats(s) {
-    // Weight each bucket by the number of rounds it aggregates (1 for a raw round,
-    // `rounds` for a rollup bucket), so a sparse bucket doesn't count the same as a
-    // full one in the loss/median averages.
+    // Weight each bucket by the rounds it aggregates (1 for a raw round). Loss is weighted
+    // by TOTAL rounds; the median by the rounds that actually produced a median (not fully
+    // lost). During an outage the two differ, and weighting the median by total rounds would
+    // let one surviving round in a mostly-lost bucket count as a full bucket's median (P2-6).
     let mwsum = 0, mmax = 0, mw = 0, lsum = 0, wsum = 0;
     for (const b of s.buckets) {
-      const w = b.rounds || 1;
-      if (!isNaN(b.median)) { mwsum += b.median * w; mmax = Math.max(mmax, b.median); mw += w; }
+      const lossW = b.rounds || 1;
+      const medW = b.medianRounds != null ? b.medianRounds : lossW;
+      if (!isNaN(b.median) && medW > 0) { mwsum += b.median * medW; mmax = Math.max(mmax, b.median); mw += medW; }
       const bn = bucketPings(b);
-      if (bn > 0) { lsum += (b.lost / bn) * w; wsum += w; }
+      if (bn > 0) { lsum += (b.lost / bn) * lossW; wsum += lossW; }
     }
     return {
       medAvg: mw ? mwsum / mw : NaN,
@@ -313,7 +315,11 @@ window.Smoke = (function () {
         lost: (x.loss_pct || 0) / 50, // 0..100% -> 0..2 lost of N=2
         median: x.median_avg_ms == null ? NaN : x.median_avg_ms,
         pings: 2, // min→max band; loss expressed as "lost of 2"
-        rounds: x.rounds || 1, // raw rounds this bucket aggregates — weights seriesStats
+        rounds: x.rounds || 1, // total rounds this bucket aggregates — weights loss in seriesStats
+        // rounds that produced a median (not fully lost) — weights the median in seriesStats,
+        // so a bucket of mostly-lost rounds doesn't count its one surviving median as a full
+        // bucket (P2-6). Falls back to total rounds if the field is absent (older hub).
+        medianRounds: x.median_rounds == null ? (x.rounds || 1) : x.median_rounds,
         t: x.bucket == null ? NaN : Date.parse(x.bucket), // wall-clock ms for time-scaled X + gap breaks
       };
     });

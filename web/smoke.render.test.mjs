@@ -229,6 +229,26 @@ check('seriesStats weights loss/median by each bucket round count', () => {
   assert.ok(st.medAvg < 12, `median avg ${st.medAvg} should be round-weighted (~10.3), not the unweighted 15`);
 });
 
+// P2-6: the median must be weighted by median_rounds (rounds that produced a median), not
+// total rounds. A mostly-lost bucket whose one surviving round is slow must NOT drag the
+// average median as if all its rounds were that slow. Loss stays weighted by total rounds.
+check('seriesStats weights median by median_rounds, loss by total rounds', () => {
+  const s = Smoke.fromApiRollup({
+    resolution: '1h',
+    buckets: [
+      // A full, fast, healthy bucket.
+      { bucket: '2026-08-06T00:00:00Z', median_avg_ms: 10, median_min_ms: 8, median_max_ms: 12, loss_pct: 0, rounds: 60, median_rounds: 60 },
+      // 60 rounds, 59 fully lost; the single surviving round was slow (200ms).
+      { bucket: '2026-08-06T01:00:00Z', median_avg_ms: 200, median_min_ms: 200, median_max_ms: 200, loss_pct: 98, rounds: 60, median_rounds: 1 },
+    ],
+  });
+  const st = Smoke.seriesStats(s);
+  // median weighted by median_rounds: (10*60 + 200*1)/61 ≈ 13.1, NOT the rounds-weighted 105.
+  assert.ok(st.medAvg < 20, `median avg ${st.medAvg} must weight by median_rounds (~13), not rounds (~105)`);
+  // loss weighted by total rounds: (0*60 + 98*60)/120 ≈ 49%.
+  assert.ok(st.lossAvg > 40 && st.lossAvg < 55, `loss avg ${st.lossAvg} should be ~49% (total-round-weighted)`);
+});
+
 // --- overlay mode: extra per-vantage median-only lines, y-scale spans all ---
 
 // A single-sample-per-bucket series built directly from median values (own timestamps),

@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -25,6 +27,31 @@ type Options struct {
 	Workers   int // max concurrent probes
 	BufferCap int // bounded store-and-forward buffer capacity (rounds)
 	FlushMax  int // max rounds per push
+}
+
+// Validate rejects an Options that would make an unusable or dangerous agent — the
+// package-boundary guard so a non-CLI caller can't construct one. In particular a
+// non-positive FlushMax panics peekBatch's make([], FlushMax) as soon as data is buffered,
+// and a non-positive Interval hot-loops the poller (CODE_REVIEW #9 / P2-9). Run calls this
+// before starting any goroutine.
+func (o Options) Validate() error {
+	switch {
+	case o.Hub == "":
+		return errors.New("agent: hub is required")
+	case o.Key == "":
+		return errors.New("agent: key is required")
+	case o.Interval <= 0:
+		return fmt.Errorf("agent: interval must be positive, got %s", o.Interval)
+	case o.Timeout <= 0:
+		return fmt.Errorf("agent: timeout must be positive, got %s", o.Timeout)
+	case o.Workers < 1:
+		return fmt.Errorf("agent: workers must be at least 1, got %d", o.Workers)
+	case o.BufferCap < 1:
+		return fmt.Errorf("agent: buffer capacity must be at least 1, got %d", o.BufferCap)
+	case o.FlushMax < 1:
+		return fmt.Errorf("agent: flush max must be at least 1, got %d", o.FlushMax)
+	}
+	return nil
 }
 
 // Agent is the smoke-agent runtime: it polls a hub for its per-vantage
@@ -69,6 +96,9 @@ func New(opts Options) *Agent {
 // that signal and then makes one final best-effort push of whatever remains
 // buffered — so a round completing during shutdown is captured, not dropped.
 func (a *Agent) Run(ctx context.Context) error {
+	if err := a.opts.Validate(); err != nil {
+		return err
+	}
 	slog.Info("smoke-agent starting", "hub", a.opts.Hub, "vantage", a.opts.Vantage, "interval", a.opts.Interval)
 
 	var wg sync.WaitGroup
@@ -222,25 +252,38 @@ func (a *Agent) awaitMeasureDrain(wait time.Duration) {
 	}
 }
 
-// finalFlush makes one best-effort push of whatever remains buffered, bounded
-// by a short fresh context (the parent ctx is already cancelled by the time
-// this runs). It does not retry — this is shutdown, not the steady-state loop.
+// finalFlush makes a best-effort push of EVERYTHING still buffered at shutdown,
+// looping over FlushMax-sized batches until the buffer is empty, the fresh shutdown
+// context expires, or a push fails (the parent ctx is already cancelled by the time
+// this runs). It does not retry a failed batch — this is shutdown, not the steady-state
+// loop — but it no longer stops after a single batch, which used to strand up to
+// (buffer - FlushMax) rounds on a controlled shutdown after a hub outage (CODE_REVIEW #8).
 func (a *Agent) finalFlush(ttl time.Duration) {
 	if a.buf.len() == 0 {
 		return
 	}
 	shutCtx, cancel := context.WithTimeout(context.Background(), ttl)
 	defer cancel()
-	batch, upto := a.buf.peekBatch(a.opts.FlushMax)
-	if len(batch) == 0 {
-		return
+	sent := 0
+	for {
+		if err := shutCtx.Err(); err != nil {
+			slog.Warn("final flush deadline exceeded, rounds left unsent",
+				"sent", sent, "remaining", a.buf.len(), "dropped", a.buf.dropped())
+			return
+		}
+		batch, upto := a.buf.peekBatch(a.opts.FlushMax)
+		if len(batch) == 0 {
+			break // buffer drained
+		}
+		if _, err := a.client.PushResults(shutCtx, batch); err != nil {
+			slog.Warn("final flush failed, rounds left unsent",
+				"err", err, "sent", sent, "remaining", a.buf.len(), "dropped", a.buf.dropped())
+			return
+		}
+		a.buf.commit(upto)
+		sent += len(batch)
 	}
-	if _, err := a.client.PushResults(shutCtx, batch); err != nil {
-		slog.Warn("final flush failed, rounds left unsent", "err", err, "batch", len(batch), "dropped", a.buf.dropped())
-		return
-	}
-	a.buf.commit(upto)
-	slog.Info("final flush complete", "batch", len(batch), "dropped", a.buf.dropped())
+	slog.Info("final flush complete", "sent", sent, "dropped", a.buf.dropped())
 }
 
 // reportFromOutcome converts a scheduler.Outcome (the shared probe/scheduler
