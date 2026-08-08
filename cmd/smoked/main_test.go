@@ -3,9 +3,11 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"smokeping-modern/internal/alert"
 	"smokeping-modern/internal/federation"
 	"smokeping-modern/internal/probe"
 	"smokeping-modern/internal/scheduler"
@@ -71,7 +73,7 @@ targets:
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	rt, err := buildRuntime(cfg, 3, 30*time.Second, time.Second, nil)
+	rt, err := buildRuntime(cfg, 3, 30*time.Second, time.Second, nil, nil)
 	if err != nil {
 		t.Fatalf("buildRuntime: %v", err)
 	}
@@ -107,7 +109,7 @@ func TestRuntimeRetainsFullMonitorSet(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "default.yaml"), []byte(cfg), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	rt, err := buildRuntime(dir, 5, time.Second, time.Second, nil)
+	rt, err := buildRuntime(dir, 5, time.Second, time.Second, nil, nil)
 	if err != nil {
 		t.Fatalf("buildRuntime: %v", err)
 	}
@@ -119,5 +121,41 @@ func TestRuntimeRetainsFullMonitorSet(t *testing.T) {
 	nyc := federation.AssignmentFor(rt.monitors, "nyc")
 	if len(nyc) != 1 || nyc[0].Name != "nyc-one" {
 		t.Fatalf("nyc assignment=%+v", nyc)
+	}
+}
+
+func TestBuildRuntimeMergesDBFragment(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte("targets:\n  children:\n    yaml-t: {probe: TCPConnect, host: 127.0.0.1, params: {port: \"80\"}}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	getter := func() ([]byte, error) {
+		return []byte(`{"targets":{"children":{"db-t":{"probe":"TCPConnect","host":"127.0.0.1","params":{"port":"80"}}}}}`), nil
+	}
+	rt, err := buildRuntime(cfgPath, 1, time.Second, time.Second, map[string]alert.Notifier{}, getter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := map[string]bool{}
+	for _, m := range rt.monitors {
+		names[m.Name] = true
+	}
+	if !names["yaml-t"] || !names["db-t"] {
+		t.Fatalf("want both yaml-t and db-t in monitors, got %v", names)
+	}
+}
+
+func TestBuildRuntimeDBFragmentCollision(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte("targets:\n  children:\n    dup: {probe: TCPConnect, host: 127.0.0.1, params: {port: \"80\"}}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	getter := func() ([]byte, error) {
+		return []byte(`{"targets":{"children":{"dup":{"probe":"TCPConnect","host":"127.0.0.1","params":{"port":"80"}}}}}`), nil
+	}
+	if _, err := buildRuntime(cfgPath, 1, time.Second, time.Second, map[string]alert.Notifier{}, getter); err == nil || !strings.Contains(err.Error(), "duplicate") {
+		t.Fatalf("want duplicate-branch error, got %v", err)
 	}
 }
