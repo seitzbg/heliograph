@@ -636,6 +636,7 @@
         stackCanvases.push(entry);
         renderStackCell(entry);
       }));
+      if (curTarget !== name) return; // route moved on while awaiting — don't render a superseded target's chips
       renderStackChips();
     }
     // drawZoom renders the current zoomState onto the zoom canvas with its explicit
@@ -816,7 +817,12 @@
       const v = b.dataset.v; if (!v || v === zoomFocus || !zoomState || !zoomState.byV) return;
       zoomFocus = v;
       zoomState.focus = v;
-      zoomState.series = zoomState.byV[v];
+      const s = zoomState.byV[v];
+      zoomState.series = s;
+      // Recompute the stats panel for the newly-focused vantage — mirrors renderStackCell's
+      // meta handling, so the band and #zoomMeta never disagree about which vantage is focused.
+      if (s && !s.unsupported && s.buckets.length >= 2) $('zoomMeta').innerHTML = metaHtml(s);
+      else $('zoomMeta').innerHTML = '';
       drawZoom();
       renderZoomChips();
     });
@@ -864,10 +870,12 @@
     function rerender() {
       const v = currentView();
       if (v === 'graphs') { renderGridPanels(); }
-      // renderStackCell (not renderInto directly) so a theme toggle/resize re-resolves
-      // overlay colors via cssVar and keeps rendering focused+overlays in multi-vantage mode.
-      else if (v === 'stack') { for (const c of stackCanvases) renderStackCell(c); }
-      else if (v === 'zoom') { drawZoom(); } // drawZoom already re-resolves overlay colors via cssVar
+      // renderStackCell (not renderInto directly) so a theme toggle/resize re-resolves overlay
+      // LINE colors via cssVar; renderStackChips likewise re-resolves the chip SWATCH colors
+      // (baked as inline style at render time) — both self-guard to a no-op on a single-vantage
+      // target (stackVantages.length<=1 => renderStackChips just re-clears the empty container).
+      else if (v === 'stack') { for (const c of stackCanvases) renderStackCell(c); renderStackChips(); }
+      else if (v === 'zoom') { drawZoom(); renderZoomChips(); } // same: line colors + chip swatches
     }
     btn.addEventListener('click', () => { const next = curTheme() === 'dark' ? 'light' : 'dark'; document.documentElement.setAttribute('data-theme', next); try { localStorage.setItem('theme', next); } catch (e) {} themeLabel(); refreshKey(); rerender(); });
     matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { themeLabel(); refreshKey(); rerender(); });
