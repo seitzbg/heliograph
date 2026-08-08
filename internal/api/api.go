@@ -918,13 +918,33 @@ func (srv *Server) listVantages(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"store unavailable"}`, http.StatusServiceUnavailable)
 		return
 	}
+	// counts[v] = number of configured targets whose vantage set contains v. Nil map
+	// (no TargetVantages wired) means the count is unknown, not zero — omit the field.
+	var counts map[string]int
+	if srv.TargetVantages != nil {
+		counts = map[string]int{}
+		for _, vs := range srv.TargetVantages() {
+			seen := map[string]bool{}
+			for _, v := range vs {
+				if seen[v] {
+					continue
+				}
+				seen[v] = true
+				counts[v]++
+			}
+		}
+	}
 	out := make([]map[string]any, 0, len(infos))
 	for _, in := range infos {
 		var last any
 		if !in.LastSeen.IsZero() {
 			last = in.LastSeen.UTC().Format(time.RFC3339)
 		}
-		out = append(out, map[string]any{"name": in.Name, "created": in.Created.UTC().Format(time.RFC3339), "last_seen": last})
+		row := map[string]any{"name": in.Name, "created": in.Created.UTC().Format(time.RFC3339), "last_seen": last}
+		if counts != nil {
+			row["targets"] = counts[in.Name]
+		}
+		out = append(out, row)
 	}
 	writeJSON(w, map[string]any{"vantages": out})
 }
