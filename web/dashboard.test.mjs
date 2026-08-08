@@ -214,5 +214,29 @@ check('pickSeries keeps last-good on failure and caches real series', () => {
   assert.deepEqual(D.pickSeries(uns, null), { series: uns, cache: null, failed: false });
 });
 
+// Vantage helpers (federation PR #6, Task 2): vantageList/orderVantages/defaultFocus/
+// vantageColorVar are pure and feed the overlay UI (Task 3) — list defaulting, a stable
+// render order (local first, then sorted, deduped), the focus default, and a stable
+// per-vantage color-var assignment keyed off that order.
+check('vantageList defaults to [local]', () => {
+  assert.deepEqual(D.vantageList({ name: 'a' }), ['local']);
+  assert.deepEqual(D.vantageList({ name: 'a', vantages: [] }), ['local']);
+  assert.deepEqual(D.vantageList({ name: 'a', vantages: ['nyc', 'local'] }), ['nyc', 'local']);
+});
+check('orderVantages puts local first then sorts', () => {
+  assert.deepEqual(D.orderVantages(['nyc', 'local', 'fra']), ['local', 'fra', 'nyc']);
+  assert.deepEqual(D.orderVantages(['nyc', 'nyc']), ['nyc']);
+});
+check('defaultFocus prefers local', () => {
+  assert.equal(D.defaultFocus(['local', 'nyc']), 'local');
+  assert.equal(D.defaultFocus(['fra', 'nyc']), 'fra');
+});
+check('vantageColorVar: local neutral, others stable palette', () => {
+  const ord = D.orderVantages(['local', 'nyc', 'fra']); // [local, fra, nyc]
+  assert.equal(D.vantageColorVar('local', ord), '--median-base');
+  assert.notEqual(D.vantageColorVar('nyc', ord), D.vantageColorVar('fra', ord));
+  assert.equal(D.vantageColorVar('nyc', ord), D.vantageColorVar('nyc', ord)); // stable
+});
+
 if (failed) { console.error(`\n${failed} test(s) failed`); process.exit(1); }
 console.log('\nall dashboard tests passed');

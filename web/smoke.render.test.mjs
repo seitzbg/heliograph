@@ -229,5 +229,99 @@ check('seriesStats weights loss/median by each bucket round count', () => {
   assert.ok(st.medAvg < 12, `median avg ${st.medAvg} should be round-weighted (~10.3), not the unweighted 15`);
 });
 
+// --- overlay mode: extra per-vantage median-only lines, y-scale spans all ---
+
+// A single-sample-per-bucket series built directly from median values (own timestamps),
+// standing in for one vantage's data when constructing an overlay.
+function seriesFrom(values, times) {
+  return {
+    buckets: values.map((v, i) => ({ centered: [v], samples: [v], lost: 0, median: v, pings: 1, t: times[i] })),
+    N: 1,
+  };
+}
+
+const OT0 = Date.parse('2026-08-06T00:00:00Z');
+const OTIMES = [OT0, OT0 + 60000, OT0 + 120000, OT0 + 180000];
+const OT1 = OTIMES[OTIMES.length - 1];
+
+check('overlays draw extra median lines and are a no-op when absent/empty', () => {
+  const focused = seriesFrom([12, 12, 13, 12], OTIMES); // ~12ms
+  const remote = seriesFrom([80, 82, 81, 83], OTIMES); // ~82ms
+  const remote2 = seriesFrom([40, 41, 42, 43], OTIMES);
+  // Pin yMax so the y-axis grid-line count (which legitimately varies with the scale,
+  // see the expansion test below) can't confound the stroke-count comparison here.
+  const opts = { height: 200, t0: OT0, t1: OT1, band: false, yMax: 100 };
+
+  const base = recordingCanvas();
+  Smoke.render(base.canvas, focused, opts);
+
+  const over = recordingCanvas();
+  Smoke.render(over.canvas, focused, {
+    ...opts,
+    overlays: [{ series: remote, color: '#7c5cff' }, { series: remote2, color: '#22c55e' }],
+  });
+
+  // (a) two overlays -> exactly two extra stroke() calls (one polyline per overlay), on
+  // top of whatever the focused series alone already draws.
+  assert.equal(over.log.strokes, base.log.strokes + 2, 'one extra stroke per overlay');
+
+  // (c) overlays:[] must render byte-for-byte like omitting overlays entirely
+  // (single-vantage rendering unchanged).
+  const empty = recordingCanvas();
+  Smoke.render(empty.canvas, focused, { ...opts, overlays: [] });
+  assert.equal(empty.log.strokes, base.log.strokes, 'empty overlays == no overlays (draw calls)');
+  assert.deepEqual(empty.log.strokePaths, base.log.strokePaths, 'empty overlays == no overlays (identical paths)');
+});
+
+check('overlays expand the returned y-scale to cover the tallest overlay', () => {
+  const focused = seriesFrom([12, 12, 13, 12], OTIMES); // ~12ms, robustMax well under the remote's
+  const remote = seriesFrom([80, 82, 81, 83], OTIMES); // ~82ms — must not be clipped
+  const opts = { height: 200, t0: OT0, t1: OT1, band: false };
+
+  const baseYMax = Smoke.render(recordingCanvas().canvas, focused, opts);
+  const overYMax = Smoke.render(recordingCanvas().canvas, focused, {
+    ...opts,
+    overlays: [{ series: remote, color: '#7c5cff' }],
+  });
+
+  // (b) the y-scale actually returned by render must cover the overlay's robustMax, not
+  // just the focused series' — otherwise the remote line is clipped flat at the plot top.
+  assert.ok(overYMax >= Smoke.robustMax(remote), 'y-scale spans the remote overlay');
+  assert.ok(overYMax > baseYMax, 'y-scale grew beyond the focused-only scale');
+
+  const emptyYMax = Smoke.render(recordingCanvas().canvas, focused, { ...opts, overlays: [] });
+  assert.equal(emptyYMax, baseYMax, 'empty overlays == no overlays (y-scale)');
+});
+
+// A caller-pinned opts.yMax is a hard ceiling: overlays must not widen it even when an
+// overlay's own robustMax would otherwise exceed it.
+check('a pinned opts.yMax is not expanded by overlays', () => {
+  const focused = seriesFrom([12, 12, 13, 12], OTIMES);
+  const remote = seriesFrom([80, 82, 81, 83], OTIMES);
+  const { canvas } = recordingCanvas();
+  const yMaxUsed = Smoke.render(canvas, focused, {
+    height: 200, t0: OT0, t1: OT1, yMax: 20,
+    overlays: [{ series: remote, color: '#7c5cff' }],
+  });
+  assert.equal(yMaxUsed, 20, 'pinned yMax must not be expanded by overlays');
+});
+
+// Each overlay pens up across ITS OWN cadence gaps — independent of the focused
+// series' timestamps/gaps — so an outage in one vantage's data never bridges as a
+// straight line in its overlay trace.
+check('overlay median line pens up across its own cadence gap, independent of the focused series', () => {
+  const focused = seriesFrom([12, 12, 13, 12], OTIMES); // evenly spaced, no gap
+  const overlayTimes = [OT0, OT0 + 60000, OT0 + 1800000]; // 60s, then a huge hole (own gap != focused's)
+  const remote = seriesFrom([80, 82, 84], overlayTimes); // 3 points -> length distinguishes it from the 4-point median base line
+  const { canvas, log } = recordingCanvas();
+  Smoke.render(canvas, focused, {
+    height: 200, t0: OT0, t1: overlayTimes[overlayTimes.length - 1], band: false,
+    overlays: [{ series: remote, color: '#7c5cff' }],
+  });
+  const overlayPath = log.strokePaths.find((p) => p.length === 3);
+  assert.ok(overlayPath, 'overlay path (3 points) was recorded');
+  assert.equal(overlayPath.filter((p) => p.op === 'M').length, 2, 'the gap starts a fresh subpath (pen-up)');
+});
+
 if (failed) { console.error(`\n${failed} test(s) failed`); process.exit(1); }
 console.log('\nall smoke.render tests passed');

@@ -130,7 +130,11 @@ window.Smoke = (function () {
     // keys off the deepest bucket so a given shade always means the same depth.
     let maxHalf = 0;
     for (let i = 0; i < n; i++) maxHalf = Math.max(maxHalf, Math.floor(bucketPings(s.buckets[i]) / 2));
-    const yMax = opts.yMax || robustMax(s);
+    // widen the y-scale so overlaid vantages aren't clipped (unless the caller pinned yMax)
+    let yMax = opts.yMax || robustMax(s);
+    if (!opts.yMax && opts.overlays && opts.overlays.length) {
+      for (const o of opts.overlays) if (o && o.series) yMax = Math.max(yMax, robustMax(o.series));
+    }
     // X by wall-clock time when a domain (t0/t1 epoch ms) and per-bucket `.t` are
     // supplied: short data floats at its true position and gaps land at the right
     // place. Without them (smoke-poc.html) fall back to even array-index spacing.
@@ -141,6 +145,9 @@ window.Smoke = (function () {
     const X = useTime
       ? (i) => mL + pw * clamp01((bk[i].t - opts.t0) / (opts.t1 - opts.t0))
       : (i) => mL + pw * (i / (n - 1));
+    // wall-clock time->x for overlay series, which carry their own buckets/timestamps
+    // (not indexed alongside the focused series' bk/n). Valid only in useTime mode.
+    const Xt = (t) => mL + pw * clamp01((t - opts.t0) / (opts.t1 - opts.t0));
     const Y = (v) => mT + ph * (1 - Math.min(v, yMax) / yMax);
     const colW = Math.ceil(pw / (n - 1)) + 1;
 
@@ -215,6 +222,29 @@ window.Smoke = (function () {
       }
     }
 
+    // overlay lines: extra per-vantage median-only context, drawn after the band/smoke
+    // stack but under the focused median so the primary series stays visually on top.
+    // Each overlay carries its own buckets/timestamps and is penned up across its own
+    // cadence gaps, independent of the focused series' gaps. Time-scaled X only.
+    if (opts.overlays && useTime) {
+      ctx.lineWidth = 1.4;
+      for (const o of opts.overlays) {
+        if (!o || !o.series || !o.series.buckets) continue;
+        const ob = o.series.buckets;
+        const oGap = gapThreshold(ob, opts.gapFactor);
+        ctx.strokeStyle = o.color; ctx.beginPath();
+        let ostarted = false;
+        for (let i = 0; i < ob.length; i++) {
+          const m = ob[i].median;
+          if (isNaN(m) || typeof ob[i].t !== 'number' || isNaN(ob[i].t)) { ostarted = false; continue; }
+          const gap = i >= 1 && (ob[i].t - ob[i - 1].t) > oGap;
+          const x = Xt(ob[i].t), y = Y(m);
+          if (!ostarted || gap) { ctx.moveTo(x, y); ostarted = true; } else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+      }
+    }
+
     // median base line
     ctx.lineWidth = 1.4; ctx.strokeStyle = V.medianBase; ctx.beginPath();
     let started = false;
@@ -248,6 +278,7 @@ window.Smoke = (function () {
       const x = mL + pw * (j / (labels.length - 1));
       ctx.fillText(labels[j], Math.min(Math.max(x, mL + 12), mL + pw - 12), mT + ph + 5);
     }
+    return yMax;
   }
 
   // Adapt an /api/series response ({rounds:[{median_ms,loss,pings,rtts_ms}]}) into a series.

@@ -10,13 +10,18 @@
     --ink:#14222e; --ink-soft:#566573; --ink-faint:#8493a0; --border:#dbe1e8;
     --accent:#0d9488; --accent-soft:#0d948820; --median-base:#202020; --ok:#178a5a; --warn:#d9822b; --bad:#d64545;
     --shadow:0 1px 2px rgba(20,34,46,.06), 0 8px 24px rgba(20,34,46,.05);
+    /* vantage overlay palette — clear of the ok/warn/bad loss ramp and the teal accent;
+       'local' stays the neutral median color (--median-base), so a single-/local-focused
+       view is unchanged. Cycled across non-local vantages by orderVantages() position. */
+    --v-a:#7c5cff; --v-b:#2563eb; --v-c:#0e7490; --v-d:#b45309;
   }
   @media (prefers-color-scheme: dark) {
-    :root {
+    :root:not([data-theme="light"]) {
       --bg:#0a0f14; --surface:#111a22; --plot-bg:#0d151c; --plot-grid:#1c2833; --plot-axis:#48586a; --plot-frame:#223140;
       --ink:#dde8f0; --ink-soft:#8b9aa8; --ink-faint:#64768a; --border:#1f2d3a;
       --accent:#2dd4bf; --accent-soft:#2dd4bf22; --median-base:#c9d6df; --ok:#34d399; --warn:#e0993f; --bad:#e05a5a;
       --shadow:0 1px 2px rgba(0,0,0,.4), 0 10px 30px rgba(0,0,0,.35);
+      --v-a:#a78bfa; --v-b:#5b9bff; --v-c:#22d3ee; --v-d:#f0a44e;
     }
   }
   :root[data-theme="light"] {
@@ -24,12 +29,14 @@
     --ink:#14222e; --ink-soft:#566573; --ink-faint:#8493a0; --border:#dbe1e8;
     --accent:#0d9488; --accent-soft:#0d948820; --median-base:#202020; --ok:#178a5a; --warn:#d9822b; --bad:#d64545;
     --shadow:0 1px 2px rgba(20,34,46,.06), 0 8px 24px rgba(20,34,46,.05);
+    --v-a:#7c5cff; --v-b:#2563eb; --v-c:#0e7490; --v-d:#b45309;
   }
   :root[data-theme="dark"] {
     --bg:#0a0f14; --surface:#111a22; --plot-bg:#0d151c; --plot-grid:#1c2833; --plot-axis:#48586a; --plot-frame:#223140;
     --ink:#dde8f0; --ink-soft:#8b9aa8; --ink-faint:#64768a; --border:#1f2d3a;
     --accent:#2dd4bf; --accent-soft:#2dd4bf22; --median-base:#c9d6df; --ok:#34d399; --warn:#e0993f; --bad:#e05a5a;
     --shadow:0 1px 2px rgba(0,0,0,.4), 0 10px 30px rgba(0,0,0,.35);
+    --v-a:#a78bfa; --v-b:#5b9bff; --v-c:#22d3ee; --v-d:#f0a44e;
   }
   * { box-sizing:border-box; }
   body { margin:0; background:var(--bg); color:var(--ink); font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; line-height:1.55; -webkit-font-smoothing:antialiased; }
@@ -102,6 +109,18 @@
   .detail-head { display:flex; align-items:flex-end; justify-content:space-between; gap:16px; flex-wrap:wrap; margin:12px 0 6px; }
   .detail-head h2 { font-size:16px; margin:0; display:flex; align-items:baseline; gap:9px; flex-wrap:wrap; }
   .reslabel { font-family:ui-monospace,Menlo,monospace; font-size:11px; color:var(--ink-faint); }
+  /* vantage chips — the legend doubles as the overlay focus selector. Left empty (no
+     children) on a single-vantage target, where :empty collapses it to zero height so
+     the single-vantage detail view is visually unchanged from today. */
+  .vchips { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin:10px 0 12px; }
+  .vchips:empty { display:none; }
+  .vchip { display:inline-flex; align-items:center; gap:7px; font-family:ui-monospace,Menlo,monospace; font-size:12px; color:var(--ink-soft); background:var(--surface); border:1px solid var(--border); border-radius:999px; padding:5px 12px 5px 10px; cursor:pointer; transition:border-color .12s,color .12s,background .12s; }
+  .vchip:hover { color:var(--ink); border-color:var(--ink-faint); }
+  .vchip:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+  .vchip i { width:11px; height:11px; border-radius:3px; flex:0 0 auto; box-shadow:inset 0 0 0 1px rgba(128,128,128,.35); }
+  .vchip .vname { color:var(--ink); }
+  .vchip .vval { color:var(--ink-faint); font-variant-numeric:tabular-nums; }
+  .vchip[aria-pressed="true"] { background:var(--accent-soft); border-color:var(--accent); color:var(--ink); box-shadow:inset 0 0 0 1px var(--accent); }
   #zoomCanvas { cursor:crosshair; }
   .zoom-sel { position:absolute; top:0; height:100%; background:rgba(80,150,235,.18); background:color-mix(in srgb, var(--accent) 16%, transparent); border-left:1px solid var(--accent); border-right:1px solid var(--accent); pointer-events:none; }
   .zoom-reset { background:transparent; border:1px solid var(--border); border-radius:6px; padding:3px 9px; cursor:pointer; }
@@ -221,6 +240,7 @@
       <h2 id="stackTitle">—</h2>
       <span class="reslabel">all four ranges · click any graph to zoom</span>
     </div>
+    <div class="vchips" id="stackVantages" role="group" aria-label="Vantages — click to focus the smoke band"></div>
     <div class="stack" id="stackGrid"></div>
   </section>
 
@@ -229,6 +249,7 @@
     <button class="back" id="backZoom">← back to all ranges</button>
     <div class="detail panel" style="margin-top:12px">
       <div class="detail-head" style="margin:0 0 6px"><h2 id="zoomTitle">—</h2><button id="zoomReset" class="reslabel zoom-reset" hidden>⤾ reset zoom</button></div>
+      <div class="vchips" id="zoomVantages" role="group" aria-label="Vantages — click to focus the smoke band"></div>
       <div class="meta" id="zoomMeta"></div>
       <div id="zoomWrap" style="position:relative">
         <canvas id="zoomCanvas"></canvas>
