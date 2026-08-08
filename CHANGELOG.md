@@ -98,6 +98,12 @@ breaking changes.
   instead of a moving `latest-pg16` tag.
 
 ### Fixed
+- **Agent vantage transparency.** `smoke-agent` now logs the *hub-assigned* vantage (the hub
+  derives it from the API key) on each assignment, and warns once when the agent's configured
+  `vantage` label disagrees — so a key minted for one vantage can't quietly have its rounds
+  logged under another. Internal robustness alongside it: `pgstore.Latest` binds the
+  `DefaultVantage` constant instead of a hardcoded `'local'` SQL literal, and `VantageOf` reuses
+  `VantageOrDefault` so the "empty ⇒ local" rule lives in exactly one place.
 - **Store read failures now surface as HTTP 503** on `/api/targets`, `/api/charts`, `/api/sla`,
   and `/metrics`, instead of a false-empty "0 targets" success that a Prometheus scrape could
   not distinguish from a healthy empty configuration. The base `Store.History`/`Keys` reads are
