@@ -186,6 +186,18 @@ breaking changes.
 - **Config rejects unprovisionable / duplicate vantage names** at load time (same validator as the
   key store and read API), instead of leaving a typo'd remote-only target permanently dark.
 
+Follow-up review pass:
+- **Detail views keep your selected vantage.** The stacked/zoom graphs auto-refresh every 30s;
+  the refresh no longer resets a multi-vantage target's focused vantage back to the default, so a
+  chip you picked stays selected.
+- **A folder of only no-data targets shows the neutral dot**, not a false green, matching its
+  children (e.g. a subtree containing only remote-only targets before their agent reports).
+- **`smoke-agent -insecure=false` overrides a config file's `insecure: true`** (a bool flag
+  couldn't previously distinguish "false" from "unset"); a multi-document YAML config is now
+  rejected rather than silently ignoring everything after the first document.
+- **Bounded alert-pattern matching.** The `*N*`-skip matcher memoizes its search, so a pattern
+  with many skips can't blow up exponentially on the alert-eval path.
+
 ### CI / ops
 - **CI hardening.** The pipeline now also enforces `gofmt` and `go mod tidy` cleanliness, runs
   the test suite under the race detector, runs the checked-in Node frontend tests, and runs a

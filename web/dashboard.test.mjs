@@ -234,6 +234,14 @@ check('defaultFocus prefers local', () => {
   assert.equal(D.defaultFocus(['local', 'nyc']), 'local');
   assert.equal(D.defaultFocus(['fra', 'nyc']), 'fra');
 });
+// keepFocus preserves a still-valid selection across a re-render (the 30s auto-refresh must not
+// reset a user's chosen vantage chip), else falls back to defaultFocus (CodeRabbit #16/#17).
+check('keepFocus preserves a valid current focus, else defaults', () => {
+  assert.equal(D.keepFocus('nyc', ['local', 'nyc', 'fra']), 'nyc'); // kept across refresh
+  assert.equal(D.keepFocus('tokyo', ['local', 'nyc']), 'local');    // stale -> default (local present)
+  assert.equal(D.keepFocus(null, ['fra', 'nyc']), 'fra');           // no current -> default
+  assert.equal(D.keepFocus('', ['local', 'nyc']), 'local');         // empty current -> default
+});
 check('vantageColorVar: local neutral, others stable palette', () => {
   const ord = D.orderVantages(['local', 'nyc', 'fra']); // [local, fra, nyc]
   assert.equal(D.vantageColorVar('local', ord), '--median-base');

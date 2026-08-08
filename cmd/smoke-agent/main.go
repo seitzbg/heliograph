@@ -69,11 +69,14 @@ type fileConfig struct {
 }
 
 // cliFlags carries the CLI flag overrides for resolveConfig. A zero value for a field
-// means "flag not passed" and never overrides a value the config file provided.
+// means "flag not passed" and never overrides a value the config file provided. insecure
+// is a *bool (nil = flag omitted) so an explicit `-insecure=false` can override a file's
+// `insecure: true` — a plain bool couldn't distinguish "false" from "not passed"
+// (CodeRabbit #5).
 type cliFlags struct {
 	hub, key, vantage string
 	interval, timeout time.Duration
-	insecure          bool
+	insecure          *bool
 	workers, buffer   int
 	flushMax          int
 }
@@ -97,6 +100,15 @@ func resolveConfig(path string, f cliFlags) (agentConfig, error) {
 		dec.KnownFields(true)
 		if err := dec.Decode(&fc); err != nil && !errors.Is(err, io.EOF) { // EOF = empty file, treat as no settings
 			return agentConfig{}, fmt.Errorf("parsing config %s: %w", path, err)
+		}
+		// Reject a trailing YAML document: KnownFields only guards the first document, so a
+		// second `---` doc (e.g. one holding a misspelled key) would otherwise be silently
+		// ignored, making a typo'd setting look applied when it isn't (CodeRabbit #6).
+		if err := dec.Decode(new(yaml.Node)); !errors.Is(err, io.EOF) {
+			if err != nil {
+				return agentConfig{}, fmt.Errorf("parsing config %s: %w", path, err)
+			}
+			return agentConfig{}, fmt.Errorf("parsing config %s: multiple YAML documents are not supported", path)
 		}
 	}
 
@@ -140,8 +152,8 @@ func resolveConfig(path string, f cliFlags) (agentConfig, error) {
 	if f.timeout != 0 {
 		cfg.Timeout = f.timeout
 	}
-	if f.insecure {
-		cfg.Insecure = true
+	if f.insecure != nil {
+		cfg.Insecure = *f.insecure
 	}
 	if f.workers != 0 {
 		cfg.Workers = f.workers
@@ -220,9 +232,18 @@ func main() {
 
 	setupLogger(*logFormat, *logLevel)
 
+	// Pass insecure only when the flag was explicitly set, so `-insecure=false` overrides a
+	// file's `insecure: true` while an omitted flag leaves the file value alone (CodeRabbit #5).
+	var insecureOverride *bool
+	flag.Visit(func(fl *flag.Flag) {
+		if fl.Name == "insecure" {
+			insecureOverride = insecure
+		}
+	})
+
 	cfg, err := resolveConfig(*configPath, cliFlags{
 		hub: *hub, key: *key, vantage: *vantage,
-		interval: *interval, timeout: *timeout, insecure: *insecure,
+		interval: *interval, timeout: *timeout, insecure: insecureOverride,
 		workers: *workers, buffer: *buffer, flushMax: *flushMax,
 	})
 	if err != nil {

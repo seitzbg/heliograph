@@ -73,3 +73,45 @@ func TestResolveConfigRejectsUnknownKey(t *testing.T) {
 		t.Fatal("expected an error for the unknown key 'flushmax' (should be flush_max)")
 	}
 }
+
+// An explicit `-insecure=false` must override a file's `insecure: true`; an omitted flag
+// (nil) must leave the file value alone (CodeRabbit #5).
+func TestResolveConfigInsecureFlagOverride(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "agent.yaml")
+	if err := os.WriteFile(p, []byte("hub: https://hub.example\nkey: smk_a_b\ninsecure: true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ptr := func(b bool) *bool { return &b }
+
+	// Flag omitted (nil): keep the file's insecure: true.
+	if c, err := resolveConfig(p, cliFlags{}); err != nil || !c.Insecure {
+		t.Fatalf("omitted flag: Insecure=%v err=%v, want true", c.Insecure, err)
+	}
+	// Explicit -insecure=false: overrides the file to false.
+	if c, err := resolveConfig(p, cliFlags{insecure: ptr(false)}); err != nil || c.Insecure {
+		t.Fatalf("explicit false: Insecure=%v err=%v, want false", c.Insecure, err)
+	}
+	// Explicit -insecure=true against a file with no insecure key: true.
+	p2 := filepath.Join(dir, "agent2.yaml")
+	if err := os.WriteFile(p2, []byte("hub: https://hub.example\nkey: smk_a_b\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if c, err := resolveConfig(p2, cliFlags{insecure: ptr(true)}); err != nil || !c.Insecure {
+		t.Fatalf("explicit true: Insecure=%v err=%v, want true", c.Insecure, err)
+	}
+}
+
+// A config file with a trailing second YAML document must be rejected, not silently ignored —
+// otherwise settings in the second doc (e.g. a misspelled key) look applied but aren't (CodeRabbit #6).
+func TestResolveConfigRejectsMultipleDocuments(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "agent.yaml")
+	body := "hub: https://hub.example\nkey: smk_a_b\n---\nflushmax: 10\n"
+	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolveConfig(p, cliFlags{}); err == nil {
+		t.Fatal("expected an error for a config with multiple YAML documents")
+	}
+}
