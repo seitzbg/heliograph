@@ -201,6 +201,13 @@
     return o.includes('local') ? 'local' : (o[0] || 'local');
   }
 
+  // keepFocus preserves the currently-focused vantage across a re-render when it is still one
+  // of the target's vantages, else falls back to defaultFocus. The detail views auto-refresh
+  // (every 30s); without this a refresh would reset a user's chip selection back to the default.
+  function keepFocus(current, list) {
+    return current && list.includes(current) ? current : defaultFocus(list);
+  }
+
   // VPAL is the fixed overlay color palette (CSS var names defined in dashboard.css) cycled
   // across non-local vantages by their position in the ordered list.
   const VPAL = ['--v-a', '--v-b', '--v-c', '--v-d'];
@@ -240,7 +247,7 @@
     return Math.round(h / 24) + 'd ago';
   }
 
-  window.Dash = { RANGES, RANGE_ORDER, parseRoute, mergeSeries, gridSince, fetchJSON, zoomResolution, pixelToTime, sharedYMax, buildTree, underPath, targetStatus, pickSeries, vantageList, orderVantages, defaultFocus, vantageColorVar, adminMode, relTime };
+  window.Dash = { RANGES, RANGE_ORDER, parseRoute, mergeSeries, gridSince, fetchJSON, zoomResolution, pixelToTime, sharedYMax, buildTree, underPath, targetStatus, pickSeries, vantageList, orderVantages, defaultFocus, keepFocus, vantageColorVar, adminMode, relTime };
 
   // ---------------------------------------------------------------- init (DOM) --
   function init() {
@@ -517,9 +524,18 @@
     // a subtree count, each leaf its own dot. Rebuilt only when that signature changes.
     const SEV = { nodata: 0, ok: 0, degraded: 1, down: 2 };
     function countLeaves(n) { let c = n.target ? 1 : 0; for (const ch of n.children) c += countLeaves(ch); return c; }
+    // A folder's dot is its worst descendant. Init 'nodata' so a folder whose leaves are all
+    // no-data reads as no-data too (matching the leaf dots), not a false green; but 'ok' (a
+    // healthy target WITH data) outranks 'nodata' even though both sort at severity 0.
     function folderStatus(n) {
-      let worst = 'ok';
-      (function visit(m) { if (m.target) { const s = statusByTarget.get(m.target) || 'ok'; if (SEV[s] > SEV[worst]) worst = s; } m.children.forEach(visit); })(n);
+      let worst = 'nodata';
+      (function visit(m) {
+        if (m.target) {
+          const s = statusByTarget.get(m.target) || 'ok';
+          if (worst === 'nodata' ? s !== 'nodata' : SEV[s] > SEV[worst]) worst = s;
+        }
+        m.children.forEach(visit);
+      })(n);
       return worst;
     }
     function nodeHtml(n, depth, filtering) {
@@ -674,7 +690,7 @@
         return;
       }
 
-      stackFocus = Dash.defaultFocus(vs);
+      stackFocus = Dash.keepFocus(stackFocus, vs); // preserve the user's chip across the 30s refresh
       await Promise.all(cells.map(async (c) => {
         const fetched = await Promise.all(vs.map((v) => fetchRange(name, c.key, v).catch(() => null)));
         if (gen !== stackGen) return; // superseded mid-fetch — don't push/render into a detached/reused cell
@@ -751,7 +767,7 @@
         return;
       }
 
-      zoomFocus = Dash.defaultFocus(vs);
+      zoomFocus = Dash.keepFocus(zoomFocus, vs); // preserve the user's chip across the 30s refresh
       const fetched = await Promise.all(vs.map((v) => fetchRange(name, range, v).catch(() => null)));
       if (gen !== zoomGen) return; // a newer zoom call superseded this one
       const byV = {}; let failed = false;
@@ -809,7 +825,7 @@
         if (gen !== zoomGen) return; // superseded mid-fetch — don't touch the shared zoomFocus
         byV = {};
         vs.forEach((v, i) => { byV[v] = fetched[i]; });
-        zoomFocus = (zoomFocus && vs.includes(zoomFocus)) ? zoomFocus : Dash.defaultFocus(vs);
+        zoomFocus = Dash.keepFocus(zoomFocus, vs);
         s = byV[zoomFocus];
       }
       if (gen !== zoomGen) return; // a newer zoom call superseded this drag (also covers the single-vantage branch's await)

@@ -549,8 +549,11 @@ func TestDailyRollup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Rollup 1d until day1: %v", err)
 	}
-	if len(pts3) != 1 || !approx(pts3[0].MedianAvg, 0.03) {
-		t.Fatalf("bounded daily [.., day1] = %d buckets avg %v, want 1 / .03 (day 1 only)", len(pts3), pts3[0].MedianAvg)
+	if len(pts3) != 1 {
+		t.Fatalf("bounded daily [.., day1] = %d buckets, want 1 (day 1 only)", len(pts3))
+	}
+	if !approx(pts3[0].MedianAvg, 0.03) {
+		t.Fatalf("bounded daily [.., day1] avg = %v, want .03 (day 1 only)", pts3[0].MedianAvg)
 	}
 }
 

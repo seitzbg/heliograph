@@ -167,17 +167,28 @@ func (p Pattern) Test(w Window, _ bool) bool {
 	if len(p.Steps) == 0 {
 		return false
 	}
-	return matchSteps(p.Steps, len(p.Steps)-1, series, len(series)-1)
+	// failed memoizes (step index, series position) states already known to be
+	// unsatisfiable, so overlapping skip branches don't re-explore them. Without it, a
+	// pattern with several `*N*` skips is exponential in the number of skips; with it the
+	// work is bounded by len(Steps) × len(series) — a config-authored footgun, not attacker
+	// input, but cheap to defuse (CodeRabbit #2).
+	failed := make(map[[2]int]bool)
+	return matchSteps(p.Steps, len(p.Steps)-1, series, len(series)-1, failed)
 }
 
 // matchSteps matches steps[0..si] against the samples ending at index pos,
 // walking newest->oldest (steps and samples both consumed from the right, so the
 // pattern is anchored to the most recent sample). Samples older than the matched
 // run are irrelevant (the pattern floats on the left, bounded by Length). A skip
-// tries every allowance 0..max; a comparison/wildcard consumes exactly one.
-func matchSteps(steps []step, si int, series []float64, pos int) bool {
+// tries every allowance 0..max; a comparison/wildcard consumes exactly one. `failed`
+// memoizes states that returned false, bounding total work (see Test).
+func matchSteps(steps []step, si int, series []float64, pos int, failed map[[2]int]bool) bool {
 	if si < 0 {
 		return true // every step satisfied
+	}
+	key := [2]int{si, pos}
+	if failed[key] {
+		return false // this (step, position) subproblem was already shown unsatisfiable
 	}
 	s := steps[si]
 	if s.kind == stepSkip {
@@ -185,18 +196,23 @@ func matchSteps(steps []step, si int, series []float64, pos int) bool {
 			if pos-k < -1 {
 				break // not enough samples left to skip k
 			}
-			if matchSteps(steps, si-1, series, pos-k) {
+			if matchSteps(steps, si-1, series, pos-k, failed) {
 				return true
 			}
 		}
+		failed[key] = true
 		return false
 	}
 	if pos < 0 {
+		failed[key] = true
 		return false // a hard/wildcard slot with no sample to fill it
 	}
 	if s.kind == stepAny || s.matchValue(series[pos]) {
-		return matchSteps(steps, si-1, series, pos-1)
+		if matchSteps(steps, si-1, series, pos-1, failed) {
+			return true
+		}
 	}
+	failed[key] = true
 	return false
 }
 

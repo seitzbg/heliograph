@@ -92,6 +92,7 @@ func TestOptionsValidate(t *testing.T) {
 		"neg timeout":   bad(func(o *Options) { o.Timeout = -1 }),
 		"zero workers":  bad(func(o *Options) { o.Workers = 0 }),
 		"zero buffer":   bad(func(o *Options) { o.BufferCap = 0 }),
+		"zero flushmax": bad(func(o *Options) { o.FlushMax = 0 }),
 		"neg flushmax":  bad(func(o *Options) { o.FlushMax = -1 }),
 	}
 	for name, o := range cases {

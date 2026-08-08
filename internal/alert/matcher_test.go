@@ -120,6 +120,31 @@ func TestPatternSkipAlignment(t *testing.T) {
 	}
 }
 
+// A pattern with many skips must stay bounded: without memoization, 8 hard slots separated by
+// *20* skips explores ~21^7 skip combinations against an all-zero (never-matching) window and
+// hangs; the (step,pos) memo bounds it to steps×window so this returns promptly, while a fully
+// matching window still matches (memoization must not change the result) (CodeRabbit #2).
+func TestPatternManySkipsBounded(t *testing.T) {
+	src := ">0%"
+	for i := 0; i < 7; i++ {
+		src += ",*20*,>0%"
+	}
+	p, err := ParsePattern("loss", src)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	win := make([]float64, p.Length()) // all zeros -> no >0% slot ever matches
+	if p.Test(Window{Loss: win}, false) {
+		t.Fatal("all-zero window must not match a >0% pattern")
+	}
+	for i := range win {
+		win[i] = 60 // every slot satisfies >0% -> pattern matches (skip 0 each time)
+	}
+	if !p.Test(Window{Loss: win}, false) {
+		t.Fatal("all-loss window should satisfy the >0% pattern (memoization broke positive matching)")
+	}
+}
+
 // The unknown value U must be matchable and distinct from 0% — the second Perl
 // pitfall, where a lost round was recorded as 0% so `==U` could never fire and an
 // outage read as clean history.
