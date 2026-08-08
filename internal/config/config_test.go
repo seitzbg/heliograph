@@ -643,3 +643,49 @@ targets:
 		t.Fatal("expected an error for a duplicate vantage, got none")
 	}
 }
+
+func TestAppendDBFragmentMerges(t *testing.T) {
+	base, err := Parse([]byte("targets:\n  children:\n    yaml-one: {probe: HTTP, host: a.example}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// DB fragment as JSON, with a Duration ("30s") to prove the yaml decoder parses JSON
+	// AND the custom Duration unmarshaler fires.
+	frag := []byte(`{"targets":{"children":{"db-one":{"probe":"HTTP","host":"b.example","step":"30s"}}}}`)
+	if err := AppendDBFragment(base, frag); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	got := base.Targets.Children["db-one"]
+	if got == nil || got.Host != "b.example" {
+		t.Fatalf("db-one not merged: %+v", base.Targets.Children)
+	}
+	if time.Duration(got.Step) != 30*time.Second {
+		t.Fatalf("step not parsed from JSON doc: %v", got.Step)
+	}
+}
+
+func TestAppendDBFragmentDuplicateBranch(t *testing.T) {
+	base, _ := Parse([]byte("targets:\n  children:\n    dup: {probe: HTTP, host: a.example}\n"))
+	err := AppendDBFragment(base, []byte(`{"targets":{"children":{"dup":{"probe":"HTTP","host":"b.example"}}}}`))
+	if err == nil || !strings.Contains(err.Error(), "duplicate") {
+		t.Fatalf("want duplicate-branch error, got %v", err)
+	}
+}
+
+func TestAppendDBFragmentRejectsGlobals(t *testing.T) {
+	base, _ := Parse([]byte("targets:\n  children: {}\n"))
+	err := AppendDBFragment(base, []byte(`{"alerts":{"x":{"type":"loss","pattern":">50%"}}}`))
+	if err == nil || !strings.Contains(err.Error(), "alerts") {
+		t.Fatalf("want globals-rejected error, got %v", err)
+	}
+}
+
+func TestAppendDBFragmentEmptyIsNoop(t *testing.T) {
+	base, _ := Parse([]byte("targets:\n  children:\n    only: {probe: HTTP, host: a.example}\n"))
+	if err := AppendDBFragment(base, []byte("   ")); err != nil {
+		t.Fatalf("empty fragment should be a no-op: %v", err)
+	}
+	if len(base.Targets.Children) != 1 {
+		t.Fatalf("empty fragment changed config: %+v", base.Targets.Children)
+	}
+}

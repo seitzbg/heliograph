@@ -233,28 +233,50 @@ func LoadDir(dir string) (*Config, error) {
 		if err != nil {
 			return nil, fmt.Errorf("config: parse conf.d/%s: %w", n, err)
 		}
-		if err := validateFragment(n, frag); err != nil {
+		if err := validateFragment("conf.d/"+n, frag); err != nil {
 			return nil, err
 		}
-		if frag.Targets == nil {
-			continue
-		}
-		for _, key := range sortedKeys(frag.Targets.Children) {
-			if prev, dup := origin[key]; dup {
-				return nil, fmt.Errorf("config: duplicate top-level target %q in conf.d/%s (already defined in %s)", key, n, prev)
-			}
-			origin[key] = "conf.d/" + n
-			base.Targets.Children[key] = frag.Targets.Children[key]
+		if err := mergeBranches(base, origin, "conf.d/"+n, frag); err != nil {
+			return nil, err
 		}
 	}
 	return base, nil
 }
 
-// validateFragment enforces that a conf.d fragment carries only target branches:
-// database / probes / alerts and any tree-wide targets:-node fields belong in
-// default.yaml. name is the fragment's filename (for the error message).
-func validateFragment(name string, c *Config) error {
-	where := "conf.d/" + name
+// AppendDBFragment merges a database-sourced config fragment (JSON or YAML bytes) into
+// cfg as an additional source concatenated after the YAML config. The fragment may carry
+// only target branches (validateFragment); a top-level branch already present in cfg is a
+// hard error. Empty/whitespace input is a no-op. The bytes are parsed by the yaml decoder
+// (JSON is valid YAML), so the custom type unmarshalers apply.
+func AppendDBFragment(cfg *Config, fragBytes []byte) error {
+	if len(bytes.TrimSpace(fragBytes)) == 0 {
+		return nil
+	}
+	frag, err := decode(fragBytes)
+	if err != nil {
+		return fmt.Errorf("config: parse database fragment: %w", err)
+	}
+	if err := validateFragment("the database config", frag); err != nil {
+		return err
+	}
+	if cfg.Targets == nil {
+		cfg.Targets = &Node{}
+	}
+	if cfg.Targets.Children == nil {
+		cfg.Targets.Children = map[string]*Node{}
+	}
+	origin := make(map[string]string, len(cfg.Targets.Children))
+	for k := range cfg.Targets.Children {
+		origin[k] = "the YAML config"
+	}
+	return mergeBranches(cfg, origin, "the database config", frag)
+}
+
+// validateFragment enforces that a fragment carries only target branches: database /
+// probes / alerts and tree-wide targets:-node fields belong in default.yaml. label
+// names the fragment's source (e.g. "conf.d/10-x.yaml" or "the database config").
+func validateFragment(label string, c *Config) error {
+	where := label
 	if c.Database.Pings != 0 || c.Database.Step != 0 {
 		return fmt.Errorf("config: %s: `database` must be set in default.yaml, not in a fragment", where)
 	}
@@ -268,6 +290,24 @@ func validateFragment(name string, c *Config) error {
 		if t.Probe != "" || t.Host != "" || t.Title != "" || t.Pings != 0 || t.Step != 0 || t.Params != nil || t.Alerts != nil || t.Alertee != nil || t.Vantages != nil {
 			return fmt.Errorf("config: %s: `targets:` may contain only `children` in a fragment (tree-wide defaults belong in default.yaml)", where)
 		}
+	}
+	return nil
+}
+
+// mergeBranches concatenates frag's top-level target branches into base. origin maps
+// an already-claimed branch name to the source that defined it; a collision is a hard
+// error. label names frag's source for the error/bookkeeping. frag must already pass
+// validateFragment and may be nil/childless (no-op).
+func mergeBranches(base *Config, origin map[string]string, label string, frag *Config) error {
+	if frag == nil || frag.Targets == nil {
+		return nil
+	}
+	for _, key := range sortedKeys(frag.Targets.Children) {
+		if prev, dup := origin[key]; dup {
+			return fmt.Errorf("config: duplicate top-level target %q in %s (already defined in %s)", key, label, prev)
+		}
+		origin[key] = label
+		base.Targets.Children[key] = frag.Targets.Children[key]
 	}
 	return nil
 }

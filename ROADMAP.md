@@ -109,9 +109,16 @@ sketch; agents poll a versioned assignment (`304` when unchanged); keys are mana
 Post-federation work, in build order (each an independent PR). Federation (Phase 4) shipped as the
 v2.0 line; these build on it.
 
-- ⬜ **Config in a database** — targets/probes/alerts are YAML-only today. Move config into the
+- 🚧 **Config in a database** — targets/probes/alerts are YAML-only today. Move config into the
   store with an in-browser **target-management UI** (add / edit / remove), reusing the admin auth.
-  The marquee next feature — goes past SmokePing's file-only config. *(Large.)*
+  Built **additively**: the DB is a live source concatenated with YAML (`conf.d`-style), not a
+  replacement. The marquee next feature — goes past SmokePing's file-only config. *(Large; 4 slices.)*
+  - ✅ DB config source + load — a versioned `config_fragment` (`internal/configstore`,
+    optimistic-concurrency `Get`/`Set`) merged into the config tree on boot/SIGHUP when `-dsn` is
+    set; dark until configured
+  - ⬜ Config CRUD API (admin-gated) + reload-on-write
+  - ⬜ Target-management UI (add / edit / remove DB targets)
+  - ⬜ YAML → DB import
 - ⬜ **SmokePing → TimescaleDB importer** — read an existing SmokePing install's `Targets` config +
   RRD history and load it here, so a running SmokePing can migrate (RRD → TSDB is the core shift).
   *(Medium.)*

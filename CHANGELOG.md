@@ -8,6 +8,13 @@ breaking changes.
 ## [Unreleased]
 
 ### Added
+- **Config in a database (groundwork).** With `-dsn` set, `smoked` now loads a DB-stored config
+  fragment as an additional **live source**, concatenated with the YAML config (`default.yaml` +
+  `conf.d/*.yaml`) on every boot and SIGHUP reload — the existing duplicate-branch guard applies
+  across sources, and the fragment carries target branches only (globals stay in YAML). Stored as a
+  single versioned `config_fragment` row (new `internal/configstore`) with optimistic-concurrency
+  `Get`/`Set`. **Dark until configured:** no `-dsn`, or an absent/empty row, is byte-for-byte
+  unchanged. Groundwork for the config CRUD API + in-browser target management still to come.
 - **Federation operator guide** (`docs/federation.md`) — the end-to-end walkthrough for
   provisioning a vantage: declaring `vantages:` on targets, minting a per-vantage key
   (`smoked vantage add` or the GUI), running `smoke-agent` at the remote location, and reading the

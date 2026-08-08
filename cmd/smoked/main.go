@@ -25,6 +25,7 @@ import (
 	"smokeping-modern/internal/alert"
 	"smokeping-modern/internal/api"
 	"smokeping-modern/internal/config"
+	"smokeping-modern/internal/configstore"
 	"smokeping-modern/internal/federation"
 	"smokeping-modern/internal/model"
 	"smokeping-modern/internal/probe"
@@ -107,9 +108,25 @@ func main() {
 		}()
 	}
 
+	// DB-backed config source (item 1): active only with -dsn. An absent/empty row
+	// contributes nothing, so YAML-only deployments are unaffected. Fetched fresh on
+	// each build so a SIGHUP reload picks up DB edits, like conf.d drop-ins.
+	var dbFragment func() ([]byte, error)
+	if *dsn != "" {
+		cfgStore, cerr := configstore.New(context.Background(), *dsn)
+		if cerr != nil {
+			fatal("config store", cerr)
+		}
+		defer cfgStore.Close()
+		dbFragment = func() ([]byte, error) {
+			doc, _, err := cfgStore.Get(context.Background())
+			return doc, err
+		}
+	}
+
 	// The runtime (jobs + alert engine) is built from config (or the demo set) and
 	// held behind an atomic pointer so it can be swapped on SIGHUP reload.
-	rt, err := buildRuntime(*configPath, *pings, *step, *timeout, notifiers)
+	rt, err := buildRuntime(*configPath, *pings, *step, *timeout, notifiers, dbFragment)
 	if err != nil {
 		fatal("startup failed", err)
 	}
@@ -136,7 +153,7 @@ func main() {
 		signal.Notify(hup, syscall.SIGHUP)
 		go func() {
 			for range hup {
-				nrt, err := buildRuntime(*configPath, *pings, *step, *timeout, notifiers)
+				nrt, err := buildRuntime(*configPath, *pings, *step, *timeout, notifiers, dbFragment)
 				if err != nil {
 					slog.Error("reload failed, keeping running config", "err", err)
 					continue
@@ -654,7 +671,7 @@ func recentContiguous(hist []scheduler.Outcome, m warmMeta, now time.Time) []sch
 // buildRuntime loads targets (from YAML config, or the demo set) and builds the
 // probe jobs and alert engine. A probe whose binary/deps are unavailable is
 // skipped with a warning, not fatal.
-func buildRuntime(configPath string, demoPings int, demoStep, timeout time.Duration, notifiers map[string]alert.Notifier) (rt *runtime, err error) {
+func buildRuntime(configPath string, demoPings int, demoStep, timeout time.Duration, notifiers map[string]alert.Notifier, dbFragment func() ([]byte, error)) (rt *runtime, err error) {
 	// Final safeguard for the SIGHUP reload path: a panic while building the runtime
 	// (e.g. a config edge case the validator misses) must not take the collector
 	// down — the reload goroutine turns this error into "keep the running config".
@@ -670,6 +687,15 @@ func buildRuntime(configPath string, demoPings int, demoStep, timeout time.Durat
 		cfg, err := config.LoadPath(configPath)
 		if err != nil {
 			return nil, fmt.Errorf("config: %w", err)
+		}
+		if dbFragment != nil {
+			fragBytes, ferr := dbFragment()
+			if ferr != nil {
+				return nil, fmt.Errorf("config: database fragment: %w", ferr)
+			}
+			if err := config.AppendDBFragment(cfg, fragBytes); err != nil {
+				return nil, fmt.Errorf("config: %w", err)
+			}
 		}
 		if monitors, err = cfg.Monitors(); err != nil {
 			return nil, err
