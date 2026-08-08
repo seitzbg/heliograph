@@ -173,7 +173,45 @@
     return { series: fresh, cache: fresh.unsupported ? prev : fresh, failed: false };
   }
 
-  window.Dash = { RANGES, RANGE_ORDER, parseRoute, mergeSeries, gridSince, fetchJSON, zoomResolution, pixelToTime, sharedYMax, buildTree, underPath, targetStatus, pickSeries };
+  // vantageList returns a target's vantage set from an /api/targets DTO: the array if
+  // present and non-empty, else the implicit single-vantage default. Sliced defensively
+  // so callers can't mutate the DTO's array through the returned list.
+  function vantageList(t) {
+    return (t && Array.isArray(t.vantages) && t.vantages.length) ? t.vantages.slice() : ['local'];
+  }
+
+  // orderVantages is the stable render order for a target's vantage overlay: 'local'
+  // first (if present), then the rest sorted ascending, deduped. Stable given a stable
+  // input set, so vantageColorVar's palette assignment stays consistent across renders.
+  function orderVantages(list) {
+    const uniq = [...new Set(list || [])];
+    const local = uniq.filter((v) => v === 'local');
+    const rest = uniq.filter((v) => v !== 'local').sort();
+    return local.concat(rest);
+  }
+
+  // defaultFocus picks the vantage a detail view opens focused on: 'local' when present
+  // in the ordered list, else the ordered list's first entry ('local' if the list is empty).
+  function defaultFocus(list) {
+    const o = orderVantages(list);
+    return o.includes('local') ? 'local' : (o[0] || 'local');
+  }
+
+  // VPAL is the fixed overlay color palette (CSS var names defined in dashboard.css) cycled
+  // across non-local vantages by their position in the ordered list.
+  const VPAL = ['--v-a', '--v-b', '--v-c', '--v-d'];
+
+  // vantageColorVar maps a vantage to a CSS var NAME: the neutral median color for 'local',
+  // else a palette slot keyed by the vantage's position among `ordered`'s non-local entries
+  // (mod palette length) — stable as long as `ordered` (from orderVantages) is stable.
+  function vantageColorVar(vantage, ordered) {
+    if (vantage === 'local') return '--median-base';
+    const rest = (ordered || []).filter((v) => v !== 'local');
+    const i = rest.indexOf(vantage);
+    return VPAL[(i < 0 ? 0 : i) % VPAL.length];
+  }
+
+  window.Dash = { RANGES, RANGE_ORDER, parseRoute, mergeSeries, gridSince, fetchJSON, zoomResolution, pixelToTime, sharedYMax, buildTree, underPath, targetStatus, pickSeries, vantageList, orderVantages, defaultFocus, vantageColorVar };
 
   // ---------------------------------------------------------------- init (DOM) --
   function init() {
@@ -183,16 +221,17 @@
     const enc = encodeURIComponent;
 
     // ---- data fetch for one range (raw series, or a server-windowed rollup band) ----
-    async function fetchRange(name, key) {
+    async function fetchRange(name, key, vantage) {
+      const vq = vantage ? '&vantage=' + enc(vantage) : '';
       const R = RANGES[key];
       if (R.mode === 'raw') {
-        const r = await fetch('/api/series?target=' + enc(name) + '&window=' + R.window, { cache: 'no-store' });
+        const r = await fetch('/api/series?target=' + enc(name) + '&window=' + R.window + vq, { cache: 'no-store' });
         if (!r.ok) return null;
         return Smoke.fromApiSeries(await r.json());
       }
       // Bound the rollup to the range window server-side (Go duration, e.g. 240h for
       // 10 days) so we don't fetch the target's full retained history each refresh.
-      const r = await fetch('/api/rollup?target=' + enc(name) + '&res=' + R.res + '&window=' + (R.days * 24) + 'h', { cache: 'no-store' });
+      const r = await fetch('/api/rollup?target=' + enc(name) + '&res=' + R.res + '&window=' + (R.days * 24) + 'h' + vq, { cache: 'no-store' });
       if (r.status === 501) return { unsupported: true };
       if (!r.ok) return null;
       return Smoke.fromApiRollup(await r.json());
@@ -293,6 +332,23 @@
     let gridScope = '', navQuery = '', treeNames = [], treeSig = null;
     const collapsed = new Set();
     const statusByTarget = new Map();
+    // vantagesByTarget mirrors statusByTarget (also fed from /api/targets in refreshGrid):
+    // each target's vantage set, so the overlay UI (Task 3) knows what it can show without
+    // a per-render fetch. vantagesFor defaults to ['local'] before the first grid refresh.
+    const vantagesByTarget = new Map();
+    function vantagesFor(name) { return vantagesByTarget.get(name) || ['local']; }
+    // ensureVantages backfills vantagesByTarget for a detail view reached before
+    // refreshGrid has populated it (e.g. a deep link to #target=...): a no-op once the
+    // grid has run, otherwise one /api/targets fetch to seed the map. `name` is accepted
+    // so Task 3's detail views can call it uniformly with the target about to render,
+    // even though seeding fetches every target's vantage set at once.
+    async function ensureVantages(name) {
+      if (vantagesByTarget.size) return;
+      try {
+        const targets = (await fetchJSON('/api/targets')).targets || [];
+        for (const t of targets) vantagesByTarget.set(t.name, vantageList(t));
+      } catch (e) { /* transient: vantagesFor falls back to ['local'] */ }
+    }
     function ensurePanel(t) {
       let p = panels.get(t.name); if (p) return p;
       const grid = $('graphGrid'); if (panels.size === 0) grid.innerHTML = '';
@@ -327,8 +383,8 @@
         catch (e) { $('statusText').textContent = 'collector unreachable — showing last known'; return; } // keep panels (#2)
         $('statusText').textContent = targets.length + ' targets · updated ' + new Date().toLocaleTimeString();
         // Feed the config-tree menu: the name set it's built from and per-target dot status.
-        statusByTarget.clear();
-        for (const t of targets) statusByTarget.set(t.name, targetStatus(t));
+        statusByTarget.clear(); vantagesByTarget.clear();
+        for (const t of targets) { statusByTarget.set(t.name, targetStatus(t)); vantagesByTarget.set(t.name, vantageList(t)); }
         treeNames = targets.map((t) => t.name);
         // Reconcile ONLY against an authoritative target list (the fetch above succeeded):
         // drop panels for targets no longer reported (e.g. removed on a SIGHUP reload). A
