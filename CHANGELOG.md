@@ -14,8 +14,18 @@ breaking changes.
   content-version hash. A TimescaleDB-backed API-key store lets an operator register vantages —
   `smoked vantage add/ls/revoke` mints a one-time key (salted-hash at rest, constant-time verify)
   — with a password-gated `/api/admin/vantages` API + session login (`SMOKED_ADMIN_PASSWORD`,
-  fail-closed). Dark until an agent connects; federation requires `-dsn`. The agent binary + its
-  endpoints, per-vantage overlay graphs, and the bundled reverse proxy are still to come.
+  fail-closed). Dark until an agent connects; federation requires `-dsn`. Still to come: the
+  bundled reverse proxy and a Vantages admin GUI panel.
+- **Federation: agent endpoints + `smoke-agent` remote collector.** Agents authenticate with a
+  per-vantage API key and pull `GET /agent/v1/assignment` (304-aware via `config_version`), then
+  `POST /agent/v1/results`; the hub is authoritative for probe/host and ingests idempotently. The
+  `smoke-agent` binary pulls its assignment, runs the same probe/scheduler pipeline, and pushes
+  rounds through a bounded in-memory store-and-forward buffer. Storage reads and the continuous
+  aggregates are now vantage-aware (default `local`), so multi-vantage data no longer conflates.
+- **Per-vantage overlay graphs.** A target probed from more than one vantage overlays each
+  vantage's median line (distinct colors) in the detail views, with a chip legend that doubles as
+  a focus selector; the smoke band renders for the focused vantage. Single-vantage targets and the
+  Graphs grid are unchanged.
 - **Config-tree menu** in the Graphs view: a left nav built from the target name paths
   (collapsible folders with worst-child status dots + subtree counts, a filter box, and a
   deep-linkable subtree scope that also scopes the unison Y-axis).
