@@ -105,6 +105,23 @@ sketch; agents poll a versioned assignment (`304` when unchanged); keys are mana
 - ✅ Availability/SLA reporting (the tSmoke equivalent) — `GET /api/sla?window=…` per-target
   availability % over a window + dashboard "Availability" panel
 
+## Phase 6 — Beyond parity 🚧
+Post-federation work, in build order (each an independent PR). Federation (Phase 4) shipped as the
+v2.0 line; these build on it.
+
+- ⬜ **Config in a database** — targets/probes/alerts are YAML-only today. Move config into the
+  store with an in-browser **target-management UI** (add / edit / remove), reusing the admin auth.
+  The marquee next feature — goes past SmokePing's file-only config. *(Large.)*
+- ⬜ **SmokePing → TimescaleDB importer** — read an existing SmokePing install's `Targets` config +
+  RRD history and load it here, so a running SmokePing can migrate (RRD → TSDB is the core shift).
+  *(Medium.)*
+- ⬜ **Native ICMP probe** — replace the `fping` shell-out with `golang.org/x/net/icmp`, dropping
+  the external binary and the `CAP_NET_RAW`/`setcap` dance from the image. *(Small–medium.)*
+- ⬜ **On-disk agent store-and-forward** — persist the agent's buffer so a vantage restart doesn't
+  drop unpushed rounds (today it's in-memory only). *(Medium.)*
+- ⬜ **Cut the release** — bump the version off `0.1.0`; tag the single-node line **v1.0** and
+  federation **v2.0** with release notes. *(Small.)*
+
 ## Known limitations / follow-ups (from the 2026-08-04 code review)
 - ✅ **Per-target polling intervals** — while serving, each target fires on its own `step`
   via `scheduler.Planner` (phase-aligned per target); config/per-node `step` is honored. The
