@@ -8,6 +8,18 @@ breaking changes.
 ## [Unreleased]
 
 ### Added
+- **Bundled Caddy reverse proxy (federation deployment).** An opt-in `federation` Docker Compose
+  profile adds a Caddy service that terminates TLS with an automatically issued and auto-renewed
+  Let's Encrypt certificate (`DOMAIN` + `ACME_EMAIL` from `.env`) and reverse-proxies smoked with
+  two auth models: the agent API (`/agent/v1/*`) by its per-vantage API key, and the dashboard +
+  read API + admin panel behind **HTTP Basic Auth** (`DASH_USER` / `DASH_PASSWORD_HASH`) — since
+  smoked's read API has no auth of its own. `smoked` never does TLS itself; both the API key and
+  the Basic Auth ride inside Caddy's TLS, and over that real TLS the admin session cookie works
+  remotely. Certificates use the HTTP-01 challenge by default, or **DNS-01** (`CADDY_ACME_DNS`) —
+  useful behind NAT / for wildcards — with provider plugins for **cloudflare, route53,
+  digitalocean, duckdns, namecheap, gandi** compiled into the Caddy image (`Caddy.Dockerfile` via
+  `xcaddy`). The default `docker compose up` is unchanged and starts no proxy (federation stays
+  dark). An external reverse proxy (Caddy/nginx) is documented as an alternative.
 - **Federation groundwork (multi-vantage), hub side.** The collector now records which *vantage*
   produced each round (the hub probes as `local`); targets declare `vantages: [...]` (inherited
   down the tree, default `[local]`), and a pure builder projects each vantage's assignment plus a

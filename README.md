@@ -56,6 +56,82 @@ SMOKE_TEST_DSN='postgres://smoke:smoke@127.0.0.1:5433/smoke?sslmode=disable' \
 
 The schema (one `samples` hypertable) is created automatically on first connect.
 
+### Federation deployment (reverse proxy)
+
+Remote **vantages** (the `smoke-agent` collector) reach the hub over HTTPS with a per-vantage
+API key. `smoked` never terminates TLS itself — a reverse proxy does. The proxy serves two
+surfaces with two auth models: the **agent API** (`/agent/v1/*`) authenticated by the per-vantage
+API key, and the **dashboard + read API + admin panel** behind **HTTP Basic Auth** (smoked's read
+API has no auth of its own).
+
+**Bundled Caddy** (automatic Let's Encrypt) — opt-in via the `federation` compose profile:
+
+```sh
+cp .env.example .env            # set DOMAIN + ACME_EMAIL (DNS for DOMAIN must point here)
+# dashboard Basic Auth password (bcrypt); see .env.example for the $-escaping note:
+export DASH_PASSWORD_HASH="$(docker run --rm caddy:2.11-alpine caddy hash-password --plaintext 'choose-a-password')"
+docker compose --profile federation up --build
+```
+
+The default `docker compose up` starts no proxy (federation stays dark). With the profile, Caddy
+obtains and auto-renews the cert and reverse-proxies `https://$DOMAIN/` to smoked: `/agent/v1/*`
+by API key, everything else behind Basic Auth (`DASH_USER` / `DASH_PASSWORD_HASH`). Set
+`SMOKED_ADMIN_PASSWORD` in `.env` to also enable the Vantages admin GUI panel (over the proxy's
+TLS, the admin session cookie works remotely). smoked's own `127.0.0.1:8087` stays available on
+the hub for direct LAN access.
+
+**Certificate challenge.** By default Caddy uses **HTTP-01** (needs inbound port 80 during
+issuance/renewal). To use **DNS-01** instead — no inbound port needed, works behind NAT, supports
+wildcards — set `CADDY_ACME_DNS` to your provider's line. The bundled image (`Caddy.Dockerfile`,
+built via `xcaddy`) includes the **cloudflare, route53, digitalocean, duckdns, namecheap, gandi**
+plugins. E.g. Cloudflare (a token with Zone:DNS:Edit):
+
+```sh
+# in .env
+CADDY_ACME_DNS=acme_dns cloudflare {env.CF_API_TOKEN}
+CF_API_TOKEN=your-cloudflare-token
+```
+
+See `.env.example` for every provider's exact line and credentials (route53/namecheap use a
+multi-field block). To add a provider not listed, add a `--with github.com/caddy-dns/<name>` line
+to `Caddy.Dockerfile` and rebuild.
+
+**External proxy** — to front smoked with your own proxy instead, skip the profile and mirror the
+same split: forward `/agent/v1/*` (API-key auth) and put Basic Auth on the rest. Caddy:
+
+```
+smoke.example.com {
+    handle /agent/v1/* {
+        reverse_proxy 127.0.0.1:8087
+    }
+    handle {
+        basic_auth {
+            admin <bcrypt-hash-from-caddy-hash-password>
+        }
+        reverse_proxy 127.0.0.1:8087
+    }
+}
+```
+
+nginx:
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name smoke.example.com;
+    # ssl_certificate / ssl_certificate_key ...
+    location /agent/v1/ {                      # agents: API-key auth, no Basic Auth
+        proxy_pass http://127.0.0.1:8087;
+        proxy_set_header Authorization $http_authorization;
+    }
+    location / {                               # dashboard + read API: Basic Auth
+        auth_basic "smokeping";
+        auth_basic_user_file /etc/nginx/.htpasswd;
+        proxy_pass http://127.0.0.1:8087;
+    }
+}
+```
+
 Example output:
 
 ```
@@ -104,4 +180,4 @@ web/
 
 ## Not built yet (roadmap)
 
-**Federation (multi-vantage) is in progress** — the hub, the `smoke-agent` remote collector, and the per-vantage overlay UI are built: a per-vantage storage dimension (the hub probes as `local`), `vantages:` config with a per-vantage assignment builder, a TimescaleDB-backed API-key store with a `smoked vantage` CLI + a password-gated admin API, the agent-facing endpoints (`GET /agent/v1/assignment`, `POST /agent/v1/results`) with idempotent ingest and per-vantage alert evaluation, and per-vantage overlay graphs in the detail views. Still to come: a Vantages admin GUI panel and the bundled reverse proxy. Transport is HTTPS/JSON with per-vantage API keys behind a required reverse proxy (a bundled Caddy with Let's Encrypt, or your own) — superseding the earlier gRPC+mTLS plan. Also planned: config sourced from a database (today it's YAML files only) · richer notifier integrations beyond log + webhook. See `07-modernization-blueprint.md` §8.
+**Federation (multi-vantage) is nearly complete** — the hub, the `smoke-agent` remote collector, the per-vantage overlay UI, the Vantages admin GUI panel, and the bundled reverse proxy are all built: a per-vantage storage dimension (the hub probes as `local`), `vantages:` config with a per-vantage assignment builder, a TimescaleDB-backed API-key store with a `smoked vantage` CLI + a password-gated admin API and login-gated GUI panel, the agent-facing endpoints (`GET /agent/v1/assignment`, `POST /agent/v1/results`) with idempotent ingest and per-vantage alert evaluation, per-vantage overlay graphs in the detail views, and a bundled Caddy compose profile that terminates TLS (automatic Let's Encrypt) and serves the agent API by key + the dashboard behind Basic Auth (see [Federation deployment](#federation-deployment-reverse-proxy)). Transport is HTTPS/JSON with per-vantage API keys behind a required reverse proxy (the bundled Caddy, or your own) — superseding the earlier gRPC+mTLS plan. Still to come: the end-to-end operator guide. Also planned: config sourced from a database (today it's YAML files only) · richer notifier integrations beyond log + webhook. See `07-modernization-blueprint.md` §8.

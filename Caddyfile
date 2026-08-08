@@ -1,0 +1,44 @@
+# Bundled reverse proxy for smokeping-modern federation.
+#
+#   docker compose --profile federation up
+#
+# Caddy terminates TLS with an automatically issued (and auto-renewed) Let's
+# Encrypt certificate for $DOMAIN. smoked never does TLS itself; both the agent's
+# API key and the dashboard's Basic Auth ride inside the TLS Caddy terminates.
+#
+# Two public surfaces, two auth models:
+#   * /agent/v1/*  — remote agents, authenticated by a per-vantage API key that
+#                    smoked verifies (Authorization: Bearer smk_...). No Basic Auth.
+#   * everything else (dashboard, read API, /api/admin/*, /metrics) — behind HTTP
+#                    Basic Auth here, because smoked's read API has no auth of its
+#                    own. Set DASH_USER + DASH_PASSWORD_HASH (see .env.example).
+#
+# Set DOMAIN and ACME_EMAIL in .env. For a local smoke test without hitting
+# Let's Encrypt, set DOMAIN=localhost — Caddy then serves an internal
+# (self-signed) cert automatically instead of attempting ACME.
+{
+	# ACME account contact. Caddy issues/renews the cert automatically.
+	email {$ACME_EMAIL}
+	# TLS challenge. Empty (default) = HTTP-01 (needs inbound port 80). To use
+	# DNS-01 instead (works behind NAT, no inbound 80/443 for validation), set
+	# CADDY_ACME_DNS in .env, e.g. `acme_dns cloudflare {env.CF_API_TOKEN}` — the
+	# image must be built with the matching caddy-dns plugin (see Caddy.Dockerfile).
+	{$CADDY_ACME_DNS}
+}
+
+{$DOMAIN} {
+	# Remote agents: API-key auth (smoked checks the Bearer key). No Basic Auth,
+	# so this path is reachable by agents that don't have the dashboard password.
+	handle /agent/v1/* {
+		reverse_proxy smoked:8087
+	}
+
+	# Dashboard + read/query API + admin panel: gated by HTTP Basic Auth, since
+	# smoked's read API is otherwise unauthenticated. Served over the proxy's TLS.
+	handle {
+		basic_auth {
+			{$DASH_USER} {$DASH_PASSWORD_HASH}
+		}
+		reverse_proxy smoked:8087
+	}
+}
