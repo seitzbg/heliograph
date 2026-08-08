@@ -593,6 +593,7 @@
       const grid = $('stackGrid'); grid.innerHTML = '';
 
       await ensureVantages(name);
+      if (curTarget !== name) return; // route moved on during the await — don't append a superseded target's panels
       const vs = Dash.orderVantages(vantagesFor(name));
       stackVantages = vs;
 
