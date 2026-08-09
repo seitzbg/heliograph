@@ -118,7 +118,8 @@ v2.0 line; these build on it.
     set; dark until configured
   - ✅ Config CRUD API — admin-gated `GET`/`PUT /api/admin/config` (whole-doc, optimistic
     concurrency) that validates the candidate config, persists it, and hot-reloads atomically
-  - ⬜ Target-management UI (add / edit / remove DB targets)
+  - ✅ Target-management UI — a login-gated **Config** tab: list DB targets, add/edit/remove via a
+    modal (read-modify-write the fragment through the CRUD API), with 400/409 handling
   - ⬜ YAML → DB import
 - ⬜ **SmokePing → TimescaleDB importer** — read an existing SmokePing install's `Targets` config +
   RRD history and load it here, so a running SmokePing can migrate (RRD → TSDB is the core shift).

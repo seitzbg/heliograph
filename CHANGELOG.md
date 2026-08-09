@@ -8,6 +8,13 @@ breaking changes.
 ## [Unreleased]
 
 ### Added
+- **Target-management UI.** A login-gated **Config** tab (over the same admin session as Vantages)
+  lists the database-managed targets and adds / edits / removes them via a modal — a probe dropdown,
+  host, key/value params, and optional vantages/alerts. It read-modify-writes the whole fragment
+  through the config CRUD API: a save validates + hot-reloads (a target appears/updates with no
+  SIGHUP), a rejected edit shows the validation error, and a concurrent change reloads (`409`).
+  YAML-defined targets are listed read-only (managed in files); reserved names (`__proto__` etc.)
+  are refused. Single tab addition; the rest of the dashboard is unchanged.
 - **Config CRUD API.** Admin-gated `GET`/`PUT /api/admin/config` (behind `SMOKED_ADMIN_PASSWORD`)
   reads and replaces the DB config fragment. A `PUT` carries the version it read; the hub
   **validates** the candidate config (builds a runtime from the YAML config + the proposed doc),
