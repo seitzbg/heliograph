@@ -358,6 +358,7 @@
         <div class="vadmin-reveal-actions" style="justify-content:space-between; align-items:baseline; margin-bottom:8px">
           <span class="vadmin-lbl">DB targets <span id="cfgVersion" class="vadmin-err" style="color:var(--ink-faint)"></span></span>
           <button id="cfgAddBtn" class="vadmin-btn" type="button">+ Add target</button>
+          <button id="cfgImportBtn" class="vadmin-btn" type="button">Import YAML</button>
         </div>
         <table class="vadmin-table" aria-label="DB targets">
           <thead><tr><th>Name</th><th>Probe</th><th>Host</th><th>Details</th><th></th></tr></thead>
@@ -391,6 +392,19 @@
         <div class="vadmin-reveal-actions">
           <button type="submit" class="vadmin-btn">Save</button>
           <button type="button" id="cfgCancel" class="vadmin-btn">Cancel</button>
+        </div>
+      </form>
+    </div>
+
+    <div id="cfgImportModal" class="vadmin-reveal-backdrop hidden">
+      <form id="cfgImportForm" class="panel vadmin-reveal" role="dialog" aria-modal="true" aria-labelledby="cfgImportTitle" autocomplete="off">
+        <h3 id="cfgImportTitle">Import YAML</h3>
+        <p class="vadmin-warn">Paste a YAML (or JSON) config. Its <code>targets:</code> branches are merged into the database config; globals (database/probes/alerts) are ignored. An existing target with different settings is a conflict (nothing is imported).</p>
+        <textarea id="cfgImportText" class="vadmin-input" rows="12" style="width:100%; font-family:ui-monospace,Menlo,monospace" placeholder="targets:&#10;  children:&#10;    my-target: {probe: HTTP, host: example.com}"></textarea>
+        <span id="cfgImportErr" class="vadmin-err" role="alert"></span>
+        <div class="vadmin-reveal-actions">
+          <button type="submit" class="vadmin-btn">Import</button>
+          <button type="button" id="cfgImportCancel" class="vadmin-btn">Cancel</button>
         </div>
       </form>
     </div>

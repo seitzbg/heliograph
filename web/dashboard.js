@@ -1234,6 +1234,36 @@
         saveDoc(Dash.removeTarget(cfg.doc, name));
       }
     });
+    $('cfgImportBtn').addEventListener('click', () => {
+      $('cfgImportText').value = '';
+      $('cfgImportErr').textContent = '';
+      $('cfgImportModal').classList.remove('hidden');
+      $('cfgImportText').focus();
+    });
+    $('cfgImportCancel').addEventListener('click', () => $('cfgImportModal').classList.add('hidden'));
+    $('cfgImportModal').addEventListener('click', (e) => { if (e.target === $('cfgImportModal')) $('cfgImportModal').classList.add('hidden'); });
+    $('cfgImportForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      $('cfgImportErr').textContent = '';
+      const text = $('cfgImportText').value;
+      if (!text.trim()) { $('cfgImportErr').textContent = 'Paste a config first.'; return; }
+      let r;
+      try {
+        r = await fetch('/api/admin/config/import', { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: text });
+      } catch (err) { $('cfgImportErr').textContent = 'Network error.'; return; }
+      if (r.status === 200) {
+        let body = {}; try { body = await r.json(); } catch (e) { /* ignore */ }
+        $('cfgImportModal').classList.add('hidden');
+        window.alert('Imported ' + (body.added || 0) + ' new, ' + (body.unchanged || 0) + ' unchanged.');
+        renderConfig();
+        return;
+      }
+      if (r.status === 401) { $('cfgImportModal').classList.add('hidden'); renderConfig(); return; }
+      if (r.status === 409) { $('cfgImportModal').classList.add('hidden'); window.alert('Config changed elsewhere — reloading the latest.'); renderConfig(); return; }
+      let msg = 'HTTP ' + r.status;
+      try { msg = (await r.json()).error || msg; } catch (e) { /* keep */ }
+      $('cfgImportErr').textContent = msg;
+    });
 
     // ---- routing ----
     function show(id) { for (const v of ['viewOverview', 'viewGraphs', 'viewStack', 'viewZoom', 'viewVantages', 'viewConfig']) $(v).classList.toggle('hidden', v !== id); }
@@ -1249,6 +1279,7 @@
       // Never leave a one-time key in the DOM across navigations: clear any open reveal.
       { const rev = $('vantReveal'); if (rev && !rev.classList.contains('hidden')) { $('vantRevealSnippet').textContent = ''; rev.classList.add('hidden'); } }
       { const cm = $('cfgModal'); if (cm && !cm.classList.contains('hidden')) cm.classList.add('hidden'); }
+      { const cim = $('cfgImportModal'); if (cim && !cim.classList.contains('hidden')) cim.classList.add('hidden'); }
       const r = parseRoute(location.hash);
       if (r.view === 'overview') { setTabs('overview'); show('viewOverview'); refreshOverview(); }
       else if (r.view === 'graphs') { gridScope = r.path || ''; setTabs('graphs'); show('viewGraphs'); renderScope(); renderTree(); renderGridPanels(); refreshGrid(); }
