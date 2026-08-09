@@ -227,3 +227,51 @@ func TestApplyConfigValidatesPersistsSwaps(t *testing.T) {
 		t.Fatalf("want ErrConfigConflict on stale version, got %v", err)
 	}
 }
+
+func TestValidateRuntimeFlags(t *testing.T) {
+	cases := []struct {
+		name          string
+		pings         int
+		step, timeout time.Duration
+		wantErr       bool
+	}{
+		{"valid", 10, 5 * time.Second, 4 * time.Second, false},
+		{"pings zero", 0, 5 * time.Second, 4 * time.Second, true},
+		{"pings too many", 1 << 20, 5 * time.Second, 4 * time.Second, true},
+		{"step too small", 10, time.Millisecond, 4 * time.Second, true},
+		{"timeout zero", 10, 5 * time.Second, 0, true},
+		{"timeout negative", 10, 5 * time.Second, -time.Second, true},
+	}
+	for _, c := range cases {
+		if err := validateRuntimeFlags(c.pings, c.step, c.timeout); (err != nil) != c.wantErr {
+			t.Errorf("%s: err=%v wantErr=%v", c.name, err, c.wantErr)
+		}
+	}
+}
+
+// TestApplyMuSerializesRuntimeSwaps models CODE_REVIEW #1: a slow "SIGHUP" build (A)
+// racing an "API apply" (B) that starts later. When both hold applyMu across their whole
+// build+swap, A cannot swap a stale runtime AFTER B: B blocks on the lock until A finishes,
+// then swaps last, so the later replacement is the live one. Without applyMu around the
+// build, A (finishing its build last) would clobber B — the bug.
+func TestApplyMuSerializesRuntimeSwaps(t *testing.T) {
+	var current atomic.Pointer[runtime]
+	var evalMu, applyMu sync.Mutex
+	current.Store(&runtime{})
+	rtA, rtB := &runtime{}, &runtime{} // distinct runtimes; B (later apply) must win
+	reload := func(buildDelay time.Duration, nrt *runtime) {
+		applyMu.Lock()
+		defer applyMu.Unlock()
+		time.Sleep(buildDelay) // simulate build time while holding the lock
+		swapRuntime(&current, &evalMu, nrt)
+	}
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); reload(80*time.Millisecond, rtA) }() // A grabs the lock first, slow build
+	time.Sleep(15 * time.Millisecond)
+	go func() { defer wg.Done(); reload(0, rtB) }() // B blocks on the lock, swaps after A
+	wg.Wait()
+	if current.Load() != rtB {
+		t.Fatal("the later runtime replacement (B) must be live; a stale swap clobbered it")
+	}
+}

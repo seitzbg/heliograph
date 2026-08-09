@@ -50,6 +50,23 @@ import (
 //	go build -ldflags "-X main.version=$(git describe --tags)"
 var version = "0.1.0"
 
+// validateRuntimeFlags checks the operational numeric flags the collector shares. A
+// non-positive -timeout is copied into every probe's context.WithTimeout, which would
+// cancel every probe immediately (a started-but-dead collector) — so reject it at the
+// CLI boundary alongside -pings and -step.
+func validateRuntimeFlags(pings int, step, timeout time.Duration) error {
+	if pings < 1 || pings > config.MaxPings {
+		return fmt.Errorf("-pings must be between 1 and %d, got %d", config.MaxPings, pings)
+	}
+	if step < config.MinStep {
+		return fmt.Errorf("-step must be at least %s, got %s", config.MinStep, step)
+	}
+	if timeout <= 0 {
+		return fmt.Errorf("-timeout must be positive, got %s", timeout)
+	}
+	return nil
+}
+
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "vantage" {
 		os.Exit(vantageCmd(os.Args[2:]))
@@ -79,11 +96,8 @@ func main() {
 
 	setupLogger(*logFormat, *logLevel)
 
-	if *pings < 1 || *pings > config.MaxPings {
-		fatal("invalid -pings", fmt.Errorf("must be between 1 and %d, got %d", config.MaxPings, *pings))
-	}
-	if *step < config.MinStep {
-		fatal("invalid -step", fmt.Errorf("must be at least %s, got %s", config.MinStep, *step))
+	if err := validateRuntimeFlags(*pings, *step, *timeout); err != nil {
+		fatal("invalid flags", err)
 	}
 
 	fmt.Printf("smoked %s — registered probe plugins: %s\n\n", version, strings.Join(probe.Registered(), ", "))
@@ -142,6 +156,12 @@ func main() {
 	// evaluation, so a round that finishes measuring across a reload boundary still
 	// updates the live engine (not the abandoned one) — no lost hysteresis state.
 	var evalMu sync.Mutex
+	// applyMu serializes the WHOLE read/build/swap of a runtime replacement — the SIGHUP
+	// reload below and the API config-apply (ConfigApply) both take it — so a slow builder
+	// can't swap a stale runtime over a replacement that completed while it was building,
+	// leaving the live runtime out of sync with the persisted config (CODE_REVIEW #1).
+	// evalMu (inside swapRuntime) only guards the swap; applyMu is strictly outside it.
+	var applyMu sync.Mutex
 	if *configPath != "" {
 		fmt.Printf("config: %d targets from %s\n", len(rt.jobs), *configPath)
 	}
@@ -159,13 +179,20 @@ func main() {
 		signal.Notify(hup, syscall.SIGHUP)
 		go func() {
 			for range hup {
-				nrt, err := buildRuntime(*configPath, *pings, *step, *timeout, notifiers, dbFragment)
-				if err != nil {
-					slog.Error("reload failed, keeping running config", "err", err)
-					continue
-				}
-				swapRuntime(&current, &evalMu, nrt)
-				slog.Info("config reloaded", "path", *configPath, "targets", len(nrt.jobs))
+				// Hold applyMu across the whole read/build/swap so a concurrent API apply
+				// can't complete (persist+swap) in the window between this reload's build
+				// and its swap and then be clobbered by this stale runtime (CODE_REVIEW #1).
+				func() {
+					applyMu.Lock()
+					defer applyMu.Unlock()
+					nrt, err := buildRuntime(*configPath, *pings, *step, *timeout, notifiers, dbFragment)
+					if err != nil {
+						slog.Error("reload failed, keeping running config", "err", err)
+						return
+					}
+					swapRuntime(&current, &evalMu, nrt)
+					slog.Info("config reloaded", "path", *configPath, "targets", len(nrt.jobs))
+				}()
 			}
 		}()
 	}
@@ -331,11 +358,11 @@ func main() {
 			// on -config in addition to the admin password gate above.
 			if *configPath != "" {
 				srv.ConfigGet = func() (json.RawMessage, int, error) { return cfgStore.Get(context.Background()) }
-				// applyMu serializes whole applies (build -> persist -> swap) end-to-end, so
-				// two concurrent PUTs can't interleave and leave the live runtime serving a
-				// doc other than the last one persisted. evalMu (inside swapRuntime) still
-				// only guards the swap itself; applyMu is strictly outside it, so no deadlock.
-				var applyMu sync.Mutex
+				// Both API applies (here) and the SIGHUP reload above take the function-scope
+				// applyMu around their whole build->(persist)->swap, so no two runtime
+				// replacements interleave and leave the live runtime out of sync with the
+				// persisted config (CODE_REVIEW #1). evalMu (inside swapRuntime) only guards
+				// the swap; applyMu is strictly outside it, so no deadlock.
 				srv.ConfigApply = func(doc json.RawMessage, expectedVersion int) error {
 					applyMu.Lock()
 					defer applyMu.Unlock()

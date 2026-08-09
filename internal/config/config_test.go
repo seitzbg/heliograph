@@ -689,3 +689,16 @@ func TestAppendDBFragmentEmptyIsNoop(t *testing.T) {
 		t.Fatalf("empty fragment changed config: %+v", base.Targets.Children)
 	}
 }
+
+func TestDecodeRejectsMultipleDocuments(t *testing.T) {
+	_, err := Parse([]byte("targets:\n  children:\n    a: {probe: HTTP, host: a}\n---\ndatabase: {pings: 5}\n"))
+	if err == nil || !strings.Contains(err.Error(), "multiple YAML documents") {
+		t.Fatalf("want multi-doc error, got %v", err)
+	}
+	if _, err := Parse([]byte("targets:\n  children:\n    a: {probe: HTTP, host: a}\n")); err != nil {
+		t.Fatalf("single doc should parse: %v", err)
+	}
+	if _, err := Parse(nil); err != nil {
+		t.Fatalf("empty should parse: %v", err)
+	}
+}

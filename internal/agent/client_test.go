@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -75,4 +76,28 @@ func TestPushResultsNon2xxErrors(t *testing.T) {
 	if _, err := c.PushResults(context.Background(), []agentwire.RoundReport{{Target: "cf"}}); err == nil {
 		t.Fatal("expected error on 503 so the caller retries")
 	}
+}
+
+// CODE_REVIEW #2: PushResults must flag a permanent (4xx the hub will never accept) rejection
+// distinctly from a transient (5xx) one, so the flush loop drops vs retries.
+func TestPushResultsPermanentVsTransient(t *testing.T) {
+	newC := func(code int) *Client {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(code) }))
+		t.Cleanup(srv.Close)
+		return NewClient(srv.URL, "smk_k_s", false, 5*time.Second)
+	}
+	perm := func(code int, want bool) {
+		_, err := newC(code).PushResults(context.Background(), []agentwire.RoundReport{{Target: "cf"}})
+		var pe *pushError
+		if !errors.As(err, &pe) {
+			t.Fatalf("status %d: expected *pushError, got %v", code, err)
+		}
+		if pe.permanent() != want {
+			t.Errorf("status %d: permanent()=%v want %v", code, pe.permanent(), want)
+		}
+	}
+	perm(http.StatusRequestEntityTooLarge, true) // 413 oversize -> permanent
+	perm(http.StatusBadRequest, true)            // 400 malformed -> permanent
+	perm(http.StatusServiceUnavailable, false)   // 503 -> transient (retry)
+	perm(http.StatusUnauthorized, false)         // 401 -> transient (key may be re-added)
 }
