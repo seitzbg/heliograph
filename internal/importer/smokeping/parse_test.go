@@ -3,6 +3,7 @@ package smokeping
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -20,6 +21,72 @@ func TestParseProjectsProbeParams(t *testing.T) {
 	}
 	if sum.Pings != 20 || sum.Step != "300" {
 		t.Errorf("database advisory wrong: step=%q pings=%d", sum.Step, sum.Pings)
+	}
+}
+
+// Review finding 1: an inline presentation key (menu/title) on a target must
+// never land in Summary.DroppedParams — only a genuinely-unsupported probe
+// setting (here FPing's `binary`, which paramMap["FPing"] accepts nothing
+// for) should. On a real SmokePing install nearly every target carries
+// inline menu/title, so if those counted as "dropped" the field meant to
+// flag real data loss would be swamped with presentation noise.
+func TestParseDropsUnsupportedProbeParamsNotPresentationKeys(t *testing.T) {
+	targets := "*** Targets ***\nprobe = FPing\n+ A\nhost = 10.0.0.1\nmenu = A Node\ntitle = Node A\n"
+	probes := "*** Probes ***\n+ FPing\nbinary = /usr/sbin/fping\n"
+	root, sum, err := Parse(targets, probes, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := root.Children["A"]
+	if a == nil {
+		t.Fatal("A missing")
+	}
+	if len(a.Params) != 0 {
+		t.Errorf("FPing accepts no target params, want empty Params, got %+v", a.Params)
+	}
+	var foundBinary, foundMenu, foundTitle bool
+	for _, d := range sum.DroppedParams {
+		switch d {
+		case "binary":
+			foundBinary = true
+		case "menu":
+			foundMenu = true
+		case "title":
+			foundTitle = true
+		}
+	}
+	if !foundBinary {
+		t.Errorf("want unsupported probe setting `binary` in DroppedParams, got %+v", sum.DroppedParams)
+	}
+	if foundMenu || foundTitle {
+		t.Errorf("presentation keys must never appear in DroppedParams, got %+v", sum.DroppedParams)
+	}
+}
+
+// Review finding 2: Parse must propagate a Probes-body parse error instead
+// of silently proceeding as if the Probes file were empty. parseSections
+// only errors on a bufio.Scanner failure (in practice: a single line longer
+// than its 1<<20-byte max buffer), so a lone, newline-free 2MB line is used
+// to force that failure deterministically.
+func TestParsePropagatesProbesParseError(t *testing.T) {
+	targets := "*** Targets ***\nprobe = FPing\n+ A\nhost = a.example\n"
+	tooLong := strings.Repeat("x", 2<<20) // no newline: one token > the 1<<20 scanner buffer cap
+	_, _, err := Parse(targets, tooLong, "*** Database ***\nstep = 300\npings = 20\n")
+	if err == nil {
+		t.Fatal("want error from a malformed Probes body, got nil")
+	}
+}
+
+// Review finding 2 (Database side): same as above, but for the Database
+// body — Parse must not silently proceed with a zero-value advisory when
+// Database itself fails to parse.
+func TestParsePropagatesDatabaseParseError(t *testing.T) {
+	targets := "*** Targets ***\nprobe = FPing\n+ A\nhost = a.example\n"
+	probes := "*** Probes ***\n+ FPing\nbinary = /usr/sbin/fping\n"
+	tooLong := strings.Repeat("x", 2<<20)
+	_, _, err := Parse(targets, probes, tooLong)
+	if err == nil {
+		t.Fatal("want error from a malformed Database body, got nil")
 	}
 }
 
@@ -241,11 +308,13 @@ func TestBuildTreeDepthJumpSiblingNotChild(t *testing.T) {
 // TestParseFixture drives Parse end-to-end off a checked-in synthetic
 // SmokePing install (testdata/smokeping/{Targets,Probes,Database} — no real
 // hostnames/IPs) covering: a nested folder->folder->target chain on the
-// inherited top-level FPing probe, a DNSProbes folder overriding probe = DNS
-// with two targets (probe-level `lookup` projected from the Probes file), a
-// TCPPing target with an inline `port` overriding the probe's file-level
-// default, a speedtestcli target that must be skipped (and its now-empty
-// folder pruned), and the Database file's step/pings advisory.
+// inherited top-level FPing probe (its leaf target carries inline
+// menu/title, like nearly every target on a real SmokePing install), a
+// DNSProbes folder overriding probe = DNS with two targets (probe-level
+// `lookup` projected from the Probes file), a TCPPing target with an inline
+// `port` overriding the probe's file-level default, a speedtestcli target
+// that must be skipped (and its now-empty folder pruned), and the Database
+// file's step/pings advisory.
 func TestParseFixture(t *testing.T) {
 	dir := "testdata/smokeping"
 	targets := readFixture(t, filepath.Join(dir, "Targets"))
@@ -264,6 +333,9 @@ func TestParseFixture(t *testing.T) {
 	leaf := root.Children["A"].Children["B"].Children["leaf"]
 	if leaf == nil || leaf.Host != "10.0.0.1" || leaf.Probe != "FPing" {
 		t.Fatalf("deep path A/B/leaf wrong: %+v", leaf)
+	}
+	if len(leaf.Params) != 0 {
+		t.Errorf("leaf's inline menu/title are presentation, not FPing params: want empty Params, got %+v", leaf.Params)
 	}
 
 	primary := root.Children["DNSProbes"].Children["Primary"]
@@ -287,14 +359,22 @@ func TestParseFixture(t *testing.T) {
 		t.Errorf("database advisory wrong: step=%q pings=%d", sum.Step, sum.Pings)
 	}
 
-	found := false
+	var foundBinary, foundMenu, foundTitle bool
 	for _, d := range sum.DroppedParams {
-		if d == "binary" {
-			found = true
+		switch d {
+		case "binary":
+			foundBinary = true
+		case "menu":
+			foundMenu = true
+		case "title":
+			foundTitle = true
 		}
 	}
-	if !found {
+	if !foundBinary {
 		t.Errorf("want probe-level `binary` (shared by every probe, not in any paramMap entry) deduped into DroppedParams, got %+v", sum.DroppedParams)
+	}
+	if foundMenu || foundTitle {
+		t.Errorf("leaf's inline menu/title are presentation, not probe params: must not appear in DroppedParams, got %+v", sum.DroppedParams)
 	}
 }
 

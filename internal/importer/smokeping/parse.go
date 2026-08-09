@@ -268,6 +268,29 @@ var paramMap = map[string]map[string]string{
 	"FPing":      {}, // no target-scoped params carried
 }
 
+// nonParamKeys lists SmokePing Targets-section keys that are structural
+// (host, probe — already consumed as node.Host/node.Probe) or purely
+// presentational/topological (menu, title, remark, alerts, alertee, slaves,
+// parents, nomasterpoll — inherited/display/federation directives, never
+// probe settings) rather than a probe-level param. They are excluded from
+// BOTH param projection and Summary.DroppedParams: on a real SmokePing
+// install nearly every target carries menu/title inline, and DroppedParams'
+// whole purpose is telling the caller what genuinely couldn't be carried
+// over (e.g. an unsupported probe setting like `binary`) — flooding it with
+// presentation noise would bury that signal.
+var nonParamKeys = map[string]bool{
+	"host":         true,
+	"probe":        true,
+	"menu":         true,
+	"title":        true,
+	"remark":       true,
+	"alerts":       true,
+	"alertee":      true,
+	"slaves":       true,
+	"parents":      true,
+	"nomasterpoll": true,
+}
+
 // Parse reads the three SmokePing config bodies (Targets, Probes, Database)
 // and returns the modern target tree plus a Summary. It builds the tree
 // (buildTree), then projects target-scoped params carried by each target's
@@ -275,7 +298,10 @@ var paramMap = map[string]map[string]string{
 // and parses Database only to advise (Summary.Step / Summary.Pings); its
 // values are never emitted into the tree, since a modern install's step and
 // ping-count are process-wide settings, not something an import should
-// silently override.
+// silently override. A malformed Targets, Probes, or Database body (i.e.
+// parseSections itself erroring — in practice only a pathologically long
+// line overflowing its scanner buffer) fails the whole Parse rather than
+// silently proceeding with partial data.
 func Parse(targetsText, probesText, databaseText string) (*config.Node, Summary, error) {
 	tsecs, err := parseSections(targetsText)
 	if err != nil {
@@ -284,19 +310,25 @@ func Parse(targetsText, probesText, databaseText string) (*config.Node, Summary,
 	root, sum, info := buildTree(tsecs)
 
 	// Index the Probes file's per-probe fields by SmokePing probe name.
+	psecs, err := parseSections(probesText)
+	if err != nil {
+		return nil, Summary{}, err
+	}
 	probeParams := map[string]map[string]string{}
-	if psecs, err := parseSections(probesText); err == nil {
-		for _, s := range psecs {
-			if s.Depth >= 1 {
-				probeParams[s.Name] = s.Fields
-			}
+	for _, s := range psecs {
+		if s.Depth >= 1 {
+			probeParams[s.Name] = s.Fields
 		}
 	}
 	projectParams(info, probeParams, &sum)
 	sort.Strings(sum.DroppedParams)
 
 	// Database is advisory only (never emitted into the tree).
-	if dsecs, err := parseSections(databaseText); err == nil && len(dsecs) > 0 {
+	dsecs, err := parseSections(databaseText)
+	if err != nil {
+		return nil, Summary{}, err
+	}
+	if len(dsecs) > 0 {
 		sum.Step = dsecs[0].Fields["step"]
 		if p := dsecs[0].Fields["pings"]; p != "" {
 			if n, err := strconv.Atoi(p); err == nil {
@@ -314,9 +346,12 @@ func Parse(targetsText, probesText, databaseText string) (*config.Node, Summary,
 // the target's own inline fields (which override the probe's file-level
 // default for the same key), a key present in paramMap[node.Probe] is copied
 // onto node.Params under its modern name; a non-empty key absent from
-// paramMap[node.Probe] is recorded on sum.DroppedParams instead (`host` and
-// `probe` are never candidates either way — they are structural and already
-// consumed as node.Host / node.Probe). Empty values are skipped either way.
+// paramMap[node.Probe] is recorded on sum.DroppedParams instead. Keys in
+// nonParamKeys (host, probe, menu, title, ...) are never candidates either
+// way — structural ones are already consumed as node.Host/node.Probe, and
+// presentation/topology ones were never a probe param an import could carry,
+// so counting them as "dropped" would misrepresent what was actually lost.
+// Empty values are skipped either way.
 func projectParams(info map[*config.Node]smokeTargetInfo, probeParams map[string]map[string]string, sum *Summary) {
 	dropped := map[string]bool{}
 	for node, ti := range info {
@@ -329,13 +364,10 @@ func projectParams(info map[*config.Node]smokeTargetInfo, probeParams map[string
 			merged[k] = v
 		}
 		for k, v := range ti.fields {
-			if k == "host" || k == "probe" {
-				continue
-			}
 			merged[k] = v // inline overrides the probe's file-level default
 		}
 		for k, v := range merged {
-			if v == "" {
+			if v == "" || nonParamKeys[k] {
 				continue
 			}
 			if modernKey, ok := accept[k]; ok {

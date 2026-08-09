@@ -11,6 +11,8 @@ menu = Site B
 
 +++ leaf
 host = 10.0.0.1
+menu = Leaf Node
+title = Leaf Node (pve1-equivalent)
 
 + DNSProbes
 probe = DNS
