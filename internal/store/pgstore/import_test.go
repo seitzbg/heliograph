@@ -2,6 +2,7 @@ package pgstore
 
 import (
 	"context"
+	"math"
 	"os"
 	"testing"
 	"time"
@@ -57,5 +58,84 @@ func TestImportSamplesIdempotentAndAggregates(t *testing.T) {
 	pts, err := s.Rollup(ctx, "imp/A", "local", "1h", base.Add(-2*time.Hour), time.Now())
 	if err != nil || len(pts) == 0 {
 		t.Fatalf("rollup after refresh: pts=%d err=%v", len(pts), err)
+	}
+}
+
+// TestImportSamplesNaNMedianStoresNull is the regression for the review finding:
+// ImportSamples bound a total-loss round's NaN median straight into $7 without the
+// nanToNil guard the live buildBatch path uses, so it stored as a literal NaN instead
+// of SQL NULL. avg()/max() over a NaN input is NaN, so a single such row poisoned its
+// whole hourly/daily aggregate bucket. Task 2's RRD extraction will produce exactly
+// this shape (a total-loss round has no median), so it must be closed before that
+// lands. This inserts one NaN-median row alongside two normal rows in the same hour
+// bucket, and asserts (a) the raw column is NULL, not NaN, and (b) the bucket's
+// aggregate median is a real number, not poisoned by the NaN row.
+func TestImportSamplesNaNMedianStoresNull(t *testing.T) {
+	dsn := os.Getenv("SMOKE_TEST_DSN")
+	if dsn == "" {
+		t.Skip("SMOKE_TEST_DSN not set")
+	}
+	ctx := context.Background()
+	s, err := New(ctx, dsn, 8, func(error) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	const target = "imp/nan"
+	// Same cleanup pattern as TestImportSamplesIdempotentAndAggregates: base is
+	// deterministic within the hour, so clear this test's own target first so re-runs
+	// against the shared DB don't see stale rows from a previous run.
+	if _, err := s.pool.Exec(ctx, "DELETE FROM samples WHERE target = $1", target); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.EnableDownsampling(ctx); err != nil {
+		t.Fatal(err) // caggs must exist
+	}
+	base := time.Now().Add(-41 * 24 * time.Hour).Truncate(time.Hour) // older than raw retention window
+	nanTS := base.Add(20 * time.Minute)
+	rows := []ImportRow{
+		{TS: base, Target: target, Probe: "FPing", Host: "10.0.0.1", Pings: 20, Loss: 0, MedianSeconds: 0.01},
+		{TS: base.Add(10 * time.Minute), Target: target, Probe: "FPing", Host: "10.0.0.1", Pings: 20, Loss: 0, MedianSeconds: 0.02},
+		// Total-loss round: RRD extraction (and a real total-loss round) has no median.
+		{TS: nanTS, Target: target, Probe: "FPing", Host: "10.0.0.1", Pings: 20, Loss: 20, MedianSeconds: math.NaN()},
+	}
+	n, err := s.ImportSamples(ctx, rows)
+	if err != nil || n != 3 {
+		t.Fatalf("insert: n=%d err=%v", n, err)
+	}
+
+	// (a) the raw column must be SQL NULL, not a literal NaN.
+	var raw *float64
+	if err := s.pool.QueryRow(ctx,
+		`SELECT median_seconds FROM samples WHERE target=$1 AND vantage='local' AND ts=$2`,
+		target, nanTS.UTC()).Scan(&raw); err != nil {
+		t.Fatalf("query raw median_seconds: %v", err)
+	}
+	if raw != nil {
+		t.Fatalf("raw median_seconds = %v, want NULL (NaN must not be stored as a literal value)", *raw)
+	}
+
+	if err := s.RefreshAggregates(ctx, base.Add(-time.Hour), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	// (b) the hourly bucket containing all three rows must report a real median_avg —
+	// a stored NaN would poison avg()/max() for the whole bucket.
+	pts, err := s.Rollup(ctx, target, "local", "1h", base.Add(-2*time.Hour), time.Now())
+	if err != nil || len(pts) == 0 {
+		t.Fatalf("rollup after refresh: pts=%d err=%v", len(pts), err)
+	}
+	p := pts[0]
+	if p.Rounds != 3 {
+		t.Errorf("Rounds = %d, want 3 (all imported rows)", p.Rounds)
+	}
+	if p.MedianRounds != 2 {
+		t.Errorf("MedianRounds = %d, want 2 (the NaN/total-loss round excluded)", p.MedianRounds)
+	}
+	if math.IsNaN(p.MedianAvg) {
+		t.Fatal("bucket MedianAvg is NaN — the NaN-median row poisoned the aggregate")
+	}
+	if math.Abs(p.MedianAvg-0.015) > 1e-9 {
+		t.Errorf("bucket MedianAvg = %v, want ~0.015 (avg of the two real medians, NaN row excluded)", p.MedianAvg)
 	}
 }

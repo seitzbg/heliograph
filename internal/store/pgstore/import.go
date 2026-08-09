@@ -53,7 +53,7 @@ func (s *PGStore) importBatch(ctx context.Context, rows []ImportRow) (int64, err
 			`INSERT INTO samples (ts,target,probe,host,vantage,pings,loss,median_seconds,rtts_seconds,err,duration_ms)
 			 VALUES ($1,$2,$3,$4,'local',$5,$6,$7,'{}'::double precision[],NULL,NULL)
 			 ON CONFLICT (target,vantage,ts) DO NOTHING`,
-			r.TS.UTC(), r.Target, r.Probe, r.Host, r.Pings, r.Loss, r.MedianSeconds)
+			r.TS.UTC(), r.Target, r.Probe, r.Host, r.Pings, r.Loss, nanToNil(r.MedianSeconds))
 	}
 	br := s.pool.SendBatch(ctx, batch)
 	defer br.Close()
