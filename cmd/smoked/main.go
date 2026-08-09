@@ -50,6 +50,23 @@ import (
 //	go build -ldflags "-X main.version=$(git describe --tags)"
 var version = "0.1.0"
 
+// validateRuntimeFlags checks the operational numeric flags the collector shares. A
+// non-positive -timeout is copied into every probe's context.WithTimeout, which would
+// cancel every probe immediately (a started-but-dead collector) — so reject it at the
+// CLI boundary alongside -pings and -step.
+func validateRuntimeFlags(pings int, step, timeout time.Duration) error {
+	if pings < 1 || pings > config.MaxPings {
+		return fmt.Errorf("-pings must be between 1 and %d, got %d", config.MaxPings, pings)
+	}
+	if step < config.MinStep {
+		return fmt.Errorf("-step must be at least %s, got %s", config.MinStep, step)
+	}
+	if timeout <= 0 {
+		return fmt.Errorf("-timeout must be positive, got %s", timeout)
+	}
+	return nil
+}
+
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "vantage" {
 		os.Exit(vantageCmd(os.Args[2:]))
@@ -79,11 +96,8 @@ func main() {
 
 	setupLogger(*logFormat, *logLevel)
 
-	if *pings < 1 || *pings > config.MaxPings {
-		fatal("invalid -pings", fmt.Errorf("must be between 1 and %d, got %d", config.MaxPings, *pings))
-	}
-	if *step < config.MinStep {
-		fatal("invalid -step", fmt.Errorf("must be at least %s, got %s", config.MinStep, *step))
+	if err := validateRuntimeFlags(*pings, *step, *timeout); err != nil {
+		fatal("invalid flags", err)
 	}
 
 	fmt.Printf("smoked %s — registered probe plugins: %s\n\n", version, strings.Join(probe.Registered(), ", "))

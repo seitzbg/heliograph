@@ -227,3 +227,24 @@ func TestApplyConfigValidatesPersistsSwaps(t *testing.T) {
 		t.Fatalf("want ErrConfigConflict on stale version, got %v", err)
 	}
 }
+
+func TestValidateRuntimeFlags(t *testing.T) {
+	cases := []struct {
+		name          string
+		pings         int
+		step, timeout time.Duration
+		wantErr       bool
+	}{
+		{"valid", 10, 5 * time.Second, 4 * time.Second, false},
+		{"pings zero", 0, 5 * time.Second, 4 * time.Second, true},
+		{"pings too many", 1 << 20, 5 * time.Second, 4 * time.Second, true},
+		{"step too small", 10, time.Millisecond, 4 * time.Second, true},
+		{"timeout zero", 10, 5 * time.Second, 0, true},
+		{"timeout negative", 10, 5 * time.Second, -time.Second, true},
+	}
+	for _, c := range cases {
+		if err := validateRuntimeFlags(c.pings, c.step, c.timeout); (err != nil) != c.wantErr {
+			t.Errorf("%s: err=%v wantErr=%v", c.name, err, c.wantErr)
+		}
+	}
+}

@@ -146,7 +146,19 @@ func decode(b []byte) (*Config, error) {
 	var c Config
 	dec := yaml.NewDecoder(bytes.NewReader(b))
 	dec.KnownFields(true)
-	if err := dec.Decode(&c); err != nil && !errors.Is(err, io.EOF) {
+	if err := dec.Decode(&c); err != nil {
+		if errors.Is(err, io.EOF) {
+			return &c, nil // empty input → zero-value config
+		}
+		return nil, err
+	}
+	// One document per input. A trailing `---`/second YAML document is almost always
+	// a mistake, and silently loading only the first conflicts with the loud-config-
+	// errors philosophy — so require EOF after the first document (the agent loader
+	// already does this).
+	if err := dec.Decode(new(Config)); err == nil {
+		return nil, fmt.Errorf("config: multiple YAML documents in one input (only the first would load — split them or remove the extra `---`)")
+	} else if !errors.Is(err, io.EOF) {
 		return nil, err
 	}
 	return &c, nil
