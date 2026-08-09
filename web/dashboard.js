@@ -266,16 +266,23 @@
       return { name, node, isFolder };
     });
   }
+  // Both writes go through defineProperty, not `children[name] = node`: a plain
+  // assignment with name === '__proto__' hits Object.prototype's __proto__ accessor
+  // instead of creating an own property — the target silently vanishes (never appears
+  // in Object.keys/JSON output) and the hasOwnProperty dup check above is bypassed on
+  // the next add. defineProperty always creates a real own data property, __proto__
+  // included, so listTargets/JSON.stringify see it like any other name (parked review
+  // finding from Task 1).
   function addTarget(doc, name, node) {
     const d = cfgWithChildren(doc);
     if (Object.prototype.hasOwnProperty.call(d.targets.children, name)) throw new Error('a target named "' + name + '" already exists');
-    d.targets.children[name] = node;
+    Object.defineProperty(d.targets.children, name, { value: node, enumerable: true, writable: true, configurable: true });
     return d;
   }
   function editTarget(doc, name, node) {
     const d = cfgWithChildren(doc);
     if (!Object.prototype.hasOwnProperty.call(d.targets.children, name)) throw new Error('no target named "' + name + '"');
-    d.targets.children[name] = node;
+    Object.defineProperty(d.targets.children, name, { value: node, enumerable: true, writable: true, configurable: true });
     return d;
   }
   function removeTarget(doc, name) {
@@ -1109,6 +1116,121 @@
       renderConfig({ afterLogin: true });
     });
 
+    // Probe kinds for the modal's dropdown (fetched once, lazily).
+    let cfgProbeKinds = null;
+    async function ensureProbeKinds() {
+      if (cfgProbeKinds) return cfgProbeKinds;
+      try {
+        const r = await fetch('/api/probes', { cache: 'no-store' });
+        const d = await r.json();
+        cfgProbeKinds = Array.isArray(d) ? d.map((p) => (typeof p === 'string' ? p : p.name)).filter(Boolean)
+          : (d && Array.isArray(d.probes) ? d.probes.map((p) => (typeof p === 'string' ? p : p.name || p.kind)).filter(Boolean) : []);
+      } catch (e) { cfgProbeKinds = []; }
+      return cfgProbeKinds;
+    }
+    function cfgParamRow(k, v) {
+      const row = document.createElement('div');
+      row.className = 'vadmin-row';
+      row.innerHTML = '<input class="vadmin-input cfg-pk" type="text" placeholder="key" style="max-width:140px"> ' +
+        '<input class="vadmin-input cfg-pv" type="text" placeholder="value"> ' +
+        '<button type="button" class="vadmin-btn cfg-pdel">×</button>';
+      row.querySelector('.cfg-pk').value = k || '';
+      row.querySelector('.cfg-pv').value = v || '';
+      row.querySelector('.cfg-pdel').addEventListener('click', () => row.remove());
+      return row;
+    }
+    async function openCfgModal(mode, name) {
+      const kinds = await ensureProbeKinds();
+      $('cfgMode').value = mode;
+      $('cfgModalTitle').textContent = mode === 'edit' ? ('Edit ' + name) : 'Add target';
+      $('cfgFormErr').textContent = '';
+      const node = mode === 'edit' ? ((cfg.doc.targets.children || {})[name] || {}) : {};
+      $('cfgName').value = mode === 'edit' ? name : '';
+      $('cfgName').disabled = mode === 'edit'; // rename = remove + add (v1)
+      $('cfgProbe').innerHTML = kinds.map((k) => '<option value="' + esc(k) + '"' + (k === node.probe ? ' selected' : '') + '>' + esc(k) + '</option>').join('');
+      $('cfgHost').value = node.host || '';
+      const pc = $('cfgParams'); pc.innerHTML = '';
+      const params = node.params || {};
+      const keys = Object.keys(params);
+      if (!keys.length) pc.appendChild(cfgParamRow('', ''));
+      else for (const k of keys) pc.appendChild(cfgParamRow(k, params[k]));
+      $('cfgVantages').value = (node.vantages || []).join(', ');
+      $('cfgAlerts').value = (node.alerts || []).join(', ');
+      $('cfgModal').classList.remove('hidden');
+      $('cfgName').disabled ? $('cfgProbe').focus() : $('cfgName').focus();
+    }
+    function closeCfgModal() { $('cfgModal').classList.add('hidden'); $('cfgFormErr').textContent = ''; }
+    function readCfgForm() {
+      const params = {};
+      for (const row of $('cfgParams').querySelectorAll('.vadmin-row')) {
+        const k = row.querySelector('.cfg-pk').value; const v = row.querySelector('.cfg-pv').value;
+        if (k.trim()) params[k] = v;
+      }
+      return {
+        name: $('cfgName').value.trim(),
+        node: Dash.buildTargetNode({
+          probe: $('cfgProbe').value, host: $('cfgHost').value.trim(), params,
+          vantages: ($('cfgVantages').value || '').split(','), alerts: ($('cfgAlerts').value || '').split(','),
+        }),
+      };
+    }
+    // saveDoc PUTs the whole mutated fragment with the version we last read (optimistic
+    // concurrency). 200 -> adopt; 400 -> show the validation error in the modal (keep input);
+    // 409 -> someone else changed it, reload; 401 -> back to login.
+    async function saveDoc(mutated, onOk) {
+      let r;
+      try {
+        r = await fetch('/api/admin/config', {
+          method: 'PUT', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ version: cfg.version, doc: mutated }),
+        });
+      } catch (e) { $('cfgFormErr').textContent = 'Network error.'; return; }
+      if (r.status === 200) {
+        let body = {}; try { body = await r.json(); } catch (e) { /* ignore */ }
+        cfg.version = body.version || (cfg.version + 1);
+        cfg.doc = mutated;
+        renderConfigRows();
+        if (onOk) onOk();
+        return;
+      }
+      if (r.status === 401) { closeCfgModal(); renderConfig(); return; }
+      if (r.status === 409) { closeCfgModal(); window.alert('Config changed elsewhere — reloading the latest.'); renderConfig(); return; }
+      // 400 or other: show the detail
+      let msg = 'HTTP ' + r.status;
+      try { msg = (await r.json()).error || msg; } catch (e) { /* keep */ }
+      $('cfgFormErr').textContent = msg;
+    }
+    $('cfgAddBtn').addEventListener('click', () => openCfgModal('add'));
+    $('cfgParamAdd').addEventListener('click', () => $('cfgParams').appendChild(cfgParamRow('', '')));
+    $('cfgCancel').addEventListener('click', closeCfgModal);
+    $('cfgModal').addEventListener('click', (e) => { if (e.target === $('cfgModal')) closeCfgModal(); });
+    $('cfgForm').addEventListener('submit', (e) => {
+      e.preventDefault();
+      $('cfgFormErr').textContent = '';
+      const { name, node } = readCfgForm();
+      if (!name) { $('cfgFormErr').textContent = 'Name required.'; return; }
+      // Reserved-name guard (parked Task-1 review finding): addTarget/editTarget now store
+      // via defineProperty so '__proto__' round-trips correctly instead of vanishing — but
+      // a target literally named '__proto__'/'constructor'/'prototype' is still a footgun
+      // (e.g. downstream JSON tooling, YAML export) worth rejecting up front in the UI.
+      if (['__proto__', 'constructor', 'prototype'].includes(name)) { $('cfgFormErr').textContent = '"' + name + '" is a reserved name.'; return; }
+      let mutated;
+      try {
+        mutated = ($('cfgMode').value === 'edit') ? Dash.editTarget(cfg.doc, name, node) : Dash.addTarget(cfg.doc, name, node);
+      } catch (err) { $('cfgFormErr').textContent = err.message; return; }
+      saveDoc(mutated, closeCfgModal);
+    });
+    $('cfgRows').addEventListener('click', (e) => {
+      const ed = e.target.closest('[data-edit]');
+      if (ed) { openCfgModal('edit', ed.getAttribute('data-edit')); return; }
+      const rm = e.target.closest('[data-remove]');
+      if (rm) {
+        const name = rm.getAttribute('data-remove');
+        if (!window.confirm('Remove target "' + name + '"?')) return;
+        saveDoc(Dash.removeTarget(cfg.doc, name));
+      }
+    });
+
     // ---- routing ----
     function show(id) { for (const v of ['viewOverview', 'viewGraphs', 'viewStack', 'viewZoom', 'viewVantages', 'viewConfig']) $(v).classList.toggle('hidden', v !== id); }
     function setTabs(view) {
@@ -1122,6 +1244,7 @@
     function route() {
       // Never leave a one-time key in the DOM across navigations: clear any open reveal.
       { const rev = $('vantReveal'); if (rev && !rev.classList.contains('hidden')) { $('vantRevealSnippet').textContent = ''; rev.classList.add('hidden'); } }
+      { const cm = $('cfgModal'); if (cm && !cm.classList.contains('hidden')) cm.classList.add('hidden'); }
       const r = parseRoute(location.hash);
       if (r.view === 'overview') { setTabs('overview'); show('viewOverview'); refreshOverview(); }
       else if (r.view === 'graphs') { gridScope = r.path || ''; setTabs('graphs'); show('viewGraphs'); renderScope(); renderTree(); renderGridPanels(); refreshGrid(); }

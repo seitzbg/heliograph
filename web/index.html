@@ -369,6 +369,31 @@
     <div id="cfgError" class="panel vadmin-note hidden">
       Couldn't reach the admin API. <button id="cfgRetry" class="vadmin-btn" type="button">Retry</button>
     </div>
+
+    <div id="cfgModal" class="vadmin-reveal-backdrop hidden">
+      <form id="cfgForm" class="panel vadmin-reveal" role="dialog" aria-modal="true" aria-labelledby="cfgModalTitle" autocomplete="off">
+        <h3 id="cfgModalTitle">Add target</h3>
+        <input type="hidden" id="cfgMode" value="add">
+        <label class="vadmin-lbl" for="cfgName">Name</label>
+        <input id="cfgName" class="vadmin-input" type="text" placeholder="e.g. cdn-cloudflare">
+        <label class="vadmin-lbl" for="cfgProbe">Probe</label>
+        <select id="cfgProbe" class="vadmin-input"></select>
+        <label class="vadmin-lbl" for="cfgHost">Host</label>
+        <input id="cfgHost" class="vadmin-input" type="text" placeholder="e.g. cloudflare.com">
+        <label class="vadmin-lbl">Params</label>
+        <div id="cfgParams"></div>
+        <button type="button" id="cfgParamAdd" class="vadmin-btn">+ param</button>
+        <label class="vadmin-lbl" for="cfgVantages">Vantages (comma-separated, optional)</label>
+        <input id="cfgVantages" class="vadmin-input" type="text" placeholder="local, nyc">
+        <label class="vadmin-lbl" for="cfgAlerts">Alerts (comma-separated, optional)</label>
+        <input id="cfgAlerts" class="vadmin-input" type="text" placeholder="loss-alert">
+        <span id="cfgFormErr" class="vadmin-err" role="alert"></span>
+        <div class="vadmin-reveal-actions">
+          <button type="submit" class="vadmin-btn">Save</button>
+          <button type="button" id="cfgCancel" class="vadmin-btn">Cancel</button>
+        </div>
+      </form>
+    </div>
   </section>
 
   <footer>smokeping-modern · live smoke renderer</footer>

@@ -312,6 +312,20 @@ check('buildTargetNode: drops empties, params -> strings', () => {
   // empty everything -> {}
   assert.deepEqual(D.buildTargetNode({ probe: '', host: '', params: {}, vantages: [], alerts: [] }), {});
 });
+check('buildTargetNode: alerts drops empties', () => {
+  const n = D.buildTargetNode({ probe: 'HTTP', host: 'h', params: {}, vantages: [], alerts: ['down', ''] });
+  assert.deepEqual(n.alerts, ['down']);
+});
+// Parked Task-1 review finding: addTarget/editTarget used `children[name] = node`, which
+// for name === '__proto__' hits Object.prototype's accessor instead of creating an own
+// property — the target silently vanished from Object.keys/listTargets/JSON output and
+// the hasOwnProperty dup check was bypassed on a second add. Fixed via defineProperty.
+check('addTarget: "__proto__" is stored as a real own property, not lost', () => {
+  const out = D.addTarget({ targets: { children: {} } }, '__proto__', { probe: 'HTTP', host: 'x' });
+  const rows = D.listTargets(out);
+  assert.ok(rows.some((r) => r.name === '__proto__'), '__proto__ target should appear in listTargets, not vanish');
+  assert.throws(() => D.addTarget(out, '__proto__', { probe: 'HTTP', host: 'y' }), /already exists/);
+});
 
 if (failed) { console.error(`\n${failed} test(s) failed`); process.exit(1); }
 console.log('\nall dashboard tests passed');
