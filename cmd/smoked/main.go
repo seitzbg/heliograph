@@ -7,6 +7,8 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -110,10 +112,14 @@ func main() {
 
 	// DB-backed config source (item 1): active only with -dsn. An absent/empty row
 	// contributes nothing, so YAML-only deployments are unaffected. Fetched fresh on
-	// each build so a SIGHUP reload picks up DB edits, like conf.d drop-ins.
+	// each build so a SIGHUP reload picks up DB edits, like conf.d drop-ins. cfgStore
+	// is hoisted to function scope so the admin config-CRUD wiring below (ConfigGet/
+	// ConfigApply) can reach it too.
 	var dbFragment func() ([]byte, error)
+	var cfgStore *configstore.Store
 	if *dsn != "" {
-		cfgStore, cerr := configstore.New(context.Background(), *dsn)
+		var cerr error
+		cfgStore, cerr = configstore.New(context.Background(), *dsn)
 		if cerr != nil {
 			fatal("config store", cerr)
 		}
@@ -158,20 +164,7 @@ func main() {
 					slog.Error("reload failed, keeping running config", "err", err)
 					continue
 				}
-				// Snapshot the running engine and swap under evalMu so a concurrent
-				// round's eval is either fully before (its update is inherited) or
-				// fully after (it lands in the new engine) — never lost in between.
-				evalMu.Lock()
-				old := current.Load()
-				if nrt.engine != nil && old.engine != nil {
-					valid := make(map[string]bool, len(nrt.alertsByTarget))
-					for t := range nrt.alertsByTarget {
-						valid[t] = true
-					}
-					nrt.engine.InheritStateFrom(old.engine, valid)
-				}
-				current.Store(nrt)
-				evalMu.Unlock()
+				swapRuntime(&current, &evalMu, nrt)
 				slog.Info("config reloaded", "path", *configPath, "targets", len(nrt.jobs))
 			}
 		}()
@@ -332,6 +325,18 @@ func main() {
 				slog.Warn("admin key-management API disabled: set SMOKED_ADMIN_PASSWORD to enable /api/admin/vantages")
 			} else {
 				slog.Info("admin key-management API enabled at /api/admin/vantages")
+			}
+			// DB config CRUD (GET/PUT /api/admin/config) requires a base YAML config to
+			// merge the DB fragment into (buildRuntime's dbFragment path), so it's gated
+			// on -config in addition to the admin password gate above.
+			if *configPath != "" {
+				srv.ConfigGet = func() (json.RawMessage, int, error) { return cfgStore.Get(context.Background()) }
+				srv.ConfigApply = func(doc json.RawMessage, expectedVersion int) error {
+					build := func(getter func() ([]byte, error)) (*runtime, error) {
+						return buildRuntime(*configPath, *pings, *step, *timeout, notifiers, getter)
+					}
+					return applyConfig(cfgStore, &current, &evalMu, build, doc, expectedVersion)
+				}
 			}
 		}
 		// Defensive timeouts so a slow or idle client can't tie up a connection
@@ -582,6 +587,45 @@ func (rt *runtime) eval(out []scheduler.Outcome) {
 			o.Computed.LossFraction()*100, o.Computed.Median, o.When)
 		rt.engine.Dispatch(events, rt.alerteeByTarget[o.Target.Name]...)
 	}
+}
+
+// swapRuntime atomically installs nrt as the live runtime, carrying alert firing
+// state + sample windows over from the running engine (so a reload/apply doesn't
+// re-fire alerts already firing or drop hysteresis history). Serialized against a
+// round's alert eval via evalMu. Shared by the SIGHUP reload and the config-apply API.
+func swapRuntime(current *atomic.Pointer[runtime], evalMu *sync.Mutex, nrt *runtime) {
+	evalMu.Lock()
+	old := current.Load()
+	if nrt.engine != nil && old.engine != nil {
+		valid := make(map[string]bool, len(nrt.alertsByTarget))
+		for t := range nrt.alertsByTarget {
+			valid[t] = true
+		}
+		nrt.engine.InheritStateFrom(old.engine, valid)
+	}
+	current.Store(nrt)
+	evalMu.Unlock()
+}
+
+// applyConfig validates a candidate DB config fragment by building a runtime from it
+// (YAML + this doc), persists it with optimistic concurrency, then swaps the built
+// runtime in. Validate → persist → swap: an invalid doc never persists, a stale
+// version never swaps. Returns api.ErrConfigInvalid / api.ErrConfigConflict.
+func applyConfig(cfgStore *configstore.Store, current *atomic.Pointer[runtime], evalMu *sync.Mutex,
+	build func(dbFragment func() ([]byte, error)) (*runtime, error), doc json.RawMessage, expectedVersion int) error {
+	nrt, berr := build(func() ([]byte, error) { return doc, nil })
+	if berr != nil {
+		return fmt.Errorf("%w: %v", api.ErrConfigInvalid, berr)
+	}
+	if serr := cfgStore.Set(context.Background(), doc, expectedVersion); serr != nil {
+		if errors.Is(serr, configstore.ErrConflict) {
+			return api.ErrConfigConflict
+		}
+		return serr
+	}
+	swapRuntime(current, evalMu, nrt)
+	slog.Info("config applied via API", "targets", len(nrt.jobs))
+	return nil
 }
 
 // warmMeta is the current target identity used to decide which stored history may seed a
