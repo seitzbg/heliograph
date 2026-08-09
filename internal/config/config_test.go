@@ -755,3 +755,20 @@ func TestDecodeRejectsMultipleDocuments(t *testing.T) {
 		t.Fatalf("empty should parse: %v", err)
 	}
 }
+
+// A file using the explicit-empty-list clear (alerts: []) must re-import idempotently, not
+// spuriously conflict — the nil-vs-empty round-trip must be preserved (Task-1 review finding c).
+func TestAppendImportIdempotentWithExplicitEmptyList(t *testing.T) {
+	imp := []byte("targets:\n  children:\n    a: {probe: HTTP, host: a.example, alerts: []}\n")
+	merged, added, _, err := AppendImport(nil, imp)
+	if err != nil || added != 1 {
+		t.Fatalf("first import: added=%d err=%v", added, err)
+	}
+	if !strings.Contains(string(merged), `"alerts":[]`) {
+		t.Fatalf("explicit empty alerts not preserved in stored JSON: %s", merged)
+	}
+	_, added2, unchanged2, err2 := AppendImport(merged, imp)
+	if err2 != nil || added2 != 0 || unchanged2 != 1 {
+		t.Fatalf("re-import with explicit []: added=%d unchanged=%d err=%v (want 0/1/nil)", added2, unchanged2, err2)
+	}
+}

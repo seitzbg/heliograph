@@ -74,16 +74,22 @@ type Database struct {
 // Node is one entry in the target tree. A node with a `host` becomes a monitor;
 // any node may carry inheritable settings and children.
 type Node struct {
-	Probe    string            `yaml:"probe" json:"probe,omitempty"`
-	Host     string            `yaml:"host" json:"host,omitempty"`
-	Title    string            `yaml:"title" json:"title,omitempty"`
-	Pings    int               `yaml:"pings" json:"pings,omitempty"`
-	Step     Duration          `yaml:"step" json:"step,omitempty"`
-	Params   map[string]string `yaml:"params" json:"params,omitempty"`
-	Alerts   []string          `yaml:"alerts" json:"alerts,omitempty"`     // alert names; inherited down the tree
-	Alertee  []string          `yaml:"alertee" json:"alertee,omitempty"`   // extra notifier names; inherited down the tree
-	Vantages []string          `yaml:"vantages" json:"vantages,omitempty"` // vantage points that probe this target; inherited
-	Children map[string]*Node  `yaml:"children" json:"children,omitempty"`
+	Probe  string            `yaml:"probe" json:"probe,omitempty"`
+	Host   string            `yaml:"host" json:"host,omitempty"`
+	Title  string            `yaml:"title" json:"title,omitempty"`
+	Pings  int               `yaml:"pings" json:"pings,omitempty"`
+	Step   Duration          `yaml:"step" json:"step,omitempty"`
+	Params map[string]string `yaml:"params" json:"params,omitempty"`
+	// NOTE: no `omitempty` on these three — a nil slice ("unset, inherit") and an explicit empty
+	// list ("clear the inherited value", see mergeInherited) are semantically distinct, and
+	// omitempty would collapse `[]` to absent on marshal, losing the clear AND breaking
+	// AppendImport idempotency (a re-import of a file with `alerts: []` would decode back to nil
+	// and spuriously conflict). nil marshals as `null` (→ nil), `[]` as `[]` (→ empty) — both
+	// round-trip.
+	Alerts   []string         `yaml:"alerts" json:"alerts"`     // alert names; inherited down the tree
+	Alertee  []string         `yaml:"alertee" json:"alertee"`   // extra notifier names; inherited down the tree
+	Vantages []string         `yaml:"vantages" json:"vantages"` // vantage points that probe this target; inherited
+	Children map[string]*Node `yaml:"children" json:"children,omitempty"`
 }
 
 // BuildAlerts compiles the alert definitions into runnable alerts.
