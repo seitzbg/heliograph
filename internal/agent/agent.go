@@ -302,6 +302,16 @@ func (a *Agent) finalFlush(ttl time.Duration) {
 			break // buffer drained
 		}
 		if _, err := a.client.PushResults(shutCtx, batch); err != nil {
+			// A permanently-rejected head batch must not strand the sendable rounds behind it:
+			// drop it (counted) and keep draining, mirroring flushLoop (CODE_REVIEW #2).
+			var pe *pushError
+			if errors.As(err, &pe) && pe.permanent() {
+				a.buf.commit(upto)
+				a.buf.reject(len(batch))
+				slog.Warn("final flush dropping permanently-rejected batch (data loss)",
+					"err", err, "rounds", len(batch), "rejected_total", a.buf.rejected())
+				continue
+			}
 			slog.Warn("final flush failed, rounds left unsent",
 				"err", err, "sent", sent, "remaining", a.buf.len(), "dropped", a.buf.dropped())
 			return
