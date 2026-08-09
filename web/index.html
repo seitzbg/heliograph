@@ -357,8 +357,10 @@
       <div class="panel">
         <div class="vadmin-reveal-actions" style="justify-content:space-between; align-items:baseline; margin-bottom:8px">
           <span class="vadmin-lbl">DB targets <span id="cfgVersion" class="vadmin-err" style="color:var(--ink-faint)"></span></span>
-          <button id="cfgAddBtn" class="vadmin-btn" type="button">+ Add target</button>
-          <button id="cfgImportBtn" class="vadmin-btn" type="button">Import YAML</button>
+          <span style="display:flex; gap:8px">
+            <button id="cfgAddBtn" class="vadmin-btn" type="button">+ Add target</button>
+            <button id="cfgImportBtn" class="vadmin-btn" type="button">Import YAML</button>
+          </span>
         </div>
         <table class="vadmin-table" aria-label="DB targets">
           <thead><tr><th>Name</th><th>Probe</th><th>Host</th><th>Details</th><th></th></tr></thead>
