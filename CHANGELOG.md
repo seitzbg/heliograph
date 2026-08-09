@@ -137,6 +137,20 @@ breaking changes.
   instead of a moving `latest-pg16` tag.
 
 ### Fixed
+- **Config reload race.** A concurrent SIGHUP reload and an API config-apply could leave the live
+  runtime out of sync with the persisted config (a slow reload build swapping a stale runtime over
+  a completed apply). Both writers now serialize the whole read/build/swap under one mutex.
+- **Agent flush loop could wedge.** A results batch the hub permanently rejects (over the 16 MiB
+  body cap or the 5,000-round limit) was retried forever, blocking every newer round behind it. The
+  limits are now shared (`agentwire`), `FlushMax` is capped, the hub answers `413` for an over-cap
+  body, and the agent **drops** a permanently-rejected batch (loudly, counted) instead of retrying.
+- **Continuous aggregates now backfill on (re)create.** Enabling downsampling created the hourly/
+  daily aggregates empty with only trailing refresh policies, so still-present raw history never
+  materialized into the 10-day / long-range views; `EnableDownsampling` now runs a bounded initial
+  refresh on first create or a shape-change recreate.
+- **Startup validation.** A non-positive `-timeout` (which would cancel every probe immediately) is
+  now rejected at the CLI boundary, and the YAML loader rejects a file with multiple documents
+  instead of silently loading only the first.
 - **Agent vantage transparency.** `smoke-agent` now logs the *hub-assigned* vantage (the hub
   derives it from the API key) on each assignment, and warns once when the agent's configured
   `vantage` label disagrees — so a key minted for one vantage can't quietly have its rounds

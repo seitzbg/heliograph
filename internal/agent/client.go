@@ -67,6 +67,18 @@ func (c *Client) PullAssignment(ctx context.Context, etag string) (agentwire.Ass
 
 // PushResults POSTs a batch; a non-2xx (or transport error) is returned so the caller
 // retains the batch and retries.
+// pushError carries the HTTP status of a failed results push so the flush loop can tell a
+// PERMANENT rejection (the hub will never accept this batch — oversize 413 or malformed 400)
+// from a transient one (5xx / 429 / auth), and drop vs retry accordingly (CODE_REVIEW #2).
+type pushError struct{ status int }
+
+func (e *pushError) Error() string { return fmt.Sprintf("agent: results: status %d", e.status) }
+
+// permanent reports whether re-sending the SAME batch is futile.
+func (e *pushError) permanent() bool {
+	return e.status == http.StatusRequestEntityTooLarge || e.status == http.StatusBadRequest
+}
+
 func (c *Client) PushResults(ctx context.Context, rounds []agentwire.RoundReport) (agentwire.ResultsResponse, error) {
 	body, err := json.Marshal(agentwire.ResultsRequest{Results: rounds})
 	if err != nil {
@@ -84,7 +96,7 @@ func (c *Client) PushResults(ctx context.Context, rounds []agentwire.RoundReport
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
-		return agentwire.ResultsResponse{}, fmt.Errorf("agent: results: status %d", resp.StatusCode)
+		return agentwire.ResultsResponse{}, &pushError{status: resp.StatusCode}
 	}
 	var out agentwire.ResultsResponse
 	_ = json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&out)

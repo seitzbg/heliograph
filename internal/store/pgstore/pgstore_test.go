@@ -1091,3 +1091,51 @@ func TestVantageReadIsolation(t *testing.T) {
 		}
 	}
 }
+
+// CODE_REVIEW #4: EnableDownsampling must backfill still-present raw history into the
+// aggregates on first create/recreate — the trailing refresh policies (3d hourly) alone never
+// materialize older data. Seed rounds 5 days ago (beyond the 3d window) and assert they appear
+// in samples_hourly WITHOUT a manual refresh.
+func TestEnableDownsamplingBackfillsHistory(t *testing.T) {
+	dsn := os.Getenv("SMOKE_TEST_DSN")
+	if dsn == "" {
+		t.Skip("set SMOKE_TEST_DSN to run the TimescaleDB integration test")
+	}
+	ctx := context.Background()
+	s, err := New(ctx, dsn, 100, func(e error) { t.Errorf("store error: %v", e) })
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer s.Close()
+	for _, q := range []string{
+		"DROP MATERIALIZED VIEW IF EXISTS samples_daily CASCADE",
+		"DROP MATERIALIZED VIEW IF EXISTS samples_hourly CASCADE",
+		"DELETE FROM samples WHERE target='bf-old'",
+	} {
+		if _, err := s.pool.Exec(ctx, q); err != nil {
+			t.Fatalf("cleanup %q: %v", q, err)
+		}
+	}
+	old := time.Now().UTC().Add(-5 * 24 * time.Hour)
+	var rounds []scheduler.Outcome
+	for i := 0; i < 3; i++ {
+		rounds = append(rounds, scheduler.Outcome{
+			Target: probe.Target{Name: "bf-old", Host: "h"}, ProbeName: "FPing",
+			Computed: sample.Compute(5, []float64{0.01, 0.02, 0.03, 0.04, 0.05}),
+			When:     old.Add(time.Duration(i) * time.Minute),
+		})
+	}
+	if err := s.AddResults(ctx, rounds); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := s.EnableDownsampling(ctx); err != nil {
+		t.Fatalf("EnableDownsampling: %v", err)
+	}
+	var got int
+	if err := s.pool.QueryRow(ctx, "SELECT coalesce(sum(rounds),0)::int FROM samples_hourly WHERE target='bf-old'").Scan(&got); err != nil {
+		t.Fatalf("query aggregate: %v", err)
+	}
+	if got < 3 {
+		t.Fatalf("initial backfill: expected the 3 five-day-old rounds materialized, got sum(rounds)=%d", got)
+	}
+}

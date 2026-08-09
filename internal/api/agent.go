@@ -45,8 +45,8 @@ func (srv *Server) agentAssignment(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, out)
 }
 
-const maxIngestBytes = 16 << 20 // 16 MiB body cap
-const maxIngestBatch = 5000     // rounds per request
+const maxIngestBytes = agentwire.MaxResultsBytes  // 16 MiB body cap (shared with the agent)
+const maxIngestBatch = agentwire.MaxResultsRounds // rounds per request (shared with the agent)
 
 // Ingest sanity bounds. An authenticated agent's samples are still validated: clock
 // skew, an agent bug, or a stolen vantage key could otherwise write a year-9999 row
@@ -108,6 +108,13 @@ func (srv *Server) agentResults(w http.ResponseWriter, r *http.Request) {
 	}
 	var req agentwire.ResultsRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxIngestBytes)).Decode(&req); err != nil {
+		// An over-cap body is a PERMANENT rejection the agent must not retry forever — return
+		// 413 (not the generic 400) so the agent can tell it apart and drop the batch (#2).
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			http.Error(w, `{"error":"request body too large"}`, http.StatusRequestEntityTooLarge)
+			return
+		}
 		http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
 		return
 	}

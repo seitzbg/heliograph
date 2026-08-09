@@ -179,12 +179,52 @@ var downsampleStmts = []string{
 // their refresh policies, and a 30-day retention policy on the raw samples.
 // Idempotent.
 func (s *PGStore) EnableDownsampling(ctx context.Context) error {
-	if err := s.migrateAggregates(ctx); err != nil {
+	existed, err := s.aggregateExists(ctx)
+	if err != nil {
+		return err
+	}
+	dropped, err := s.migrateAggregates(ctx)
+	if err != nil {
 		return err
 	}
 	for _, q := range downsampleStmts {
 		if _, err := s.pool.Exec(ctx, q); err != nil {
 			return fmt.Errorf("pgstore: downsampling: %w", err)
+		}
+	}
+	// On first creation (fresh DB) or after a shape-change recreate, the aggregates start
+	// empty and the refresh policies only cover the trailing 3d (hourly) / 30d (daily) — so
+	// still-present older raw history (the 10d hourly view; daily up to the 30d raw retention)
+	// would never materialize. Run a one-time bounded initial refresh to backfill it
+	// (CODE_REVIEW #4). New data thereafter is materialized by the policies.
+	if !existed || dropped {
+		if err := s.backfillAggregates(ctx); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// aggregateExists reports whether the samples_hourly continuous aggregate is already present.
+func (s *PGStore) aggregateExists(ctx context.Context) (bool, error) {
+	var ok bool
+	if err := s.pool.QueryRow(ctx, `SELECT to_regclass('samples_hourly') IS NOT NULL`).Scan(&ok); err != nil {
+		return false, fmt.Errorf("pgstore: check aggregate: %w", err)
+	}
+	return ok, nil
+}
+
+// backfillAggregates materializes existing raw history into the aggregates over the ranges the
+// long views promise (10 days hourly; up to the 30-day raw retention for daily) — what the
+// trailing refresh policies never cover after a fresh create/recreate. Bounded and one-time
+// (EnableDownsampling only calls it on create/recreate). Must run outside an explicit txn.
+func (s *PGStore) backfillAggregates(ctx context.Context) error {
+	for _, q := range []string{
+		`CALL refresh_continuous_aggregate('samples_hourly', now() - INTERVAL '10 days', now() - INTERVAL '1 hour')`,
+		`CALL refresh_continuous_aggregate('samples_daily', now() - INTERVAL '30 days', now() - INTERVAL '1 hour')`,
+	} {
+		if _, err := s.pool.Exec(ctx, q); err != nil {
+			return fmt.Errorf("pgstore: backfill aggregates: %w", err)
 		}
 	}
 	return nil
@@ -202,22 +242,24 @@ func (s *PGStore) EnableDownsampling(ctx context.Context) error {
 // buckets are already gone, so they can never be rebuilt). This is a one-time long-range-
 // history loss the first time an older hub upgrades and calls EnableDownsampling; see the
 // slog.Warn below, logged only when the drop actually fires.
-func (s *PGStore) migrateAggregates(ctx context.Context) error {
+// migrateAggregates returns true if it dropped the aggregates for a recreate (so the caller
+// backfills the rebuilt views).
+func (s *PGStore) migrateAggregates(ctx context.Context) (bool, error) {
 	var hasView bool
 	if err := s.pool.QueryRow(ctx, `SELECT to_regclass('samples_hourly') IS NOT NULL`).Scan(&hasView); err != nil {
-		return fmt.Errorf("pgstore: check aggregate: %w", err)
+		return false, fmt.Errorf("pgstore: check aggregate: %w", err)
 	}
 	if !hasView {
-		return nil
+		return false, nil
 	}
 	var hasVantage, hasMedianRounds bool
 	if err := s.pool.QueryRow(ctx, `
 		SELECT bool_or(column_name='vantage'), bool_or(column_name='median_rounds')
 		  FROM information_schema.columns WHERE table_name='samples_hourly'`).Scan(&hasVantage, &hasMedianRounds); err != nil {
-		return fmt.Errorf("pgstore: check aggregate columns: %w", err)
+		return false, fmt.Errorf("pgstore: check aggregate columns: %w", err)
 	}
 	if hasVantage && hasMedianRounds {
-		return nil
+		return false, nil
 	}
 	slog.Warn("pgstore: rebuilding continuous aggregates to match the current definition " +
 		"(vantage dimension and/or median_rounds); daily rollup buckets older than the raw " +
@@ -227,10 +269,10 @@ func (s *PGStore) migrateAggregates(ctx context.Context) error {
 		`DROP MATERIALIZED VIEW IF EXISTS samples_hourly CASCADE`,
 	} {
 		if _, err := s.pool.Exec(ctx, q); err != nil {
-			return fmt.Errorf("pgstore: migrate aggregates: %w", err)
+			return false, fmt.Errorf("pgstore: migrate aggregates: %w", err)
 		}
 	}
-	return nil
+	return true, nil
 }
 
 // nanToNil converts NaN -> nil so lost/median gaps are stored as SQL NULL.

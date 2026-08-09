@@ -50,6 +50,10 @@ func (o Options) Validate() error {
 		return fmt.Errorf("agent: buffer capacity must be at least 1, got %d", o.BufferCap)
 	case o.FlushMax < 1:
 		return fmt.Errorf("agent: flush max must be at least 1, got %d", o.FlushMax)
+	case o.FlushMax > agentwire.MaxResultsRounds:
+		// A larger batch is always rejected by the hub (its per-request cap), which would wedge
+		// the flush loop retrying a never-acceptable batch forever (CODE_REVIEW #2).
+		return fmt.Errorf("agent: flush max must be at most %d (the hub's per-request limit), got %d", agentwire.MaxResultsRounds, o.FlushMax)
 	}
 	return nil
 }
@@ -108,7 +112,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	go func() { defer wg.Done(); a.flushLoop(ctx) }()
 	wg.Wait()
 
-	slog.Info("smoke-agent stopped", "dropped", a.buf.dropped())
+	slog.Info("smoke-agent stopped", "dropped", a.buf.dropped(), "rejected", a.buf.rejected())
 	return nil
 }
 
@@ -228,6 +232,18 @@ func (a *Agent) flushLoop(ctx context.Context) {
 
 		batch, upto := a.buf.peekBatch(a.opts.FlushMax)
 		if _, err := a.client.PushResults(ctx, batch); err != nil {
+			var pe *pushError
+			if errors.As(err, &pe) && pe.permanent() {
+				// The hub will never accept this batch (too large / malformed). Retrying it
+				// forever would wedge the queue behind it and block every newer round — so drop
+				// it (loud + counted) and keep draining (CODE_REVIEW #2).
+				a.buf.commit(upto)
+				a.buf.reject(len(batch))
+				slog.Warn("dropping permanently-rejected results batch (data loss)",
+					"err", err, "rounds", len(batch), "rejected_total", a.buf.rejected())
+				backoff = backoffStart
+				continue
+			}
 			slog.Warn("push failed, will retry", "err", err, "batch", len(batch), "backoff", backoff)
 			select {
 			case <-ctx.Done():
@@ -286,6 +302,16 @@ func (a *Agent) finalFlush(ttl time.Duration) {
 			break // buffer drained
 		}
 		if _, err := a.client.PushResults(shutCtx, batch); err != nil {
+			// A permanently-rejected head batch must not strand the sendable rounds behind it:
+			// drop it (counted) and keep draining, mirroring flushLoop (CODE_REVIEW #2).
+			var pe *pushError
+			if errors.As(err, &pe) && pe.permanent() {
+				a.buf.commit(upto)
+				a.buf.reject(len(batch))
+				slog.Warn("final flush dropping permanently-rejected batch (data loss)",
+					"err", err, "rounds", len(batch), "rejected_total", a.buf.rejected())
+				continue
+			}
 			slog.Warn("final flush failed, rounds left unsent",
 				"err", err, "sent", sent, "remaining", a.buf.len(), "dropped", a.buf.dropped())
 			return

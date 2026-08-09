@@ -24,6 +24,7 @@ type buffer struct {
 	headSeq int64 // sequence number of rounds[0]; advances on evict and commit
 	cap     int
 	dropCnt atomic.Int64
+	rejCnt  atomic.Int64 // rounds discarded because the hub permanently rejected their batch
 }
 
 func newBuffer(capRounds int) *buffer {
@@ -94,3 +95,8 @@ func (b *buffer) len() int {
 }
 
 func (b *buffer) dropped() int64 { return b.dropCnt.Load() }
+
+// reject counts rounds discarded because the hub permanently rejected their batch (distinct
+// from dropCnt, which counts oldest rounds evicted when the buffer overflows).
+func (b *buffer) reject(n int)    { b.rejCnt.Add(int64(n)) }
+func (b *buffer) rejected() int64 { return b.rejCnt.Load() }
