@@ -689,3 +689,56 @@ func TestAppendDBFragmentEmptyIsNoop(t *testing.T) {
 		t.Fatalf("empty fragment changed config: %+v", base.Targets.Children)
 	}
 }
+
+func TestAppendImportAddsAndIsIdempotent(t *testing.T) {
+	imp := []byte("targets:\n  children:\n    a: {probe: HTTP, host: a.example}\n    b: {probe: TCPConnect, host: b.example, params: {port: \"80\"}}\n")
+	merged, added, unchanged, err := AppendImport(nil, imp) // empty DB
+	if err != nil || added != 2 || unchanged != 0 {
+		t.Fatalf("first import: added=%d unchanged=%d err=%v", added, unchanged, err)
+	}
+	// lowercase keys in the marshaled fragment (store/UI convention)
+	if !strings.Contains(string(merged), `"probe":"HTTP"`) || !strings.Contains(string(merged), `"host":"a.example"`) {
+		t.Fatalf("merged not lowercase-keyed: %s", merged)
+	}
+	// re-import the exact same file against the merged doc -> all unchanged, no error
+	merged2, added2, unchanged2, err2 := AppendImport(merged, imp)
+	if err2 != nil || added2 != 0 || unchanged2 != 2 {
+		t.Fatalf("re-import: added=%d unchanged=%d err=%v", added2, unchanged2, err2)
+	}
+	_ = merged2
+}
+
+func TestAppendImportConflictWritesNothing(t *testing.T) {
+	db := []byte(`{"targets":{"children":{"a":{"probe":"HTTP","host":"a.example"}}}}`)
+	imp := []byte("targets:\n  children:\n    a: {probe: HTTP, host: DIFFERENT.example}\n    c: {probe: HTTP, host: c.example}\n")
+	_, added, _, err := AppendImport(db, imp)
+	if err == nil || !strings.Contains(err.Error(), `"a"`) {
+		t.Fatalf("want conflict naming \"a\", got added=%d err=%v", added, err)
+	}
+	// atomic: "c" must NOT have been added despite being new (whole import aborts)
+	if added != 0 {
+		t.Fatalf("conflict must write nothing, added=%d", added)
+	}
+}
+
+func TestAppendImportRejectsGlobals(t *testing.T) {
+	_, _, _, err := AppendImport(nil, []byte("alerts:\n  x: {type: loss, pattern: \">50%\"}\ntargets:\n  children:\n    a: {probe: HTTP, host: a}\n"))
+	if err == nil || !strings.Contains(err.Error(), "alerts") {
+		t.Fatalf("want globals-rejected, got %v", err)
+	}
+}
+
+func TestAppendImportSchemaInvalid(t *testing.T) {
+	// unknown probe kind -> Monitors() rejects -> nothing written
+	_, _, _, err := AppendImport(nil, []byte("targets:\n  children:\n    a: {probe: NoSuchProbe, host: a}\n"))
+	if err == nil {
+		t.Fatalf("want schema error for unknown probe")
+	}
+}
+
+func TestAppendImportEmptyIsNoop(t *testing.T) {
+	_, added, unchanged, err := AppendImport(nil, []byte("   "))
+	if err != nil || added != 0 || unchanged != 0 {
+		t.Fatalf("empty import: added=%d unchanged=%d err=%v", added, unchanged, err)
+	}
+}
