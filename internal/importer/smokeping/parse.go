@@ -107,17 +107,28 @@ var probeMap = map[string]string{
 // tree and may be overridden per section. Presentation keys (menu, title,
 // remark, ...) are dropped — Node.Title is never set here. A target whose
 // resolved SmokePing probe has no probeMap entry is skipped (recorded in
-// Summary.Skipped, never emitted into the tree), and any folder left with no
-// targets underneath, directly or nested, is pruned.
+// Summary.Skipped) but still contributes a linked, host-less placeholder node
+// so that any mappable descendants nested under it survive. A section whose
+// name duplicates an existing sibling is also skipped (first one wins). Any
+// node left with no Host and no children, directly or nested, is pruned —
+// but a node with a Host is never pruned, even if its own children end up
+// empty: `*config.Node` legally carries both (config.Monitors emits the
+// monitor AND recurses into children), so "target" and "folder" are not
+// mutually exclusive and pruning must key off Host, not Children.
 func buildTree(secs []Section) (*config.Node, Summary) {
 	sum := Summary{ByProbe: map[string]int{}}
 	root := &config.Node{Children: map[string]*config.Node{}}
-	// stack[d] holds the node whose section Depth is d; a section at depth D
-	// attaches under stack[D-1]. names and spProbe run in lockstep with stack:
-	// names[d] is that depth's section name (used only to rebuild SkipNote.Path
-	// via pathOf), spProbe[d] is the SmokePing probe inherited at that depth.
+	// stack[i]/names[i]/depths[i]/spProbe[i] are one frame, pushed and popped in
+	// lockstep: stack[i] is the node, names[i] its section name (used only to
+	// rebuild SkipNote.Path via pathOf), depths[i] its Section.Depth (root is a
+	// synthetic depth-0 frame), spProbe[i] the SmokePing probe inherited at that
+	// depth. depths — not len(stack) — decides how many frames a section pops,
+	// so a section that jumps more than one level deeper than its predecessor
+	// (e.g. "+" then "+++" with no "++") still nests under the right ancestor
+	// instead of under whatever the previous section happened to be.
 	stack := []*config.Node{root}
 	names := []string{""}
+	depths := []int{0}
 	spProbe := []string{""}
 	if len(secs) > 0 && secs[0].Depth == 0 {
 		spProbe[0] = secs[0].Fields["probe"] // top-level default probe
@@ -126,9 +137,10 @@ func buildTree(secs []Section) (*config.Node, Summary) {
 		if s.Depth == 0 {
 			continue // root body already consumed above for the default probe
 		}
-		for len(stack) > s.Depth {
+		for depths[len(depths)-1] >= s.Depth {
 			stack = stack[:len(stack)-1]
 			names = names[:len(names)-1]
+			depths = depths[:len(depths)-1]
 			spProbe = spProbe[:len(spProbe)-1]
 		}
 		parent := stack[len(stack)-1]
@@ -137,39 +149,55 @@ func buildTree(secs []Section) (*config.Node, Summary) {
 			sp = p
 		}
 
+		_, dup := parent.Children[s.Name]
 		host, isTarget := s.Fields["host"]
 		var node *config.Node
-		if isTarget {
+		switch {
+		case dup:
+			sum.Skipped = append(sum.Skipped, SkipNote{Path: pathOf(names, s.Name), Probe: sp, Reason: "duplicate name"})
+			// Unlinked placeholder: keeps the stack in sync for any deeper
+			// sections nested under the duplicate, but the duplicate (and
+			// anything under it) never reaches the tree — the first section
+			// with this name wins, matching parent.Children's single slot.
+			node = &config.Node{Children: map[string]*config.Node{}}
+		case isTarget:
 			modern, ok := probeMap[sp]
-			if !ok {
-				sum.Skipped = append(sum.Skipped, SkipNote{Path: pathOf(names, s.Name), Probe: sp, Reason: "unmapped probe"})
-				// Unlinked placeholder: keeps stack/names/spProbe in sync so any
-				// (malformed) deeper sections still have a frame to pop, but it
-				// never reaches parent.Children, so it can't leak into the tree.
-				node = &config.Node{Children: map[string]*config.Node{}}
-			} else {
+			if ok {
 				node = &config.Node{Probe: modern, Host: host}
 				sum.Targets++
 				sum.ByProbe[modern]++
-				if parent.Children == nil {
-					parent.Children = map[string]*config.Node{}
-				}
-				parent.Children[s.Name] = node
+			} else {
+				sum.Skipped = append(sum.Skipped, SkipNote{Path: pathOf(names, s.Name), Probe: sp, Reason: "unmapped probe"})
+				// Linked, host-less placeholder: the skipped target itself is
+				// dropped, but a section with a `host` may still (legally, if
+				// unusually) have nested subsections — link this in so any
+				// mappable descendant survives and nests correctly. Pruned
+				// below if nothing rescues it.
+				node = &config.Node{Children: map[string]*config.Node{}}
 			}
-		} else {
+			linkChild(parent, s.Name, node)
+		default:
 			node = &config.Node{Children: map[string]*config.Node{}}
 			sum.Folders++
-			if parent.Children == nil {
-				parent.Children = map[string]*config.Node{}
-			}
-			parent.Children[s.Name] = node
+			linkChild(parent, s.Name, node)
 		}
 		stack = append(stack, node)
 		names = append(names, s.Name)
+		depths = append(depths, s.Depth)
 		spProbe = append(spProbe, sp)
 	}
 	pruneEmptyFolders(root)
 	return root, sum
+}
+
+// linkChild attaches node under parent as name, initializing parent.Children
+// first if this is parent's first child (a target node starts with a nil
+// Children map — see config.Node).
+func linkChild(parent *config.Node, name string, node *config.Node) {
+	if parent.Children == nil {
+		parent.Children = map[string]*config.Node{}
+	}
+	parent.Children[name] = node
 }
 
 // pathOf rebuilds the slash-joined path for a SkipNote from the names on the
@@ -185,17 +213,18 @@ func pathOf(names []string, name string) string {
 	return strings.Join(parts, "/")
 }
 
-// pruneEmptyFolders recursively deletes folder nodes (Children != nil) that
-// end up with no children once their own descendants are pruned — e.g. a
-// folder whose only targets were all skipped for an unmapped probe. Target
-// nodes (Children == nil) are left alone.
+// pruneEmptyFolders recursively deletes nodes that end up with neither a Host
+// nor any children once their own descendants are pruned first — e.g. a
+// folder whose only targets were all skipped, or a skipped-target placeholder
+// that nothing mappable was nested under. A node with a Host is never pruned,
+// even if it ends up with zero children: config.Node legally carries both a
+// Host and Children (config.Monitors emits the monitor and recurses), so a
+// hosted node with pruned-empty Children is still a real target, not an
+// empty folder.
 func pruneEmptyFolders(n *config.Node) {
 	for name, c := range n.Children {
-		if c.Children == nil {
-			continue // target node, nothing to prune
-		}
 		pruneEmptyFolders(c)
-		if len(c.Children) == 0 {
+		if c.Host == "" && len(c.Children) == 0 {
 			delete(n.Children, name)
 		}
 	}
