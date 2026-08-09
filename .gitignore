@@ -13,6 +13,10 @@ go.work.sum
 # local compose env (holds DOMAIN/ACME_EMAIL/admin password); .env.example is tracked
 /.env
 
+# real SmokePing fixture for manual `smoked import smokeping` verification (multi-MB zip;
+# never committed — see cmd/smoked/import.go and CHANGELOG "SmokePing config import")
+/import-test/
+
 # editor / OS
 .DS_Store
 *.swp
