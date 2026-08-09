@@ -14,7 +14,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"reflect"
 	"slices"
 	"sort"
 	"strings"
@@ -296,11 +295,32 @@ func AppendDBFragment(cfg *Config, fragBytes []byte) error {
 	return mergeBranches(cfg, origin, "the database config", frag)
 }
 
+// nodesEqual reports whether two target nodes serialize identically. It compares by canonical
+// JSON — the exact encoding used to persist the fragment — rather than reflect.DeepEqual, so that
+// classification can never diverge from what actually gets stored. The omitempty fields
+// (params/children) collapse nil and empty to the same absent value on both sides, while the
+// explicit-empty fields (alerts/alertee/vantages) keep null distinct from [] — matching the
+// stored representation exactly. Without this, re-importing an unchanged target that carries an
+// empty map (e.g. `params: {}`) would spuriously conflict, because the marshal round-trip that
+// stored it dropped the empty map to nil.
+func nodesEqual(a, b *Node) (bool, error) {
+	ab, err := json.Marshal(a)
+	if err != nil {
+		return false, err
+	}
+	bb, err := json.Marshal(b)
+	if err != nil {
+		return false, err
+	}
+	return bytes.Equal(ab, bb), nil
+}
+
 // AppendImport merges the target branches from importBytes (a YAML or JSON config) into the DB
 // config fragment dbDoc, idempotently. For each imported branch: new -> added; identical to the
-// existing DB entry (deep-equal) -> skipped; different -> a hard conflict error with NOTHING
-// merged (atomic). Globals in the import are rejected (target branches only). The merged fragment
-// is schema-validated. Returns the merged doc (JSON) plus counts; on any error nothing is written.
+// existing DB entry (same canonical JSON) -> skipped; different -> a hard conflict error with
+// NOTHING merged (atomic). Globals in the import are rejected (target branches only). The merged
+// fragment is schema-validated. Returns the merged doc (JSON) plus counts; on any error nothing
+// is written.
 func AppendImport(dbDoc, importBytes []byte) (merged json.RawMessage, added, unchanged int, err error) {
 	base := &Config{Targets: &Node{Children: map[string]*Node{}}}
 	if len(bytes.TrimSpace(dbDoc)) > 0 {
@@ -331,7 +351,11 @@ func AppendImport(dbDoc, importBytes []byte) (merged json.RawMessage, added, unc
 	var toAdd []string
 	for _, k := range sortedKeys(imp.Targets.Children) {
 		if cur, ok := base.Targets.Children[k]; ok {
-			if reflect.DeepEqual(cur, imp.Targets.Children[k]) {
+			eq, err := nodesEqual(cur, imp.Targets.Children[k])
+			if err != nil {
+				return nil, 0, 0, err
+			}
+			if eq {
 				unchanged++
 			} else {
 				return nil, 0, 0, fmt.Errorf("config: import conflict: target %q already exists in the database config with different settings", k)

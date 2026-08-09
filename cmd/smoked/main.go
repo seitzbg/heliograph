@@ -621,6 +621,8 @@ func configCmd(args []string) int {
 	}
 	fmt.Printf("imported %d targets → database config v%d (%d unchanged)\n", added, version+1, unchanged)
 	fmt.Println("note: database/probes/alerts are not imported (globals stay in YAML)")
+	fmt.Println("note: a target name that also exists in the running YAML config is a duplicate the")
+	fmt.Println("      daemon rejects on its next reload — rename or remove it from one source.")
 	return 0
 }
 

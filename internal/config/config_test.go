@@ -772,3 +772,29 @@ func TestAppendImportIdempotentWithExplicitEmptyList(t *testing.T) {
 		t.Fatalf("re-import with explicit []: added=%d unchanged=%d err=%v (want 0/1/nil)", added2, unchanged2, err2)
 	}
 }
+
+// A target that carries an empty params/children map must re-import as unchanged, not conflict:
+// omitempty drops the empty map when the fragment is stored, so a naive reflect.DeepEqual against
+// the re-decoded (nil) node would spuriously conflict. Classification compares canonical JSON, so
+// nil and empty collapse to the same absent value and the re-import is idempotent.
+func TestAppendImportIdempotentWithEmptyMaps(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		imp  string
+	}{
+		{"empty params", "targets:\n  children:\n    a: {probe: HTTP, host: a.example, params: {}}\n"},
+		{"empty children", "targets:\n  children:\n    a: {probe: HTTP, host: a.example, children: {}}\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			imp := []byte(tc.imp)
+			merged, added, _, err := AppendImport(nil, imp)
+			if err != nil || added != 1 {
+				t.Fatalf("first import: added=%d err=%v", added, err)
+			}
+			_, added2, unchanged2, err2 := AppendImport(merged, imp)
+			if err2 != nil || added2 != 0 || unchanged2 != 1 {
+				t.Fatalf("re-import: added=%d unchanged=%d err=%v (want 0/1/nil)", added2, unchanged2, err2)
+			}
+		})
+	}
+}
