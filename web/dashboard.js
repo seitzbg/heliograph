@@ -247,7 +247,57 @@
     return Math.round(h / 24) + 'd ago';
   }
 
-  window.Dash = { RANGES, RANGE_ORDER, parseRoute, mergeSeries, gridSince, fetchJSON, zoomResolution, pixelToTime, sharedYMax, buildTree, underPath, targetStatus, pickSeries, vantageList, orderVantages, defaultFocus, keepFocus, vantageColorVar, adminMode, relTime };
+  // --- DB config fragment helpers (pure; the Config panel's read-modify-write core) ---
+  // A fragment is { targets: { children: { <name>: <node> } } }. add/edit/remove return a
+  // NEW deep-cloned fragment (never mutate the live doc; it's replaced only after a save).
+  function cfgClone(doc) { return JSON.parse(JSON.stringify(doc || {})); }
+  function cfgWithChildren(doc) {
+    const d = cfgClone(doc);
+    if (!d.targets) d.targets = {};
+    if (!d.targets.children) d.targets.children = {};
+    return d;
+  }
+  function listTargets(doc) {
+    const ch = (doc && doc.targets && doc.targets.children) || {};
+    return Object.keys(ch).sort().map((name) => {
+      const node = ch[name] || {};
+      const isFolder = !!(node.children && Object.keys(node.children).length);
+      return { name, node, isFolder };
+    });
+  }
+  function addTarget(doc, name, node) {
+    const d = cfgWithChildren(doc);
+    if (Object.prototype.hasOwnProperty.call(d.targets.children, name)) throw new Error('a target named "' + name + '" already exists');
+    d.targets.children[name] = node;
+    return d;
+  }
+  function editTarget(doc, name, node) {
+    const d = cfgWithChildren(doc);
+    if (!Object.prototype.hasOwnProperty.call(d.targets.children, name)) throw new Error('no target named "' + name + '"');
+    d.targets.children[name] = node;
+    return d;
+  }
+  function removeTarget(doc, name) {
+    const d = cfgWithChildren(doc);
+    delete d.targets.children[name];
+    return d;
+  }
+  function buildTargetNode(f) {
+    const node = {};
+    if (f.probe) node.probe = f.probe;
+    if (f.host) node.host = f.host;
+    const p = {};
+    const params = f.params || {};
+    for (const k of Object.keys(params)) { const key = k.trim(); if (key) p[key] = String(params[k]); }
+    if (Object.keys(p).length) node.params = p;
+    const vs = (f.vantages || []).map((s) => s.trim()).filter(Boolean);
+    if (vs.length) node.vantages = vs;
+    const al = (f.alerts || []).map((s) => s.trim()).filter(Boolean);
+    if (al.length) node.alerts = al;
+    return node;
+  }
+
+  window.Dash = { RANGES, RANGE_ORDER, parseRoute, mergeSeries, gridSince, fetchJSON, zoomResolution, pixelToTime, sharedYMax, buildTree, underPath, targetStatus, pickSeries, vantageList, orderVantages, defaultFocus, keepFocus, vantageColorVar, adminMode, relTime, listTargets, addTarget, editTarget, removeTarget, buildTargetNode };
 
   // ---------------------------------------------------------------- init (DOM) --
   function init() {

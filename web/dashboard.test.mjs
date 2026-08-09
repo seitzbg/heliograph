@@ -268,5 +268,50 @@ check('relTime: never / just now / minutes / hours / days', () => {
   assert.equal(D.relTime('2026-08-06T12:00:00Z', now), '2d ago');
 });
 
+// DB config fragment helpers (config-in-a-database slice 3, Task 1): pure
+// list/add/edit/remove/buildNode over a { targets: { children: {...} } } fragment —
+// the Config panel's read-modify-write core (Tasks 2-3 build the DOM around these).
+check('listTargets: flattens + sorts + flags folders', () => {
+  const doc = { targets: { children: {
+    b: { probe: 'HTTP', host: 'b.example' },
+    a: { probe: 'TCPConnect', host: 'a.example' },
+    grp: { children: { x: { probe: 'HTTP', host: 'x' } } },
+  } } };
+  const rows = D.listTargets(doc);
+  assert.deepEqual(rows.map((r) => r.name), ['a', 'b', 'grp']);
+  assert.equal(rows.find((r) => r.name === 'grp').isFolder, true);
+  assert.equal(rows.find((r) => r.name === 'a').isFolder, false);
+});
+check('listTargets: empty/absent children -> []', () => {
+  assert.deepEqual(D.listTargets({}), []);
+  assert.deepEqual(D.listTargets({ targets: {} }), []);
+});
+check('addTarget: sets child, rejects dup, does not mutate input', () => {
+  const doc = { targets: { children: { a: { probe: 'HTTP', host: 'a' } } } };
+  const out = D.addTarget(doc, 'b', { probe: 'HTTP', host: 'b' });
+  assert.deepEqual(Object.keys(out.targets.children).sort(), ['a', 'b']);
+  assert.deepEqual(Object.keys(doc.targets.children), ['a']); // input untouched
+  assert.throws(() => D.addTarget(out, 'a', {}), /already exists/);
+});
+check('editTarget: replaces existing, throws on missing', () => {
+  const doc = { targets: { children: { a: { probe: 'HTTP', host: 'a' } } } };
+  const out = D.editTarget(doc, 'a', { probe: 'DNS', host: 'a2' });
+  assert.equal(out.targets.children.a.probe, 'DNS');
+  assert.equal(doc.targets.children.a.probe, 'HTTP'); // input untouched
+  assert.throws(() => D.editTarget(doc, 'nope', {}), /no target/);
+});
+check('removeTarget: deletes, input untouched', () => {
+  const doc = { targets: { children: { a: {}, b: {} } } };
+  const out = D.removeTarget(doc, 'a');
+  assert.deepEqual(Object.keys(out.targets.children), ['b']);
+  assert.deepEqual(Object.keys(doc.targets.children).sort(), ['a', 'b']);
+});
+check('buildTargetNode: drops empties, params -> strings', () => {
+  const n = D.buildTargetNode({ probe: 'TCPConnect', host: 'h', params: { port: 80, '': 'x', extra: '' }, vantages: ['nyc', '  ', ''], alerts: [] });
+  assert.deepEqual(n, { probe: 'TCPConnect', host: 'h', params: { port: '80', extra: '' }, vantages: ['nyc'] });
+  // empty everything -> {}
+  assert.deepEqual(D.buildTargetNode({ probe: '', host: '', params: {}, vantages: [], alerts: [] }), {});
+});
+
 if (failed) { console.error(`\n${failed} test(s) failed`); process.exit(1); }
 console.log('\nall dashboard tests passed');
