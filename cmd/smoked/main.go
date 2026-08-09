@@ -331,7 +331,14 @@ func main() {
 			// on -config in addition to the admin password gate above.
 			if *configPath != "" {
 				srv.ConfigGet = func() (json.RawMessage, int, error) { return cfgStore.Get(context.Background()) }
+				// applyMu serializes whole applies (build -> persist -> swap) end-to-end, so
+				// two concurrent PUTs can't interleave and leave the live runtime serving a
+				// doc other than the last one persisted. evalMu (inside swapRuntime) still
+				// only guards the swap itself; applyMu is strictly outside it, so no deadlock.
+				var applyMu sync.Mutex
 				srv.ConfigApply = func(doc json.RawMessage, expectedVersion int) error {
+					applyMu.Lock()
+					defer applyMu.Unlock()
 					build := func(getter func() ([]byte, error)) (*runtime, error) {
 						return buildRuntime(*configPath, *pings, *step, *timeout, notifiers, getter)
 					}

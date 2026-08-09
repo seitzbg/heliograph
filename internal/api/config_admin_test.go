@@ -126,3 +126,18 @@ func TestPutConfigMalformedReturns400AndDoesNotApply(t *testing.T) {
 		t.Fatal("ConfigApply must not be called on malformed input")
 	}
 }
+
+func TestPutConfigNullDocRejected(t *testing.T) {
+	called := false
+	_, mux, cookie := configServer(t, func(json.RawMessage, int) error { called = true; return nil }, nil, 0)
+	w := putConfig(t, mux, cookie, `{"version":0,"doc":null}`)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("want 400, got %d (%s)", w.Code, w.Body)
+	}
+	if !strings.Contains(w.Body.String(), "doc required") {
+		t.Fatalf("body should report doc required, got %s", w.Body)
+	}
+	if called {
+		t.Fatal("ConfigApply must not be called on a null doc")
+	}
+}

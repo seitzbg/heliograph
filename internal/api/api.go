@@ -4,6 +4,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"crypto/subtle"
 	"encoding/json"
@@ -1070,7 +1071,7 @@ func (srv *Server) getConfig(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"store unavailable"}`, http.StatusServiceUnavailable)
 		return
 	}
-	if len(doc) == 0 {
+	if trimmed := bytes.TrimSpace(doc); len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
 		doc = json.RawMessage(`{}`)
 	}
 	writeJSON(w, map[string]any{"version": version, "doc": doc})
@@ -1085,7 +1086,8 @@ func (srv *Server) putConfig(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
 		return
 	}
-	if len(body.Doc) == 0 {
+	trimmed := bytes.TrimSpace(body.Doc)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
 		http.Error(w, `{"error":"doc required"}`, http.StatusBadRequest)
 		return
 	}
