@@ -116,7 +116,8 @@ v2.0 line; these build on it.
   - ✅ DB config source + load — a versioned `config_fragment` (`internal/configstore`,
     optimistic-concurrency `Get`/`Set`) merged into the config tree on boot/SIGHUP when `-dsn` is
     set; dark until configured
-  - ⬜ Config CRUD API (admin-gated) + reload-on-write
+  - ✅ Config CRUD API — admin-gated `GET`/`PUT /api/admin/config` (whole-doc, optimistic
+    concurrency) that validates the candidate config, persists it, and hot-reloads atomically
   - ⬜ Target-management UI (add / edit / remove DB targets)
   - ⬜ YAML → DB import
 - ⬜ **SmokePing → TimescaleDB importer** — read an existing SmokePing install's `Targets` config +

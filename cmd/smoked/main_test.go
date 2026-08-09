@@ -1,13 +1,20 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"smokeping-modern/internal/alert"
+	"smokeping-modern/internal/api"
+	"smokeping-modern/internal/configstore"
 	"smokeping-modern/internal/federation"
 	"smokeping-modern/internal/probe"
 	"smokeping-modern/internal/scheduler"
@@ -157,5 +164,66 @@ func TestBuildRuntimeDBFragmentCollision(t *testing.T) {
 	}
 	if _, err := buildRuntime(cfgPath, 1, time.Second, time.Second, map[string]alert.Notifier{}, getter); err == nil || !strings.Contains(err.Error(), "duplicate") {
 		t.Fatalf("want duplicate-branch error, got %v", err)
+	}
+}
+
+func TestSwapRuntimeInstallsAndInherits(t *testing.T) {
+	var current atomic.Pointer[runtime]
+	var mu sync.Mutex
+	old := &runtime{jobs: nil} // nil engine → inheritance guarded off
+	current.Store(old)
+	nrt := &runtime{}
+	swapRuntime(&current, &mu, nrt)
+	if current.Load() != nrt {
+		t.Fatal("swapRuntime did not install the new runtime")
+	}
+}
+
+func TestApplyConfigValidatesPersistsSwaps(t *testing.T) {
+	dsn := os.Getenv("SMOKE_TEST_DSN")
+	if dsn == "" {
+		t.Skip("set SMOKE_TEST_DSN to run applyConfig test")
+	}
+	ctx := context.Background()
+	cs, err := configstore.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Close()
+
+	var current atomic.Pointer[runtime]
+	var mu sync.Mutex
+	current.Store(&runtime{})
+
+	built := &runtime{jobs: []scheduler.Job{{}}} // sentinel distinct runtime
+	goodBuild := func(func() ([]byte, error)) (*runtime, error) { return built, nil }
+	badBuild := func(func() ([]byte, error)) (*runtime, error) { return nil, errors.New("boom") }
+
+	// invalid → ErrConfigInvalid, NOT persisted, NOT swapped
+	_, verBefore, _ := cs.Get(ctx)
+	if err := applyConfig(cs, &current, &mu, badBuild, json.RawMessage(`{}`), verBefore); !errors.Is(err, api.ErrConfigInvalid) {
+		t.Fatalf("want ErrConfigInvalid, got %v", err)
+	}
+	if _, verAfter, _ := cs.Get(ctx); verAfter != verBefore {
+		t.Fatalf("invalid doc must not persist: %d -> %d", verBefore, verAfter)
+	}
+	if current.Load() == built {
+		t.Fatal("invalid doc must not swap")
+	}
+
+	// valid → persists (version bumps) + swaps
+	if err := applyConfig(cs, &current, &mu, goodBuild, json.RawMessage(`{"targets":{"children":{}}}`), verBefore); err != nil {
+		t.Fatalf("valid apply: %v", err)
+	}
+	if _, verAfter, _ := cs.Get(ctx); verAfter != verBefore+1 {
+		t.Fatalf("valid doc should bump version %d -> %d", verBefore, verAfter)
+	}
+	if current.Load() != built {
+		t.Fatal("valid doc should swap in the built runtime")
+	}
+
+	// stale version → ErrConfigConflict
+	if err := applyConfig(cs, &current, &mu, goodBuild, json.RawMessage(`{}`), verBefore); !errors.Is(err, api.ErrConfigConflict) {
+		t.Fatalf("want ErrConfigConflict on stale version, got %v", err)
 	}
 }

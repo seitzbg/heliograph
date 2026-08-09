@@ -8,6 +8,13 @@ breaking changes.
 ## [Unreleased]
 
 ### Added
+- **Config CRUD API.** Admin-gated `GET`/`PUT /api/admin/config` (behind `SMOKED_ADMIN_PASSWORD`)
+  reads and replaces the DB config fragment. A `PUT` carries the version it read; the hub
+  **validates** the candidate config (builds a runtime from the YAML config + the proposed doc),
+  **persists** it with optimistic concurrency, then **hot-reloads** — all atomically: an invalid
+  doc is rejected (`400`, with the validation error) and never persisted, a stale version is
+  rejected (`409`), and a good edit takes effect with no SIGHUP. The SIGHUP reload and the API now
+  share one runtime-swap path. Foundation for the in-browser target-management UI.
 - **Config in a database (groundwork).** With `-dsn` set, `smoked` now loads a DB-stored config
   fragment as an additional **live source**, concatenated with the YAML config (`default.yaml` +
   `conf.d/*.yaml`) on every boot and SIGHUP reload — the existing duplicate-branch guard applies

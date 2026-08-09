@@ -72,4 +72,8 @@ db-test:
     # TimescaleDB restarts once during first-boot init; wait past it before connecting.
     - sleep 20
   script:
-    - go test -count=1 ./internal/store/pgstore/ ./internal/vantage/ ./internal/api/
+    # -p 1 serializes the package test binaries: internal/configstore and cmd/smoked
+    # both mutate the single-row `config_fragment` table, so running them concurrently
+    # (default -p) races on that row. (Same reason a local `go test ./...` with a DSN
+    # can flake — run those two with -p 1.)
+    - go test -p 1 -count=1 ./internal/store/pgstore/ ./internal/vantage/ ./internal/api/ ./internal/configstore/ ./cmd/smoked/
