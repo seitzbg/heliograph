@@ -1,0 +1,40 @@
+*** Targets ***
+probe = FPing
+menu = Top
+title = Example Monitoring
+
++ A
+menu = Region A
+
+++ B
+menu = Site B
+
++++ leaf
+host = 10.0.0.1
+menu = Leaf Node
+title = Leaf Node (pve1-equivalent)
+
++ DNSProbes
+probe = DNS
+menu = DNS Checks
+
+++ Primary
+host = 10.0.0.53
+
+++ Secondary
+host = 10.0.0.54
+
++ TCPChecks
+menu = TCP Checks
+
+++ Web
+probe = TCPPing
+host = example.com
+port = 8443
+
++ Speed
+probe = speedtestcli
+menu = Speed Tests
+
+++ Download
+host = dummy

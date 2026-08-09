@@ -74,6 +74,9 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "config" {
 		os.Exit(configCmd(os.Args[2:]))
 	}
+	if len(os.Args) > 1 && os.Args[1] == "import" {
+		os.Exit(importCmd(os.Args[2:]))
+	}
 
 	showVersion := flag.Bool("version", false, "print version and exit")
 	rounds := flag.Int("rounds", 2, "number of measurement rounds to run")
