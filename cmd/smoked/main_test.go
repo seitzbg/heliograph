@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"smokeping-modern/internal/alert"
 	"smokeping-modern/internal/api"
 	"smokeping-modern/internal/configstore"
@@ -273,5 +275,58 @@ func TestApplyMuSerializesRuntimeSwaps(t *testing.T) {
 	wg.Wait()
 	if current.Load() != rtB {
 		t.Fatal("the later runtime replacement (B) must be live; a stale swap clobbered it")
+	}
+}
+
+// TestConfigImportCmd exercises `smoked config import <file>` end to end against a real
+// database: a first import adds the file's targets, and a re-import of the identical file
+// is a no-op (idempotent) that leaves the stored version unchanged.
+func TestConfigImportCmd(t *testing.T) {
+	dsn := os.Getenv("SMOKE_TEST_DSN")
+	if dsn == "" {
+		t.Skip("set SMOKE_TEST_DSN to run config import test")
+	}
+	ctx := context.Background()
+	cs, err := configstore.New(ctx, dsn) // also ensures the config_fragment table exists
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Close()
+	// clean slate: config_fragment is a shared row across this package's DB-gated tests,
+	// so reset it deterministically rather than relying on whatever a prior test left
+	// behind. configstore has no delete method, so use a raw connection (mirrors
+	// configstore_test.go's reset, which reaches its own unexported pool from inside
+	// the package).
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.Exec(ctx, `DELETE FROM config_fragment WHERE id = 1`); err != nil {
+		conn.Close(ctx)
+		t.Fatal(err)
+	}
+	conn.Close(ctx)
+	if _, _, e := cs.Get(ctx); e != nil {
+		t.Fatal(e)
+	}
+	// write a config file
+	dir := t.TempDir()
+	f := filepath.Join(dir, "in.yaml")
+	os.WriteFile(f, []byte("targets:\n  children:\n    imp-a: {probe: TCPConnect, host: 127.0.0.1, params: {port: \"5432\"}}\n"), 0o644)
+	// first import adds it
+	if rc := configCmd([]string{"import", f, "-dsn", dsn}); rc != 0 {
+		t.Fatalf("import rc=%d", rc)
+	}
+	doc, ver, _ := cs.Get(ctx)
+	if ver < 1 || !strings.Contains(string(doc), "imp-a") {
+		t.Fatalf("import not persisted: v%d %s", ver, doc)
+	}
+	// re-import same file -> no change (idempotent), version unchanged
+	if rc := configCmd([]string{"import", f, "-dsn", dsn}); rc != 0 {
+		t.Fatalf("re-import rc=%d", rc)
+	}
+	_, ver2, _ := cs.Get(ctx)
+	if ver2 != ver {
+		t.Fatalf("idempotent re-import bumped version %d -> %d", ver, ver2)
 	}
 }
