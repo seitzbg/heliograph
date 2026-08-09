@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"math"
 	"net/http"
@@ -100,6 +101,10 @@ type Server struct {
 	// returning ErrConfigInvalid (⇒400) or ErrConfigConflict (⇒409).
 	ConfigGet   func() (doc json.RawMessage, version int, err error)
 	ConfigApply func(doc json.RawMessage, expectedVersion int) error
+	// ConfigImport, if set, merges a YAML/JSON config's target branches into the DB fragment and
+	// hot-reloads (POST /api/admin/config/import). Returns ErrConfigInvalid (⇒400)/ErrConfigConflict
+	// (⇒409). nil ⇒ route not registered.
+	ConfigImport func(body []byte) (added, unchanged, version int, err error)
 }
 
 func New(s store.Store, webDir string) *Server { return &Server{store: s, webDir: webDir} }
@@ -166,6 +171,9 @@ func (srv *Server) Routes() *http.ServeMux {
 	if srv.AdminPassword != "" && len(srv.AdminKey) > 0 && srv.ConfigGet != nil && srv.ConfigApply != nil {
 		mux.HandleFunc("GET /api/admin/config", srv.requireAdmin(srv.getConfig))
 		mux.HandleFunc("PUT /api/admin/config", srv.requireAdmin(srv.putConfig))
+	}
+	if srv.AdminPassword != "" && len(srv.AdminKey) > 0 && srv.ConfigImport != nil {
+		mux.HandleFunc("POST /api/admin/config/import", srv.requireAdmin(srv.importConfig))
 	}
 	if srv.VantageAuth != nil && srv.Assignment != nil {
 		mux.HandleFunc("GET /agent/v1/assignment", srv.requireAgent(srv.agentAssignment))
@@ -1103,5 +1111,26 @@ func (srv *Server) putConfig(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"version conflict"}`, http.StatusConflict)
 	default:
 		http.Error(w, `{"error":"apply failed"}`, http.StatusInternalServerError)
+	}
+}
+
+func (srv *Server) importConfig(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
+	if err != nil {
+		http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
+		return
+	}
+	added, unchanged, version, err := srv.ConfigImport(body)
+	switch {
+	case err == nil:
+		writeJSON(w, map[string]any{"added": added, "unchanged": unchanged, "version": version})
+	case errors.Is(err, ErrConfigInvalid):
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+	case errors.Is(err, ErrConfigConflict):
+		http.Error(w, `{"error":"version conflict"}`, http.StatusConflict)
+	default:
+		http.Error(w, `{"error":"import failed"}`, http.StatusInternalServerError)
 	}
 }

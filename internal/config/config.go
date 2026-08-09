@@ -7,6 +7,7 @@ package config
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -42,11 +43,15 @@ func (d *Duration) UnmarshalYAML(n *yaml.Node) error {
 	return nil
 }
 
+// MarshalJSON emits the string form (e.g. "60s"), mirroring the YAML form, so a
+// round-trip through decode (which reads JSON as a YAML subset) reads it back.
+func (d Duration) MarshalJSON() ([]byte, error) { return json.Marshal(time.Duration(d).String()) }
+
 type Config struct {
-	Database Database                     `yaml:"database"`
-	Probes   map[string]map[string]string `yaml:"probes"` // probe kind -> probe-level params
-	Alerts   map[string]AlertDef          `yaml:"alerts"` // name -> alert definition
-	Targets  *Node                        `yaml:"targets"`
+	Database Database                     `yaml:"database" json:"database,omitempty"`
+	Probes   map[string]map[string]string `yaml:"probes" json:"probes,omitempty"` // probe kind -> probe-level params
+	Alerts   map[string]AlertDef          `yaml:"alerts" json:"alerts,omitempty"` // name -> alert definition
+	Targets  *Node                        `yaml:"targets" json:"targets,omitempty"`
 }
 
 // AlertDef is the YAML shape of one alert.
@@ -68,16 +73,22 @@ type Database struct {
 // Node is one entry in the target tree. A node with a `host` becomes a monitor;
 // any node may carry inheritable settings and children.
 type Node struct {
-	Probe    string            `yaml:"probe"`
-	Host     string            `yaml:"host"`
-	Title    string            `yaml:"title"`
-	Pings    int               `yaml:"pings"`
-	Step     Duration          `yaml:"step"`
-	Params   map[string]string `yaml:"params"`
-	Alerts   []string          `yaml:"alerts"`   // alert names; inherited down the tree
-	Alertee  []string          `yaml:"alertee"`  // extra notifier names; inherited down the tree
-	Vantages []string          `yaml:"vantages"` // vantage points that probe this target; inherited
-	Children map[string]*Node  `yaml:"children"`
+	Probe  string            `yaml:"probe" json:"probe,omitempty"`
+	Host   string            `yaml:"host" json:"host,omitempty"`
+	Title  string            `yaml:"title" json:"title,omitempty"`
+	Pings  int               `yaml:"pings" json:"pings,omitempty"`
+	Step   Duration          `yaml:"step" json:"step,omitempty"`
+	Params map[string]string `yaml:"params" json:"params,omitempty"`
+	// NOTE: no `omitempty` on these three — a nil slice ("unset, inherit") and an explicit empty
+	// list ("clear the inherited value", see mergeInherited) are semantically distinct, and
+	// omitempty would collapse `[]` to absent on marshal, losing the clear AND breaking
+	// AppendImport idempotency (a re-import of a file with `alerts: []` would decode back to nil
+	// and spuriously conflict). nil marshals as `null` (→ nil), `[]` as `[]` (→ empty) — both
+	// round-trip.
+	Alerts   []string         `yaml:"alerts" json:"alerts"`     // alert names; inherited down the tree
+	Alertee  []string         `yaml:"alertee" json:"alertee"`   // extra notifier names; inherited down the tree
+	Vantages []string         `yaml:"vantages" json:"vantages"` // vantage points that probe this target; inherited
+	Children map[string]*Node `yaml:"children" json:"children,omitempty"`
 }
 
 // BuildAlerts compiles the alert definitions into runnable alerts.
@@ -282,6 +293,112 @@ func AppendDBFragment(cfg *Config, fragBytes []byte) error {
 		origin[k] = "the YAML config"
 	}
 	return mergeBranches(cfg, origin, "the database config", frag)
+}
+
+// nodesEqual reports whether two target nodes serialize identically. It compares by canonical
+// JSON — the exact encoding used to persist the fragment — rather than reflect.DeepEqual, so that
+// classification can never diverge from what actually gets stored. The omitempty fields
+// (params/children) collapse nil and empty to the same absent value on both sides, while the
+// explicit-empty fields (alerts/alertee/vantages) keep null distinct from [] — matching the
+// stored representation exactly. Without this, re-importing an unchanged target that carries an
+// empty map (e.g. `params: {}`) would spuriously conflict, because the marshal round-trip that
+// stored it dropped the empty map to nil.
+func nodesEqual(a, b *Node) (bool, error) {
+	ab, err := json.Marshal(a)
+	if err != nil {
+		return false, err
+	}
+	bb, err := json.Marshal(b)
+	if err != nil {
+		return false, err
+	}
+	return bytes.Equal(ab, bb), nil
+}
+
+// AppendImport merges the target branches from importBytes (a YAML or JSON config) into the DB
+// config fragment dbDoc, idempotently. For each imported branch: new -> added; identical to the
+// existing DB entry (same canonical JSON) -> skipped; different -> a hard conflict error with
+// NOTHING merged (atomic). Globals in the import are rejected (target branches only). The merged
+// fragment is schema-validated. Returns the merged doc (JSON) plus counts; on any error nothing
+// is written.
+func AppendImport(dbDoc, importBytes []byte) (merged json.RawMessage, added, unchanged int, err error) {
+	base := &Config{Targets: &Node{Children: map[string]*Node{}}}
+	if len(bytes.TrimSpace(dbDoc)) > 0 {
+		if base, err = decode(dbDoc); err != nil {
+			return nil, 0, 0, fmt.Errorf("config: parse database fragment: %w", err)
+		}
+		if base.Targets == nil {
+			base.Targets = &Node{}
+		}
+		if base.Targets.Children == nil {
+			base.Targets.Children = map[string]*Node{}
+		}
+	}
+	if len(bytes.TrimSpace(importBytes)) == 0 {
+		return dbDoc, 0, 0, nil
+	}
+	imp, err := decode(importBytes)
+	if err != nil {
+		return nil, 0, 0, fmt.Errorf("config: parse import: %w", err)
+	}
+	if err := validateFragment("the imported file", imp); err != nil {
+		return nil, 0, 0, err
+	}
+	if imp.Targets == nil || len(imp.Targets.Children) == 0 {
+		return dbDoc, 0, 0, nil
+	}
+	// Pass 1 — classify without mutating; a differing duplicate aborts the whole import.
+	var toAdd []string
+	for _, k := range sortedKeys(imp.Targets.Children) {
+		if cur, ok := base.Targets.Children[k]; ok {
+			eq, err := nodesEqual(cur, imp.Targets.Children[k])
+			if err != nil {
+				return nil, 0, 0, err
+			}
+			if eq {
+				unchanged++
+			} else {
+				return nil, 0, 0, fmt.Errorf("config: import conflict: target %q already exists in the database config with different settings", k)
+			}
+		} else {
+			toAdd = append(toAdd, k)
+		}
+	}
+	if len(toAdd) == 0 {
+		return dbDoc, 0, unchanged, nil // idempotent no-op
+	}
+	// Pass 2 — apply.
+	for _, k := range toAdd {
+		base.Targets.Children[k] = imp.Targets.Children[k]
+	}
+	// Schema-validate the merged result so an invalid import never persists. dbDoc is always a
+	// target-only fragment (the output of a prior AppendImport, or empty) and importBytes just
+	// passed validateFragment above, so base.Database is zero here; seed the same defaults Parse
+	// applies to a full config purely so Monitors() has an effective pings/step to validate
+	// ranges against. The real values live in default.yaml and are orthogonal to what this import
+	// is checking — a leaf that doesn't set its own pings/step is meant to inherit them at load
+	// time, same as any other target-branch fragment (conf.d, AppendDBFragment).
+	if base.Database.Pings == 0 {
+		base.Database.Pings = 20
+	}
+	if base.Database.Step == 0 {
+		base.Database.Step = Duration(60 * time.Second)
+	}
+	if _, err := base.Monitors(); err != nil {
+		return nil, 0, 0, err
+	}
+	// Marshal via a targets-only shape, not *Config: Config.Database is a plain (non-pointer)
+	// struct, and encoding/json's omitempty never omits struct-typed fields (only false/0/nil/
+	// empty-collection values) — marshaling a *Config here would leak a spurious "database":{}
+	// into what must stay a target-only fragment (validateFragment forbids `database` in every
+	// fragment this merges with downstream, e.g. AppendDBFragment).
+	out, err := json.Marshal(&struct {
+		Targets *Node `json:"targets,omitempty"`
+	}{Targets: base.Targets})
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	return out, len(toAdd), unchanged, nil
 }
 
 // validateFragment enforces that a fragment carries only target branches: database /

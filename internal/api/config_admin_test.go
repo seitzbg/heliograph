@@ -141,3 +141,41 @@ func TestPutConfigNullDocRejected(t *testing.T) {
 		t.Fatal("ConfigApply must not be called on a null doc")
 	}
 }
+
+func TestImportConfig(t *testing.T) {
+	srv, _ := adminServer("hunter2")
+	srv.ConfigGet = func() (json.RawMessage, int, error) { return nil, 0, nil }
+	srv.ConfigApply = func(json.RawMessage, int) error { return nil }
+	var gotBody string
+	srv.ConfigImport = func(b []byte) (int, int, int, error) { gotBody = string(b); return 2, 1, 5, nil }
+	mux := srv.Routes()
+	cookie := login(t, mux, "hunter2")
+	r := httptest.NewRequest("POST", "/api/admin/config/import", strings.NewReader("targets:\n  children:\n    a: {probe: HTTP, host: a}\n"))
+	r.AddCookie(cookie)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, r)
+	if w.Code != 200 || !strings.Contains(gotBody, "children") {
+		t.Fatalf("code=%d body-seen=%q resp=%s", w.Code, gotBody, w.Body)
+	}
+	var resp struct{ Added, Unchanged, Version int }
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	if resp.Added != 2 || resp.Unchanged != 1 || resp.Version != 5 {
+		t.Fatalf("resp=%+v", resp)
+	}
+}
+
+func TestImportConfigConflict400(t *testing.T) {
+	srv, _ := adminServer("hunter2")
+	srv.ConfigGet = func() (json.RawMessage, int, error) { return nil, 0, nil }
+	srv.ConfigApply = func(json.RawMessage, int) error { return nil }
+	srv.ConfigImport = func([]byte) (int, int, int, error) { return 0, 0, 0, ErrConfigInvalid }
+	mux := srv.Routes()
+	cookie := login(t, mux, "hunter2")
+	r := httptest.NewRequest("POST", "/api/admin/config/import", strings.NewReader("x"))
+	r.AddCookie(cookie)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, r)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("want 400, got %d", w.Code)
+	}
+}

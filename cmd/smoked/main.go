@@ -71,6 +71,9 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "vantage" {
 		os.Exit(vantageCmd(os.Args[2:]))
 	}
+	if len(os.Args) > 1 && os.Args[1] == "config" {
+		os.Exit(configCmd(os.Args[2:]))
+	}
 
 	showVersion := flag.Bool("version", false, "print version and exit")
 	rounds := flag.Int("rounds", 2, "number of measurement rounds to run")
@@ -371,6 +374,33 @@ func main() {
 					}
 					return applyConfig(cfgStore, &current, &evalMu, build, doc, expectedVersion)
 				}
+				// ConfigImport merges a YAML/JSON config's target branches into the current DB
+				// fragment (config.AppendImport; globals aren't imported) and, only if it actually
+				// added targets, reuses applyConfig's validate->persist->swap under the same
+				// applyMu as ConfigApply/the SIGHUP reload above. A merge with nothing new to add
+				// is a no-op — no pointless persist/rebuild/swap.
+				srv.ConfigImport = func(body []byte) (added, unchanged, version int, err error) {
+					applyMu.Lock()
+					defer applyMu.Unlock()
+					doc, ver, gerr := cfgStore.Get(context.Background())
+					if gerr != nil {
+						return 0, 0, 0, gerr
+					}
+					merged, add, unch, ierr := config.AppendImport(doc, body)
+					if ierr != nil {
+						return 0, 0, ver, fmt.Errorf("%w: %v", api.ErrConfigInvalid, ierr)
+					}
+					if add == 0 {
+						return 0, unch, ver, nil // nothing to apply
+					}
+					build := func(getter func() ([]byte, error)) (*runtime, error) {
+						return buildRuntime(*configPath, *pings, *step, *timeout, notifiers, getter)
+					}
+					if aerr := applyConfig(cfgStore, &current, &evalMu, build, merged, ver); aerr != nil {
+						return 0, 0, ver, aerr // applyConfig already returns api.ErrConfig* sentinels
+					}
+					return add, unch, ver + 1, nil
+				}
 			}
 		}
 		// Defensive timeouts so a slow or idle client can't tie up a connection
@@ -534,6 +564,66 @@ func vantageCmd(args []string) int {
 		fmt.Fprintf(os.Stderr, "unknown vantage subcommand %q\n", sub)
 		return 2
 	}
+}
+
+// configCmd implements `smoked config import <file> [-dsn DSN]` — merges a YAML/JSON config's
+// target branches into the database config fragment (idempotent; a differing existing target is a
+// conflict). Globals (database/probes/alerts) are not imported. -dsn defaults to SMOKED_DSN.
+func configCmd(args []string) int {
+	if len(args) < 1 || args[0] != "import" {
+		fmt.Fprintln(os.Stderr, "usage: smoked config import <file> [-dsn DSN]")
+		return 2
+	}
+	rest := args[1:]
+	if len(rest) == 0 || strings.HasPrefix(rest[0], "-") {
+		fmt.Fprintln(os.Stderr, "usage: smoked config import <file> [-dsn DSN]")
+		return 2
+	}
+	file := rest[0]
+	fs := flag.NewFlagSet("config import", flag.ExitOnError)
+	dsn := fs.String("dsn", os.Getenv("SMOKED_DSN"), "TimescaleDB DSN (or set SMOKED_DSN)")
+	if err := fs.Parse(rest[1:]); err != nil {
+		return 2
+	}
+	if *dsn == "" {
+		fmt.Fprintln(os.Stderr, "config import: -dsn (or SMOKED_DSN) is required")
+		return 2
+	}
+	fileBytes, err := os.ReadFile(file)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "config import: %v\n", err)
+		return 1
+	}
+	ctx := context.Background()
+	cs, err := configstore.New(ctx, *dsn)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "config import: %v\n", err)
+		return 1
+	}
+	defer cs.Close()
+	doc, version, err := cs.Get(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "config import: %v\n", err)
+		return 1
+	}
+	merged, added, unchanged, err := config.AppendImport(doc, fileBytes)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "config import: %v\n", err)
+		return 1
+	}
+	if added == 0 {
+		fmt.Printf("nothing to import (%d unchanged)\n", unchanged)
+		return 0
+	}
+	if err := cs.Set(ctx, merged, version); err != nil {
+		fmt.Fprintf(os.Stderr, "config import: %v (re-run to retry)\n", err)
+		return 1
+	}
+	fmt.Printf("imported %d targets → database config v%d (%d unchanged)\n", added, version+1, unchanged)
+	fmt.Println("note: database/probes/alerts are not imported (globals stay in YAML)")
+	fmt.Println("note: a target name that also exists in the running YAML config is a duplicate the")
+	fmt.Println("      daemon rejects on its next reload — rename or remove it from one source.")
+	return 0
 }
 
 // setupLogger installs the process-wide structured logger for operational events

@@ -109,10 +109,10 @@ sketch; agents poll a versioned assignment (`304` when unchanged); keys are mana
 Post-federation work, in build order (each an independent PR). Federation (Phase 4) shipped as the
 v2.0 line; these build on it.
 
-- 🚧 **Config in a database** — targets/probes/alerts are YAML-only today. Move config into the
+- ✅ **Config in a database** — targets/probes/alerts were YAML-only; config now also lives in the
   store with an in-browser **target-management UI** (add / edit / remove), reusing the admin auth.
   Built **additively**: the DB is a live source concatenated with YAML (`conf.d`-style), not a
-  replacement. The marquee next feature — goes past SmokePing's file-only config. *(Large; 4 slices.)*
+  replacement. The marquee feature — goes past SmokePing's file-only config. *(Large; 4 slices, all shipped.)*
   - ✅ DB config source + load — a versioned `config_fragment` (`internal/configstore`,
     optimistic-concurrency `Get`/`Set`) merged into the config tree on boot/SIGHUP when `-dsn` is
     set; dark until configured
@@ -120,7 +120,10 @@ v2.0 line; these build on it.
     concurrency) that validates the candidate config, persists it, and hot-reloads atomically
   - ✅ Target-management UI — a login-gated **Config** tab: list DB targets, add/edit/remove via a
     modal (read-modify-write the fragment through the CRUD API), with 400/409 handling
-  - ⬜ YAML → DB import
+  - ✅ YAML → DB import — a `smoked config import <file>` CLI and a Config-tab **Import YAML**
+    button that additively merge a YAML/JSON file's target branches into the DB fragment;
+    an entry identical to the stored one is skipped (idempotent), a same-name entry with
+    different settings is a conflict (nothing imported), and globals stay in YAML
 - ⬜ **SmokePing → TimescaleDB importer** — read an existing SmokePing install's `Targets` config +
   RRD history and load it here, so a running SmokePing can migrate (RRD → TSDB is the core shift).
   *(Medium.)*
