@@ -8,6 +8,13 @@ breaking changes.
 ## [Unreleased]
 
 ### Added
+- **YAML → DB config import.** A `smoked config import <file>` subcommand and a Config-tab
+  **Import YAML** button both merge a YAML (or JSON) config's `targets:` branches into the
+  database fragment, additively. The merge is **atomic and idempotent**: an imported entry that
+  is byte-for-byte identical to the stored one is skipped (reported as `unchanged`), a same-name
+  entry with *different* settings is a conflict that imports nothing (`400` in the UI, non-zero
+  exit for the CLI), and globals (`database`/`probes`/`alerts`) are ignored. A successful import
+  hot-reloads with no SIGHUP. Completes **Config in a database** (all four slices shipped).
 - **Target-management UI.** A login-gated **Config** tab (over the same admin session as Vantages)
   lists the database-managed targets and adds / edits / removes them via a modal — a probe dropdown,
   host, key/value params, and optional vantages/alerts. It read-modify-writes the whole fragment
