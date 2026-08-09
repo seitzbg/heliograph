@@ -1,6 +1,27 @@
 package smokeping
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func TestParseProjectsProbeParams(t *testing.T) {
+	targets := "*** Targets ***\nprobe = FPing\n+ DNSProbes\nprobe = DNS\n++ G\nhost = 8.8.8.8\n"
+	probes := "*** Probes ***\n+ FPing\nbinary = /usr/sbin/fping\n+ DNS\nbinary = /usr/bin/dig\nlookup = google.com\npings = 5\n"
+	database := "*** Database ***\nstep = 300\npings = 20\n"
+	root, sum, err := Parse(targets, probes, database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := root.Children["DNSProbes"].Children["G"]
+	if g.Params["lookup"] != "google.com" {
+		t.Errorf("DNS lookup not projected: %+v", g.Params)
+	}
+	if sum.Pings != 20 || sum.Step != "300" {
+		t.Errorf("database advisory wrong: step=%q pings=%d", sum.Step, sum.Pings)
+	}
+}
 
 func TestParseSectionsNestingAndFields(t *testing.T) {
 	in := "*** Targets ***\n" +
@@ -66,7 +87,7 @@ func TestBuildTreeFoldersTargetsInheritanceAndProbeMap(t *testing.T) {
 		"++ Download\n" +
 		"host = dummy\n"
 	secs, _ := parseSections(in)
-	root, sum := buildTree(secs)
+	root, sum, _ := buildTree(secs)
 
 	local := root.Children["Local"]
 	if local == nil || local.Host != "" {
@@ -108,7 +129,7 @@ func TestBuildTreePruneKeepsHostedNodeWithEmptyChildren(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	root, sum := buildTree(secs)
+	root, sum, _ := buildTree(secs)
 
 	pve1 := root.Children["pve1"]
 	if pve1 == nil || pve1.Host != "pve1.example" || pve1.Probe != "FPing" {
@@ -137,7 +158,7 @@ func TestBuildTreeMappedChildOfSkippedTargetSurvives(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	root, sum := buildTree(secs)
+	root, sum, _ := buildTree(secs)
 
 	download := root.Children["Speed"].Children["Download"]
 	if download == nil {
@@ -169,7 +190,7 @@ func TestBuildTreeDuplicateNameKeepsFirstAndSkipsSecond(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	root, sum := buildTree(secs)
+	root, sum, _ := buildTree(secs)
 
 	d := root.Children["dup"]
 	if d == nil || d.Host != "first.example" {
@@ -199,7 +220,7 @@ func TestBuildTreeDepthJumpSiblingNotChild(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	root, _ := buildTree(secs)
+	root, _, _ := buildTree(secs)
 
 	a := root.Children["A"]
 	if a == nil {
@@ -215,4 +236,73 @@ func TestBuildTreeDepthJumpSiblingNotChild(t *testing.T) {
 	if _, ok := c.Children["D"]; ok {
 		t.Errorf("D must NOT be nested under C")
 	}
+}
+
+// TestParseFixture drives Parse end-to-end off a checked-in synthetic
+// SmokePing install (testdata/smokeping/{Targets,Probes,Database} — no real
+// hostnames/IPs) covering: a nested folder->folder->target chain on the
+// inherited top-level FPing probe, a DNSProbes folder overriding probe = DNS
+// with two targets (probe-level `lookup` projected from the Probes file), a
+// TCPPing target with an inline `port` overriding the probe's file-level
+// default, a speedtestcli target that must be skipped (and its now-empty
+// folder pruned), and the Database file's step/pings advisory.
+func TestParseFixture(t *testing.T) {
+	dir := "testdata/smokeping"
+	targets := readFixture(t, filepath.Join(dir, "Targets"))
+	probes := readFixture(t, filepath.Join(dir, "Probes"))
+	database := readFixture(t, filepath.Join(dir, "Database"))
+
+	root, sum, err := Parse(targets, probes, database)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if sum.Targets != 4 {
+		t.Errorf("want 4 targets (leaf, Primary, Secondary, Web; Download skipped), got %d", sum.Targets)
+	}
+
+	leaf := root.Children["A"].Children["B"].Children["leaf"]
+	if leaf == nil || leaf.Host != "10.0.0.1" || leaf.Probe != "FPing" {
+		t.Fatalf("deep path A/B/leaf wrong: %+v", leaf)
+	}
+
+	primary := root.Children["DNSProbes"].Children["Primary"]
+	if primary == nil || primary.Probe != "DNS" || primary.Params["lookup"] != "example.com" {
+		t.Fatalf("DNSProbes/Primary lookup not projected from Probes file: %+v", primary)
+	}
+
+	web := root.Children["TCPChecks"].Children["Web"]
+	if web == nil || web.Probe != "TCPConnect" || web.Params["port"] != "8443" {
+		t.Fatalf("TCPChecks/Web inline port override not projected: %+v", web)
+	}
+
+	if _, ok := root.Children["Speed"]; ok {
+		t.Errorf("Speed folder should be pruned: its only target (speedtestcli) was skipped")
+	}
+	if len(sum.Skipped) != 1 || sum.Skipped[0].Probe != "speedtestcli" {
+		t.Errorf("want 1 speedtestcli skip, got %+v", sum.Skipped)
+	}
+
+	if sum.Step != "300" || sum.Pings != 20 {
+		t.Errorf("database advisory wrong: step=%q pings=%d", sum.Step, sum.Pings)
+	}
+
+	found := false
+	for _, d := range sum.DroppedParams {
+		if d == "binary" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("want probe-level `binary` (shared by every probe, not in any paramMap entry) deduped into DroppedParams, got %+v", sum.DroppedParams)
+	}
+}
+
+func readFixture(t *testing.T, path string) string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading fixture %s: %v", path, err)
+	}
+	return string(b)
 }

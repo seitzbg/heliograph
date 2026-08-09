@@ -1,0 +1,17 @@
+*** Probes ***
+
++ FPing
+binary = /usr/sbin/fping
+offset = 50%
+
++ DNS
+binary = /usr/bin/dig
+lookup = example.com
+pings = 5
+
++ TCPPing
+binary = /usr/bin/echoping
+port = 80
+
++ speedtestcli
+binary = /usr/bin/speedtest-cli

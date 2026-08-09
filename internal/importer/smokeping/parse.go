@@ -7,6 +7,8 @@ package smokeping
 
 import (
 	"bufio"
+	"sort"
+	"strconv"
 	"strings"
 
 	"smokeping-modern/internal/config"
@@ -81,13 +83,19 @@ type SkipNote struct {
 	Path, Probe, Reason string
 }
 
-// Summary reports what buildTree produced: how many targets and folders made
-// it into the tree, a per-modern-probe target count, and anything skipped.
+// Summary reports what buildTree/Parse produced: how many targets and
+// folders made it into the tree, a per-modern-probe target count, anything
+// skipped, the SmokePing params that had no home in the modern probe's param
+// set, and the Database file's advisory step/pings (never emitted into the
+// tree — see Parse).
 type Summary struct {
-	Targets int
-	Folders int
-	ByProbe map[string]int // modern probe kind -> target count
-	Skipped []SkipNote
+	Targets       int
+	Folders       int
+	ByProbe       map[string]int // modern probe kind -> target count
+	Skipped       []SkipNote
+	DroppedParams []string // SmokePing param names with no paramMap entry for their modern probe (deduped, sorted)
+	Step          string   // Database file's `step`, advisory only
+	Pings         int      // Database file's `pings`, advisory only
 }
 
 // probeMap translates a SmokePing probe name to its modern equivalent.
@@ -98,6 +106,16 @@ var probeMap = map[string]string{
 	"FPing6":  "FPing",
 	"DNS":     "DNS",
 	"TCPPing": "TCPConnect",
+}
+
+// smokeTargetInfo carries, for one target node buildTree created, the
+// SmokePing-side data Parse needs later to project probe-level params onto
+// it: the resolved (inherited/overridden) SmokePing probe name, and the
+// target section's own inline fields — so an inline override (e.g. a
+// per-target `port`) can be told apart from the probe's file-level default.
+type smokeTargetInfo struct {
+	probe  string
+	fields map[string]string
 }
 
 // buildTree turns parsed Targets sections into a *config.Node tree (root is
@@ -115,9 +133,14 @@ var probeMap = map[string]string{
 // empty: `*config.Node` legally carries both (config.Monitors emits the
 // monitor AND recurses into children), so "target" and "folder" are not
 // mutually exclusive and pruning must key off Host, not Children.
-func buildTree(secs []Section) (*config.Node, Summary) {
+//
+// The third return value maps each surviving target node back to the
+// SmokePing-side data (resolved probe name + the target section's own
+// inline fields) that Parse needs to project probe-level params onto it.
+func buildTree(secs []Section) (*config.Node, Summary, map[*config.Node]smokeTargetInfo) {
 	sum := Summary{ByProbe: map[string]int{}}
 	root := &config.Node{Children: map[string]*config.Node{}}
+	info := map[*config.Node]smokeTargetInfo{}
 	// stack[i]/names[i]/depths[i]/spProbe[i] are one frame, pushed and popped in
 	// lockstep: stack[i] is the node, names[i] its section name (used only to
 	// rebuild SkipNote.Path via pathOf), depths[i] its Section.Depth (root is a
@@ -166,6 +189,7 @@ func buildTree(secs []Section) (*config.Node, Summary) {
 				node = &config.Node{Probe: modern, Host: host}
 				sum.Targets++
 				sum.ByProbe[modern]++
+				info[node] = smokeTargetInfo{probe: sp, fields: s.Fields}
 			} else {
 				sum.Skipped = append(sum.Skipped, SkipNote{Path: pathOf(names, s.Name), Probe: sp, Reason: "unmapped probe"})
 				// Linked, host-less placeholder: the skipped target itself is
@@ -187,7 +211,7 @@ func buildTree(secs []Section) (*config.Node, Summary) {
 		spProbe = append(spProbe, sp)
 	}
 	pruneEmptyFolders(root)
-	return root, sum
+	return root, sum, info
 }
 
 // linkChild attaches node under parent as name, initializing parent.Children
@@ -226,6 +250,103 @@ func pruneEmptyFolders(n *config.Node) {
 		pruneEmptyFolders(c)
 		if c.Host == "" && len(c.Children) == 0 {
 			delete(n.Children, name)
+		}
+	}
+}
+
+// paramMap translates a SmokePing probe param name to its modern target
+// param name, per modern probe kind (the map key). Only params a target
+// itself can meaningfully carry are listed here — probe-wide settings (e.g.
+// FPing's `binary`, DNS's `pings`) are execution config for the SmokePing
+// probe process, not something a modern target can express, so FPing has no
+// entries at all. A SmokePing param with no entry for the target's modern
+// probe is dropped (recorded on Summary.DroppedParams) rather than silently
+// ignored.
+var paramMap = map[string]map[string]string{
+	"DNS":        {"lookup": "lookup", "recordtype": "recordtype", "port": "port"},
+	"TCPConnect": {"port": "port"},
+	"FPing":      {}, // no target-scoped params carried
+}
+
+// Parse reads the three SmokePing config bodies (Targets, Probes, Database)
+// and returns the modern target tree plus a Summary. It builds the tree
+// (buildTree), then projects target-scoped params carried by each target's
+// SmokePing probe onto the modern target — see paramMap and projectParams —
+// and parses Database only to advise (Summary.Step / Summary.Pings); its
+// values are never emitted into the tree, since a modern install's step and
+// ping-count are process-wide settings, not something an import should
+// silently override.
+func Parse(targetsText, probesText, databaseText string) (*config.Node, Summary, error) {
+	tsecs, err := parseSections(targetsText)
+	if err != nil {
+		return nil, Summary{}, err
+	}
+	root, sum, info := buildTree(tsecs)
+
+	// Index the Probes file's per-probe fields by SmokePing probe name.
+	probeParams := map[string]map[string]string{}
+	if psecs, err := parseSections(probesText); err == nil {
+		for _, s := range psecs {
+			if s.Depth >= 1 {
+				probeParams[s.Name] = s.Fields
+			}
+		}
+	}
+	projectParams(info, probeParams, &sum)
+	sort.Strings(sum.DroppedParams)
+
+	// Database is advisory only (never emitted into the tree).
+	if dsecs, err := parseSections(databaseText); err == nil && len(dsecs) > 0 {
+		sum.Step = dsecs[0].Fields["step"]
+		if p := dsecs[0].Fields["pings"]; p != "" {
+			if n, err := strconv.Atoi(p); err == nil {
+				sum.Pings = n
+			}
+		}
+	}
+	return root, sum, nil
+}
+
+// projectParams stamps each target node's params from paramMap[node.Probe]:
+// for every field on the target's SmokePing probe (from the Probes file,
+// keyed by the SmokePing probe name in smokeTargetInfo.probe — e.g. a
+// TCPPing target's fields come from the Probes file's TCPPing section) plus
+// the target's own inline fields (which override the probe's file-level
+// default for the same key), a key present in paramMap[node.Probe] is copied
+// onto node.Params under its modern name; a non-empty key absent from
+// paramMap[node.Probe] is recorded on sum.DroppedParams instead (`host` and
+// `probe` are never candidates either way — they are structural and already
+// consumed as node.Host / node.Probe). Empty values are skipped either way.
+func projectParams(info map[*config.Node]smokeTargetInfo, probeParams map[string]map[string]string, sum *Summary) {
+	dropped := map[string]bool{}
+	for node, ti := range info {
+		accept, ok := paramMap[node.Probe]
+		if !ok {
+			continue
+		}
+		merged := map[string]string{}
+		for k, v := range probeParams[ti.probe] {
+			merged[k] = v
+		}
+		for k, v := range ti.fields {
+			if k == "host" || k == "probe" {
+				continue
+			}
+			merged[k] = v // inline overrides the probe's file-level default
+		}
+		for k, v := range merged {
+			if v == "" {
+				continue
+			}
+			if modernKey, ok := accept[k]; ok {
+				if node.Params == nil {
+					node.Params = map[string]string{}
+				}
+				node.Params[modernKey] = v
+			} else if !dropped[k] {
+				dropped[k] = true
+				sum.DroppedParams = append(sum.DroppedParams, k)
+			}
 		}
 	}
 }
