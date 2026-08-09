@@ -87,14 +87,15 @@ func TestOptionsValidate(t *testing.T) {
 	}
 	bad := func(f func(*Options)) Options { o := ok; f(&o); return o }
 	cases := map[string]Options{
-		"no hub":        bad(func(o *Options) { o.Hub = "" }),
-		"no key":        bad(func(o *Options) { o.Key = "" }),
-		"zero interval": bad(func(o *Options) { o.Interval = 0 }),
-		"neg timeout":   bad(func(o *Options) { o.Timeout = -1 }),
-		"zero workers":  bad(func(o *Options) { o.Workers = 0 }),
-		"zero buffer":   bad(func(o *Options) { o.BufferCap = 0 }),
-		"zero flushmax": bad(func(o *Options) { o.FlushMax = 0 }),
-		"neg flushmax":  bad(func(o *Options) { o.FlushMax = -1 }),
+		"no hub":                       bad(func(o *Options) { o.Hub = "" }),
+		"no key":                       bad(func(o *Options) { o.Key = "" }),
+		"zero interval":                bad(func(o *Options) { o.Interval = 0 }),
+		"neg timeout":                  bad(func(o *Options) { o.Timeout = -1 }),
+		"zero workers":                 bad(func(o *Options) { o.Workers = 0 }),
+		"zero buffer":                  bad(func(o *Options) { o.BufferCap = 0 }),
+		"zero flushmax":                bad(func(o *Options) { o.FlushMax = 0 }),
+		"neg flushmax":                 bad(func(o *Options) { o.FlushMax = -1 }),
+		"flushmax too big (> hub cap)": bad(func(o *Options) { o.FlushMax = agentwire.MaxResultsRounds + 1 }),
 	}
 	for name, o := range cases {
 		if err := o.Validate(); err == nil {
@@ -357,5 +358,35 @@ func TestPollLoopWarnsOnVantageMismatch(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("expected a warning naming the configured (lax) and assigned (nyc) vantages")
+	}
+}
+
+// CODE_REVIEW #2: a permanently-rejected batch (413) must be DROPPED (counted) so the queue
+// drains, not retried forever which would wedge every newer round behind it.
+func TestFlushLoopDropsPermanentlyRejectedBatch(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusRequestEntityTooLarge) // 413: the hub will never accept it
+	}))
+	defer srv.Close()
+	a := New(Options{Hub: srv.URL, Key: "smk_k_s", Vantage: "nyc",
+		Timeout: time.Second, Workers: 1, BufferCap: 1000, FlushMax: 10})
+	for i := 0; i < 5; i++ {
+		a.buf.add(agentwire.RoundReport{Target: "t1", Pings: 1, RTTs: []float64{0.01}})
+	}
+	close(a.measureDone) // so shutdown()'s awaitMeasureDrain returns immediately on cancel
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { a.flushLoop(ctx); close(done) }()
+	deadline := time.Now().Add(3 * time.Second)
+	for a.buf.len() != 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	<-done
+	if n := a.buf.len(); n != 0 {
+		t.Fatalf("permanently-rejected batch not dropped: %d rounds still buffered", n)
+	}
+	if got := a.buf.rejected(); got < 5 {
+		t.Fatalf("rejected counter = %d, want >= 5", got)
 	}
 }

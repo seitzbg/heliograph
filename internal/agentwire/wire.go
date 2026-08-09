@@ -44,6 +44,15 @@ type ResultsRequest struct {
 	Results []RoundReport `json:"results"`
 }
 
+// Ingest limits shared by the hub (which enforces them) and the agent (which caps its flush
+// batch to MaxResultsRounds). Keeping them in one place stops the agent from ever building a
+// batch the hub is guaranteed to reject, which would otherwise wedge its flush loop retrying
+// the same permanently-rejected batch forever (CODE_REVIEW #2).
+const (
+	MaxResultsRounds = 5000     // max rounds per POST /agent/v1/results
+	MaxResultsBytes  = 16 << 20 // 16 MiB request-body cap
+)
+
 // ResultsResponse is the response body for POST /agent/v1/results.
 type ResultsResponse struct {
 	Accepted int `json:"accepted"`
