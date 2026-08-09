@@ -84,15 +84,24 @@ func importCmd(args []string) int {
 	out := fs.String("out", "", "write config YAML to this file (default: stdout)")
 	apply := fs.Bool("apply", false, "also merge into the DB config fragment (needs --dsn)")
 	dsn := fs.String("dsn", os.Getenv("SMOKED_DSN"), "TimescaleDB DSN (or set SMOKED_DSN)")
-	if err := fs.Parse(rest[1:]); err != nil {
-		return 2
-	}
+	// flag.ExitOnError means Parse never returns a non-nil error (it calls
+	// os.Exit(2) itself on a bad flag), so there's no error path to check here.
+	fs.Parse(rest[1:])
 
-	read := func(name string) string {
+	// Targets is required: a wrong dir or an incomplete/unreadable checkout
+	// must fail loudly rather than silently producing an empty `targets: {}`
+	// fragment. Probes and Database are advisory-only param/step sources —
+	// missing or unreadable is fine, read tolerantly as "".
+	targetsBytes, err := os.ReadFile(filepath.Join(dir, "Targets"))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "import: reading Targets: %v\n", err)
+		return 1
+	}
+	readOptional := func(name string) string {
 		b, _ := os.ReadFile(filepath.Join(dir, name))
 		return string(b)
 	}
-	root, sum, err := smokeping.Parse(read("Targets"), read("Probes"), read("Database"))
+	root, sum, err := smokeping.Parse(string(targetsBytes), readOptional("Probes"), readOptional("Database"))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "import: %v\n", err)
 		return 1
@@ -151,7 +160,7 @@ func applyFragment(dsn string, root *config.Node) int {
 		return 1
 	}
 	if added == 0 {
-		fmt.Printf("nothing to import (%d unchanged)\n", unchanged)
+		fmt.Printf("nothing new to merge (%d top-level branch(es) unchanged)\n", unchanged)
 		return 0
 	}
 	if err := cs.Set(ctx, merged, version); err != nil {
@@ -162,7 +171,7 @@ func applyFragment(dsn string, root *config.Node) int {
 		}
 		return 1
 	}
-	fmt.Printf("imported %d targets → database config v%d (%d unchanged)\n", added, version+1, unchanged)
+	fmt.Printf("merged %d top-level branch(es) → database config v%d (%d unchanged)\n", added, version+1, unchanged)
 	return 0
 }
 

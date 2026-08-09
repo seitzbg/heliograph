@@ -118,6 +118,22 @@ func TestParseSectionsNestingAndFields(t *testing.T) {
 	}
 }
 
+// TestParseSectionsFlushesDanglingContinuationAtEOF covers a field whose
+// value ends in a continuation backslash on the very last line of the file
+// (no trailing newline, no following line to join onto): the accumulated
+// `pending` text must still be flushed into the current section's Fields
+// rather than silently dropped.
+func TestParseSectionsFlushesDanglingContinuationAtEOF(t *testing.T) {
+	in := "*** Targets ***\nkey = val \\"
+	secs, err := parseSections(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := secs[0].Fields["key"]; got != "val" {
+		t.Errorf("dangling EOF continuation not flushed: Fields[%q] = %q, want %q", "key", got, "val")
+	}
+}
+
 func TestParseSectionsCommentsAndContinuation(t *testing.T) {
 	in := "*** Targets ***\n" +
 		"# a comment\n" +
@@ -271,6 +287,47 @@ func TestBuildTreeDuplicateNameKeepsFirstAndSkipsSecond(t *testing.T) {
 	}
 }
 
+// Summary counts must be computed from the FINAL pruned tree, not tallied
+// during buildTree's construction pass: (1) a folder whose only target was
+// skipped is itself pruned and must not be counted, and (2) a mapped target
+// nested under a duplicate-named (and therefore unlinked) sibling never
+// reaches the tree and must not be counted either.
+func TestBuildTreeCountsExcludePrunedFolderAndOrphanedDuplicateDescendant(t *testing.T) {
+	in := "*** Targets ***\n" +
+		"probe = FPing\n" +
+		"+ Speed\n" +
+		"probe = speedtestcli\n" +
+		"++ Download\n" +
+		"host = dummy\n" +
+		"+ dup\n" +
+		"host = first.example\n" +
+		"+ dup\n" +
+		"++ Orphan\n" +
+		"host = orphan.example\n"
+	secs, err := parseSections(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, sum, _ := buildTree(secs)
+
+	if _, ok := root.Children["Speed"]; ok {
+		t.Errorf("Speed (all-skipped) should be pruned: %+v", root.Children)
+	}
+	if sum.Folders != 0 {
+		t.Errorf("want 0 folders (Speed pruned away), got %d", sum.Folders)
+	}
+	d := root.Children["dup"]
+	if d == nil || d.Host != "first.example" {
+		t.Fatalf("first `dup` section should win: %+v", d)
+	}
+	if sum.Targets != 1 {
+		t.Errorf("want 1 target (dup; Orphan is nested under the unlinked duplicate and unreachable), got %d", sum.Targets)
+	}
+	if sum.ByProbe["FPing"] != 1 {
+		t.Errorf("want ByProbe[FPing] = 1, got %+v", sum.ByProbe)
+	}
+}
+
 // Finding 4: a section whose depth jumps more than one level past its
 // predecessor (e.g. "+" then "+++" with no "++" in between) must still nest
 // under the right ancestor — and a following section at that same jumped-to
@@ -328,6 +385,11 @@ func TestParseFixture(t *testing.T) {
 
 	if sum.Targets != 4 {
 		t.Errorf("want 4 targets (leaf, Primary, Secondary, Web; Download skipped), got %d", sum.Targets)
+	}
+	// A, A/B, DNSProbes, TCPChecks survive; Speed (its only target, Download,
+	// was skipped) is pruned and must not be counted.
+	if sum.Folders != 4 {
+		t.Errorf("want 4 folders (A, A/B, DNSProbes, TCPChecks; Speed pruned), got %d", sum.Folders)
 	}
 
 	leaf := root.Children["A"].Children["B"].Children["leaf"]

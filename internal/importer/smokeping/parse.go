@@ -35,6 +35,29 @@ func parseSections(text string) ([]Section, error) {
 	sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
 	lineNo := 0
 	var pending string // accumulates a continued line
+	// processLine handles one fully-joined, trimmed, non-blank/comment/header
+	// logical line: either a `+`-prefixed section header or a key=value
+	// field on the current section (root if curIdx < 0). Shared by the scan
+	// loop and by the post-loop flush of a dangling EOF continuation below.
+	processLine := func(t string) {
+		if strings.HasPrefix(t, "+") {
+			d := 0
+			for d < len(t) && t[d] == '+' {
+				d++
+			}
+			subs = append(subs, Section{Depth: d, Name: strings.TrimSpace(t[d:]), Fields: map[string]string{}, Line: lineNo})
+			curIdx = len(subs) - 1
+			return
+		}
+		if k, v, ok := strings.Cut(t, "="); ok {
+			key, val := strings.TrimSpace(k), strings.TrimSpace(v)
+			if curIdx < 0 {
+				root.Fields[key] = val
+			} else {
+				subs[curIdx].Fields[key] = val
+			}
+		}
+	}
 	for sc.Scan() {
 		lineNo++
 		raw := sc.Text()
@@ -50,26 +73,17 @@ func parseSections(text string) ([]Section, error) {
 			pending = strings.TrimSpace(strings.TrimSuffix(t, "\\")) + " "
 			continue
 		}
-		if strings.HasPrefix(t, "+") {
-			d := 0
-			for d < len(t) && t[d] == '+' {
-				d++
-			}
-			subs = append(subs, Section{Depth: d, Name: strings.TrimSpace(t[d:]), Fields: map[string]string{}, Line: lineNo})
-			curIdx = len(subs) - 1
-			continue
-		}
-		if k, v, ok := strings.Cut(t, "="); ok {
-			key, val := strings.TrimSpace(k), strings.TrimSpace(v)
-			if curIdx < 0 {
-				root.Fields[key] = val
-			} else {
-				subs[curIdx].Fields[key] = val
-			}
-		}
+		processLine(t)
 	}
 	if err := sc.Err(); err != nil {
 		return nil, err
+	}
+	if pending != "" {
+		// A field's value ended in '\' on the file's last line, so there was
+		// no following line to join onto and the scan loop above never got a
+		// chance to process it — flush what was accumulated instead of
+		// silently dropping it.
+		processLine(strings.TrimSpace(pending))
 	}
 	out := make([]Section, 0, len(subs)+1)
 	out = append(out, root) // depth-0 root body always first, then sections in document order
@@ -187,8 +201,6 @@ func buildTree(secs []Section) (*config.Node, Summary, map[*config.Node]smokeTar
 			modern, ok := probeMap[sp]
 			if ok {
 				node = &config.Node{Probe: modern, Host: host}
-				sum.Targets++
-				sum.ByProbe[modern]++
 				info[node] = smokeTargetInfo{probe: sp, fields: s.Fields}
 			} else {
 				sum.Skipped = append(sum.Skipped, SkipNote{Path: pathOf(names, s.Name), Probe: sp, Reason: "unmapped probe"})
@@ -202,7 +214,6 @@ func buildTree(secs []Section) (*config.Node, Summary, map[*config.Node]smokeTar
 			linkChild(parent, s.Name, node)
 		default:
 			node = &config.Node{Children: map[string]*config.Node{}}
-			sum.Folders++
 			linkChild(parent, s.Name, node)
 		}
 		stack = append(stack, node)
@@ -211,7 +222,34 @@ func buildTree(secs []Section) (*config.Node, Summary, map[*config.Node]smokeTar
 		spProbe = append(spProbe, sp)
 	}
 	pruneEmptyFolders(root)
+	countTree(root, &sum)
 	return root, sum, info
+}
+
+// countTree walks the final, pruned tree (root's children and below — root
+// itself is the synthetic Targets-container, not a SmokePing section, and is
+// never counted) and sets sum.Targets, sum.Folders, and sum.ByProbe from
+// what actually survived: a node with a Host is a target (tallied into
+// ByProbe by its modern Probe), a node without one is a folder. Computing
+// these post-prune, from the tree Parse actually emits, rather than
+// incrementing counters as buildTree constructs (and sometimes later prunes
+// or orphans) nodes keeps the summary exact by construction — see buildTree.
+func countTree(root *config.Node, sum *Summary) {
+	sum.Targets, sum.Folders = 0, 0
+	sum.ByProbe = map[string]int{}
+	var walk func(n *config.Node)
+	walk = func(n *config.Node) {
+		for _, c := range n.Children {
+			if c.Host != "" {
+				sum.Targets++
+				sum.ByProbe[c.Probe]++
+			} else {
+				sum.Folders++
+			}
+			walk(c)
+		}
+	}
+	walk(root)
 }
 
 // linkChild attaches node under parent as name, initializing parent.Children

@@ -84,6 +84,22 @@ func TestImportCmdRejectsMissingDir(t *testing.T) {
 	}
 }
 
+// TestImportCmdMissingTargetsFileErrors covers the read path: a dir with no
+// Targets file (wrong dir, or an install directory the caller pointed at by
+// mistake) must fail loudly with a non-zero exit and write nothing, not
+// silently succeed with an empty `targets: {}` fragment.
+func TestImportCmdMissingTargetsFileErrors(t *testing.T) {
+	dir := t.TempDir() // empty: no Targets file (Probes/Database absent too)
+	out := filepath.Join(t.TempDir(), "targets.yaml")
+	code := importCmd([]string{"smokeping", dir, "--out", out})
+	if code == 0 {
+		t.Fatalf("importCmd against a dir with no Targets file = %d, want non-zero", code)
+	}
+	if _, err := os.Stat(out); !os.IsNotExist(err) {
+		t.Errorf("importCmd should not have written %s when Targets is missing", out)
+	}
+}
+
 func writeFile(t *testing.T, path, contents string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
