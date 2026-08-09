@@ -1119,7 +1119,7 @@
     // Probe kinds for the modal's dropdown (fetched once, lazily).
     let cfgProbeKinds = null;
     async function ensureProbeKinds() {
-      if (cfgProbeKinds) return cfgProbeKinds;
+      if (cfgProbeKinds && cfgProbeKinds.length) return cfgProbeKinds;
       try {
         const r = await fetch('/api/probes', { cache: 'no-store' });
         const d = await r.json();
@@ -1178,13 +1178,17 @@
     // concurrency). 200 -> adopt; 400 -> show the validation error in the modal (keep input);
     // 409 -> someone else changed it, reload; 401 -> back to login.
     async function saveDoc(mutated, onOk) {
+      const showErr = (msg) => {
+        if ($('cfgModal').classList.contains('hidden')) window.alert(msg);
+        else $('cfgFormErr').textContent = msg;
+      };
       let r;
       try {
         r = await fetch('/api/admin/config', {
           method: 'PUT', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ version: cfg.version, doc: mutated }),
         });
-      } catch (e) { $('cfgFormErr').textContent = 'Network error.'; return; }
+      } catch (e) { showErr('Network error.'); return; }
       if (r.status === 200) {
         let body = {}; try { body = await r.json(); } catch (e) { /* ignore */ }
         cfg.version = body.version || (cfg.version + 1);
@@ -1198,7 +1202,7 @@
       // 400 or other: show the detail
       let msg = 'HTTP ' + r.status;
       try { msg = (await r.json()).error || msg; } catch (e) { /* keep */ }
-      $('cfgFormErr').textContent = msg;
+      showErr(msg);
     }
     $('cfgAddBtn').addEventListener('click', () => openCfgModal('add'));
     $('cfgParamAdd').addEventListener('click', () => $('cfgParams').appendChild(cfgParamRow('', '')));
