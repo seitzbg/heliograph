@@ -32,6 +32,14 @@ type VantageAdmin interface {
 	Revoke(ctx context.Context, name string) (removed bool, err error)
 }
 
+// ErrConfigInvalid and ErrConfigConflict are the sentinel results a ConfigApply
+// implementation returns; putConfig maps them to 400 and 409. Defined here so the
+// api package needs no dependency on internal/configstore (main translates).
+var (
+	ErrConfigInvalid  = errors.New("config: invalid")
+	ErrConfigConflict = errors.New("config: version conflict")
+)
+
 type Server struct {
 	store  store.Store
 	webDir string
@@ -85,6 +93,12 @@ type Server struct {
 	// vantage) — the post-ingest hook that closes CODE_REVIEW #5 / P2-5. nil = no alerting
 	// on ingest (e.g. pure API tests).
 	OnIngest func(outcomes []scheduler.Outcome)
+	// ConfigGet/ConfigApply enable the DB config CRUD API (GET/PUT /api/admin/config),
+	// gated behind the admin password. Both nil ⇒ the routes are not registered.
+	// ConfigApply validates the candidate config, persists it, and hot-reloads —
+	// returning ErrConfigInvalid (⇒400) or ErrConfigConflict (⇒409).
+	ConfigGet   func() (doc json.RawMessage, version int, err error)
+	ConfigApply func(doc json.RawMessage, expectedVersion int) error
 }
 
 func New(s store.Store, webDir string) *Server { return &Server{store: s, webDir: webDir} }
@@ -147,6 +161,10 @@ func (srv *Server) Routes() *http.ServeMux {
 		mux.HandleFunc("GET /api/admin/vantages", srv.requireAdmin(srv.listVantages))
 		mux.HandleFunc("POST /api/admin/vantages", srv.requireAdmin(srv.addVantage))
 		mux.HandleFunc("DELETE /api/admin/vantages/{name}", srv.requireAdmin(srv.revokeVantage))
+	}
+	if srv.AdminPassword != "" && len(srv.AdminKey) > 0 && srv.ConfigGet != nil && srv.ConfigApply != nil {
+		mux.HandleFunc("GET /api/admin/config", srv.requireAdmin(srv.getConfig))
+		mux.HandleFunc("PUT /api/admin/config", srv.requireAdmin(srv.putConfig))
 	}
 	if srv.VantageAuth != nil && srv.Assignment != nil {
 		mux.HandleFunc("GET /agent/v1/assignment", srv.requireAgent(srv.agentAssignment))
@@ -1044,4 +1062,44 @@ func (srv *Server) revokeVantage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]any{"removed": true, "name": name})
+}
+
+func (srv *Server) getConfig(w http.ResponseWriter, r *http.Request) {
+	doc, version, err := srv.ConfigGet()
+	if err != nil {
+		http.Error(w, `{"error":"store unavailable"}`, http.StatusServiceUnavailable)
+		return
+	}
+	if len(doc) == 0 {
+		doc = json.RawMessage(`{}`)
+	}
+	writeJSON(w, map[string]any{"version": version, "doc": doc})
+}
+
+func (srv *Server) putConfig(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Version int             `json:"version"`
+		Doc     json.RawMessage `json:"doc"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&body); err != nil {
+		http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
+		return
+	}
+	if len(body.Doc) == 0 {
+		http.Error(w, `{"error":"doc required"}`, http.StatusBadRequest)
+		return
+	}
+	err := srv.ConfigApply(body.Doc, body.Version)
+	switch {
+	case err == nil:
+		writeJSON(w, map[string]any{"version": body.Version + 1})
+	case errors.Is(err, ErrConfigInvalid):
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+	case errors.Is(err, ErrConfigConflict):
+		http.Error(w, `{"error":"version conflict"}`, http.StatusConflict)
+	default:
+		http.Error(w, `{"error":"apply failed"}`, http.StatusInternalServerError)
+	}
 }
