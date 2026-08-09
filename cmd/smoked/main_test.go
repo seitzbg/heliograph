@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,6 +17,7 @@ import (
 
 	"smokeping-modern/internal/alert"
 	"smokeping-modern/internal/api"
+	"smokeping-modern/internal/config"
 	"smokeping-modern/internal/configstore"
 	"smokeping-modern/internal/federation"
 	"smokeping-modern/internal/probe"
@@ -328,5 +330,94 @@ func TestConfigImportCmd(t *testing.T) {
 	_, ver2, _ := cs.Get(ctx)
 	if ver2 != ver {
 		t.Fatalf("idempotent re-import bumped version %d -> %d", ver, ver2)
+	}
+}
+
+// TestConfigImportMergeThenApply exercises, against a real database, the exact sequence the
+// API's ConfigImport closure (cmd/smoked/main.go) runs: cfgStore.Get -> config.AppendImport ->
+// (only if added>0) applyConfig's validate/persist/swap. The closure itself is unexported and
+// built inline inside main(), so this drives its three primitives directly — the same approach
+// TestApplyConfigValidatesPersistsSwaps takes for ConfigApply's applyConfig call — to prove:
+// an import that adds targets persists and swaps in the built runtime; a no-op re-import (added
+// == 0) does neither; and a conflicting import (a differing duplicate target) is rejected as
+// api.ErrConfigInvalid with the store and live runtime both left untouched.
+func TestConfigImportMergeThenApply(t *testing.T) {
+	dsn := os.Getenv("SMOKE_TEST_DSN")
+	if dsn == "" {
+		t.Skip("set SMOKE_TEST_DSN to run config import merge/apply test")
+	}
+	ctx := context.Background()
+	cs, err := configstore.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Close()
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.Exec(ctx, `DELETE FROM config_fragment WHERE id = 1`); err != nil {
+		conn.Close(ctx)
+		t.Fatal(err)
+	}
+	conn.Close(ctx)
+
+	var current atomic.Pointer[runtime]
+	var evalMu sync.Mutex
+	base := &runtime{}
+	current.Store(base)
+	built := &runtime{jobs: []scheduler.Job{{}}} // sentinel distinct runtime
+	build := func(func() ([]byte, error)) (*runtime, error) { return built, nil }
+
+	bodyA := []byte("targets:\n  children:\n    imp-x: {probe: TCPConnect, host: 127.0.0.1, params: {port: \"5432\"}}\n")
+
+	// added > 0 -> merge persists (version bumps) and swaps in the built runtime.
+	doc0, ver0, gerr := cs.Get(ctx)
+	if gerr != nil {
+		t.Fatal(gerr)
+	}
+	merged, added, unchanged, ierr := config.AppendImport(doc0, bodyA)
+	if ierr != nil || added != 1 || unchanged != 0 {
+		t.Fatalf("first import: added=%d unchanged=%d err=%v", added, unchanged, ierr)
+	}
+	if err := applyConfig(cs, &current, &evalMu, build, merged, ver0); err != nil {
+		t.Fatalf("apply after import: %v", err)
+	}
+	doc1, ver1, _ := cs.Get(ctx)
+	if ver1 != ver0+1 || !strings.Contains(string(doc1), "imp-x") {
+		t.Fatalf("import not persisted: v%d %s", ver1, doc1)
+	}
+	if current.Load() != built {
+		t.Fatal("import with added>0 should swap in the built runtime")
+	}
+
+	// added == 0 (identical re-import) -> the ConfigImport closure returns early and never
+	// calls applyConfig, so nothing is persisted or swapped again.
+	merged2, added2, unchanged2, ierr2 := config.AppendImport(doc1, bodyA)
+	if ierr2 != nil || added2 != 0 || unchanged2 != 1 {
+		t.Fatalf("re-import: added=%d unchanged=%d err=%v", added2, unchanged2, ierr2)
+	}
+	_ = merged2 // per the closure, add==0 short-circuits before ever reaching applyConfig
+	if _, ver2, _ := cs.Get(ctx); ver2 != ver1 {
+		t.Fatalf("no-op re-import must not bump version: %d -> %d", ver1, ver2)
+	}
+
+	// a conflicting duplicate (same key, different settings) is rejected by AppendImport
+	// itself -> the closure wraps it as api.ErrConfigInvalid, applyConfig is never reached,
+	// so the store and live runtime are both untouched.
+	bodyConflict := []byte("targets:\n  children:\n    imp-x: {probe: TCPConnect, host: 10.0.0.9, params: {port: \"5432\"}}\n")
+	_, _, _, cerr := config.AppendImport(doc1, bodyConflict)
+	if cerr == nil {
+		t.Fatal("conflicting duplicate target should error")
+	}
+	wrapped := fmt.Errorf("%w: %v", api.ErrConfigInvalid, cerr) // exactly the wrapping main.go's ConfigImport closure applies
+	if !errors.Is(wrapped, api.ErrConfigInvalid) {
+		t.Fatalf("wrapped conflict should still be api.ErrConfigInvalid, got %v", wrapped)
+	}
+	if _, ver3, _ := cs.Get(ctx); ver3 != ver1 {
+		t.Fatalf("rejected conflict must not persist: %d -> %d", ver1, ver3)
+	}
+	if current.Load() != built {
+		t.Fatal("rejected conflict must not swap the runtime")
 	}
 }

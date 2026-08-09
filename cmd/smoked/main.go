@@ -374,6 +374,33 @@ func main() {
 					}
 					return applyConfig(cfgStore, &current, &evalMu, build, doc, expectedVersion)
 				}
+				// ConfigImport merges a YAML/JSON config's target branches into the current DB
+				// fragment (config.AppendImport; globals aren't imported) and, only if it actually
+				// added targets, reuses applyConfig's validate->persist->swap under the same
+				// applyMu as ConfigApply/the SIGHUP reload above. A merge with nothing new to add
+				// is a no-op — no pointless persist/rebuild/swap.
+				srv.ConfigImport = func(body []byte) (added, unchanged, version int, err error) {
+					applyMu.Lock()
+					defer applyMu.Unlock()
+					doc, ver, gerr := cfgStore.Get(context.Background())
+					if gerr != nil {
+						return 0, 0, 0, gerr
+					}
+					merged, add, unch, ierr := config.AppendImport(doc, body)
+					if ierr != nil {
+						return 0, 0, ver, fmt.Errorf("%w: %v", api.ErrConfigInvalid, ierr)
+					}
+					if add == 0 {
+						return 0, unch, ver, nil // nothing to apply
+					}
+					build := func(getter func() ([]byte, error)) (*runtime, error) {
+						return buildRuntime(*configPath, *pings, *step, *timeout, notifiers, getter)
+					}
+					if aerr := applyConfig(cfgStore, &current, &evalMu, build, merged, ver); aerr != nil {
+						return 0, 0, ver, aerr // applyConfig already returns api.ErrConfig* sentinels
+					}
+					return add, unch, ver + 1, nil
+				}
 			}
 		}
 		// Defensive timeouts so a slow or idle client can't tie up a connection
