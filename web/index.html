@@ -210,6 +210,7 @@
         <button id="tabOverview" role="tab" aria-selected="true">Overview</button>
         <button id="tabGraphs" role="tab" aria-selected="false">Graphs</button>
         <button id="tabVantages" role="tab" aria-selected="false">Vantages</button>
+        <button id="tabConfig" role="tab" aria-selected="false">Config</button>
       </div>
     </div>
     <div class="controls">
@@ -332,6 +333,41 @@
           <button id="vantRevealClose" class="vadmin-btn">Done</button>
         </div>
       </div>
+    </div>
+  </section>
+
+  <!-- CONFIG (DB-backed targets) -->
+  <section id="viewConfig" class="hidden">
+    <h2 class="vadmin-title">Config</h2>
+    <p class="lede">Targets stored in the database, merged live with your YAML config. Requires the admin password. YAML-defined targets are managed in files, not here.</p>
+
+    <div id="cfgDisabled" class="panel vadmin-note hidden">
+      Config management is disabled. It requires a database (<code>-dsn</code>), a config file
+      (<code>-config</code>), and <code>SMOKED_ADMIN_PASSWORD</code> on the hub.
+    </div>
+
+    <form id="cfgLogin" class="panel vadmin-row hidden" autocomplete="off">
+      <label class="vadmin-lbl" for="cfgPass">Admin password</label>
+      <input id="cfgPass" type="password" class="vadmin-input" autocomplete="current-password">
+      <button type="submit" class="vadmin-btn">Sign in</button>
+      <span id="cfgLoginErr" class="vadmin-err" role="alert"></span>
+    </form>
+
+    <div id="cfgList" class="hidden">
+      <div class="panel">
+        <div class="vadmin-reveal-actions" style="justify-content:space-between; align-items:baseline; margin-bottom:8px">
+          <span class="vadmin-lbl">DB targets <span id="cfgVersion" class="vadmin-err" style="color:var(--ink-faint)"></span></span>
+          <button id="cfgAddBtn" class="vadmin-btn" type="button">+ Add target</button>
+        </div>
+        <table class="vadmin-table" aria-label="DB targets">
+          <thead><tr><th>Name</th><th>Probe</th><th>Host</th><th>Details</th><th></th></tr></thead>
+          <tbody id="cfgRows"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div id="cfgError" class="panel vadmin-note hidden">
+      Couldn't reach the admin API. <button id="cfgRetry" class="vadmin-btn" type="button">Retry</button>
     </div>
   </section>
 

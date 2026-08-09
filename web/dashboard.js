@@ -41,6 +41,7 @@
       return path ? { view: 'graphs', path } : { view: 'graphs' };
     }
     if (h === 'vantages') return { view: 'vantages' };
+    if (h === 'config') return { view: 'config' };
     return { view: 'overview' };
   }
 
@@ -1045,13 +1046,77 @@
       }
     });
 
+    // ---- Config admin panel (DB-backed targets): thin client over /api/admin/config.
+    // Mirrors the Vantages panel above — the first GET decides the mode (disabled /
+    // login / list / error) via Dash.adminMode. ----
+    let cfg = { version: 0, doc: { targets: { children: {} } } };
+    function cShow(id) {
+      for (const s of ['cfgDisabled', 'cfgLogin', 'cfgList', 'cfgError']) $(s).classList.toggle('hidden', s !== id);
+    }
+    function renderConfigRows() {
+      const rows = Dash.listTargets(cfg.doc);
+      $('cfgVersion').textContent = 'v' + cfg.version;
+      if (!rows.length) { $('cfgRows').innerHTML = '<tr><td colspan="5" class="vadmin-empty">No DB targets yet — add one.</td></tr>'; return; }
+      $('cfgRows').innerHTML = rows.map((r) => {
+        const nm = esc(r.name);
+        if (r.isFolder) {
+          return '<tr><td>' + nm + '</td><td colspan="3" style="color:var(--ink-faint)">folder — managed via files</td><td></td></tr>';
+        }
+        const n = r.node || {};
+        const details = esc([n.params ? Object.entries(n.params).map(([k, v]) => k + '=' + v).join(' ') : '',
+          (n.vantages && n.vantages.length) ? '@' + n.vantages.join(',') : ''].filter(Boolean).join('  '));
+        return '<tr><td>' + nm + '</td><td>' + esc(n.probe || '') + '</td><td>' + esc(n.host || '') + '</td><td style="color:var(--ink-soft)">' + details +
+          '</td><td style="text-align:right; white-space:nowrap">' +
+          '<button class="vadmin-btn" data-edit="' + nm + '">Edit</button>' +
+          '<button class="vadmin-btn" data-remove="' + nm + '">Remove</button></td></tr>';
+      }).join('');
+    }
+    async function renderConfig(opts) {
+      const afterLogin = !!(opts && opts.afterLogin);
+      let r;
+      try { r = await fetch('/api/admin/config', { cache: 'no-store' }); }
+      catch (e) { cShow('cfgError'); return; }
+      const mode = Dash.adminMode(r.status);
+      if (mode === 'disabled') { cShow('cfgDisabled'); return; }
+      if (mode === 'error') { cShow('cfgError'); return; }
+      if (mode === 'login') {
+        cShow('cfgLogin');
+        $('cfgLoginErr').textContent = afterLogin
+          ? "Login didn't persist — the admin session needs a secure context (HTTPS via the proxy, or localhost). You are on " + location.origin + '.'
+          : '';
+        if (!afterLogin) $('cfgPass').focus();
+        return;
+      }
+      let data;
+      try { data = await r.json(); } catch (e) { cShow('cfgError'); return; }
+      cfg.version = data.version || 0;
+      cfg.doc = (data.doc && typeof data.doc === 'object') ? data.doc : { targets: { children: {} } };
+      renderConfigRows();
+      cShow('cfgList');
+    }
+    $('cfgRetry').addEventListener('click', () => renderConfig());
+    $('cfgLogin').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      $('cfgLoginErr').textContent = '';
+      const pass = $('cfgPass').value;
+      $('cfgPass').value = '';
+      let lr;
+      try {
+        lr = await fetch('/api/admin/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: pass }) });
+      } catch (err) { $('cfgLoginErr').textContent = 'Network error.'; return; }
+      if (lr.status === 401) { $('cfgLoginErr').textContent = 'Invalid password.'; return; }
+      if (lr.status !== 204) { $('cfgLoginErr').textContent = 'Login failed (HTTP ' + lr.status + ').'; return; }
+      renderConfig({ afterLogin: true });
+    });
+
     // ---- routing ----
-    function show(id) { for (const v of ['viewOverview', 'viewGraphs', 'viewStack', 'viewZoom', 'viewVantages']) $(v).classList.toggle('hidden', v !== id); }
+    function show(id) { for (const v of ['viewOverview', 'viewGraphs', 'viewStack', 'viewZoom', 'viewVantages', 'viewConfig']) $(v).classList.toggle('hidden', v !== id); }
     function setTabs(view) {
       const g = (view === 'graphs' || view === 'stack' || view === 'zoom');
       $('tabOverview').setAttribute('aria-selected', String(view === 'overview'));
       $('tabGraphs').setAttribute('aria-selected', String(g));
       $('tabVantages').setAttribute('aria-selected', String(view === 'vantages'));
+      $('tabConfig').setAttribute('aria-selected', String(view === 'config'));
     }
     function currentView() { return parseRoute(location.hash).view; }
     function route() {
@@ -1063,6 +1128,7 @@
       else if (r.view === 'stack') { setTabs('stack'); show('viewStack'); renderStack(r.name); }
       else if (r.view === 'zoom') { setTabs('zoom'); show('viewZoom'); renderZoom(r.name, r.range); }
       else if (r.view === 'vantages') { setTabs('vantages'); show('viewVantages'); renderVantages(); }
+      else if (r.view === 'config') { setTabs('config'); show('viewConfig'); renderConfig(); }
       $('statusText').textContent = (r.view === 'stack' || r.view === 'zoom') ? r.name : $('statusText').textContent;
       window.scrollTo(0, 0);
     }
@@ -1073,6 +1139,7 @@
     $('tabOverview').addEventListener('click', () => nav('overview'));
     $('tabGraphs').addEventListener('click', () => nav('graphs'));
     $('tabVantages').addEventListener('click', () => nav('vantages'));
+    $('tabConfig').addEventListener('click', () => nav('config'));
     $('backStack').addEventListener('click', () => { if (history.length > 1) history.back(); else nav('graphs'); });
     $('backZoom').addEventListener('click', () => { if (history.length > 1) history.back(); else nav('target=' + enc(curTarget || '')); });
     $('worstSeg').addEventListener('click', (e) => { const b = e.target.closest('button'); if (!b) return; worstBy = b.dataset.by; document.querySelectorAll('#worstSeg button').forEach((x) => x.setAttribute('aria-pressed', String(x === b))); refreshWorst(); });
