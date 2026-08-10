@@ -12,6 +12,7 @@ pings = 5
 + TCPPing
 binary = /usr/bin/echoping
 port = 80
+pings = 8
 
 + speedtestcli
 binary = /usr/bin/speedtest-cli

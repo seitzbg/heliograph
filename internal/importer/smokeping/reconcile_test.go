@@ -8,12 +8,18 @@ import (
 
 // TestTargetsResolvesPingsFromFixture drives Targets end-to-end off the
 // slice-A synthetic fixture and asserts the SmokePing pings precedence
-// (target inline > Probes-file probe > Database default) for two of its four
+// (target inline > Probes-file probe > Database default) for all four of its
 // leaves: the FPing leaf (A/B/leaf) has no probe- or target-level pings
 // override anywhere, so it falls all the way through to the Database file's
 // default (20); the DNS targets (DNSProbes/Primary, DNSProbes/Secondary)
 // inherit the DNSProbes section's `probe = DNS`, and the Probes file's DNS
-// section sets pings=5, overriding the Database default.
+// section sets pings=5, overriding the Database default; the TCPPing target
+// (TCPChecks/Web) resolves via the SmokePing probe name `TCPPing` (not the
+// modern `TCPConnect` the target itself is mapped to) to the Probes file's
+// TCPPing pings=8 — distinct from both the DNS override (5) and the Database
+// default (20) specifically so a regression that looked up pings under the
+// wrong (modern) probe name would fail this assertion instead of silently
+// landing on the Database default by coincidence.
 func TestTargetsResolvesPingsFromFixture(t *testing.T) {
 	dir := "testdata/smokeping"
 	targets := readFixture(t, filepath.Join(dir, "Targets"))
@@ -58,8 +64,8 @@ func TestTargetsResolvesPingsFromFixture(t *testing.T) {
 	}
 
 	web, ok := by["TCPChecks/Web"]
-	if !ok || web.Probe != "TCPConnect" || web.Pings != 20 {
-		t.Errorf("TCPChecks/Web: want Probe=TCPConnect Pings=20 (Database default, TCPPing has no Probes-file pings), got %+v", web)
+	if !ok || web.Probe != "TCPConnect" || web.Pings != 8 {
+		t.Errorf("TCPChecks/Web: want Probe=TCPConnect Pings=8 (Probes-file TCPPing override, looked up by the SmokePing probe name not the modern one), got %+v", web)
 	}
 }
 
@@ -158,6 +164,44 @@ func TestReconcileOrphansSorted(t *testing.T) {
 		if rec.Orphans[i] != w {
 			t.Errorf("Orphans[%d] = %q, want %q (full: %+v)", i, rec.Orphans[i], w, rec.Orphans)
 		}
+	}
+}
+
+// TestReconcileConfigOnlyOnlyForNotExist pins the legitimate ConfigOnly case
+// (the .rrd genuinely doesn't exist) so a future change can't widen it back
+// out to "any Stat error" without failing a test.
+func TestReconcileConfigOnlyOnlyForNotExist(t *testing.T) {
+	dataDir := t.TempDir()
+	targets := []ImportTarget{{Name: "A/B/leaf", Host: "10.0.0.1", Probe: "FPing", Pings: 20}}
+
+	rec, err := Reconcile(targets, dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rec.ConfigOnly) != 1 || rec.ConfigOnly[0].Name != "A/B/leaf" {
+		t.Errorf("want A/B/leaf ConfigOnly (its .rrd genuinely doesn't exist), got %+v", rec)
+	}
+}
+
+// TestReconcileHardStatErrorIsNotConfigOnly is a regression test for a
+// review finding: Reconcile must not fold every os.Stat failure into
+// ConfigOnly, only fs.ErrNotExist — anything else (permission denied, a
+// path component that isn't a directory, ...) has to come back as a hard
+// error, since silently reporting a target "history-less" when its .rrd may
+// actually exist but was merely unreadable would drop real history with no
+// signal anything went wrong. Simulated portably by making "A" a regular
+// file: Stat("A/B.rrd") then fails with ENOTDIR, not ENOENT, so
+// errors.Is(err, fs.ErrNotExist) is false and Reconcile must propagate it.
+func TestReconcileHardStatErrorIsNotConfigOnly(t *testing.T) {
+	dataDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dataDir, "A"), []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	targets := []ImportTarget{{Name: "A/B", Host: "10.0.0.1", Probe: "FPing", Pings: 20}}
+
+	_, err := Reconcile(targets, dataDir)
+	if err == nil {
+		t.Fatal("want a hard error when Stat fails for a reason other than not-exist, got nil")
 	}
 }
 

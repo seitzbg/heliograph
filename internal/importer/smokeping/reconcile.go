@@ -1,6 +1,8 @@
 package smokeping
 
 import (
+	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -23,16 +25,26 @@ type Reconciliation struct {
 // Reconcile classifies each target by whether dataDir/<Name>.rrd exists
 // (Matched vs ConfigOnly), then walks dataDir for every *.rrd file and
 // reports any whose stripped relative path isn't one of the targets' Names
-// as an Orphan.
+// as an Orphan. A target's .rrd genuinely not existing (fs.ErrNotExist) is
+// the legitimate ConfigOnly case; any other Stat failure (permission denied,
+// a path component that isn't a directory, a transient I/O error, ...) is
+// returned as a hard error instead of being folded into ConfigOnly — for a
+// migration tool, silently reporting a target "history-less" when its .rrd
+// may well exist but was merely unreadable would drop real history without
+// any signal that anything went wrong.
 func Reconcile(targets []ImportTarget, dataDir string) (Reconciliation, error) {
 	var rec Reconciliation
 	names := make(map[string]bool, len(targets))
 	for _, t := range targets {
 		names[t.Name] = true
-		if _, err := os.Stat(filepath.Join(dataDir, t.Name+".rrd")); err == nil {
+		_, err := os.Stat(filepath.Join(dataDir, t.Name+".rrd"))
+		switch {
+		case err == nil:
 			rec.Matched = append(rec.Matched, t)
-		} else {
+		case errors.Is(err, fs.ErrNotExist):
 			rec.ConfigOnly = append(rec.ConfigOnly, t)
+		default:
+			return Reconciliation{}, fmt.Errorf("stat %s: %w", t.Name+".rrd", err)
 		}
 	}
 
