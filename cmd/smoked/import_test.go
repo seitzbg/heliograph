@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"smokeping-modern/internal/config"
+	"smokeping-modern/internal/configstore"
 	"smokeping-modern/internal/store/pgstore"
 )
 
@@ -113,6 +114,133 @@ func writeFile(t *testing.T, path, contents string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// resetConfigFragmentRow clears the shared config_fragment row (id=1) so a DB-gated test
+// starts from a known-empty DB config, mirroring the reset TestConfigImportCmd (main_test.go)
+// performs before exercising configCmd against the same table.
+func resetConfigFragmentRow(t *testing.T, dsn string) {
+	t.Helper()
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if _, err := pool.Exec(ctx, `DELETE FROM config_fragment WHERE id = 1`); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// applyFragment (behind `smoked import smokeping <dir> --apply`) merges via
+// config.AppendImport, which is now deliberately context-free (Finding #6): it can't tell
+// whether a leaf's probe/params/alerts resolve once inherited from the real base config. The
+// optional --config DIR effective-validates the merged fragment against that base config
+// (LoadPath + AppendDBFragment + Monitors(), the same composition buildRuntime performs)
+// before persisting, so an operator gets an immediate reject instead of a silently-stored
+// fragment the daemon only discovers is broken at its next reload.
+
+// --config given, fragment relies on the base's tree-wide probe: accepted and persisted.
+func TestApplyFragmentConfigFlagAcceptsInheritedFragment(t *testing.T) {
+	dsn := os.Getenv("SMOKE_TEST_DSN")
+	if dsn == "" {
+		t.Skip("set SMOKE_TEST_DSN to run applyFragment --config test")
+	}
+	ctx := context.Background()
+	cs, err := configstore.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Close()
+	resetConfigFragmentRow(t, dsn)
+	if _, _, e := cs.Get(ctx); e != nil {
+		t.Fatal(e)
+	}
+
+	baseDir := t.TempDir()
+	writeFile(t, filepath.Join(baseDir, "default.yaml"), "targets:\n  probe: TCPConnect\n")
+
+	root := &config.Node{Children: map[string]*config.Node{
+		"af-inh": {Host: "127.0.0.1"}, // no probe: relies on the base's tree-wide probe
+	}}
+	if rc := applyFragment(dsn, root, baseDir); rc != 0 {
+		t.Fatalf("applyFragment --config on an inheriting fragment: rc=%d, want 0", rc)
+	}
+	doc, ver, _ := cs.Get(ctx)
+	if ver < 1 || !strings.Contains(string(doc), "af-inh") {
+		t.Fatalf("inherited fragment not persisted: v%d %s", ver, doc)
+	}
+}
+
+// --config given, fragment has no probe anywhere (base sets no tree-wide probe either):
+// rejected, non-zero exit, nothing persisted.
+func TestApplyFragmentConfigFlagRejectsInvalid(t *testing.T) {
+	dsn := os.Getenv("SMOKE_TEST_DSN")
+	if dsn == "" {
+		t.Skip("set SMOKE_TEST_DSN to run applyFragment --config test")
+	}
+	ctx := context.Background()
+	cs, err := configstore.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Close()
+	resetConfigFragmentRow(t, dsn)
+	_, verBefore, e := cs.Get(ctx)
+	if e != nil {
+		t.Fatal(e)
+	}
+
+	baseDir := t.TempDir()
+	writeFile(t, filepath.Join(baseDir, "default.yaml"), "targets:\n  children: {}\n")
+
+	root := &config.Node{Children: map[string]*config.Node{
+		"af-bad": {Host: "127.0.0.1"}, // no probe, nothing to inherit either
+	}}
+	rc := applyFragment(dsn, root, baseDir)
+	if rc == 0 {
+		t.Fatal("applyFragment --config should reject a genuinely-invalid fragment, got rc=0")
+	}
+	doc, verAfter, _ := cs.Get(ctx)
+	if verAfter != verBefore || strings.Contains(string(doc), "af-bad") {
+		t.Fatalf("rejected fragment must not persist: v%d -> v%d, doc=%s", verBefore, verAfter, doc)
+	}
+}
+
+// --config omitted: only AppendImport's context-free checks run, so an inheriting fragment is
+// accepted and persisted without a base config to check against; a note explains it's
+// validated at the daemon's next reload instead.
+func TestApplyFragmentWithoutConfigFlagAcceptsInheritedFragment(t *testing.T) {
+	dsn := os.Getenv("SMOKE_TEST_DSN")
+	if dsn == "" {
+		t.Skip("set SMOKE_TEST_DSN to run applyFragment test")
+	}
+	ctx := context.Background()
+	cs, err := configstore.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Close()
+	resetConfigFragmentRow(t, dsn)
+	if _, _, e := cs.Get(ctx); e != nil {
+		t.Fatal(e)
+	}
+
+	root := &config.Node{Children: map[string]*config.Node{
+		"af-noconf": {Host: "127.0.0.1"},
+	}}
+	var rc int
+	out := captureStdout(t, func() { rc = applyFragment(dsn, root, "") })
+	if rc != 0 {
+		t.Fatalf("applyFragment without --config should accept a context-free-valid fragment: rc=%d", rc)
+	}
+	if !strings.Contains(out, "next reload") {
+		t.Fatalf("expected a note about daemon-reload validation, got:\n%s", out)
+	}
+	doc, ver, _ := cs.Get(ctx)
+	if ver < 1 || !strings.Contains(string(doc), "af-noconf") {
+		t.Fatalf("fragment not persisted: v%d %s", ver, doc)
 	}
 }
 

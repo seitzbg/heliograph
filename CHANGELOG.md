@@ -178,6 +178,20 @@ breaking changes.
   instead of a moving `latest-pg16` tag.
 
 ### Fixed
+- **Config import rejected valid fragments that relied on base-YAML inheritance.**
+  `config.AppendImport` used to schema-validate the DB fragment in isolation — building a bare
+  target tree and calling `Monitors()` on it *before* the fragment was ever composed with
+  `default.yaml`. A target that inherited its `probe` (or referenced an alert) from the tree-wide
+  YAML config, rather than setting it on the fragment itself, was wrongly rejected with e.g.
+  `no probe set (and none inherited)`, even though the identical branch in a `conf.d/*.yaml`
+  fragment resolves fine. `AppendImport` now does context-free validation only (the structural
+  `database`/`probes`/`alerts` rejection, the additive merge, and the duplicate/idempotency
+  logic) — schema validation happens once the fragment is actually composed with the base config,
+  which the API's `ConfigImport` closure already does on every apply (`buildRuntime` →
+  `AppendDBFragment` → `Monitors()`). `smoked config import` and `smoked import smokeping --apply`
+  gained an optional `-config`/`--config DIR` flag to effective-validate the merged fragment
+  against that base config before persisting; without it, an invalid fragment is now caught (and
+  logged) at the daemon's next reload instead of being validated too strictly up front.
 - **Config reload race.** A concurrent SIGHUP reload and an API config-apply could leave the live
   runtime out of sync with the persisted config (a slow reload build swapping a stale runtime over
   a completed apply). Both writers now serialize the whole read/build/swap under one mutex.

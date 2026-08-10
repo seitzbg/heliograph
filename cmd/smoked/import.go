@@ -74,7 +74,8 @@ func stripNulls(v any) {
 // importCmd implements `smoked import smokeping <dir> [--out FILE] [--apply] [--dsn DSN]
 // [--report] [--history] [--rrdtool PATH] [--data DIR]`.
 func importCmd(args []string) int {
-	const usage = "usage: smoked import smokeping <dir> [--out FILE] [--apply] [--dsn DSN] [--report] [--history] [--rrdtool PATH] [--data DIR]"
+	const usage = "usage: smoked import smokeping <dir> [--out FILE] [--apply] [--dsn DSN] [--config DIR] " +
+		"[--report] [--history] [--rrdtool PATH] [--data DIR]"
 	if len(args) < 1 || args[0] != "smokeping" {
 		fmt.Fprintln(os.Stderr, usage)
 		return 2
@@ -89,6 +90,9 @@ func importCmd(args []string) int {
 	out := fs.String("out", "", "write config YAML to this file (default: stdout)")
 	apply := fs.Bool("apply", false, "also merge into the DB config fragment (needs --dsn)")
 	dsn := fs.String("dsn", os.Getenv("SMOKED_DSN"), "TimescaleDB DSN (or set SMOKED_DSN)")
+	configDir := fs.String("config", "", "with --apply, effective-validate the merged fragment against this base "+
+		"config (default.yaml + conf.d) before persisting, instead of relying on the daemon's next reload to "+
+		"catch a leaf whose inherited probe/params/alerts don't resolve")
 	report := fs.Bool("report", false, "reconcile config targets against the RRD data dir and print counts (dry run, no writes)")
 	history := fs.Bool("history", false, "backfill each matched target's RRD history into samples/aggregates (needs --dsn/SMOKED_DSN and rrdtool)")
 	rrdtoolFlag := fs.String("rrdtool", "", "path to the rrdtool binary (default: PATH lookup)")
@@ -146,7 +150,7 @@ func importCmd(args []string) int {
 			fmt.Fprintln(os.Stderr, "import: --apply requires --dsn (or SMOKED_DSN)")
 			return 2
 		}
-		if code := applyFragment(*dsn, root); code != 0 {
+		if code := applyFragment(*dsn, root, *configDir); code != 0 {
 			return code
 		}
 	}
@@ -155,8 +159,13 @@ func importCmd(args []string) int {
 
 // applyFragment merges root's targets into the DB config fragment, mirroring configCmd's
 // `config import` flow: read the current fragment, append (idempotent — an unchanged
-// re-import reports 0 added), write it back under optimistic concurrency.
-func applyFragment(dsn string, root *config.Node) int {
+// re-import reports 0 added), write it back under optimistic concurrency. config.AppendImport
+// only performs context-free validation (Finding #6) — a leaf relying on an inherited
+// probe/params/alerts can't be judged in isolation — so when configDir is non-empty, the
+// merged fragment is additionally effective-validated against that base config (the same
+// composition buildRuntime performs) before it's persisted; a genuinely-invalid fragment is
+// rejected here instead of only being caught (and logged) at the daemon's next reload.
+func applyFragment(dsn string, root *config.Node, configDir string) int {
 	importBytes, err := renderFragmentJSON(root)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "import: %v\n", err)
@@ -182,6 +191,15 @@ func applyFragment(dsn string, root *config.Node) int {
 	if added == 0 {
 		fmt.Printf("nothing new to merge (%d top-level branch(es) unchanged)\n", unchanged)
 		return 0
+	}
+	if configDir != "" {
+		if err := effectiveValidate(configDir, merged); err != nil {
+			fmt.Fprintf(os.Stderr, "import: effective validation against %s failed: %v\n", configDir, err)
+			return 1
+		}
+	} else {
+		fmt.Println("note: fragment not checked against a running config (--config not given); an invalid")
+		fmt.Println("      fragment is rejected and logged at the daemon's next reload, not silently applied.")
 	}
 	if err := cs.Set(ctx, merged, version); err != nil {
 		if errors.Is(err, configstore.ErrConflict) {

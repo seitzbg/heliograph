@@ -574,18 +574,23 @@ func vantageCmd(args []string) int {
 // target branches into the database config fragment (idempotent; a differing existing target is a
 // conflict). Globals (database/probes/alerts) are not imported. -dsn defaults to SMOKED_DSN.
 func configCmd(args []string) int {
+	const usage = "usage: smoked config import <file> [-dsn DSN] [-config DIR]"
 	if len(args) < 1 || args[0] != "import" {
-		fmt.Fprintln(os.Stderr, "usage: smoked config import <file> [-dsn DSN]")
+		fmt.Fprintln(os.Stderr, usage)
 		return 2
 	}
 	rest := args[1:]
 	if len(rest) == 0 || strings.HasPrefix(rest[0], "-") {
-		fmt.Fprintln(os.Stderr, "usage: smoked config import <file> [-dsn DSN]")
+		fmt.Fprintln(os.Stderr, usage)
 		return 2
 	}
 	file := rest[0]
 	fs := flag.NewFlagSet("config import", flag.ExitOnError)
 	dsn := fs.String("dsn", os.Getenv("SMOKED_DSN"), "TimescaleDB DSN (or set SMOKED_DSN)")
+	configDir := fs.String("config", "", "effective-validate the merged fragment against this base config "+
+		"(default.yaml + conf.d) before persisting; a target relying on inherited probe/params/alerts is checked "+
+		"against the real tree instead of AppendImport's context-free checks alone. If omitted, an invalid "+
+		"fragment is only caught (and logged) at the daemon's next reload")
 	if err := fs.Parse(rest[1:]); err != nil {
 		return 2
 	}
@@ -619,6 +624,15 @@ func configCmd(args []string) int {
 		fmt.Printf("nothing to import (%d unchanged)\n", unchanged)
 		return 0
 	}
+	if *configDir != "" {
+		if err := effectiveValidate(*configDir, merged); err != nil {
+			fmt.Fprintf(os.Stderr, "config import: effective validation against %s failed: %v\n", *configDir, err)
+			return 1
+		}
+	} else {
+		fmt.Println("note: fragment not checked against a running config (-config not given); an invalid")
+		fmt.Println("      fragment is rejected and logged at the daemon's next reload, not silently applied.")
+	}
 	if err := cs.Set(ctx, merged, version); err != nil {
 		fmt.Fprintf(os.Stderr, "config import: %v (re-run to retry)\n", err)
 		return 1
@@ -628,6 +642,27 @@ func configCmd(args []string) int {
 	fmt.Println("note: a target name that also exists in the running YAML config is a duplicate the")
 	fmt.Println("      daemon rejects on its next reload — rename or remove it from one source.")
 	return 0
+}
+
+// effectiveValidate composes a candidate DB config fragment with the base YAML config at
+// configDir (default.yaml + conf.d, via LoadPath) and validates the merged result via
+// Monitors() — the same composition buildRuntime performs at startup, SIGHUP reload, and every
+// API config apply. AppendImport's own checks are deliberately context-free (Finding #6): a
+// fragment leaf relying on inherited probe/params/alerts can't be judged without the real base
+// config, so this is what actually catches a leaf that still doesn't resolve — no probe
+// anywhere, an unknown probe kind, an undefined alert reference, a bad param — once composed.
+func effectiveValidate(configDir string, fragment []byte) error {
+	base, err := config.LoadPath(configDir)
+	if err != nil {
+		return fmt.Errorf("loading %s: %w", configDir, err)
+	}
+	if err := config.AppendDBFragment(base, fragment); err != nil {
+		return err
+	}
+	if _, err := base.Monitors(); err != nil {
+		return err
+	}
+	return nil
 }
 
 // setupLogger installs the process-wide structured logger for operational events

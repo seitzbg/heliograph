@@ -318,9 +318,12 @@ func nodesEqual(a, b *Node) (bool, error) {
 // AppendImport merges the target branches from importBytes (a YAML or JSON config) into the DB
 // config fragment dbDoc, idempotently. For each imported branch: new -> added; identical to the
 // existing DB entry (same canonical JSON) -> skipped; different -> a hard conflict error with
-// NOTHING merged (atomic). Globals in the import are rejected (target branches only). The merged
-// fragment is schema-validated. Returns the merged doc (JSON) plus counts; on any error nothing
-// is written.
+// NOTHING merged (atomic). Globals in the import are rejected (target branches only, via
+// validateFragment). Validation here is deliberately CONTEXT-FREE: it never sees the real
+// default.yaml, so a leaf that relies on an inherited probe/params/alerts is accepted, not
+// schema-checked — that only happens once the fragment is composed with the base config (see
+// AppendDBFragment + Monitors(), driven by buildRuntime and the CLI's optional -config flag).
+// Returns the merged doc (JSON) plus counts; on any error nothing is written.
 func AppendImport(dbDoc, importBytes []byte) (merged json.RawMessage, added, unchanged int, err error) {
 	base := &Config{Targets: &Node{Children: map[string]*Node{}}}
 	if len(bytes.TrimSpace(dbDoc)) > 0 {
@@ -371,22 +374,19 @@ func AppendImport(dbDoc, importBytes []byte) (merged json.RawMessage, added, unc
 	for _, k := range toAdd {
 		base.Targets.Children[k] = imp.Targets.Children[k]
 	}
-	// Schema-validate the merged result so an invalid import never persists. dbDoc is always a
-	// target-only fragment (the output of a prior AppendImport, or empty) and importBytes just
-	// passed validateFragment above, so base.Database is zero here; seed the same defaults Parse
-	// applies to a full config purely so Monitors() has an effective pings/step to validate
-	// ranges against. The real values live in default.yaml and are orthogonal to what this import
-	// is checking — a leaf that doesn't set its own pings/step is meant to inherit them at load
-	// time, same as any other target-branch fragment (conf.d, AppendDBFragment).
-	if base.Database.Pings == 0 {
-		base.Database.Pings = 20
-	}
-	if base.Database.Step == 0 {
-		base.Database.Step = Duration(60 * time.Second)
-	}
-	if _, err := base.Monitors(); err != nil {
-		return nil, 0, 0, err
-	}
+	// No schema validation here (deliberately): AppendImport only ever sees dbDoc (the prior
+	// DB fragment) and importBytes, never the real default.yaml. A target-only fragment is
+	// designed to inherit tree-wide probe/params/alerts from the base config the same way a
+	// conf.d fragment does (LoadDir), so validating this fragment's leaves in isolation would
+	// reject perfectly valid imports whose probe/params/alerts come from default.yaml alone —
+	// exactly the bug this comment used to paper over with synthetic pings/step. Schema
+	// validation instead happens once the fragment is actually composed with the base config
+	// (AppendDBFragment + Monitors(), in buildRuntime — see cmd/smoked/main.go), which every
+	// caller of AppendImport (the API's ConfigImport closure, `smoked config import`, `smoked
+	// import smokeping --apply`) triggers downstream: the API path on every apply via
+	// applyConfig, the CLI paths at the daemon's next reload (or immediately, via the CLI's
+	// optional -config effective-validation flag).
+	//
 	// Marshal via a targets-only shape, not *Config: Config.Database is a plain (non-pointer)
 	// struct, and encoding/json's omitempty never omits struct-typed fields (only false/0/nil/
 	// empty-collection values) — marshaling a *Config here would leak a spurious "database":{}
