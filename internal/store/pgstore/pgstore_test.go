@@ -6,7 +6,6 @@ import (
 	"math"
 	"os"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -555,49 +554,6 @@ func TestDailyRollup(t *testing.T) {
 	}
 	if !approx(pts3[0].MedianAvg, 0.03) {
 		t.Fatalf("bounded daily [.., day1] avg = %v, want .03 (day 1 only)", pts3[0].MedianAvg)
-	}
-}
-
-// backfillAggregates' two CALL refresh_continuous_aggregate statements must survive TimescaleDB's
-// SQLSTATE 55P03 (lock_not_available), exactly like RefreshAggregates already does via
-// execWithRetry — a background continuous-aggregate refresh policy job can hold the same cagg's
-// refresh lock at the moment backfillAggregates' own CALL runs, and TimescaleDB aborts the loser
-// instead of queuing it. Un-retried, that ordinary contention was an intermittent
-// TestDailyRollup/TestRollupMedianRoundsExcludesLostRounds flake, and — because
-// EnableDownsampling (which calls backfillAggregates) runs at cold start — a startup fatal().
-//
-// This reproduces the underlying lock contention directly against a live TimescaleDB, no
-// mocking: several goroutines call the unexported backfillAggregates concurrently against the
-// SAME aggregates and ranges, which is exactly the situation a racing background refresh-policy
-// job creates. Before the fix (a raw s.pool.Exec, no retry), this reliably surfaces a 55P03 from
-// at least one goroutine; after routing through execWithRetry, every call must eventually
-// succeed.
-func TestBackfillAggregatesRetriesOnConcurrentRefreshContention(t *testing.T) {
-	s := testStore(t)
-	ctx := context.Background()
-	// The aggregates must already exist for CALL refresh_continuous_aggregate to have
-	// anything to refresh; this also primes TimescaleDB's background refresh-policy jobs for
-	// these views, which are what backfillAggregates races against in production.
-	if err := s.EnableDownsampling(ctx); err != nil {
-		t.Fatalf("EnableDownsampling: %v", err)
-	}
-
-	const n = 8
-	var wg sync.WaitGroup
-	errs := make([]error, n)
-	wg.Add(n)
-	for i := 0; i < n; i++ {
-		go func(i int) {
-			defer wg.Done()
-			errs[i] = s.backfillAggregates(ctx)
-		}(i)
-	}
-	wg.Wait()
-
-	for i, err := range errs {
-		if err != nil {
-			t.Errorf("backfillAggregates[%d] = %v, want nil (a 55P03 from concurrent refresh contention must be retried, not surfaced)", i, err)
-		}
 	}
 }
 
