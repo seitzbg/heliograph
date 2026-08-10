@@ -619,6 +619,22 @@ func TestImportCmdHistoryE2E(t *testing.T) {
 		t.Skip("rrdtool not on PATH")
 	}
 
+	// --history now refuses to import at all when the continuous aggregates are
+	// absent (review Finding #3's fail-fast fix), so this test can no longer rely on
+	// them merely happening to already exist on the shared test DB from some earlier
+	// test/run — it must ensure them itself, deterministically, regardless of DB
+	// state or go-test package ordering. EnableDownsampling is idempotent (CREATE ...
+	// IF NOT EXISTS), so this is a safe no-op when aggregates are already present.
+	ctx := context.Background()
+	s, err := pgstore.New(ctx, dsn, 8, func(error) {})
+	if err != nil {
+		t.Fatalf("pgstore.New: %v", err)
+	}
+	defer s.Close()
+	if err := s.EnableDownsampling(ctx); err != nil {
+		t.Fatalf("EnableDownsampling: %v", err)
+	}
+
 	// This test's ImpHist* targets are unique per run (see suffix below), so they
 	// never collide with a concurrent run — but nothing ever deletes the rows a
 	// run inserts, so the shared samples table accretes them across every CI/local
@@ -676,12 +692,6 @@ func TestImportCmdHistoryE2E(t *testing.T) {
 		t.Fatalf("importCmd --history exit code = %d, want 0\nstdout:\n%s", code, first)
 	}
 
-	ctx := context.Background()
-	s, err := pgstore.New(ctx, dsn, 8, func(error) {})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Close()
 	hist, err := s.HistoryVantage(ctx, nameA, "local")
 	if err != nil {
 		t.Fatal(err)
@@ -717,6 +727,20 @@ func TestImportCmdHistoryPartialFailureMissingPings(t *testing.T) {
 	rrdtoolBin, err := exec.LookPath("rrdtool")
 	if err != nil {
 		t.Skip("rrdtool not on PATH")
+	}
+
+	// See TestImportCmdHistoryE2E: --history now refuses to import at all when the
+	// continuous aggregates are absent, so this test must ensure them itself rather
+	// than depending on the shared test DB already having them from an earlier
+	// test/run or a particular go-test package ordering.
+	ctx := context.Background()
+	s, err := pgstore.New(ctx, dsn, 8, func(error) {})
+	if err != nil {
+		t.Fatalf("pgstore.New: %v", err)
+	}
+	defer s.Close()
+	if err := s.EnableDownsampling(ctx); err != nil {
+		t.Fatalf("EnableDownsampling: %v", err)
 	}
 
 	ctxCleanup := context.Background()
@@ -780,12 +804,6 @@ func TestImportCmdHistoryPartialFailureMissingPings(t *testing.T) {
 		t.Errorf("stdout summary should report 1 failed target, got:\n%s", stdout)
 	}
 
-	ctx := context.Background()
-	s, err := pgstore.New(ctx, dsn, 8, func(error) {})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Close()
 	histGood, err := s.HistoryVantage(ctx, good, "local")
 	if err != nil {
 		t.Fatal(err)
