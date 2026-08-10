@@ -124,14 +124,17 @@ v2.0 line; these build on it.
     button that additively merge a YAML/JSON file's target branches into the DB fragment;
     an entry identical to the stored one is skipped (idempotent), a same-name entry with
     different settings is a conflict (nothing imported), and globals stay in YAML
-- 🚧 **SmokePing → TimescaleDB importer** — read an existing SmokePing install's `Targets` config +
+- ✅ **SmokePing → TimescaleDB importer** — read an existing SmokePing install's `Targets` config +
   RRD history and load it here, so a running SmokePing can migrate (RRD → TSDB is the core shift).
-  *(Medium; 2 slices.)*
+  *(Medium; 2 slices, both shipped.)*
   - ✅ Slice A: config import — `smoked import smokeping <dir>` parses a legacy `Targets`/`Probes`/
     `Database` config (FPing/FPing6/DNS/TCPPing → the modern probe map; `speedtest`/unmapped probes
     skipped and reported) into a reviewable YAML target tree (default: stdout/`--out`) or merges it
     straight into the DB config fragment (`--apply`, reusing `config.AppendImport`)
-  - ⬜ Slice B: RRD history backfill + `--report`/`--history` modes
+  - ✅ Slice B: RRD history backfill — `--report` (dry-run) reconciles config targets against the
+    RRD data dir (matched/config-only/orphan counts, data dir resolved as sibling `../data` or a
+    `data` subdir); `--history` extracts each matched target's full RRD history via `rrdtool` and
+    backfills median/loss into `samples` + the hourly/daily aggregates, idempotently
 - ⬜ **Native ICMP probe** — replace the `fping` shell-out with `golang.org/x/net/icmp`, dropping
   the external binary and the `CAP_NET_RAW`/`setcap` dance from the image. *(Small–medium.)*
 - ⬜ **On-disk agent store-and-forward** — persist the agent's buffer so a vantage restart doesn't
