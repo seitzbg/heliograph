@@ -81,6 +81,22 @@ func ExtractRRD(rrdtoolBin, rrdPath string, now time.Time) ([]RRDSample, error) 
 	}
 
 	var out []RRDSample
+	// seen guards against a second rrdtool boundary quirk, symmetric to the
+	// -s one handled by fetchStart below: when a tier's -e lands exactly on
+	// that tier's own step grid, rrdtool fetch returns ONE EXTRA row past -e
+	// (rounding "up" to guarantee at least one covering row, even though -e
+	// already sat on a boundary). Because every tier's Lookback is an exact
+	// multiple of the next tier's Step (302400 = 84*3600, 15552000 =
+	// 360*43200), that overrun row's timestamp regularly lands back inside
+	// the finer tier's own (already-fetched) span — e.g. tier 2 (3600s) can
+	// hand back a hopelessly coarse hourly average timestamped one hour past
+	// its nominal end, exactly the instant tier 1 (300s) already fetched at
+	// full resolution. Rather than chase this with more boundary arithmetic
+	// (fragile, and there is no guarantee it's the only such quirk), tiers
+	// are processed finest-first (rrdTiers' own order) and any sample whose
+	// timestamp a finer tier already produced is dropped: the finer,
+	// higher-resolution value always wins.
+	seen := make(map[int64]bool)
 	// end is the exclusive-lower-bound-turned-inclusive-upper-bound carried
 	// from the previous (finer) tier: that tier already claimed everything
 	// in (its own start, end], so this tier's window stops at end.
@@ -112,7 +128,14 @@ func ExtractRRD(rrdtoolBin, rrdPath string, now time.Time) ([]RRDSample, error) 
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, samples...)
+		for _, s := range samples {
+			ts := s.TS.Unix()
+			if seen[ts] {
+				continue // a finer tier already produced this instant at higher resolution
+			}
+			seen[ts] = true
+			out = append(out, s)
+		}
 		end = start
 	}
 

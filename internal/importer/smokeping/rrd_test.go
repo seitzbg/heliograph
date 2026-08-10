@@ -175,3 +175,100 @@ func TestExtractRRDIncludesOldestRow(t *testing.T) {
 		t.Errorf("oldest row ts = %d, want %d (rrdtool `first`) — the fetch -s exclusivity boundary must not drop it", got[0].TS.Unix(), start)
 	}
 }
+
+// TestExtractRRDTierBoundaryNoDuplicateFinestWins covers a second rrdtool
+// boundary quirk, symmetric to the -s exclusivity one above: `rrdtool fetch
+// -e <t>` is supposed to be inclusive of t, but when t lands exactly on that
+// fetch's own step grid, rrdtool hands back ONE EXTRA row PAST -e (rounding
+// "up" to guarantee a covering row even though -e already sat on a
+// boundary). ExtractRRD's tier plan makes this land in exactly the wrong
+// place: tier 1's lookback (3.5d = 302400s) is an exact multiple of tier 2's
+// step (3600s), so tier 2's -e (= tier 1's start) regularly sits on the
+// 3600s grid, and its overrun row — a full hour's coarse average — lands on
+// a timestamp tier 1 already fetched at full 300s resolution. Without
+// dedup, that timestamp appears twice in the result with two different
+// Median values, and (sort.Slice being unstable) which one a caller sees is
+// unspecified — a straight conflict on (target, vantage, ts) downstream.
+//
+// This needs two real RRAs (a single-RRA RRD, as in the other tests here,
+// never exercises tier stitching at all) built at the real tier scale —
+// rrdTiers isn't test-injectable, so the RRD has to actually span several
+// days for tier 2 to engage. Update timestamps are exactly step-aligned (as
+// in TestExtractRRDGapVsTotalLoss) so consolidation is deterministic, and
+// the median alternates sharply between two values every 300s so a 3600s
+// average is unmistakably different from either raw value — a value change
+// this large can't be explained by consolidation rounding, only by the
+// wrong tier's row winning.
+func TestExtractRRDTierBoundaryNoDuplicateFinestWins(t *testing.T) {
+	bin, err := exec.LookPath("rrdtool")
+	if err != nil {
+		t.Skip("rrdtool not on PATH")
+	}
+	dir := t.TempDir()
+	rrd := filepath.Join(dir, "t.rrd")
+
+	// last (L) is divisible by 3600 (and so by 300 too) so that tier 1's
+	// start = L - 302400 (302400 = 84*3600) lands exactly on tier 2's 3600s
+	// grid — the precondition for the -e overrun.
+	const last = int64(1_600_002_000)
+	const firstTS = last - 320400  // > 3.5 days before tier1's own start, so tier 2 actually runs
+	const boundary = last - 302400 // tier 1's start == tier 2's end (-e)
+	const dupTS = boundary + 3600  // where tier 2's overrun row lands — inside tier 1's own span
+
+	mustRun(t, bin, "create", rrd, "--start", fmt.Sprint(firstTS-300), "--step", "300",
+		"DS:median:GAUGE:600:0:180", "DS:loss:GAUGE:600:0:20",
+		"RRA:AVERAGE:0.5:1:1200", // 300s tier
+		"RRA:AVERAGE:0.5:12:150") // 3600s tier (12 PDPs/row = 3600s)
+
+	// One bulk `update` with every 300s point from firstTS to last: median
+	// alternates 0.01/0.5 by parity of the step index, loss cycles 0..2.
+	args := []string{"update", rrd}
+	var expectMedian float64
+	for ts, i := firstTS, 0; ts <= last; ts, i = ts+300, i+1 {
+		median := 0.01
+		if i%2 != 0 {
+			median = 0.5
+		}
+		if ts == dupTS {
+			expectMedian = median // the true fine-grained value at the contested timestamp
+		}
+		args = append(args, fmt.Sprintf("%d:%f:%d", ts, median, i%3))
+	}
+	mustRun(t, bin, args...)
+
+	got, err := ExtractRRD(bin, rrd, time.Unix(last+300, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	seen := map[int64]int{}
+	for _, s := range got {
+		seen[s.TS.Unix()]++
+	}
+	for ts, n := range seen {
+		if n > 1 {
+			t.Errorf("timestamp %d appears %d times in result, want at most once (tier-boundary duplicate)", ts, n)
+		}
+	}
+
+	dup, ok := seen[dupTS]
+	if !ok || dup == 0 {
+		t.Fatalf("expected overlap timestamp %d missing from result entirely", dupTS)
+	}
+	var dupSample RRDSample
+	found := false
+	for _, s := range got {
+		if s.TS.Unix() == dupTS {
+			dupSample = s
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected overlap timestamp %d missing from result", dupTS)
+	}
+	if math.Abs(dupSample.Median-expectMedian) > 1e-6 {
+		t.Errorf("at overlap ts=%d: Median = %v, want %v (the finer 300s tier's value, not a coarse hourly average like ~0.255)",
+			dupTS, dupSample.Median, expectMedian)
+	}
+}
