@@ -25,17 +25,23 @@ type Job struct {
 	Pings   int
 	Timeout time.Duration
 	Step    time.Duration // per-target polling interval (drives the Planner)
+	// Fingerprint is an opaque measurement-identity tag from the hub's assignment
+	// (agent path only; empty for the hub's own local jobs). It flows through to the
+	// Outcome so a buffered remote round can be attributed to the exact assignment
+	// that produced it. See federation.Fingerprint / agentwire.
+	Fingerprint string
 }
 
 // Outcome is the derived result of a Job.
 type Outcome struct {
-	Target    probe.Target
-	ProbeName string
-	Computed  sample.Computed
-	Err       error
-	When      time.Time
-	Duration  time.Duration
-	Vantage   string // where this round was measured; "" means the hub (store.DefaultVantage)
+	Target      probe.Target
+	ProbeName   string
+	Computed    sample.Computed
+	Err         error
+	When        time.Time
+	Duration    time.Duration
+	Vantage     string // where this round was measured; "" means the hub (store.DefaultVantage)
+	Fingerprint string // opaque tag copied from the Job (empty for local hub jobs)
 }
 
 // runOne measures a single job under its own timeout derived from ctx and derives
@@ -46,12 +52,13 @@ func runOne(ctx context.Context, j Job) Outcome {
 	start := time.Now()
 	res, err := safeMeasure(jctx, j)
 	return Outcome{
-		Target:    j.Target,
-		ProbeName: j.Probe.Name(),
-		Computed:  sample.Compute(j.Pings, res.Samples),
-		Err:       err,
-		When:      start,
-		Duration:  time.Since(start),
+		Target:      j.Target,
+		ProbeName:   j.Probe.Name(),
+		Computed:    sample.Compute(j.Pings, res.Samples),
+		Err:         err,
+		When:        start,
+		Duration:    time.Since(start),
+		Fingerprint: j.Fingerprint,
 	}
 }
 

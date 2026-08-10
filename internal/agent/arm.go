@@ -55,6 +55,9 @@ func BuildJobs(targets []agentwire.AssignmentTarget, timeout time.Duration) (job
 			Pings:   t.Pings,
 			Timeout: timeout,
 			Step:    step,
+			// Opaque hub-assigned identity tag; carried through the Outcome into the
+			// buffered RoundReport so the hub can attribute a replayed round.
+			Fingerprint: t.Fingerprint,
 		})
 	}
 	return jobs, skipped

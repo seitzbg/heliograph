@@ -18,6 +18,12 @@ type AssignmentTarget struct {
 	ProbeConfig map[string]string `json:"probe_config,omitempty"`
 	StepMs      int64             `json:"step_ms"`
 	Pings       int               `json:"pings"`
+	// Fingerprint is the hub-computed measurement-identity hash for this target
+	// (federation.Fingerprint over probe/host/params/pings/probe-config). The agent
+	// treats it as opaque, carries it through the measurement, and echoes it on each
+	// RoundReport so the hub can reject a round whose target was redefined since it was
+	// measured. Empty from a pre-fingerprint agent; the hub accepts that transitionally.
+	Fingerprint string `json:"fingerprint,omitempty"`
 }
 
 // Assignment is the response body for GET /agent/v1/assignment: the full
@@ -31,12 +37,16 @@ type Assignment struct {
 
 // RoundReport is one measured round for one target, as submitted by an agent.
 type RoundReport struct {
-	Target     string    `json:"target"`
-	TS         string    `json:"ts"`    // RFC3339 / RFC3339Nano
-	Pings      int       `json:"pings"` // N expected this round
-	RTTs       []float64 `json:"rtts"`  // received RTTs in seconds (no nulls; loss = pings - len)
-	Err        string    `json:"err,omitempty"`
-	DurationMs float64   `json:"duration_ms,omitempty"`
+	Target string    `json:"target"`
+	TS     string    `json:"ts"`    // RFC3339 / RFC3339Nano
+	Pings  int       `json:"pings"` // N expected this round
+	RTTs   []float64 `json:"rtts"`  // received RTTs in seconds (no nulls; loss = pings - len)
+	Err    string    `json:"err,omitempty"`
+	// Fingerprint echoes the assignment target's measurement-identity hash (opaque to
+	// the agent). The hub recomputes it from the target's current config on ingest and
+	// drops the round if they differ; empty is accepted transitionally (old agent).
+	Fingerprint string  `json:"fingerprint,omitempty"`
+	DurationMs  float64 `json:"duration_ms,omitempty"`
 }
 
 // ResultsRequest is the request body for POST /agent/v1/results.

@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"smokeping-modern/internal/federation"
 	"smokeping-modern/internal/model"
 	"smokeping-modern/internal/scheduler"
 	"smokeping-modern/internal/store"
@@ -135,6 +136,84 @@ func TestIngestAcceptsAssignedTarget(t *testing.T) {
 	}
 	if o.Computed.Loss != 0 || o.Computed.Pings != 3 {
 		t.Fatalf("Compute mismatch: %+v", o.Computed)
+	}
+}
+
+// The assignment must stamp each target with federation.Fingerprint over its current
+// identity, so the agent can echo it back and the hub can verify attribution on ingest.
+func TestAssignmentStampsFingerprint(t *testing.T) {
+	srv := testAgentServer()
+	r := httptest.NewRequest("GET", "/agent/v1/assignment", nil)
+	r.Header.Set("Authorization", "Bearer smk_x_y")
+	w := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(w, r)
+
+	var got struct {
+		Targets []struct {
+			Fingerprint string `json:"fingerprint"`
+		} `json:"targets"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	// testAgentServer's monitor: cf / FPing / 1.1.1.1 / pings 20, probe cfg binary=/usr/sbin/fping.
+	want := federation.Fingerprint(
+		model.Monitor{Name: "cf", ProbeKind: "FPing", Host: "1.1.1.1", Pings: 20, Step: time.Minute, Vantages: []string{"nyc"}},
+		map[string]string{"binary": "/usr/sbin/fping"},
+	)
+	if len(got.Targets) != 1 || got.Targets[0].Fingerprint != want {
+		t.Fatalf("assignment fingerprint = %q, want %q", got.Targets[0].Fingerprint, want)
+	}
+}
+
+// The core of CODE_REVIEW #2: a buffered round measured under a target's OLD identity must
+// not be stored (or alerted) as the target's redefined identity. A round carrying the
+// CURRENT fingerprint is accepted; a stale one is dropped and counted, not misattributed.
+func TestIngestFingerprintAttribution(t *testing.T) {
+	current := model.Monitor{Name: "cf", ProbeKind: "FPing", Host: "2.2.2.2", Pings: 3, Step: time.Minute, Vantages: []string{"nyc"}}
+	probeCfgs := map[string]map[string]string{"FPing": {"binary": "/usr/sbin/fping"}}
+	ing := &fakeIngester{}
+	var alerted []scheduler.Outcome
+	srv := &Server{
+		store:       ing,
+		VantageAuth: fakeAuth{name: "nyc", ok: true},
+		Assignment: func(v string) ([]model.Monitor, map[string]map[string]string, string) {
+			return []model.Monitor{current}, probeCfgs, "sha256:v1"
+		},
+		OnIngest: func(o []scheduler.Outcome) { alerted = append(alerted, o...) },
+	}
+	fpCurrent := federation.Fingerprint(current, probeCfgs["FPing"])
+	old := current
+	old.Host = "1.1.1.1" // the identity the agent actually measured under, since redefined
+	fpOld := federation.Fingerprint(old, probeCfgs["FPing"])
+
+	// Stale-identity round: dropped, not stored, not alerted.
+	w := postResults(t, srv, fmt.Sprintf(
+		`{"results":[{"target":"cf","ts":%q,"pings":3,"rtts":[0.01,0.02,0.03],"fingerprint":%q}]}`, recentTS(), fpOld))
+	if w.Code != 200 {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body)
+	}
+	var resp struct{ Accepted, Dropped int }
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	if resp.Accepted != 0 || resp.Dropped != 1 {
+		t.Fatalf("stale-fingerprint round: counts=%+v, want accepted=0 dropped=1", resp)
+	}
+	if len(ing.got) != 0 {
+		t.Fatalf("stale-fingerprint round must not be stored, stored %d", len(ing.got))
+	}
+	if len(alerted) != 0 {
+		t.Fatalf("stale-fingerprint round must not be alerted, alerted %d", len(alerted))
+	}
+
+	// Current-identity round: accepted and stored under the current host.
+	w = postResults(t, srv, fmt.Sprintf(
+		`{"results":[{"target":"cf","ts":%q,"pings":3,"rtts":[0.01,0.02,0.03],"fingerprint":%q}]}`, recentTS(), fpCurrent))
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	if resp.Accepted != 1 || resp.Dropped != 0 {
+		t.Fatalf("current-fingerprint round: counts=%+v, want accepted=1 dropped=0", resp)
+	}
+	if len(ing.got) != 1 || ing.got[0].Target.Host != "2.2.2.2" {
+		t.Fatalf("current-fingerprint round must be stored as current host: %+v", ing.got)
 	}
 }
 

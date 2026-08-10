@@ -67,3 +67,18 @@ func TestBuildJobsAppliesProbeConfig(t *testing.T) {
 		t.Fatalf("probe not built with hub probe config: got %+v", lastCaptureCfg)
 	}
 }
+
+// BuildJobs must carry the hub's opaque Fingerprint tag from each AssignmentTarget
+// onto its Job, so it can later ride the Outcome into the buffered RoundReport.
+func TestBuildJobsCarriesFingerprint(t *testing.T) {
+	targets := []agentwire.AssignmentTarget{
+		{Name: "ok", Probe: "TCPConnect", Host: "1.1.1.1", Params: map[string]string{"port": "443"}, StepMs: 1000, Pings: 3, Fingerprint: "sha256:deadbeef"},
+	}
+	jobs, skipped := BuildJobs(targets, 4*time.Second)
+	if len(jobs) != 1 || len(skipped) != 0 {
+		t.Fatalf("jobs=%d skipped=%v", len(jobs), skipped)
+	}
+	if jobs[0].Fingerprint != "sha256:deadbeef" {
+		t.Fatalf("Job.Fingerprint = %q, want sha256:deadbeef", jobs[0].Fingerprint)
+	}
+}
