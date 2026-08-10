@@ -180,6 +180,22 @@ breaking changes.
   instead of a moving `latest-pg16` tag.
 
 ### Fixed
+- **Buffered agent results can no longer be attributed to a redefined target.** An agent's
+  store-and-forward buffer keyed rounds only by target *name*, and the hub, on ingest, looked the
+  name up in the *current* assignment and stamped that target's current host/probe onto the old
+  round — so a round measured under one identity and replayed (up to 30 days later) after the
+  operator changed the target's host/probe/params/pings/probe-config while keeping its name was
+  silently stored **and alerted** as a measurement of the new target. The hub now computes a stable
+  per-target *measurement-identity* fingerprint (`federation.Fingerprint` — a sha256 over
+  probe/host/params/pings and the effective `probes.<Kind>` config, using the same canonical
+  encoding as `ConfigVersion`), stamps it on each assignment target, and the agent echoes it back
+  opaquely on every round (carried through `scheduler.Job`→`Outcome`→`RoundReport`, so it survives a
+  replay). On ingest the hub recomputes the fingerprint from the target's *current* config and drops
+  any round whose fingerprint differs — counted in the response `dropped` and logged with a
+  `fingerprint_mismatch` breakdown — so a stale round can never be misattributed. **Compatibility:**
+  a round with no fingerprint (from a pre-fingerprint agent) is still accepted, with a one-time
+  per-process warning to upgrade the agent, so a rolling upgrade doesn't drop data; a later release
+  may require it.
 - **`EnableDownsampling`'s one-time backfill could fail on ordinary refresh-policy contention.**
   `backfillAggregates` ran its two `CALL refresh_continuous_aggregate(...)` statements via a raw
   `pool.Exec`, with no retry — unlike `RefreshAggregates`, which already wraps the same kind of

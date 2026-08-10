@@ -6,10 +6,12 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
+	"sync"
 	"time"
 
 	"smokeping-modern/internal/agentwire"
 	"smokeping-modern/internal/config"
+	"smokeping-modern/internal/federation"
 	"smokeping-modern/internal/model"
 	"smokeping-modern/internal/probe"
 	"smokeping-modern/internal/sample"
@@ -39,6 +41,9 @@ func (srv *Server) agentAssignment(w http.ResponseWriter, r *http.Request) {
 			Name: m.Name, Probe: m.ProbeKind, Host: m.Host,
 			Params: m.Params, ProbeConfig: probeCfgs[m.ProbeKind],
 			StepMs: m.Step.Milliseconds(), Pings: m.Pings,
+			// Measurement-identity tag the agent echoes on each round; the hub
+			// recomputes and verifies it on ingest (CODE_REVIEW #2).
+			Fingerprint: federation.Fingerprint(m, probeCfgs[m.ProbeKind]),
 		})
 	}
 	w.Header().Set("ETag", cv)
@@ -122,13 +127,19 @@ func (srv *Server) agentResults(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"batch too large"}`, http.StatusRequestEntityTooLarge)
 		return
 	}
-	monitors, _, _ := srv.Assignment(v)
+	monitors, probeCfgs, _ := srv.Assignment(v)
 	allowed := make(map[string]model.Monitor, len(monitors))
+	// wantFP is each assigned target's current measurement-identity fingerprint, computed
+	// once per target here rather than per round: a store-and-forward replay is typically a
+	// large batch spanning only a handful of distinct targets, so per-round hashing would
+	// redo the same sha256 thousands of times.
+	wantFP := make(map[string]string, len(monitors))
 	for _, m := range monitors {
 		allowed[m.Name] = m
+		wantFP[m.Name] = federation.Fingerprint(m, probeCfgs[m.ProbeKind])
 	}
 	outcomes := make([]scheduler.Outcome, 0, len(req.Results))
-	dropped := 0
+	dropped, mismatched, noFP := 0, 0, 0
 	now := time.Now()
 	for _, rd := range req.Results {
 		m, ok := allowed[rd.Target]
@@ -143,6 +154,20 @@ func (srv *Server) agentResults(w http.ResponseWriter, r *http.Request) {
 		}
 		if !withinSkew(ts, now) || !validSamples(rd.RTTs, rd.DurationMs) {
 			dropped++
+			continue
+		}
+		// Attribution: the round must have been measured under this target's CURRENT
+		// identity. The hub recomputes the fingerprint from the live assignment and drops a
+		// round whose target has since been redefined, so a buffered old measurement can't be
+		// stored or alerted as the new target (CODE_REVIEW #2). An empty fingerprint comes from
+		// a pre-fingerprint agent; accept it transitionally (warn once) so a rolling upgrade
+		// doesn't drop data — a not-yet-upgraded agent self-heals once its binary is updated.
+		switch {
+		case rd.Fingerprint == "":
+			noFP++
+		case rd.Fingerprint != wantFP[rd.Target]:
+			dropped++
+			mismatched++
 			continue
 		}
 		o := scheduler.Outcome{
@@ -171,7 +196,18 @@ func (srv *Server) agentResults(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if dropped > 0 {
-		slog.Warn("agent ingest: dropped rounds not in assignment", "vantage", v, "dropped", dropped)
+		// fingerprint_mismatch is broken out of the total so a redefined-target drop is
+		// distinguishable from a not-in-assignment / malformed / stale-timestamp drop.
+		slog.Warn("agent ingest: dropped rounds", "vantage", v, "dropped", dropped, "fingerprint_mismatch", mismatched)
+	}
+	if noFP > 0 {
+		warnMissingFingerprint.Do(func() {
+			slog.Warn("agent ingest: accepting rounds with no fingerprint; result attribution is unverified until the agent is upgraded", "vantage", v)
+		})
 	}
 	writeJSON(w, agentwire.ResultsResponse{Accepted: len(outcomes), Dropped: dropped})
 }
+
+// warnMissingFingerprint bounds the "agent sent no fingerprint" notice to once per hub
+// process — it's a one-time migration nudge, not a per-batch alert.
+var warnMissingFingerprint sync.Once

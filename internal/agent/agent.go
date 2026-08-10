@@ -400,11 +400,12 @@ func reportFromOutcome(o scheduler.Outcome) agentwire.RoundReport {
 		errStr = o.Err.Error()
 	}
 	return agentwire.RoundReport{
-		Target:     o.Target.Name,
-		TS:         o.When.UTC().Format(time.RFC3339Nano),
-		Pings:      o.Computed.Pings,
-		RTTs:       o.Computed.Sorted,
-		Err:        errStr,
-		DurationMs: float64(o.Duration.Microseconds()) / 1000,
+		Target:      o.Target.Name,
+		TS:          o.When.UTC().Format(time.RFC3339Nano),
+		Pings:       o.Computed.Pings,
+		RTTs:        o.Computed.Sorted,
+		Err:         errStr,
+		Fingerprint: o.Fingerprint,
+		DurationMs:  float64(o.Duration.Microseconds()) / 1000,
 	}
 }

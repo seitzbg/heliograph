@@ -64,6 +64,25 @@ func TestParallelism(t *testing.T) {
 	}
 }
 
+// TestFingerprintPropagates: a Job's opaque Fingerprint tag must reach its Outcome
+// unchanged, on both the success and the timeout/error path — that's what lets a
+// buffered remote round be attributed to the exact assignment that produced it.
+// runOne is shared by RunRound and Dispatcher.Go, so covering RunRound covers both.
+func TestFingerprintPropagates(t *testing.T) {
+	jobs := []Job{
+		{Probe: &fakeProbe{name: "ok", delay: time.Millisecond, rtt: 0.01}, Target: probe.Target{Name: "a"}, Pings: 1, Timeout: time.Second, Fingerprint: "sha256:aaa"},
+		{Probe: &fakeProbe{name: "hung", delay: time.Second, rtt: 0.5}, Target: probe.Target{Name: "b"}, Pings: 1, Timeout: 20 * time.Millisecond, Fingerprint: "sha256:bbb"},
+		{Probe: &fakeProbe{name: "none", delay: time.Millisecond, rtt: 0.01}, Target: probe.Target{Name: "c"}, Pings: 1, Timeout: time.Second}, // empty tag stays empty
+	}
+	out := RunRound(context.Background(), jobs, 4)
+	want := []string{"sha256:aaa", "sha256:bbb", ""}
+	for i, o := range out {
+		if o.Fingerprint != want[i] {
+			t.Errorf("job %d Outcome.Fingerprint = %q, want %q", i, o.Fingerprint, want[i])
+		}
+	}
+}
+
 // TestIsolation: one target hangs (5s) while three are fast (5ms). With a 300ms
 // per-job timeout, the round finishes promptly, the fast targets succeed, and
 // only the hung one records loss/error — proving one slow target can't block
