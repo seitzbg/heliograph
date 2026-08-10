@@ -180,6 +180,16 @@ breaking changes.
   instead of a moving `latest-pg16` tag.
 
 ### Fixed
+- **`EnableDownsampling`'s one-time backfill could fail on ordinary refresh-policy contention.**
+  `backfillAggregates` ran its two `CALL refresh_continuous_aggregate(...)` statements via a raw
+  `pool.Exec`, with no retry — unlike `RefreshAggregates`, which already wraps the same kind of
+  `CALL` in `execWithRetry` because a background continuous-aggregate refresh policy job can hold
+  the same aggregate's refresh lock at the moment the CALL runs, and TimescaleDB aborts the loser
+  with SQLSTATE `55P03` (`lock_not_available`) instead of queuing it. Un-retried, that ordinary
+  contention was an intermittent `TestDailyRollup`/`TestRollupMedianRoundsExcludesLostRounds`
+  flake — and, because `EnableDownsampling` runs at cold start, could make the daemon fail to
+  boot outright. `backfillAggregates` now routes both `CALL`s through the same `execWithRetry`
+  helper.
 - **History import no longer writes rows with an invalid ping count or loss.** `smoked import
   smokeping <dir> --history` used to write a matched target's resolved `Pings` straight into
   `pgstore.ImportRow` with no validation: a target whose `Database` file was missing/unreadable
@@ -224,8 +234,10 @@ breaking changes.
   which the API's `ConfigImport` closure already does on every apply (`buildRuntime` →
   `AppendDBFragment` → `Monitors()`). `smoked config import` and `smoked import smokeping --apply`
   gained an optional `-config`/`--config DIR` flag to effective-validate the merged fragment
-  against that base config before persisting; without it, an invalid fragment is now caught (and
-  logged) at the daemon's next reload instead of being validated too strictly up front.
+  against that base config before persisting; without it, an invalid fragment is instead validated
+  when the config is next built — on a running daemon, that's a SIGHUP reload, which rejects it and
+  logs why; on a cold start, `buildRuntime` failing on it makes the daemon **fail to boot**. Prefer
+  `-config`/`--config` to catch a bad fragment up front instead of at the next build.
 - **Agent flush no longer discards a whole oversized backlog on a 413.** A results batch that
   tripped the hub's 16 MiB body cap (`413`) used to be treated the same as a malformed (`400`)
   batch — dropped wholesale, even though every round in it except the one(s) that pushed it over

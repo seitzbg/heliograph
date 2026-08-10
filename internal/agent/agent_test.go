@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -544,5 +545,130 @@ func TestSendBatchPropagatesTransientErrorWithoutSplittingOrDropping(t *testing.
 	}
 	if requests != 1 {
 		t.Errorf("hub received %d requests, want exactly 1 (a transient failure must not trigger a split)", requests)
+	}
+}
+
+// CODE_REVIEW round-9 whole-branch review #1 (deferred minor): the split path was only ever
+// traced by hand for the case where a 413 splits a batch, the FIRST half POSTs fine, and the
+// SECOND half then hits a TRANSIENT (5xx) error — sendBatch must discard the first half's
+// already-successful send-count and propagate the error so the caller (flushLoop) retries the
+// WHOLE original batch, not just the second half, and does not double-count or lose anything in
+// the process. This is the first committed test for that interleaving; previously it was only
+// verified by trace.
+//
+// The fake hub caps a request at capN rounds (413 above it, mirroring the real hub's byte cap
+// applied to round count for a deterministic, easy-to-reason-about split point) and, for the
+// specific sub-batch that sendBatch's split produces as the SECOND half, answers 503 on its
+// first appearance only — every later appearance (the retry, and any duplicate resend of the
+// first half) succeeds, exactly like a hub that had a transient blip and recovered.
+func TestSendBatchTransientOnSecondSplitHalfRetriesWholeBatchWithoutLoss(t *testing.T) {
+	const capN = 5 // hub's fake per-request round cap
+	const total = 9
+	rounds := make([]agentwire.RoundReport, total)
+	for i := range rounds {
+		rounds[i] = agentwire.RoundReport{Target: fmt.Sprintf("r%d", i), Pings: 1, RTTs: []float64{0.01}}
+	}
+	// Mirrors sendBatch's own split point (mid := len(rounds) / 2) so the fake hub can
+	// recognize which sub-batch is "the second half" without reaching into sendBatch itself.
+	mid := total / 2
+	keyOf := func(results []agentwire.RoundReport) string {
+		names := make([]string, len(results))
+		for i, r := range results {
+			names[i] = r.Target
+		}
+		return strings.Join(names, ",")
+	}
+	secondHalfKey := keyOf(rounds[mid:])
+
+	var (
+		mu       sync.Mutex
+		attempts = map[string]int{}
+		received []agentwire.RoundReport
+		requests int
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req agentwire.ResultsRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		mu.Lock()
+		requests++
+		mu.Unlock()
+		if len(req.Results) > capN {
+			w.WriteHeader(http.StatusRequestEntityTooLarge)
+			return
+		}
+		key := keyOf(req.Results)
+		mu.Lock()
+		attempts[key]++
+		n := attempts[key]
+		mu.Unlock()
+		if key == secondHalfKey && n == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable) // transient, first attempt only
+			return
+		}
+		mu.Lock()
+		received = append(received, req.Results...)
+		mu.Unlock()
+		_ = json.NewEncoder(w).Encode(agentwire.ResultsResponse{Accepted: len(req.Results)})
+	}))
+	defer srv.Close()
+
+	a := New(Options{Hub: srv.URL, Key: "smk_k_s", Vantage: "nyc",
+		Timeout: time.Second, Workers: 1, BufferCap: 1000, FlushMax: 20})
+	for _, r := range rounds {
+		a.buf.add(r)
+	}
+	close(a.measureDone) // so shutdown()'s awaitMeasureDrain returns immediately on cancel
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { a.flushLoop(ctx); close(done) }()
+
+	// The first cycle: whole batch 413s, splits, the first half POSTs OK, the second half
+	// hits the transient 503. That must NOT commit anything — give it time to run (well
+	// within flushLoop's 1s backoff before it retries) and confirm the whole batch is still
+	// buffered, and nothing was miscounted as rejected.
+	time.Sleep(200 * time.Millisecond)
+	if n := a.buf.len(); n != total {
+		t.Fatalf("buffer len = %d after the transient failure, want %d still buffered — "+
+			"a transient error on the second split half must leave the WHOLE peeked batch "+
+			"uncommitted (including the first half's already-successful send), not just its own half",
+			n, total)
+	}
+	if got := a.buf.rejected(); got != 0 {
+		t.Fatalf("rejected = %d after the transient failure, want 0 (nothing here is a permanent rejection)", got)
+	}
+
+	// Wait for the retry (after ~1s backoff) to succeed and drain the buffer.
+	deadline := time.Now().Add(5 * time.Second)
+	for a.buf.len() != 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	<-done
+
+	if n := a.buf.len(); n != 0 {
+		t.Fatalf("buffer not drained after the retry: %d round(s) still buffered", n)
+	}
+	if got := a.buf.rejected(); got != 0 {
+		t.Fatalf("rejected = %d, want 0 (every round was eventually sendable; none may be counted rejected)", got)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	seen := map[string]int{}
+	for _, r := range received {
+		seen[r.Target]++
+	}
+	for _, r := range rounds {
+		if seen[r.Target] == 0 {
+			t.Errorf("round %q never reached the hub — lost by the agent", r.Target)
+		}
+	}
+	// The retried first half may legitimately reach the hub twice (dedup on
+	// (target,vantage,ts) is the hub's job, not the agent's), but every round must reach it
+	// AT LEAST once and the agent's own bookkeeping (buffer drained, rejected==0) must not
+	// depend on how many times the hub actually saw it.
+	if len(received) < total {
+		t.Errorf("hub received %d round-delivery(ies) total, want at least %d (one per round)", len(received), total)
 	}
 }

@@ -630,8 +630,10 @@ func configCmd(args []string) int {
 			return 1
 		}
 	} else {
-		fmt.Println("note: fragment not checked against a running config (-config not given); an invalid")
-		fmt.Println("      fragment is rejected and logged at the daemon's next reload, not silently applied.")
+		fmt.Println("note: fragment not checked against a running config (-config not given); it's instead")
+		fmt.Println("      validated when the config is next built: a running daemon's next reload (SIGHUP)")
+		fmt.Println("      rejects and logs an invalid fragment, but a COLD START fails to boot on one")
+		fmt.Println("      instead — prefer -config to validate up front.")
 	}
 	if err := cs.Set(ctx, merged, version); err != nil {
 		fmt.Fprintf(os.Stderr, "config import: %v (re-run to retry)\n", err)
