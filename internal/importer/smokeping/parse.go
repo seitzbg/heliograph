@@ -352,12 +352,7 @@ func Parse(targetsText, probesText, databaseText string) (*config.Node, Summary,
 	if err != nil {
 		return nil, Summary{}, err
 	}
-	probeParams := map[string]map[string]string{}
-	for _, s := range psecs {
-		if s.Depth >= 1 {
-			probeParams[s.Name] = s.Fields
-		}
-	}
+	probeParams := probeFieldsByName(psecs)
 	projectParams(info, probeParams, &sum)
 	sort.Strings(sum.DroppedParams)
 
@@ -419,4 +414,104 @@ func projectParams(info map[*config.Node]smokeTargetInfo, probeParams map[string
 			}
 		}
 	}
+}
+
+// probeFieldsByName indexes a parsed Probes file's sections by SmokePing
+// probe name (depth-0 is the file's root body, never a probe, so it's
+// skipped). Shared by Parse (probe-level param projection) and Targets
+// (probe-level `pings` lookup) so both read the Probes file the same way.
+func probeFieldsByName(psecs []Section) map[string]map[string]string {
+	out := map[string]map[string]string{}
+	for _, s := range psecs {
+		if s.Depth >= 1 {
+			out[s.Name] = s.Fields
+		}
+	}
+	return out
+}
+
+// ImportTarget is one leaf target flattened for the data import: Name is the
+// slash-joined path (matching config.Monitors()'s Name and the SmokePing RRD
+// path under the data directory), Probe the modern probe kind, and Pings the
+// resolved ping count that RRD extraction should expect for this target's
+// history (see Targets for the resolution precedence).
+type ImportTarget struct {
+	Name, Host, Probe string
+	Pings             int
+}
+
+// Targets parses the three SmokePing config bodies exactly as Parse does,
+// then flattens the resulting tree into its leaf targets (Host != "") with
+// each one's ping count resolved. Precedence, matching SmokePing itself:
+// the target's own inline `pings` (smokeTargetInfo.fields, the same inline
+// data Parse projects target-level param overrides from) beats its resolved
+// SmokePing probe's Probes-file `pings` (smokeTargetInfo.probe, looked up via
+// probeFieldsByName — the same map Parse indexes for param projection), which
+// beats the Database file's `pings` default. A target whose SmokePing probe
+// has no modern mapping never reaches the tree (buildTree already dropped it,
+// recording a Summary.Skipped note), so it never appears here either.
+func Targets(targetsText, probesText, databaseText string) ([]ImportTarget, Summary, error) {
+	tsecs, err := parseSections(targetsText)
+	if err != nil {
+		return nil, Summary{}, err
+	}
+	root, sum, info := buildTree(tsecs)
+
+	psecs, err := parseSections(probesText)
+	if err != nil {
+		return nil, Summary{}, err
+	}
+	probeParams := probeFieldsByName(psecs)
+
+	dsecs, err := parseSections(databaseText)
+	if err != nil {
+		return nil, Summary{}, err
+	}
+	defaultPings := 0
+	if len(dsecs) > 0 {
+		sum.Step = dsecs[0].Fields["step"]
+		if p := dsecs[0].Fields["pings"]; p != "" {
+			if n, err := strconv.Atoi(p); err == nil {
+				defaultPings = n
+			}
+		}
+	}
+	sum.Pings = defaultPings
+
+	var out []ImportTarget
+	var walk func(path string, n *config.Node)
+	walk = func(path string, n *config.Node) {
+		keys := make([]string, 0, len(n.Children))
+		for k := range n.Children {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			c := n.Children[k]
+			child := k
+			if path != "" {
+				child = path + "/" + k
+			}
+			if c.Host != "" {
+				pings := defaultPings
+				if ti, ok := info[c]; ok {
+					if v := probeParams[ti.probe]["pings"]; v != "" {
+						if num, err := strconv.Atoi(v); err == nil {
+							pings = num
+						}
+					}
+					if v := ti.fields["pings"]; v != "" {
+						if num, err := strconv.Atoi(v); err == nil {
+							pings = num
+						}
+					}
+				}
+				out = append(out, ImportTarget{Name: child, Host: c.Host, Probe: c.Probe, Pings: pings})
+			}
+			walk(child, c)
+		}
+	}
+	walk("", root)
+
+	return out, sum, nil
 }

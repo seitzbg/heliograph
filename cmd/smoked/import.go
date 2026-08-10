@@ -1,9 +1,10 @@
 // smoked import smokeping <dir> reads a legacy SmokePing config directory
 // (Targets, Probes, Database) and turns it into a modern target-tree
 // fragment: YAML to stdout/--out by default for review, or merged straight
-// into the DB config fragment with --apply. This is slice A of the
-// importer — RRD history backfill and a --report/--history mode are slice B,
-// not implemented here.
+// into the DB config fragment with --apply (slice A). --report reconciles
+// the config against the RRD data directory (dry run, no writes) and
+// --history backfills each matched target's RRD history into the DB's
+// samples/aggregates (slice B).
 package main
 
 import (
@@ -14,14 +15,17 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
 	"smokeping-modern/internal/config"
 	"smokeping-modern/internal/configstore"
 	"smokeping-modern/internal/importer/smokeping"
+	"smokeping-modern/internal/store/pgstore"
 )
 
 // renderFragmentYAML marshals {targets: root} to tidy YAML: JSON first (Node's json
@@ -67,9 +71,10 @@ func stripNulls(v any) {
 	}
 }
 
-// importCmd implements `smoked import smokeping <dir> [--out FILE] [--apply] [--dsn DSN]`.
+// importCmd implements `smoked import smokeping <dir> [--out FILE] [--apply] [--dsn DSN]
+// [--report] [--history] [--rrdtool PATH] [--data DIR]`.
 func importCmd(args []string) int {
-	const usage = "usage: smoked import smokeping <dir> [--out FILE] [--apply] [--dsn DSN]"
+	const usage = "usage: smoked import smokeping <dir> [--out FILE] [--apply] [--dsn DSN] [--report] [--history] [--rrdtool PATH] [--data DIR]"
 	if len(args) < 1 || args[0] != "smokeping" {
 		fmt.Fprintln(os.Stderr, usage)
 		return 2
@@ -84,9 +89,24 @@ func importCmd(args []string) int {
 	out := fs.String("out", "", "write config YAML to this file (default: stdout)")
 	apply := fs.Bool("apply", false, "also merge into the DB config fragment (needs --dsn)")
 	dsn := fs.String("dsn", os.Getenv("SMOKED_DSN"), "TimescaleDB DSN (or set SMOKED_DSN)")
+	report := fs.Bool("report", false, "reconcile config targets against the RRD data dir and print counts (dry run, no writes)")
+	history := fs.Bool("history", false, "backfill each matched target's RRD history into samples/aggregates (needs --dsn/SMOKED_DSN and rrdtool)")
+	rrdtoolFlag := fs.String("rrdtool", "", "path to the rrdtool binary (default: PATH lookup)")
+	dataFlag := fs.String("data", "", "RRD data dir (default: sibling ../data, or ./data, under <dir>)")
 	// flag.ExitOnError means Parse never returns a non-nil error (it calls
 	// os.Exit(2) itself on a bad flag), so there's no error path to check here.
 	fs.Parse(rest[1:])
+
+	// --report/--history are alternate, read-mostly/write-only modes: neither
+	// touches the YAML-fragment/--apply path below. If both are given,
+	// --history (which itself reconciles and reports the same counts as part
+	// of its summary) wins.
+	if *history {
+		return runHistory(dir, *dataFlag, *rrdtoolFlag, *dsn)
+	}
+	if *report {
+		return runReport(dir, *dataFlag)
+	}
 
 	// Targets is required: a wrong dir or an incomplete/unreadable checkout
 	// must fail loudly rather than silently producing an empty `targets: {}`
@@ -207,4 +227,283 @@ func sortedKeys(m map[string]int) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// resolveDataDir locates the RRD data directory for a SmokePing config dir.
+// The linuxserver/SmokePing layout (and the real fixture) puts config/ and
+// data/ as SIBLINGS — data/ is NOT generally under the config dir — so an
+// explicit --data is trusted as given (no existence check here; a bad path
+// surfaces its own clear error from Reconcile/ExtractRRD downstream), and
+// absent that, the sibling <configDir>/../data (the common case) is tried
+// before the subdirectory <configDir>/data. Neither existing is a clear,
+// named error rather than a silent bad guess.
+func resolveDataDir(configDir, dataFlag string) (string, error) {
+	if dataFlag != "" {
+		return dataFlag, nil
+	}
+	sibling := filepath.Join(configDir, "..", "data")
+	subdir := filepath.Join(configDir, "data")
+	for _, cand := range []string{sibling, subdir} {
+		if fi, err := os.Stat(cand); err == nil && fi.IsDir() {
+			return cand, nil
+		}
+	}
+	return "", fmt.Errorf("could not find the RRD data dir (tried %s, %s); pass --data", sibling, subdir)
+}
+
+// loadImportTargets reads a SmokePing config dir's Targets/Probes/Database
+// files (the same tolerant-read shape as importCmd's YAML path: Targets is
+// required, Probes/Database are advisory and read as "" if absent/unreadable)
+// and flattens them via smokeping.Targets into the leaf list --report and
+// --history both reconcile against the RRD data dir.
+func loadImportTargets(dir string) ([]smokeping.ImportTarget, smokeping.Summary, error) {
+	targetsBytes, err := os.ReadFile(filepath.Join(dir, "Targets"))
+	if err != nil {
+		return nil, smokeping.Summary{}, fmt.Errorf("reading Targets: %w", err)
+	}
+	readOptional := func(name string) string {
+		b, _ := os.ReadFile(filepath.Join(dir, name))
+		return string(b)
+	}
+	return smokeping.Targets(string(targetsBytes), readOptional("Probes"), readOptional("Database"))
+}
+
+// runReport implements --report: a dry-run reconciliation of the config
+// against the RRD data dir. It never opens a DB connection and never writes
+// anything — it only needs the config dir (and, for the data dir, --data or
+// a resolvable sibling/subdir).
+func runReport(dir, dataFlag string) int {
+	targets, _, err := loadImportTargets(dir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "import: %v\n", err)
+		return 1
+	}
+	dataDir, err := resolveDataDir(dir, dataFlag)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "import: %v\n", err)
+		return 1
+	}
+	rec, err := smokeping.Reconcile(targets, dataDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "import: %v\n", err)
+		return 1
+	}
+	printReconciliationSummary(os.Stdout, len(targets), rec)
+	return 0
+}
+
+// printReconciliationSummary reports config-vs-RRD drift: config is always
+// the source of truth (Reconcile never invents a target from an orphan
+// .rrd), so a config-only target is one --history will skip for lack of
+// history to backfill, and an orphan .rrd is one --history will never touch.
+// Orphans are capped in the listing (there can be many after a config
+// rename/prune) with a "N more" tail rather than flooding the terminal.
+func printReconciliationSummary(w io.Writer, total int, rec smokeping.Reconciliation) {
+	fmt.Fprintf(w, "smokeping report: %d target(s), %d matched (have .rrd), %d config-only, %d orphan(s)\n",
+		total, len(rec.Matched), len(rec.ConfigOnly), len(rec.Orphans))
+	if len(rec.ConfigOnly) > 0 {
+		fmt.Fprintln(w, "config-only (no .rrd found under the data dir — --history will skip these):")
+		for _, t := range rec.ConfigOnly {
+			fmt.Fprintf(w, "  %s\n", t.Name)
+		}
+	}
+	if len(rec.Orphans) > 0 {
+		fmt.Fprintln(w, "orphans (.rrd with no matching target — never imported):")
+		const limit = 10
+		n := len(rec.Orphans)
+		if n > limit {
+			n = limit
+		}
+		for _, name := range rec.Orphans[:n] {
+			fmt.Fprintf(w, "  %s\n", name)
+		}
+		if len(rec.Orphans) > n {
+			fmt.Fprintf(w, "  ... and %d more\n", len(rec.Orphans)-n)
+		}
+	}
+}
+
+// runHistory implements --history: resolve rrdtool and the data dir,
+// reconcile config against it, then for each matched target extract its RRD
+// history and backfill it into the DB's samples table (and, once done, the
+// hourly/daily continuous aggregates over the imported range). A single
+// target's extract failure is logged and skipped (its RRD may be corrupt,
+// missing an expected DS, etc. — no reason to abort a whole backfill over
+// one bad file); a DB insert failure aborts, since a partial/uncertain write
+// state is worse than stopping.
+func runHistory(dir, dataFlag, rrdtoolFlag, dsn string) int {
+	if dsn == "" {
+		fmt.Fprintln(os.Stderr, "import: --history requires --dsn (or SMOKED_DSN)")
+		return 2
+	}
+	rrdtoolBin := rrdtoolFlag
+	if rrdtoolBin == "" {
+		var err error
+		rrdtoolBin, err = exec.LookPath("rrdtool")
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "import: rrdtool not found on PATH; pass --rrdtool <path>")
+			return 2
+		}
+	}
+
+	targets, _, err := loadImportTargets(dir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "import: %v\n", err)
+		return 1
+	}
+	dataDir, err := resolveDataDir(dir, dataFlag)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "import: %v\n", err)
+		return 1
+	}
+	rec, err := smokeping.Reconcile(targets, dataDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "import: %v\n", err)
+		return 1
+	}
+
+	ctx := context.Background()
+	pg, err := pgstore.New(ctx, dsn, 8, func(err error) {
+		fmt.Fprintf(os.Stderr, "import: pgstore: %v\n", err)
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "import: %v\n", err)
+		return 1
+	}
+	defer pg.Close()
+
+	// Long-range history (anything older than the raw-retention window) is
+	// only queryable through the hourly/daily aggregates — without them, the
+	// import still lands the raw rows (never silently dropped), but an
+	// operator who hasn't run `smoked -downsample` yet needs to know why the
+	// dashboard won't show old history until they do.
+	hasCaggs, _ := pg.AggregatesExist(ctx)
+	if !hasCaggs {
+		fmt.Fprintln(os.Stderr, "import: warning: continuous aggregates not found; long-range history needs `smoked -downsample` first — importing raw samples only")
+	}
+
+	now := time.Now()
+	var totalRows int64
+	var minTS, maxTS time.Time
+	backfilled := 0
+	for i, t := range rec.Matched {
+		rrdPath := filepath.Join(dataDir, t.Name+".rrd")
+		samples, err := smokeping.ExtractRRD(rrdtoolBin, rrdPath, now)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "import: [%d/%d] %s: extract failed, skipping: %v\n", i+1, len(rec.Matched), t.Name, err)
+			continue
+		}
+		rows := make([]pgstore.ImportRow, len(samples))
+		for j, s := range samples {
+			rows[j] = pgstore.ImportRow{
+				TS:            s.TS,
+				Target:        t.Name,
+				Probe:         t.Probe,
+				Host:          t.Host,
+				Pings:         t.Pings,
+				Loss:          s.Loss,
+				MedianSeconds: s.Median,
+			}
+		}
+		n, err := pg.ImportSamples(ctx, rows)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "import: [%d/%d] %s: insert failed: %v\n", i+1, len(rec.Matched), t.Name, err)
+			return 1
+		}
+		totalRows += n
+		backfilled++
+		fmt.Fprintf(os.Stdout, "[%d/%d] %s: %d rows\n", i+1, len(rec.Matched), t.Name, n)
+		if len(samples) > 0 {
+			if minTS.IsZero() || samples[0].TS.Before(minTS) {
+				minTS = samples[0].TS
+			}
+			last := samples[len(samples)-1].TS
+			if maxTS.IsZero() || last.After(maxTS) {
+				maxTS = last
+			}
+		}
+	}
+
+	refreshed := false
+	// partialRefresh: RefreshAggregates (via refreshWindowFor) caps `until`
+	// at now()-1h, since continuous aggregates only refresh closed,
+	// bucket-aligned ranges — a still-live SmokePing install being imported
+	// mid-collection can have maxTS newer than that cap, in which case the
+	// refresh genuinely does NOT cover the newest imported samples yet (they
+	// land in the raw `samples` table either way — nothing is lost — but
+	// won't show up via the hourly/daily aggregate views until the regular
+	// background refresh policy catches up).
+	partialRefresh := false
+	if hasCaggs && !minTS.IsZero() && !maxTS.IsZero() {
+		refreshFrom, refreshUntil := refreshWindowFor(minTS, maxTS, now)
+		if err := pg.RefreshAggregates(ctx, refreshFrom, refreshUntil); err != nil {
+			fmt.Fprintf(os.Stderr, "import: refresh aggregates: %v\n", err)
+			return 1
+		}
+		refreshed = true
+		partialRefresh = maxTS.After(refreshUntil)
+	}
+
+	printHistorySummary(os.Stdout, backfilled, totalRows, len(rec.ConfigOnly), len(rec.Orphans), hasCaggs, refreshed, partialRefresh)
+	return 0
+}
+
+// minRefreshSpan is the minimum [from,until) width handed to
+// RefreshAggregates. TimescaleDB's refresh_continuous_aggregate errors
+// "refresh window too small" unless the window covers at least two buckets
+// of the aggregate being refreshed (its own error hint), and RefreshAggregates
+// refreshes both the hourly (1h bucket) and daily (1d bucket) continuous
+// aggregates over the SAME window — so the binding constraint is the daily
+// one, at least 2 days. 72h (3 days) gives a safety margin above that for
+// whatever alignment adjustment TimescaleDB applies internally. Without this,
+// a target with only a short or sparse RRD history (or any --history run
+// whose Matched targets' combined sample range happens to be narrow) would
+// have its samples import cleanly but the refresh step hard-fail.
+const minRefreshSpan = 72 * time.Hour
+
+// refreshWindowFor computes the window to hand RefreshAggregates for a
+// --history run's combined [minTS,maxTS] extracted-sample range: `until` is
+// capped at now()-1h — mirroring RefreshAggregates' own cap (continuous
+// aggregates only refresh closed, bucket-aligned ranges, so the still-open
+// last hour is left to the regular refresh policy) — and `from` is then
+// pulled back from that (already-capped) `until`, never from the raw maxTS,
+// so the guaranteed minRefreshSpan survives the cap rather than being
+// silently eaten by it. Widening only backward (never forward past `until`)
+// matters because forward padding into the future would just be clamped
+// away by RefreshAggregates' own cap and defeat the guarantee.
+func refreshWindowFor(minTS, maxTS, now time.Time) (time.Time, time.Time) {
+	until := maxTS
+	if ceiling := now.Add(-time.Hour); until.After(ceiling) {
+		until = ceiling
+	}
+	from := minTS
+	if until.Sub(from) < minRefreshSpan {
+		from = until.Add(-minRefreshSpan)
+	}
+	return from, until
+}
+
+// printHistorySummary reports what --history did: how many matched targets
+// it backfilled, the total rows actually inserted (0 on a re-run — see
+// ImportSamples' ON CONFLICT DO NOTHING), and how many config-only targets
+// and orphan .rrds it left untouched, matching printReconciliationSummary's
+// counts so --report's preview and --history's outcome read the same way.
+// The aggregate-refresh line is deliberately not a flat "done": partialRefresh
+// means RefreshAggregates' own now()-1h cap left the newest imported samples
+// (from a still-live SmokePing source) outside the refreshed range — raw data
+// is never lost, but claiming an unqualified "done" there would overstate
+// what's actually queryable via the hourly/daily views right now.
+func printHistorySummary(w io.Writer, backfilled int, rows int64, configOnly, orphans int, hasCaggs, refreshed, partialRefresh bool) {
+	fmt.Fprintf(w, "smokeping history: %d target(s) backfilled, %d row(s) inserted, %d config-only skipped, %d orphan(s) skipped\n",
+		backfilled, rows, configOnly, orphans)
+	switch {
+	case !hasCaggs:
+		fmt.Fprintln(w, "aggregate refresh: skipped (no continuous aggregates — run `smoked -downsample` first)")
+	case refreshed && partialRefresh:
+		fmt.Fprintln(w, "aggregate refresh: done up through the last full hour; the most recent (<1h old) imported samples are stored but not yet reflected in the hourly/daily views — the regular background refresh policy will pick them up")
+	case refreshed:
+		fmt.Fprintln(w, "aggregate refresh: done")
+	default:
+		fmt.Fprintln(w, "aggregate refresh: skipped (no rows extracted)")
+	}
 }

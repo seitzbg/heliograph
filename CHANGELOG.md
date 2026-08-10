@@ -8,6 +8,21 @@ breaking changes.
 ## [Unreleased]
 
 ### Added
+- **SmokePing RRD history import.** `smoked import smokeping <dir> --history` (needs `--dsn`/
+  `SMOKED_DSN` and `rrdtool` on `PATH` or `--rrdtool`) reconciles the legacy config's targets
+  against the RRD data directory (resolved as `--data`, else the sibling `<dir>/../data` or
+  `<dir>/data` — linuxserver/SmokePing puts `config/` and `data/` as siblings) and, for every
+  target that has a matching `.rrd`, extracts its full consolidated history (finest-resolution RRA
+  first) and backfills median + loss into `samples`, then refreshes the hourly/daily continuous
+  aggregates over the imported range. Import is idempotent (`ON CONFLICT DO NOTHING`, so a re-run
+  adds 0 rows) and config stays the source of truth: a target with no `.rrd` is skipped and
+  reported (`config-only`), an `.rrd` with no matching target is reported as an `orphan` and never
+  imported. History from before smokeping-modern's own raw-sample retention window still renders
+  on the dashboard, just from the aggregate (its smoke band collapses to the median line — there's
+  no per-round distribution in an RRD's consolidated data to draw a band from). A dry-run
+  `--report` mode prints the same target/matched/config-only/orphan counts without touching the
+  DB, for previewing config-vs-RRD drift before running `--history`. This completes the SmokePing
+  importer (slice B on top of slice A's config-only import below).
 - **SmokePing config import.** `smoked import smokeping <dir>` reads a legacy SmokePing install's
   `Targets`/`Probes`/`Database` config and turns the target tree into a modern config fragment:
   by default it prints tidy YAML (or writes it with `--out FILE`) for review; `--apply` (with
@@ -15,9 +30,7 @@ breaking changes.
   `config.AppendImport` path as `config import`, so a re-run is idempotent (`unchanged`, not a
   duplicate). SmokePing probes map to their modern equivalent (FPing/FPing6 → FPing, DNS → DNS,
   TCPPing → TCPConnect); `speedtest`/`speedtestcli` and any unrecognized probe are skipped and
-  reported, along with any per-probe param with no modern equivalent. This is slice A (config
-  only) of the SmokePing importer — RRD history backfill and a `--report`/`--history` mode land in
-  a follow-up (slice B).
+  reported, along with any per-probe param with no modern equivalent.
 - **YAML → DB config import.** A `smoked config import <file>` subcommand and a Config-tab
   **Import YAML** button both merge a YAML (or JSON) config's `targets:` branches into the
   database fragment, additively. The merge is **atomic and idempotent**: an imported entry that
