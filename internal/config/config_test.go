@@ -728,11 +728,34 @@ func TestAppendImportRejectsGlobals(t *testing.T) {
 	}
 }
 
-func TestAppendImportSchemaInvalid(t *testing.T) {
-	// unknown probe kind -> Monitors() rejects -> nothing written
-	_, _, _, err := AppendImport(nil, []byte("targets:\n  children:\n    a: {probe: NoSuchProbe, host: a}\n"))
-	if err == nil {
-		t.Fatalf("want schema error for unknown probe")
+// AppendImport validates its fragment CONTEXT-FREE only (validateFragment's structural
+// checks, the additive merge, and the duplicate/idempotency logic) — it must NOT run the
+// fragment's targets through Monitors() in isolation, because a leaf's probe/params/alerts
+// may be inherited from the real default.yaml, which AppendImport never sees. A schema
+// problem that survives full composition (unknown probe kind, missing param, undefined
+// alert, or truly no probe anywhere) is instead caught downstream, once the fragment is
+// merged with the base config — see cmd/smoked's buildRuntime-level tests. So even a fragment
+// naming an unregistered probe kind is accepted here: added=1, err=nil.
+func TestAppendImportDoesNotSchemaValidateInIsolation(t *testing.T) {
+	_, added, _, err := AppendImport(nil, []byte("targets:\n  children:\n    a: {probe: NoSuchProbe, host: a}\n"))
+	if err != nil || added != 1 {
+		t.Fatalf("AppendImport must not schema-validate in isolation: added=%d err=%v (want 1/nil)", added, err)
+	}
+}
+
+// The motivating case for this finding: a fragment whose target sets no `probe` at all,
+// relying entirely on the real default.yaml's tree-wide `targets.probe` — invisible to
+// AppendImport, which only ever sees the DB-fragment side. Rejecting this in isolation (the
+// old behavior) made DB imports stricter than an equivalent conf.d fragment, which inherits
+// the tree-wide default fine via LoadDir's full composition. AppendImport must accept it;
+// whether the base config actually defines a tree-wide probe is checked later, when the
+// fragment is composed with default.yaml (config.AppendDBFragment + Monitors(), exercised by
+// cmd/smoked's buildRuntime tests).
+func TestAppendImportAcceptsFragmentThatReliesOnInheritedProbe(t *testing.T) {
+	imp := []byte("targets:\n  children:\n    inherited:\n      host: 127.0.0.1\n")
+	_, added, _, err := AppendImport(nil, imp)
+	if err != nil || added < 1 {
+		t.Fatalf("fragment relying on inherited probe must be accepted: added=%d err=%v (want >=1/nil)", added, err)
 	}
 }
 

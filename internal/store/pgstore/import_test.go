@@ -4,9 +4,96 @@ import (
 	"context"
 	"math"
 	"os"
+	"strings"
 	"testing"
 	"time"
+
+	"smokeping-modern/internal/config"
 )
+
+// TestValidateImportRowRejectsInvalidPingsAndLoss covers ImportSamples' defense-in-depth
+// backstop (Finding #5): the CLI importer (cmd/smoked's runHistory) is expected to have
+// already filtered these out, but validateImportRow must independently refuse to let a
+// semantically invalid row reach the INSERT — a pings<1 row would make raw LossFraction
+// read as a false 0% and NULLIF(pings,0) blank out the aggregate loss (see the
+// samples_hourly/samples_daily view definitions), a pings>MaxPings row risks overflowing
+// the smallint column, and a loss<0 or loss>pings row is nonsensical on its face.
+func TestValidateImportRowRejectsInvalidPingsAndLoss(t *testing.T) {
+	base := ImportRow{TS: time.Now(), Target: "t", Probe: "FPing", Host: "h", Pings: 20, Loss: 2, MedianSeconds: 0.01}
+
+	cases := []struct {
+		name    string
+		mutate  func(r ImportRow) ImportRow
+		wantErr bool
+	}{
+		{"valid row unchanged", func(r ImportRow) ImportRow { return r }, false},
+		{"pings zero", func(r ImportRow) ImportRow { r.Pings = 0; r.Loss = 0; return r }, true},
+		{"pings negative", func(r ImportRow) ImportRow { r.Pings = -1; r.Loss = 0; return r }, true},
+		{"pings over MaxPings", func(r ImportRow) ImportRow { r.Pings = config.MaxPings + 1; return r }, true},
+		{"pings exactly MaxPings", func(r ImportRow) ImportRow { r.Pings = config.MaxPings; r.Loss = 0; return r }, false},
+		{"loss negative", func(r ImportRow) ImportRow { r.Loss = -1; return r }, true},
+		{"loss exceeds pings", func(r ImportRow) ImportRow { r.Pings = 5; r.Loss = 6; return r }, true},
+		{"loss equals pings (boundary, valid)", func(r ImportRow) ImportRow { r.Pings = 5; r.Loss = 5; return r }, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := validateImportRow(c.mutate(base))
+			if (err != nil) != c.wantErr {
+				t.Errorf("validateImportRow() err = %v, wantErr %v", err, c.wantErr)
+			}
+		})
+	}
+}
+
+// TestImportSamplesRejectsInvalidRowBackstop is the DB-gated proof that ImportSamples
+// itself enforces validateImportRow, not just the CLI: a batch containing one row with
+// pings=0 (e.g. what a missing/unparsable Database file used to resolve to before the
+// CLI-level fix) must be rejected wholesale — as a backstop that should never fire in
+// practice, ImportSamples fails the whole call rather than silently skipping the bad row,
+// so no rows from the batch land, valid or not.
+func TestImportSamplesRejectsInvalidRowBackstop(t *testing.T) {
+	dsn := os.Getenv("SMOKE_TEST_DSN")
+	if dsn == "" {
+		t.Skip("SMOKE_TEST_DSN not set")
+	}
+	ctx := context.Background()
+	s, err := New(ctx, dsn, 8, func(error) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	const target = "imp/invalid-backstop"
+	if _, err := s.pool.Exec(ctx, "DELETE FROM samples WHERE target = $1", target); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		s.pool.Exec(context.Background(), "DELETE FROM samples WHERE target = $1", target)
+	})
+
+	base := time.Now().Add(-42 * 24 * time.Hour).Truncate(time.Hour)
+	rows := []ImportRow{
+		{TS: base, Target: target, Probe: "FPing", Host: "10.0.0.1", Pings: 20, Loss: 0, MedianSeconds: 0.01},
+		{TS: base.Add(time.Hour), Target: target, Probe: "FPing", Host: "10.0.0.1", Pings: 0, Loss: 0, MedianSeconds: 0.02}, // invalid: pings=0
+	}
+	n, err := s.ImportSamples(ctx, rows)
+	if err == nil {
+		t.Fatal("ImportSamples with an invalid (pings=0) row should error")
+	}
+	if !strings.Contains(err.Error(), "pings") {
+		t.Errorf("error should mention pings, got: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("ImportSamples n = %d, want 0 (the valid row must not be inserted alongside the rejected batch)", n)
+	}
+
+	var count int
+	if err := s.pool.QueryRow(ctx, "SELECT count(*) FROM samples WHERE target = $1", target).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Errorf("samples table has %d row(s) for %s, want 0 (nothing from the rejected batch should have been inserted)", count, target)
+	}
+}
 
 // TestExecWithRetryNonLockErrorReturnsImmediately covers RefreshAggregates' retry
 // wrapper (execWithRetry): a non-55P03 error (here, a syntax error) must return on

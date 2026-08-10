@@ -218,12 +218,19 @@ func (s *PGStore) aggregateExists(ctx context.Context) (bool, error) {
 // long views promise (10 days hourly; up to the 30-day raw retention for daily) — what the
 // trailing refresh policies never cover after a fresh create/recreate. Bounded and one-time
 // (EnableDownsampling only calls it on create/recreate). Must run outside an explicit txn.
+//
+// Runs through execWithRetry (the same SQLSTATE 55P03 lock_not_available retry RefreshAggregates
+// uses) rather than a raw s.pool.Exec: a background continuous-aggregate refresh policy can hold
+// the same cagg's refresh lock at the moment this CALL runs, and TimescaleDB aborts the loser
+// instead of queuing it. Without the retry, that ordinary contention surfaced as a startup
+// fatal() (EnableDownsampling is called from cold start) and an intermittent flake in
+// TestDailyRollup / TestRollupMedianRoundsExcludesLostRounds.
 func (s *PGStore) backfillAggregates(ctx context.Context) error {
 	for _, q := range []string{
 		`CALL refresh_continuous_aggregate('samples_hourly', now() - INTERVAL '10 days', now() - INTERVAL '1 hour')`,
 		`CALL refresh_continuous_aggregate('samples_daily', now() - INTERVAL '30 days', now() - INTERVAL '1 hour')`,
 	} {
-		if _, err := s.pool.Exec(ctx, q); err != nil {
+		if err := s.execWithRetry(ctx, q); err != nil {
 			return fmt.Errorf("pgstore: backfill aggregates: %w", err)
 		}
 	}

@@ -74,7 +74,8 @@ func stripNulls(v any) {
 // importCmd implements `smoked import smokeping <dir> [--out FILE] [--apply] [--dsn DSN]
 // [--report] [--history] [--rrdtool PATH] [--data DIR]`.
 func importCmd(args []string) int {
-	const usage = "usage: smoked import smokeping <dir> [--out FILE] [--apply] [--dsn DSN] [--report] [--history] [--rrdtool PATH] [--data DIR]"
+	const usage = "usage: smoked import smokeping <dir> [--out FILE] [--apply] [--dsn DSN] [--config DIR] " +
+		"[--report] [--history] [--rrdtool PATH] [--data DIR]"
 	if len(args) < 1 || args[0] != "smokeping" {
 		fmt.Fprintln(os.Stderr, usage)
 		return 2
@@ -89,6 +90,9 @@ func importCmd(args []string) int {
 	out := fs.String("out", "", "write config YAML to this file (default: stdout)")
 	apply := fs.Bool("apply", false, "also merge into the DB config fragment (needs --dsn)")
 	dsn := fs.String("dsn", os.Getenv("SMOKED_DSN"), "TimescaleDB DSN (or set SMOKED_DSN)")
+	configDir := fs.String("config", "", "with --apply, effective-validate the merged fragment against this base "+
+		"config (default.yaml + conf.d) before persisting, instead of relying on the daemon's next reload to "+
+		"catch a leaf whose inherited probe/params/alerts don't resolve")
 	report := fs.Bool("report", false, "reconcile config targets against the RRD data dir and print counts (dry run, no writes)")
 	history := fs.Bool("history", false, "backfill each matched target's RRD history into samples/aggregates (needs --dsn/SMOKED_DSN and rrdtool)")
 	rrdtoolFlag := fs.String("rrdtool", "", "path to the rrdtool binary (default: PATH lookup)")
@@ -146,7 +150,7 @@ func importCmd(args []string) int {
 			fmt.Fprintln(os.Stderr, "import: --apply requires --dsn (or SMOKED_DSN)")
 			return 2
 		}
-		if code := applyFragment(*dsn, root); code != 0 {
+		if code := applyFragment(*dsn, root, *configDir); code != 0 {
 			return code
 		}
 	}
@@ -155,8 +159,13 @@ func importCmd(args []string) int {
 
 // applyFragment merges root's targets into the DB config fragment, mirroring configCmd's
 // `config import` flow: read the current fragment, append (idempotent — an unchanged
-// re-import reports 0 added), write it back under optimistic concurrency.
-func applyFragment(dsn string, root *config.Node) int {
+// re-import reports 0 added), write it back under optimistic concurrency. config.AppendImport
+// only performs context-free validation (Finding #6) — a leaf relying on an inherited
+// probe/params/alerts can't be judged in isolation — so when configDir is non-empty, the
+// merged fragment is additionally effective-validated against that base config (the same
+// composition buildRuntime performs) before it's persisted; a genuinely-invalid fragment is
+// rejected here instead of only being caught (and logged) at the daemon's next reload.
+func applyFragment(dsn string, root *config.Node, configDir string) int {
 	importBytes, err := renderFragmentJSON(root)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "import: %v\n", err)
@@ -182,6 +191,17 @@ func applyFragment(dsn string, root *config.Node) int {
 	if added == 0 {
 		fmt.Printf("nothing new to merge (%d top-level branch(es) unchanged)\n", unchanged)
 		return 0
+	}
+	if configDir != "" {
+		if err := effectiveValidate(configDir, merged); err != nil {
+			fmt.Fprintf(os.Stderr, "import: effective validation against %s failed: %v\n", configDir, err)
+			return 1
+		}
+	} else {
+		fmt.Println("note: fragment not checked against a running config (--config not given); it's instead")
+		fmt.Println("      validated when the config is next built: a running daemon's next reload (SIGHUP)")
+		fmt.Println("      rejects and logs an invalid fragment, but a COLD START fails to boot on one")
+		fmt.Println("      instead — prefer --config to validate up front.")
 	}
 	if err := cs.Set(ctx, merged, version); err != nil {
 		if errors.Is(err, configstore.ErrConflict) {
@@ -323,14 +343,61 @@ func printReconciliationSummary(w io.Writer, total int, rec smokeping.Reconcilia
 	}
 }
 
+// exitPartialFailure is runHistory's exit code when the run completed but at least one
+// matched target could not be safely imported (e.g. an unresolvable ping count) — as
+// opposed to 0 (every matched target imported cleanly) or 1 (a hard error, such as a DB
+// insert failure, that aborts the whole run outright). The other targets in a
+// partial-failure run were still imported; this distinct code exists so a script driving
+// the importer can tell "some targets need attention" apart from both a clean run and a
+// total failure.
+const exitPartialFailure = 3
+
+// validTargetPings reports whether t's resolved ping count is safe to import: it must be
+// strictly positive and no more than config.MaxPings. A missing/unreadable Database file
+// with no probe/target-level override resolves smokeping.Targets' default to 0 (Finding
+// #5) — writing that straight into pgstore.ImportRow{Pings: 0} makes raw LossFraction
+// read as a false 0% and NULLIF(pings,0) blank out the aggregate loss, so it must be
+// caught here instead. A genuinely-optional missing Probes file is NOT an error by
+// itself — only pings failing to resolve to >=1 by any precedence path is.
+func validTargetPings(t smokeping.ImportTarget) error {
+	switch {
+	case t.Pings < 1:
+		return fmt.Errorf("%s: could not resolve a valid ping count (got %d); is the Database file present with a `pings` setting, or a probe/target pings override?", t.Name, t.Pings)
+	case t.Pings > config.MaxPings:
+		return fmt.Errorf("%s: resolved ping count %d exceeds the maximum of %d", t.Name, t.Pings, config.MaxPings)
+	}
+	return nil
+}
+
+// validLossSamples partitions samples into those whose Loss is consistent with pings
+// (0..pings inclusive) and the count of those dropped for falling outside that range.
+// Policy: drop the offending sample rather than failing the whole target — an RRD can
+// hold years of history, and one bad round (a consolidation artifact, corruption, ...)
+// shouldn't cost the rest of it, mirroring ExtractRRD's own per-row tolerance for a true
+// gap. The caller is expected to warn when dropped > 0.
+func validLossSamples(samples []smokeping.RRDSample, pings int) ([]smokeping.RRDSample, int) {
+	out := make([]smokeping.RRDSample, 0, len(samples))
+	dropped := 0
+	for _, s := range samples {
+		if s.Loss < 0 || s.Loss > pings {
+			dropped++
+			continue
+		}
+		out = append(out, s)
+	}
+	return out, dropped
+}
+
 // runHistory implements --history: resolve rrdtool and the data dir,
 // reconcile config against it, then for each matched target extract its RRD
 // history and backfill it into the DB's samples table (and, once done, the
-// hourly/daily continuous aggregates over the imported range). A single
-// target's extract failure is logged and skipped (its RRD may be corrupt,
-// missing an expected DS, etc. — no reason to abort a whole backfill over
-// one bad file); a DB insert failure aborts, since a partial/uncertain write
-// state is worse than stopping.
+// hourly/daily continuous aggregates over the imported range). A target whose
+// resolved ping count doesn't validate (validTargetPings) or whose extract
+// fails is logged and skipped (its RRD may be corrupt, missing an expected
+// DS, etc. — no reason to abort a whole backfill over one bad target), and
+// the run exits non-zero (exitPartialFailure) if any target was skipped for
+// an invalid ping count; a DB insert failure still aborts the whole run,
+// since a partial/uncertain write state is worse than stopping.
 func runHistory(dir, dataFlag, rrdtoolFlag, dsn string) int {
 	if dsn == "" {
 		fmt.Fprintln(os.Stderr, "import: --history requires --dsn (or SMOKED_DSN)")
@@ -372,26 +439,56 @@ func runHistory(dir, dataFlag, rrdtoolFlag, dsn string) int {
 	}
 	defer pg.Close()
 
-	// Long-range history (anything older than the raw-retention window) is
-	// only queryable through the hourly/daily aggregates — without them, the
-	// import still lands the raw rows (never silently dropped), but an
-	// operator who hasn't run `smoked -downsample` yet needs to know why the
-	// dashboard won't show old history until they do.
-	hasCaggs, _ := pg.AggregatesExist(ctx)
+	// Long-range history (anything older than the raw-retention window) is only
+	// queryable through the hourly/daily aggregates. Without them, importing raw
+	// rows anyway and continuing (the old behavior) would silently produce a DB
+	// where any history older than the eventual 30-day raw retention window can
+	// NEVER be materialized into samples_daily: once -downsample is later enabled,
+	// EnableDownsampling's one-time backfill only reaches back 30 days (matching
+	// the raw retention it installs at the same time), and the retention policy
+	// then deletes the raw rows out from under the older history before it's ever
+	// aggregated — the "full consolidated history" this importer promises would be
+	// silently lost (review Finding #3). So --history refuses to import anything at
+	// all until aggregates already exist, forcing the correct operator order:
+	// enable downsampling first, then import.
+	hasCaggs, err := pg.AggregatesExist(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "import: checking continuous aggregates: %v\n", err)
+		return 1
+	}
 	if !hasCaggs {
-		fmt.Fprintln(os.Stderr, "import: warning: continuous aggregates not found; long-range history needs `smoked -downsample` first — importing raw samples only")
+		fmt.Fprintln(os.Stderr, "import: continuous aggregates are not enabled on this database; start the "+
+			"collector with `-downsample` (or otherwise enable downsampling) before importing history, so "+
+			"history older than the 30-day raw retention is materialized into the daily aggregate. No rows "+
+			"were imported.")
+		return 1
 	}
 
 	now := time.Now()
 	var totalRows int64
 	var minTS, maxTS time.Time
 	backfilled := 0
+	failed := 0
 	for i, t := range rec.Matched {
+		// Validate BEFORE extracting/inserting: a target whose resolved ping count can't
+		// be trusted (e.g. 0 from a missing Database file — Finding #5) must never reach
+		// an insert. It's reported as a failed target and counted toward the run's
+		// partial-failure exit code, and the other matched targets still import.
+		if err := validTargetPings(t); err != nil {
+			fmt.Fprintf(os.Stderr, "import: [%d/%d] %v\n", i+1, len(rec.Matched), err)
+			failed++
+			continue
+		}
 		rrdPath := filepath.Join(dataDir, t.Name+".rrd")
 		samples, err := smokeping.ExtractRRD(rrdtoolBin, rrdPath, now)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "import: [%d/%d] %s: extract failed, skipping: %v\n", i+1, len(rec.Matched), t.Name, err)
 			continue
+		}
+		samples, droppedLoss := validLossSamples(samples, t.Pings)
+		if droppedLoss > 0 {
+			fmt.Fprintf(os.Stderr, "import: [%d/%d] %s: dropped %d sample(s) with invalid loss (loss<0 or loss>pings=%d)\n",
+				i+1, len(rec.Matched), t.Name, droppedLoss, t.Pings)
 		}
 		rows := make([]pgstore.ImportRow, len(samples))
 		for j, s := range samples {
@@ -444,7 +541,10 @@ func runHistory(dir, dataFlag, rrdtoolFlag, dsn string) int {
 		partialRefresh = maxTS.After(refreshUntil)
 	}
 
-	printHistorySummary(os.Stdout, backfilled, totalRows, len(rec.ConfigOnly), len(rec.Orphans), hasCaggs, refreshed, partialRefresh)
+	printHistorySummary(os.Stdout, backfilled, totalRows, len(rec.ConfigOnly), len(rec.Orphans), failed, hasCaggs, refreshed, partialRefresh)
+	if failed > 0 {
+		return exitPartialFailure
+	}
 	return 0
 }
 
@@ -485,17 +585,21 @@ func refreshWindowFor(minTS, maxTS, now time.Time) (time.Time, time.Time) {
 
 // printHistorySummary reports what --history did: how many matched targets
 // it backfilled, the total rows actually inserted (0 on a re-run — see
-// ImportSamples' ON CONFLICT DO NOTHING), and how many config-only targets
-// and orphan .rrds it left untouched, matching printReconciliationSummary's
-// counts so --report's preview and --history's outcome read the same way.
-// The aggregate-refresh line is deliberately not a flat "done": partialRefresh
-// means RefreshAggregates' own now()-1h cap left the newest imported samples
-// (from a still-live SmokePing source) outside the refreshed range — raw data
-// is never lost, but claiming an unqualified "done" there would overstate
-// what's actually queryable via the hourly/daily views right now.
-func printHistorySummary(w io.Writer, backfilled int, rows int64, configOnly, orphans int, hasCaggs, refreshed, partialRefresh bool) {
-	fmt.Fprintf(w, "smokeping history: %d target(s) backfilled, %d row(s) inserted, %d config-only skipped, %d orphan(s) skipped\n",
-		backfilled, rows, configOnly, orphans)
+// ImportSamples' ON CONFLICT DO NOTHING), how many config-only targets
+// and orphan .rrds it left untouched (matching printReconciliationSummary's
+// counts so --report's preview and --history's outcome read the same way),
+// and how many matched targets failed validation (an unresolvable ping
+// count — Finding #5) and so were skipped with no rows written; a non-zero
+// failed count is also why the run's exit code is exitPartialFailure rather
+// than 0. The aggregate-refresh line is deliberately not a flat "done":
+// partialRefresh means RefreshAggregates' own now()-1h cap left the newest
+// imported samples (from a still-live SmokePing source) outside the
+// refreshed range — raw data is never lost, but claiming an unqualified
+// "done" there would overstate what's actually queryable via the
+// hourly/daily views right now.
+func printHistorySummary(w io.Writer, backfilled int, rows int64, configOnly, orphans, failed int, hasCaggs, refreshed, partialRefresh bool) {
+	fmt.Fprintf(w, "smokeping history: %d target(s) backfilled, %d row(s) inserted, %d config-only skipped, %d orphan(s) skipped, %d failed\n",
+		backfilled, rows, configOnly, orphans, failed)
 	switch {
 	case !hasCaggs:
 		fmt.Fprintln(w, "aggregate refresh: skipped (no continuous aggregates — run `smoked -downsample` first)")

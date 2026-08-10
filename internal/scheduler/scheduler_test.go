@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -273,6 +274,53 @@ func TestDispatcherConcurrencyCap(t *testing.T) {
 	}
 	if batches.Load() != 1 {
 		t.Errorf("onBatch called %d times, want 1", batches.Load())
+	}
+}
+
+// panicProbe always panics inside Measure, simulating a buggy/misconfigured
+// probe (e.g. an out-of-range allocation) — for testing that the scheduler
+// contains a panic to a single Outcome instead of crashing the daemon.
+type panicProbe struct{}
+
+func (p *panicProbe) Name() string                     { return "panic" }
+func (p *panicProbe) Describe() string                 { return "panic" }
+func (p *panicProbe) Schema() map[string]probe.VarSpec { return nil }
+func (p *panicProbe) Measure(ctx context.Context, t probe.Target, pings int) (probe.Result, error) {
+	panic("boom: simulated probe panic")
+}
+
+// TestRunOneRecoversPanic is the regression test for the finding that
+// scheduler probe goroutines did not recover panics: a panicking probe used
+// to terminate the whole daemon. It must instead surface as a failed Outcome
+// (Err set, mentioning the target and the recovered value), and — critically
+// — must not stop other targets in the same round from completing.
+func TestRunOneRecoversPanic(t *testing.T) {
+	jobs := []Job{
+		{Probe: &panicProbe{}, Target: probe.Target{Name: "panicky"}, Pings: 1, Timeout: time.Second},
+		{Probe: &fakeProbe{name: "fine", delay: time.Millisecond, rtt: 0.01}, Target: probe.Target{Name: "ok"}, Pings: 1, Timeout: time.Second},
+	}
+	out := RunRound(context.Background(), jobs, 2)
+
+	if out[0].Err == nil {
+		t.Fatal("expected an error Outcome for the panicking probe, got nil Err")
+	}
+	if !strings.Contains(out[0].Err.Error(), "panicky") {
+		t.Errorf("recovered error should mention the target name, got: %v", out[0].Err)
+	}
+	if !strings.Contains(out[0].Err.Error(), "boom") {
+		t.Errorf("recovered error should mention the recovered panic value, got: %v", out[0].Err)
+	}
+	if out[0].Computed.Loss != 1 {
+		t.Errorf("panicking target loss = %d, want 1 (full loss)", out[0].Computed.Loss)
+	}
+
+	// The other target in the same round must still complete normally — a
+	// panic in one probe goroutine must not take down its siblings.
+	if out[1].Err != nil {
+		t.Errorf("sibling target errored: %v, want nil", out[1].Err)
+	}
+	if out[1].Computed.Loss != 0 {
+		t.Errorf("sibling target loss = %d, want 0", out[1].Computed.Loss)
 	}
 }
 

@@ -30,10 +30,12 @@ breaking changes.
   reported (`config-only`), an `.rrd` with no matching target is reported as an `orphan` and never
   imported. History from before smokeping-modern's own raw-sample retention window still renders
   on the dashboard, just from the aggregate (its smoke band collapses to the median line — there's
-  no per-round distribution in an RRD's consolidated data to draw a band from). A dry-run
-  `--report` mode prints the same target/matched/config-only/orphan counts without touching the
-  DB, for previewing config-vs-RRD drift before running `--history`. This completes the SmokePing
-  importer (slice B on top of slice A's config-only import below).
+  no per-round distribution in an RRD's consolidated data to draw a band from) — which is why
+  `--history` requires the continuous aggregates already enabled (`smoked -downsample`) and refuses
+  to import at all otherwise (see Fixed below). A dry-run `--report` mode prints the same
+  target/matched/config-only/orphan counts without touching the DB, and works with or without
+  downsampling enabled, for previewing config-vs-RRD drift before running `--history`. This
+  completes the SmokePing importer (slice B on top of slice A's config-only import below).
 - **SmokePing config import.** `smoked import smokeping <dir>` reads a legacy SmokePing install's
   `Targets`/`Probes`/`Database` config and turns the target tree into a modern config fragment:
   by default it prints tidy YAML (or writes it with `--out FILE`) for review; `--apply` (with
@@ -178,6 +180,77 @@ breaking changes.
   instead of a moving `latest-pg16` tag.
 
 ### Fixed
+- **`EnableDownsampling`'s one-time backfill could fail on ordinary refresh-policy contention.**
+  `backfillAggregates` ran its two `CALL refresh_continuous_aggregate(...)` statements via a raw
+  `pool.Exec`, with no retry — unlike `RefreshAggregates`, which already wraps the same kind of
+  `CALL` in `execWithRetry` because a background continuous-aggregate refresh policy job can hold
+  the same aggregate's refresh lock at the moment the CALL runs, and TimescaleDB aborts the loser
+  with SQLSTATE `55P03` (`lock_not_available`) instead of queuing it. Un-retried, that ordinary
+  contention was an intermittent `TestDailyRollup`/`TestRollupMedianRoundsExcludesLostRounds`
+  flake — and, because `EnableDownsampling` runs at cold start, could make the daemon fail to
+  boot outright. `backfillAggregates` now routes both `CALL`s through the same `execWithRetry`
+  helper.
+- **History import no longer writes rows with an invalid ping count or loss.** `smoked import
+  smokeping <dir> --history` used to write a matched target's resolved `Pings` straight into
+  `pgstore.ImportRow` with no validation: a target whose `Database` file was missing/unreadable
+  (and with no probe/target `pings` override) resolved to `Pings=0`, which made raw `LossFraction`
+  read as a false 0% and blanked the aggregate loss out to `NULL` via `NULLIF(pings,0)`.
+  `runHistory` now validates each matched target's resolved ping count (1..`config.MaxPings`)
+  *before* extracting or inserting anything; a target that fails is reported by name (hinting at
+  the missing `Database` file), its rows are never written, the other matched targets still
+  import, and the run exits with a distinct non-zero partial-failure code (rather than `0`) so a
+  script can tell "some targets need attention" apart from a clean run. Each extracted sample's
+  `loss` is separately checked against that target's pings; a sample with `loss<0` or `loss>pings`
+  is dropped (with a warning) rather than the whole target failing — one bad round in years of RRD
+  history shouldn't cost the rest of it. `pgstore.ImportSamples` also gained a defense-in-depth
+  backstop (`pings<1`, `pings>MaxPings`, `loss<0`, or `loss>pings` now rejects the whole call) so
+  no caller, present or future, can slip an invalid row past it.
+- **History import could silently lose old history to retention before it was ever aggregated.**
+  When the hourly/daily continuous aggregates weren't enabled yet (production init doesn't create
+  them; only `smoked -downsample` does), `--history` used to print a warning and import the raw
+  rows anyway, then skip the aggregate refresh entirely. If the operator enabled downsampling
+  later, `EnableDownsampling`'s one-time backfill only reaches back 30 days (matching the raw
+  retention policy it installs at the same time) — so any imported history older than that window
+  was never materialized into `samples_daily`, and the raw rows behind it were eventually deleted
+  by the retention policy, silently losing the "full consolidated history" the importer promises.
+  `runHistory` now checks for the continuous aggregates *before* extracting or inserting anything
+  and refuses to import at all when they're absent — a clear, actionable error names
+  `smoked -downsample` and confirms no rows were written — forcing the correct order (enable
+  downsampling, then import). Separately, `pgstore.RefreshAggregates` itself could leave the daily
+  bucket containing the newest imported sample completely unmaterialized: TimescaleDB's
+  `refresh_continuous_aggregate` can return zero rows for a bucket when the refresh window's upper
+  bound lands exactly at (or only seconds past) that bucket's newest raw timestamp, rather than
+  materializing it. `RefreshAggregates` now widens both bounds out to whole UTC days before
+  refreshing, guaranteeing the daily aggregate's bucket at each end is unambiguously covered.
+- **Config import rejected valid fragments that relied on base-YAML inheritance.**
+  `config.AppendImport` used to schema-validate the DB fragment in isolation — building a bare
+  target tree and calling `Monitors()` on it *before* the fragment was ever composed with
+  `default.yaml`. A target that inherited its `probe` (or referenced an alert) from the tree-wide
+  YAML config, rather than setting it on the fragment itself, was wrongly rejected with e.g.
+  `no probe set (and none inherited)`, even though the identical branch in a `conf.d/*.yaml`
+  fragment resolves fine. `AppendImport` now does context-free validation only (the structural
+  `database`/`probes`/`alerts` rejection, the additive merge, and the duplicate/idempotency
+  logic) — schema validation happens once the fragment is actually composed with the base config,
+  which the API's `ConfigImport` closure already does on every apply (`buildRuntime` →
+  `AppendDBFragment` → `Monitors()`). `smoked config import` and `smoked import smokeping --apply`
+  gained an optional `-config`/`--config DIR` flag to effective-validate the merged fragment
+  against that base config before persisting; without it, an invalid fragment is instead validated
+  when the config is next built — on a running daemon, that's a SIGHUP reload, which rejects it and
+  logs why; on a cold start, `buildRuntime` failing on it makes the daemon **fail to boot**. Prefer
+  `-config`/`--config` to catch a bad fragment up front instead of at the next build.
+- **Agent flush no longer discards a whole oversized backlog on a 413.** A results batch that
+  tripped the hub's 16 MiB body cap (`413`) used to be treated the same as a malformed (`400`)
+  batch — dropped wholesale, even though every round in it except the one(s) that pushed it over
+  the cap was perfectly valid and individually sendable. A high-ping-count assignment recovering
+  from a hub outage with a large backlog (e.g. 5,000 buffered rounds serializing past 16 MiB)
+  could lose the *entire* backlog to a single oversized batch. `pushError` now distinguishes a
+  size rejection (`oversize()`, 413 only) from the broader `permanent()` (413 or 400); a new
+  `Agent.sendBatch` helper, shared by `flushLoop` and `finalFlush`, retries a 413 by splitting
+  the batch in half and recursing on each half — isolating the unsendable round(s) so every other
+  round still reaches the hub — while a `400` (the hub's decoder rejected the request's shape, not
+  its size) still drops the whole batch as before, and a transient error (5xx/429/auth) still
+  propagates untouched so the caller retries the whole batch later. Only a round that alone
+  exceeds the byte cap is ever dropped (and counted in the existing `rejected` metric).
 - **Config reload race.** A concurrent SIGHUP reload and an API config-apply could leave the live
   runtime out of sync with the persisted config (a slow reload build swapping a stale runtime over
   a completed apply). Both writers now serialize the whole read/build/swap under one mutex.
@@ -198,6 +271,16 @@ breaking changes.
   logged under another. Internal robustness alongside it: `pgstore.Latest` binds the
   `DefaultVantage` constant instead of a hardcoded `'local'` SQL literal, and `VantageOf` reuses
   `VantageOrDefault` so the "empty ⇒ local" rule lives in exactly one place.
+- **Unbounded `Ping.packetsize` could OOM or panic the collector.** The schema accepted any
+  non-negative integer (e.g. `1073741824`), which reached `buildEcho`'s `make([]byte, packetsize)`
+  on every send. A `maxPacketSize` (65500 bytes, under the ~65507-byte IPv4 ICMP payload ceiling
+  and safe for IPv6) is now enforced in three places — the schema's `Validate` hook, the `Ping`
+  factory's probe-level default, and `Measure`'s effective per-target value (a per-target override
+  bypasses the first two) — so an oversized value is a loud config/measurement error instead of a
+  crash. Hardening alongside it: the scheduler's per-probe goroutine (`runOne`) now recovers a
+  panicking `Measure` call into a failed `Outcome` (error names the probe + target + recovered
+  value) instead of taking down the whole daemon, so one misbehaving probe can no longer crash
+  every other target's round.
 - **Store read failures now surface as HTTP 503** on `/api/targets`, `/api/charts`, `/api/sla`,
   and `/metrics`, instead of a false-empty "0 targets" success that a Prometheus scrape could
   not distinguish from a healthy empty configuration. The base `Store.History`/`Keys` reads are

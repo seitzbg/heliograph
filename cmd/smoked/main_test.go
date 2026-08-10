@@ -171,6 +171,67 @@ func TestBuildRuntimeDBFragmentCollision(t *testing.T) {
 	}
 }
 
+// AppendImport (internal/config) is deliberately context-free: it never sees the real
+// default.yaml, so it can't know whether a leaf's probe/params/alerts resolve once inherited.
+// buildRuntime is what actually composes the DB fragment with the base config (LoadPath +
+// AppendDBFragment) and calls Monitors() — that's where a genuinely-invalid import (one that
+// still doesn't resolve even with the base config's tree-wide defaults) must be caught. These
+// two cases prove that boundary: AppendImport happily accepts both fragments (added=1, no
+// error), and it's buildRuntime — the same composition the API's ConfigImport closure and
+// applyConfig trigger — that rejects them.
+func TestBuildRuntimeRejectsGenuinelyInvalidImportNotAppendImport(t *testing.T) {
+	t.Run("no probe anywhere", func(t *testing.T) {
+		dir := t.TempDir()
+		// Base config sets no tree-wide probe at all, so a child that also sets none has
+		// nothing to inherit.
+		if err := os.WriteFile(filepath.Join(dir, "default.yaml"), []byte("targets:\n  children: {}\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		frag := []byte("targets:\n  children:\n    orphan: {host: 127.0.0.1}\n")
+		merged, added, _, err := config.AppendImport(nil, frag)
+		if err != nil || added != 1 {
+			t.Fatalf("AppendImport should accept a fragment relying on (missing) inherited probe: added=%d err=%v", added, err)
+		}
+		getter := func() ([]byte, error) { return merged, nil }
+		if _, err := buildRuntime(dir, 1, time.Second, time.Second, nil, getter); err == nil || !strings.Contains(err.Error(), "no probe set") {
+			t.Fatalf("buildRuntime should reject the composed config for having no probe anywhere, got %v", err)
+		}
+	})
+
+	t.Run("undefined alert reference", func(t *testing.T) {
+		dir := t.TempDir()
+		base := "targets:\n  probe: TCPConnect\nalerts:\n  known: {type: loss, pattern: \">50%\"}\n"
+		if err := os.WriteFile(filepath.Join(dir, "default.yaml"), []byte(base), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		frag := []byte("targets:\n  children:\n    orphan: {host: 127.0.0.1, alerts: [nope]}\n")
+		merged, added, _, err := config.AppendImport(nil, frag)
+		if err != nil || added != 1 {
+			t.Fatalf("AppendImport should accept a fragment referencing an alert it can't see: added=%d err=%v", added, err)
+		}
+		getter := func() ([]byte, error) { return merged, nil }
+		if _, err := buildRuntime(dir, 1, time.Second, time.Second, nil, getter); err == nil || !strings.Contains(err.Error(), `undefined alert "nope"`) {
+			t.Fatalf("buildRuntime should reject the composed config for the undefined alert, got %v", err)
+		}
+	})
+
+	t.Run("unknown probe kind", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "default.yaml"), []byte("targets:\n  children: {}\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		frag := []byte("targets:\n  children:\n    orphan: {probe: NoSuchProbe, host: 127.0.0.1}\n")
+		merged, added, _, err := config.AppendImport(nil, frag)
+		if err != nil || added != 1 {
+			t.Fatalf("AppendImport should accept an unknown-probe-kind fragment (schema-blind): added=%d err=%v", added, err)
+		}
+		getter := func() ([]byte, error) { return merged, nil }
+		if _, err := buildRuntime(dir, 1, time.Second, time.Second, nil, getter); err == nil || !strings.Contains(err.Error(), "unknown probe kind") {
+			t.Fatalf("buildRuntime should reject the composed config for the unknown probe kind, got %v", err)
+		}
+	})
+}
+
 func TestSwapRuntimeInstallsAndInherits(t *testing.T) {
 	var current atomic.Pointer[runtime]
 	var mu sync.Mutex
@@ -330,6 +391,141 @@ func TestConfigImportCmd(t *testing.T) {
 	_, ver2, _ := cs.Get(ctx)
 	if ver2 != ver {
 		t.Fatalf("idempotent re-import bumped version %d -> %d", ver, ver2)
+	}
+}
+
+// resetConfigFragmentRowMain mirrors resetConfigFragmentRow (import_test.go) using this
+// file's already-imported pgx.Connect, so `smoked config import`'s DB-gated tests can reset
+// the shared config_fragment row (id=1) between runs without depending on load order across
+// the two test files' helpers.
+func resetConfigFragmentRowMain(t *testing.T, dsn string) {
+	t.Helper()
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(ctx)
+	if _, err := conn.Exec(ctx, `DELETE FROM config_fragment WHERE id = 1`); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// `smoked config import` merges via config.AppendImport, which (Finding #6) is deliberately
+// context-free — it never sees the real base config, so it can't tell whether a leaf's
+// probe/params/alerts resolve once inherited. The optional -config DIR effective-validates the
+// merged fragment against that base config before persisting (same composition buildRuntime
+// performs), giving an operator an immediate reject instead of discovering the break only at
+// the daemon's next reload.
+
+// -config given, fragment relies on the base's tree-wide probe: accepted and persisted.
+func TestConfigImportCmdConfigFlagAcceptsInheritedFragment(t *testing.T) {
+	dsn := os.Getenv("SMOKE_TEST_DSN")
+	if dsn == "" {
+		t.Skip("set SMOKE_TEST_DSN to run config import -config test")
+	}
+	ctx := context.Background()
+	cs, err := configstore.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Close()
+	resetConfigFragmentRowMain(t, dsn)
+	if _, _, e := cs.Get(ctx); e != nil {
+		t.Fatal(e)
+	}
+
+	baseDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(baseDir, "default.yaml"), []byte("targets:\n  probe: TCPConnect\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	f := filepath.Join(dir, "in.yaml")
+	// no probe on the target: relies entirely on baseDir's tree-wide probe.
+	if err := os.WriteFile(f, []byte("targets:\n  children:\n    ci-inh: {host: 127.0.0.1}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if rc := configCmd([]string{"import", f, "-dsn", dsn, "-config", baseDir}); rc != 0 {
+		t.Fatalf("config import -config on an inheriting fragment: rc=%d, want 0", rc)
+	}
+	doc, ver, _ := cs.Get(ctx)
+	if ver < 1 || !strings.Contains(string(doc), "ci-inh") {
+		t.Fatalf("inherited fragment not persisted: v%d %s", ver, doc)
+	}
+}
+
+// -config given, fragment has no probe anywhere (base sets no tree-wide probe either):
+// rejected, non-zero exit, nothing persisted.
+func TestConfigImportCmdConfigFlagRejectsInvalid(t *testing.T) {
+	dsn := os.Getenv("SMOKE_TEST_DSN")
+	if dsn == "" {
+		t.Skip("set SMOKE_TEST_DSN to run config import -config test")
+	}
+	ctx := context.Background()
+	cs, err := configstore.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Close()
+	resetConfigFragmentRowMain(t, dsn)
+	_, verBefore, e := cs.Get(ctx)
+	if e != nil {
+		t.Fatal(e)
+	}
+
+	baseDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(baseDir, "default.yaml"), []byte("targets:\n  children: {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	f := filepath.Join(dir, "in.yaml")
+	if err := os.WriteFile(f, []byte("targets:\n  children:\n    ci-bad: {host: 127.0.0.1}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rc := configCmd([]string{"import", f, "-dsn", dsn, "-config", baseDir})
+	if rc == 0 {
+		t.Fatal("config import -config should reject a genuinely-invalid fragment, got rc=0")
+	}
+	doc, verAfter, _ := cs.Get(ctx)
+	if verAfter != verBefore || strings.Contains(string(doc), "ci-bad") {
+		t.Fatalf("rejected fragment must not persist: v%d -> v%d, doc=%s", verBefore, verAfter, doc)
+	}
+}
+
+// -config omitted: only AppendImport's context-free checks run, so an inheriting fragment is
+// accepted and persisted; a note explains it's validated at the daemon's next reload instead.
+func TestConfigImportCmdWithoutConfigFlagAcceptsInheritedFragment(t *testing.T) {
+	dsn := os.Getenv("SMOKE_TEST_DSN")
+	if dsn == "" {
+		t.Skip("set SMOKE_TEST_DSN to run config import test")
+	}
+	ctx := context.Background()
+	cs, err := configstore.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Close()
+	resetConfigFragmentRowMain(t, dsn)
+	if _, _, e := cs.Get(ctx); e != nil {
+		t.Fatal(e)
+	}
+
+	dir := t.TempDir()
+	f := filepath.Join(dir, "in.yaml")
+	if err := os.WriteFile(f, []byte("targets:\n  children:\n    ci-noconf: {host: 127.0.0.1}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var rc int
+	out := captureStdout(t, func() { rc = configCmd([]string{"import", f, "-dsn", dsn}) })
+	if rc != 0 {
+		t.Fatalf("config import without -config should accept a context-free-valid fragment: rc=%d", rc)
+	}
+	if !strings.Contains(out, "next reload") {
+		t.Fatalf("expected a note about daemon-reload validation, got:\n%s", out)
+	}
+	doc, ver, _ := cs.Get(ctx)
+	if ver < 1 || !strings.Contains(string(doc), "ci-noconf") {
+		t.Fatalf("fragment not persisted: v%d %s", ver, doc)
 	}
 }
 

@@ -42,11 +42,44 @@ type pingProbe struct {
 	defaultPacketsize string        // per-target override via t.Param("packetsize", ...)
 }
 
+// maxPacketSize bounds the "packetsize" config var (ICMP payload bytes).
+// 65500 sits comfortably under the ~65507-byte ceiling a single IPv4 packet
+// can carry as ICMP payload (65535 max IPv4 total length, minus a 20-byte IP
+// header and 8-byte ICMP header) and is well within IPv6's much larger
+// (jumbogram-capable) limit too, so one constant is a safe bound for both
+// families. Without this bound, a schema-valid but huge value (e.g.
+// 1073741824) reaches buildEcho's make([]byte, packetsize) on every send —
+// an OOM or an impossible-allocation panic. Since scheduler probe goroutines
+// do not recover panics on their own (see runOne/safeMeasure), that would
+// take down the whole daemon rather than just fail one probe's round.
+const maxPacketSize = 65500
+
+// parsePacketSize parses and validates a "packetsize" config value: it must
+// be a non-negative integer no larger than maxPacketSize. It is the single
+// source of truth for that check, used by the schema Validate hook below,
+// the factory (validating the probe-level default), and Measure (validating
+// the effective per-target value, which can come from a per-target override
+// that bypasses both of the above).
+func parsePacketSize(v string) (int, error) {
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 {
+		return 0, fmt.Errorf("packetsize must be a non-negative integer, got %q", v)
+	}
+	if n > maxPacketSize {
+		return 0, fmt.Errorf("packetsize must be <= %d bytes, got %d", maxPacketSize, n)
+	}
+	return n, nil
+}
+
 func init() {
 	probe.Register("Ping", "ICMP Echo (native, no fping)", map[string]probe.VarSpec{
 		"packetsize": {
-			Doc: "ICMP payload size in bytes", Default: "56",
+			Doc: fmt.Sprintf("ICMP payload size in bytes (max %d)", maxPacketSize), Default: "56",
 			Scope: probe.TargetVar, Kind: probe.KindInt,
+			Validate: func(v string) error {
+				_, err := parsePacketSize(v)
+				return err
+			},
 		},
 		"interval_ms": {
 			Doc: "milliseconds between successive echo sends within one round", Default: "50",
@@ -83,6 +116,9 @@ func newPingProbe(cfg map[string]string) (probe.Probe, error) {
 		p.mode = v
 	}
 	if v, ok := cfg["packetsize"]; ok && v != "" {
+		if _, err := parsePacketSize(v); err != nil {
+			return nil, fmt.Errorf("pingprobe: %w", err)
+		}
 		p.defaultPacketsize = v
 	}
 	return p, nil
@@ -120,6 +156,16 @@ type roundState struct {
 // rather than the send schedule (see the package doc comment above).
 // Unanswered pings are ordinary loss (absent samples), not an error.
 func (p *pingProbe) Measure(ctx context.Context, t probe.Target, pings int) (probe.Result, error) {
+	// Validate packetsize before touching the network: a per-target override
+	// (t.Param) bypasses both the schema-level check (config load time) and
+	// the factory's check of the probe-level default, so this is the last
+	// line of defense against an oversized value reaching buildEcho's
+	// make([]byte, packetsize) — see maxPacketSize's doc comment.
+	packetsize, err := parsePacketSize(t.Param("packetsize", p.defaultPacketsize))
+	if err != nil {
+		return probe.Result{}, fmt.Errorf("pingprobe: %w", err)
+	}
+
 	ip, isV6, err := resolveHost(ctx, t.Host)
 	if err != nil {
 		return probe.Result{}, fmt.Errorf("pingprobe: resolve %q: %w", t.Host, err)
@@ -130,11 +176,6 @@ func (p *pingProbe) Measure(ctx context.Context, t probe.Target, pings int) (pro
 		return probe.Result{}, err
 	}
 	defer conn.Close()
-
-	packetsize, err := strconv.Atoi(t.Param("packetsize", p.defaultPacketsize))
-	if err != nil || packetsize < 0 {
-		return probe.Result{}, fmt.Errorf("pingprobe: invalid packetsize %q", t.Param("packetsize", p.defaultPacketsize))
-	}
 
 	token := make([]byte, 8)
 	if _, err := rand.Read(token); err != nil {
