@@ -41,6 +41,7 @@ import (
 	_ "smokeping-modern/internal/probe/fping"
 	_ "smokeping-modern/internal/probe/httpprobe"
 	_ "smokeping-modern/internal/probe/irttprobe"
+	_ "smokeping-modern/internal/probe/pingprobe"
 	_ "smokeping-modern/internal/probe/sshprobe"
 	_ "smokeping-modern/internal/probe/tcpconnect"
 )

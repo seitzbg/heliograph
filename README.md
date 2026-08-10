@@ -9,8 +9,13 @@ Goal: reproduce SmokePing's features and its signature **smoke graphs**, with a 
 ## What works today (verified)
 
 - **Smoke-graph renderer** (`web/smoke-poc.html`) — a self-contained canvas re-implementation of SmokePing's signature chart: nested percentile bands darkening toward the median + the 8-bucket loss-colored median line, light/dark theme-aware, across four latency scenarios. This de-risks the "keep the look & feel" requirement. Open it in a browser, or view the published version at the artifact URL noted in the session.
-- **Plugin probes** — a `Probe` interface + registry; probes self-register via `init()`. Six shipped (the lean v1 set), all live-tested against real hosts:
+- **Plugin probes** — a `Probe` interface + registry; probes self-register via `init()`. Seven shipped, all live-tested against real hosts:
   - `FPing` — wraps `fping(8)` for ICMP echo RTT (CLI-wrapper style).
+  - `Ping` — native ICMP echo via `golang.org/x/net/icmp`, no `fping` binary/`setcap`: an
+    unprivileged datagram socket first (needs the `net.ipv4.ping_group_range` sysctl), falling
+    back to a raw socket (needs `CAP_NET_RAW`) — `mode: auto|unprivileged|privileged` can pin
+    one path. Params: `packetsize` (default `56`), `interval_ms` (default `50`). Coexists with
+    `FPing`.
   - `TCPConnect` — native TCP-connect timing, no external binary.
   - `DNS` — native resolver query timing via `miekg/dns` (no external `dig`).
   - `HTTP` — native HTTP(S) time-to-first-byte (minus DNS) via `net/http` + `httptrace` (no external `curl`).
@@ -156,6 +161,7 @@ internal/
   probe/         Probe interface + registry (the plugin contract)
     tcpconnect/  native TCP-connect probe
     fping/       fping(8) wrapper probe (own process group; killed as a group on timeout)
+    pingprobe/   native ICMP echo probe (golang.org/x/net/icmp; datagram-first, raw fallback)
     dns/         native DNS probe (miekg/dns)
     httpprobe/   native HTTP TTFB probe (net/http + httptrace)
     sshprobe/    native SSH banner-timing probe
