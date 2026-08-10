@@ -8,6 +8,17 @@ breaking changes.
 ## [Unreleased]
 
 ### Added
+- **Native ICMP `Ping` probe.** A new `Ping` probe kind sends and matches ICMP Echo itself via
+  `golang.org/x/net/icmp` — no `fping` binary, no `setcap`. Per round it opens a socket
+  **datagram-first** (an unprivileged `udp4`/`udp6` ICMP socket, gated by the kernel's
+  `net.ipv4.ping_group_range`) and falls back to a raw `ip4:icmp`/`ip6:ipv6-icmp` socket
+  (needs `CAP_NET_RAW`) when the datagram attempt fails; `mode: auto|unprivileged|privileged`
+  can pin one path instead of trying both, and a failure that exhausts every attempt names both
+  remedies in the error. Family (IPv4/IPv6) follows the target's resolved address. Params:
+  `packetsize` (ICMP payload bytes, default `56`) and `interval_ms` (gap between successive
+  sends within one round, default `50`). `Ping` coexists with `FPing` — the fping wrapper probe
+  is unchanged and still available. See `docker-compose.yml` for the `ping_group_range` sysctl
+  that enables the unprivileged path.
 - **SmokePing RRD history import.** `smoked import smokeping <dir> --history` (needs `--dsn`/
   `SMOKED_DSN` and `rrdtool` on `PATH` or `--rrdtool`) reconciles the legacy config's targets
   against the RRD data directory (resolved as `--data`, else the sibling `<dir>/../data` or

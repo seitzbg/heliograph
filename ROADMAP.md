@@ -135,8 +135,11 @@ v2.0 line; these build on it.
     RRD data dir (matched/config-only/orphan counts, data dir resolved as sibling `../data` or a
     `data` subdir); `--history` extracts each matched target's full RRD history via `rrdtool` and
     backfills median/loss into `samples` + the hourly/daily aggregates, idempotently
-- ⬜ **Native ICMP probe** — replace the `fping` shell-out with `golang.org/x/net/icmp`, dropping
-  the external binary and the `CAP_NET_RAW`/`setcap` dance from the image. *(Small–medium.)*
+- ✅ **Native ICMP probe** — a new `Ping` probe kind (`internal/probe/pingprobe`) speaks ICMP
+  echo itself via `golang.org/x/net/icmp`: datagram socket first (unprivileged, needs the
+  `net.ipv4.ping_group_range` sysctl), raw-socket fallback (`CAP_NET_RAW`). Ships alongside
+  `FPing` rather than replacing it — the external binary and `setcap` dance stay for users who
+  keep using `FPing`, but new deployments can drop both by using `Ping` instead. *(Small–medium.)*
 - ⬜ **On-disk agent store-and-forward** — persist the agent's buffer so a vantage restart doesn't
   drop unpushed rounds (today it's in-memory only). *(Medium.)*
 - ⬜ **Cut the release** — bump the version off `0.1.0`; tag the single-node line **v1.0** and

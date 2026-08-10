@@ -33,6 +33,10 @@ services:
     # published on localhost only.
     cap_add:
       - NET_RAW          # fping ICMP (via fping's file capability, non-root)
+    sysctls:
+      # Lets the native Ping probe send ICMP via an unprivileged datagram socket
+      # (no capability needed). Falls back to CAP_NET_RAW (above) if unset.
+      net.ipv4.ping_group_range: "0 2147483647"
     environment:
       # Optional: enable the password-gated admin key-management API + Vantages
       # GUI panel. Empty (the default) leaves it fail-closed/disabled. Set it in

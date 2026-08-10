@@ -43,7 +43,9 @@ agents connected, `smoked` behaves exactly as a single-node collector.
 - One or more **remote hosts** to run agents on. Each needs the external probe
   binaries for the probe kinds it will run (e.g. `fping` for ICMP, with
   `CAP_NET_RAW`; `irtt` for the IRTT probe). Native probes (TCP, DNS, HTTP, SSH)
-  need nothing extra.
+  need nothing extra. For ICMP without an external binary, use `Ping` instead of
+  `FPing`: it needs either the `net.ipv4.ping_group_range` sysctl (unprivileged) or
+  `CAP_NET_RAW` (raw-socket fallback) on the agent host.
 
 ## Step 1 — Declare which targets a vantage probes
 
