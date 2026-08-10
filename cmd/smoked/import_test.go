@@ -16,6 +16,7 @@ import (
 
 	"smokeping-modern/internal/config"
 	"smokeping-modern/internal/configstore"
+	"smokeping-modern/internal/importer/smokeping"
 	"smokeping-modern/internal/store/pgstore"
 )
 
@@ -316,6 +317,86 @@ func assertSamePath(t *testing.T, got, want string) {
 	}
 }
 
+// TestValidTargetPingsRejectsUnresolvableAndOversizeCounts is the regression for
+// Finding #5: a target whose Database file is missing/unreadable (and which has no
+// probe/target-level pings override) resolves smokeping.Targets' default pings to 0 —
+// validTargetPings must reject that (and any other non-positive or over-MaxPings value)
+// with an error naming the target and the likely cause, while leaving a normally-resolved
+// count (Database present, or an override) alone.
+func TestValidTargetPingsRejectsUnresolvableAndOversizeCounts(t *testing.T) {
+	cases := []struct {
+		name    string
+		pings   int
+		wantErr bool
+	}{
+		{"zero (unresolvable — missing Database)", 0, true},
+		{"negative", -1, true},
+		{"valid minimum", 1, false},
+		{"valid typical (Database default)", 20, false},
+		{"at MaxPings", config.MaxPings, false},
+		{"over MaxPings", config.MaxPings + 1, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := validTargetPings(smokeping.ImportTarget{Name: "A/B", Pings: c.pings})
+			if (err != nil) != c.wantErr {
+				t.Errorf("validTargetPings(pings=%d) err = %v, wantErr %v", c.pings, err, c.wantErr)
+			}
+		})
+	}
+	// The zero case specifically must hint at the missing Database file — this is the
+	// actual failure mode the finding describes, and a generic "invalid" message would
+	// leave an operator guessing why a valid-looking target failed to import.
+	err := validTargetPings(smokeping.ImportTarget{Name: "A/B", Pings: 0})
+	if err == nil || !strings.Contains(err.Error(), "Database") {
+		t.Errorf("pings=0 error should hint at the missing Database file, got: %v", err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "A/B") {
+		t.Errorf("error should name the target (A/B), got: %v", err)
+	}
+}
+
+// TestValidLossSamplesDropsOutOfRangeLoss covers the chosen policy for a sample whose
+// extracted loss can't be reconciled with the target's resolved pings (negative, or
+// greater than pings): drop that sample (with the caller expected to warn), keep the
+// rest — one bad round in years of RRD history shouldn't lose the rest of it, mirroring
+// ExtractRRD's own per-row tolerance for a true gap.
+func TestValidLossSamplesDropsOutOfRangeLoss(t *testing.T) {
+	now := time.Now()
+	samples := []smokeping.RRDSample{
+		{TS: now, Loss: 0},
+		{TS: now.Add(time.Minute), Loss: 5},      // == pings, boundary valid
+		{TS: now.Add(2 * time.Minute), Loss: 6},  // > pings, drop
+		{TS: now.Add(3 * time.Minute), Loss: -1}, // negative, drop
+	}
+	valid, dropped := validLossSamples(samples, 5)
+	if dropped != 2 {
+		t.Errorf("dropped = %d, want 2", dropped)
+	}
+	if len(valid) != 2 {
+		t.Fatalf("len(valid) = %d, want 2: %+v", len(valid), valid)
+	}
+	for _, s := range valid {
+		if s.Loss > 5 || s.Loss < 0 {
+			t.Errorf("valid sample has out-of-range loss: %+v", s)
+		}
+	}
+}
+
+// TestValidLossSamplesNoneDroppedReturnsAllUnchanged is the regression case for --
+// every sample has an in-range loss, so nothing is dropped and every sample is kept.
+func TestValidLossSamplesNoneDroppedReturnsAllUnchanged(t *testing.T) {
+	now := time.Now()
+	samples := []smokeping.RRDSample{{TS: now, Loss: 0}, {TS: now.Add(time.Minute), Loss: 3}}
+	valid, dropped := validLossSamples(samples, 20)
+	if dropped != 0 {
+		t.Errorf("dropped = %d, want 0", dropped)
+	}
+	if len(valid) != 2 {
+		t.Errorf("len(valid) = %d, want 2", len(valid))
+	}
+}
+
 // captureStdout redirects os.Stdout for the duration of fn and returns
 // whatever it wrote — used to assert on importCmd's --report/--history
 // output without threading an io.Writer through importCmd's flag-parsing
@@ -338,6 +419,38 @@ func captureStdout(t *testing.T, fn func()) string {
 		t.Fatal(err)
 	}
 	return buf.String()
+}
+
+// captureOutput redirects both os.Stdout and os.Stderr for the duration of fn and
+// returns each captured separately — used where a single importCmd run needs asserting
+// on both its stdout (the summary/per-target progress lines) and stderr (per-target
+// warnings/errors, e.g. an unresolvable ping count).
+func captureOutput(t *testing.T, fn func()) (stdout, stderr string) {
+	t.Helper()
+	origOut, origErr := os.Stdout, os.Stderr
+	ro, wo, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	re, we, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout, os.Stderr = wo, we
+	defer func() { os.Stdout, os.Stderr = origOut, origErr }()
+
+	fn()
+
+	wo.Close()
+	we.Close()
+	var bufOut, bufErr bytes.Buffer
+	if _, err := io.Copy(&bufOut, ro); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.Copy(&bufErr, re); err != nil {
+		t.Fatal(err)
+	}
+	return bufOut.String(), bufErr.String()
 }
 
 // TestImportCmdReport builds a temp SmokePing config dir with a sibling data/
@@ -456,16 +569,27 @@ func TestRefreshWindowForPadsNarrowRange(t *testing.T) {
 // either way, but the summary must say so rather than overclaim.
 func TestPrintHistorySummaryPartialRefreshWording(t *testing.T) {
 	var full bytes.Buffer
-	printHistorySummary(&full, 3, 100, 0, 0, true, true, false)
+	printHistorySummary(&full, 3, 100, 0, 0, 0, true, true, false)
 	if !strings.Contains(full.String(), "aggregate refresh: done") || strings.Contains(full.String(), "most recent") {
 		t.Errorf("fully-covered refresh should report a plain \"done\", got:\n%s", full.String())
 	}
 
 	var partial bytes.Buffer
-	printHistorySummary(&partial, 3, 100, 0, 0, true, true, true)
+	printHistorySummary(&partial, 3, 100, 0, 0, 0, true, true, true)
 	s := partial.String()
 	if !strings.Contains(s, "most recent") || !strings.Contains(s, "background refresh policy") {
 		t.Errorf("partially-covered refresh should note the trailing gap and the background policy, got:\n%s", s)
+	}
+}
+
+// TestPrintHistorySummaryReportsFailed covers the new failed-target count (Finding
+// #5): a run with at least one failed target must mention it in the summary, matching
+// how config-only/orphan counts are already surfaced.
+func TestPrintHistorySummaryReportsFailed(t *testing.T) {
+	var buf bytes.Buffer
+	printHistorySummary(&buf, 2, 50, 0, 0, 1, true, true, false)
+	if !strings.Contains(buf.String(), "1 failed") {
+		t.Errorf("summary should report the failed-target count, got:\n%s", buf.String())
 	}
 }
 
@@ -574,5 +698,106 @@ func TestImportCmdHistoryE2E(t *testing.T) {
 	}
 	if !strings.Contains(second, "0 row") {
 		t.Errorf("2nd --history run should report 0 rows inserted (idempotent), got:\n%s", second)
+	}
+}
+
+// TestImportCmdHistoryPartialFailureMissingPings is the DB+rrdtool-gated regression for
+// Finding #5: a target with no Database file and no probe/target pings override resolves
+// smokeping.Targets' pings to 0 — before the fix, --history wrote that straight into
+// pgstore.ImportRow{Pings: 0}, a semantically invalid row (raw LossFraction reads as a
+// false 0%, aggregate loss goes NULL via NULLIF(pings,0)). Now that target must be
+// reported as failed (naming it and hinting at the missing Database file), its rows must
+// never be inserted, --history must still import the other, validly-resolved target, and
+// the run must exit with exitPartialFailure rather than 0.
+func TestImportCmdHistoryPartialFailureMissingPings(t *testing.T) {
+	dsn := os.Getenv("SMOKE_TEST_DSN")
+	if dsn == "" {
+		t.Skip("SMOKE_TEST_DSN not set")
+	}
+	rrdtoolBin, err := exec.LookPath("rrdtool")
+	if err != nil {
+		t.Skip("rrdtool not on PATH")
+	}
+
+	ctxCleanup := context.Background()
+	deleteRows := func() {
+		pool, err := pgxpool.New(ctxCleanup, dsn)
+		if err != nil {
+			t.Fatalf("cleanup: connect: %v", err)
+		}
+		defer pool.Close()
+		if _, err := pool.Exec(ctxCleanup, "DELETE FROM samples WHERE target LIKE 'ImpFail%'"); err != nil {
+			t.Fatalf("cleanup: delete ImpFail* rows: %v", err)
+		}
+	}
+	deleteRows()
+	t.Cleanup(deleteRows)
+
+	root := t.TempDir()
+	configDir := filepath.Join(root, "config")
+	dataDir := filepath.Join(root, "data")
+	mkdir(t, configDir)
+	mkdir(t, dataDir)
+
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	good := "ImpFailGood" + suffix
+	bad := "ImpFailBad" + suffix
+
+	// good has an inline pings override (so it resolves fine with no Database file at
+	// all); bad has no override anywhere, so with no Database file its pings resolves to
+	// the unresolvable 0 — the case this fix must catch.
+	targetsBody := fmt.Sprintf("*** Targets ***\nprobe = FPing\n+ %s\nhost = a.example\npings = 20\n+ %s\nhost = b.example\n", good, bad)
+	writeFile(t, filepath.Join(configDir, "Targets"), targetsBody)
+	writeFile(t, filepath.Join(configDir, "Probes"), "*** Probes ***\n+ FPing\nbinary = /usr/sbin/fping\n")
+	// Deliberately no Database file.
+
+	start := time.Now().Add(-2 * time.Hour).Truncate(300 * time.Second).Unix()
+	for _, name := range []string{good, bad} {
+		rrd := filepath.Join(dataDir, name+".rrd")
+		mustRunRRDTool(t, rrdtoolBin, "create", rrd, "--start", fmt.Sprint(start-300), "--step", "300",
+			"DS:median:GAUGE:600:0:180", "DS:loss:GAUGE:600:0:20", "RRA:AVERAGE:0.5:1:100")
+		for i := 0; i < 5; i++ {
+			ts := start + int64(i)*300
+			mustRunRRDTool(t, rrdtoolBin, "update", rrd, fmt.Sprintf("%d:%f:%d", ts, 0.010+float64(i)*0.001, i%3))
+		}
+	}
+
+	var code int
+	stdout, stderr := captureOutput(t, func() {
+		code = importCmd([]string{"smokeping", configDir, "--history", "--dsn", dsn, "--rrdtool", rrdtoolBin})
+	})
+	if code != exitPartialFailure {
+		t.Fatalf("importCmd --history exit code = %d, want %d (partial failure)\nstdout:\n%s\nstderr:\n%s",
+			code, exitPartialFailure, stdout, stderr)
+	}
+	if !strings.Contains(stderr, bad) {
+		t.Errorf("stderr should name the failed target %s, got:\n%s", bad, stderr)
+	}
+	if !strings.Contains(stderr, "Database") {
+		t.Errorf("stderr should hint at the missing Database file, got:\n%s", stderr)
+	}
+	if !strings.Contains(stdout, "1 failed") {
+		t.Errorf("stdout summary should report 1 failed target, got:\n%s", stdout)
+	}
+
+	ctx := context.Background()
+	s, err := pgstore.New(ctx, dsn, 8, func(error) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	histGood, err := s.HistoryVantage(ctx, good, "local")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(histGood) == 0 {
+		t.Fatalf("HistoryVantage(%s) empty — the valid target should still be imported", good)
+	}
+	histBad, err := s.HistoryVantage(ctx, bad, "local")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(histBad) != 0 {
+		t.Fatalf("HistoryVantage(%s) = %d row(s), want 0 — the unresolvable-pings target must not be imported", bad, len(histBad))
 	}
 }

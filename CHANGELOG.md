@@ -178,6 +178,21 @@ breaking changes.
   instead of a moving `latest-pg16` tag.
 
 ### Fixed
+- **History import no longer writes rows with an invalid ping count or loss.** `smoked import
+  smokeping <dir> --history` used to write a matched target's resolved `Pings` straight into
+  `pgstore.ImportRow` with no validation: a target whose `Database` file was missing/unreadable
+  (and with no probe/target `pings` override) resolved to `Pings=0`, which made raw `LossFraction`
+  read as a false 0% and blanked the aggregate loss out to `NULL` via `NULLIF(pings,0)`.
+  `runHistory` now validates each matched target's resolved ping count (1..`config.MaxPings`)
+  *before* extracting or inserting anything; a target that fails is reported by name (hinting at
+  the missing `Database` file), its rows are never written, the other matched targets still
+  import, and the run exits with a distinct non-zero partial-failure code (rather than `0`) so a
+  script can tell "some targets need attention" apart from a clean run. Each extracted sample's
+  `loss` is separately checked against that target's pings; a sample with `loss<0` or `loss>pings`
+  is dropped (with a warning) rather than the whole target failing — one bad round in years of RRD
+  history shouldn't cost the rest of it. `pgstore.ImportSamples` also gained a defense-in-depth
+  backstop (`pings<1`, `pings>MaxPings`, `loss<0`, or `loss>pings` now rejects the whole call) so
+  no caller, present or future, can slip an invalid row past it.
 - **Config import rejected valid fragments that relied on base-YAML inheritance.**
   `config.AppendImport` used to schema-validate the DB fragment in isolation — building a bare
   target tree and calling `Monitors()` on it *before* the fragment was ever composed with

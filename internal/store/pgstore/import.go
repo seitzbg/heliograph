@@ -8,6 +8,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+
+	"smokeping-modern/internal/config"
 )
 
 // importBatchSize bounds how many rows a single pgx.Batch/SendBatch round-trip
@@ -25,14 +27,46 @@ type ImportRow struct {
 	MedianSeconds       float64
 }
 
+// validateImportRow is ImportSamples' defense-in-depth backstop against a semantically
+// invalid historical row reaching the samples table (Finding #5). The CLI importer
+// (cmd/smoked's runHistory) is expected to have already validated every target's
+// resolved pings and every extracted sample's loss before ever calling here — this
+// exists so no caller, present or future, can slip an invalid row past ImportSamples.
+// pings<1 would make raw LossFraction read as a false 0% and NULLIF(pings,0) blank out
+// the aggregate loss (see the samples_hourly/samples_daily view definitions); pings
+// beyond config.MaxPings risks overflowing the smallint column; loss<0 or loss>pings is
+// nonsensical on its face.
+func validateImportRow(r ImportRow) error {
+	switch {
+	case r.Pings < 1:
+		return fmt.Errorf("pgstore: import row %s@%s: pings must be >= 1, got %d", r.Target, r.TS, r.Pings)
+	case r.Pings > config.MaxPings:
+		return fmt.Errorf("pgstore: import row %s@%s: pings must be <= %d, got %d", r.Target, r.TS, config.MaxPings, r.Pings)
+	case r.Loss < 0:
+		return fmt.Errorf("pgstore: import row %s@%s: loss must be >= 0, got %d", r.Target, r.TS, r.Loss)
+	case r.Loss > r.Pings:
+		return fmt.Errorf("pgstore: import row %s@%s: loss (%d) must be <= pings (%d)", r.Target, r.TS, r.Loss, r.Pings)
+	}
+	return nil
+}
+
 // ImportSamples bulk-inserts historical rows idempotently (ON CONFLICT
 // (target,vantage,ts) DO NOTHING, matching the live-write shape), so re-running an
 // import after a partial failure never duplicates rows. Imported rows carry no raw
 // RTT distribution (rtts_seconds = '{}', NOT NULL) and no err/duration (NULL) — RRD
 // history only has the consolidated median/loss, not the per-round samples. Rows are
-// sent in bounded batches; the return value is the number of rows actually inserted
-// (rows already present count 0, not an error).
+// validated up front (validateImportRow) before any insert, then sent in bounded
+// batches; the return value is the number of rows actually inserted (rows already
+// present count 0, not an error).
 func (s *PGStore) ImportSamples(ctx context.Context, rows []ImportRow) (int64, error) {
+	// Validate the whole batch up front, before any INSERT: a bad row here should never
+	// happen (the CLI importer filters first), so this backstop rejects the call outright
+	// rather than silently dropping just the offending row — no partial/uncertain state.
+	for _, r := range rows {
+		if err := validateImportRow(r); err != nil {
+			return 0, err
+		}
+	}
 	var total int64
 	for start := 0; start < len(rows); start += importBatchSize {
 		end := start + importBatchSize
