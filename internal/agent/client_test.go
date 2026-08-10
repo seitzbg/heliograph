@@ -101,3 +101,28 @@ func TestPushResultsPermanentVsTransient(t *testing.T) {
 	perm(http.StatusServiceUnavailable, false)   // 503 -> transient (retry)
 	perm(http.StatusUnauthorized, false)         // 401 -> transient (key may be re-added)
 }
+
+// CODE_REVIEW round-9 #1: a 413 must be distinguishable from a 400 specifically as a SIZE
+// condition — the agent's flush splits an oversized batch to isolate the unsendable
+// round(s), but must drop a malformed (400) batch wholesale, since splitting a batch the
+// hub's decoder outright rejected can't make any sub-shape of it more acceptable.
+func TestPushErrorOversize(t *testing.T) {
+	newC := func(code int) *Client {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(code) }))
+		t.Cleanup(srv.Close)
+		return NewClient(srv.URL, "smk_k_s", false, 5*time.Second)
+	}
+	oversize := func(code int, want bool) {
+		_, err := newC(code).PushResults(context.Background(), []agentwire.RoundReport{{Target: "cf"}})
+		var pe *pushError
+		if !errors.As(err, &pe) {
+			t.Fatalf("status %d: expected *pushError, got %v", code, err)
+		}
+		if pe.oversize() != want {
+			t.Errorf("status %d: oversize()=%v want %v", code, pe.oversize(), want)
+		}
+	}
+	oversize(http.StatusRequestEntityTooLarge, true) // 413 -> oversize (splittable)
+	oversize(http.StatusBadRequest, false)           // 400 -> permanent but NOT oversize (drop whole)
+	oversize(http.StatusServiceUnavailable, false)   // 503 -> not even permanent
+}

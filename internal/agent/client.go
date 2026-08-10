@@ -69,7 +69,10 @@ func (c *Client) PullAssignment(ctx context.Context, etag string) (agentwire.Ass
 // retains the batch and retries.
 // pushError carries the HTTP status of a failed results push so the flush loop can tell a
 // PERMANENT rejection (the hub will never accept this batch — oversize 413 or malformed 400)
-// from a transient one (5xx / 429 / auth), and drop vs retry accordingly (CODE_REVIEW #2).
+// from a transient one (5xx / 429 / auth), and drop vs retry accordingly (CODE_REVIEW #2). Of
+// the two permanent cases, a 413 is further distinguished from a 400 (oversize()) because it is
+// recoverable by SPLITTING the batch rather than dropping it outright — see Agent.sendBatch
+// (CODE_REVIEW round-9 #1).
 type pushError struct{ status int }
 
 func (e *pushError) Error() string { return fmt.Sprintf("agent: results: status %d", e.status) }
@@ -77,6 +80,15 @@ func (e *pushError) Error() string { return fmt.Sprintf("agent: results: status 
 // permanent reports whether re-sending the SAME batch is futile.
 func (e *pushError) permanent() bool {
 	return e.status == http.StatusRequestEntityTooLarge || e.status == http.StatusBadRequest
+}
+
+// oversize reports whether the rejection was specifically a SIZE condition (413), as opposed
+// to a malformed-batch rejection (400). Unlike a 400 — which means the hub's decoder rejected
+// the shape of the whole batch, so no sub-batch of it is any more sendable — a 413 is
+// recoverable: a smaller sub-batch of the SAME rounds may fit under the hub's byte cap, so the
+// caller can split instead of dropping every round in the batch (CODE_REVIEW round-9 #1).
+func (e *pushError) oversize() bool {
+	return e.status == http.StatusRequestEntityTooLarge
 }
 
 func (c *Client) PushResults(ctx context.Context, rounds []agentwire.RoundReport) (agentwire.ResultsResponse, error) {

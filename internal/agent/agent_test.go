@@ -3,6 +3,8 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -388,5 +390,159 @@ func TestFlushLoopDropsPermanentlyRejectedBatch(t *testing.T) {
 	}
 	if got := a.buf.rejected(); got < 5 {
 		t.Fatalf("rejected counter = %d, want >= 5", got)
+	}
+}
+
+// CODE_REVIEW round-9 #1: a 413 is a recoverable SIZE condition, not a "this batch is
+// unsendable" verdict — most of the batch may be perfectly valid, individually-sendable
+// rounds sitting next to one oversized round. The fix must SPLIT an oversized batch and
+// isolate the unsendable round(s), instead of dropping every round in the batch wholesale.
+//
+// The fake hub below mirrors the real one (internal/api/agent.go agentResults): it 413s any
+// request whose marshaled body exceeds a byte cap, and accepts anything under it. The cap is
+// sized well below agentwire.MaxResultsBytes (16 MiB) because a single round can't
+// realistically exceed 16 MiB under sane ping counts — per the review's own note, a smaller
+// fake cap is used so a single round can representably exceed it. The test validates its own
+// instrument (asserts the huge round's marshaled size actually exceeds the fake cap) before
+// trusting the result, per the "validate the probe" rule: a cap the huge round doesn't
+// actually exceed would make this test pass for the wrong reason.
+func TestFinalFlushSplitsOversizedBatchInsteadOfDroppingIt(t *testing.T) {
+	const fixedTS = "2026-08-07T00:00:00Z"
+	ordinary := func(name string) agentwire.RoundReport {
+		return agentwire.RoundReport{Target: name, TS: fixedTS, Pings: 1, RTTs: []float64{0.01}}
+	}
+	huge := agentwire.RoundReport{Target: "huge", TS: fixedTS, Pings: 500, RTTs: make([]float64, 500)}
+	for i := range huge.RTTs {
+		huge.RTTs[i] = 0.012345 + float64(i)/1e6
+	}
+
+	ordinaryBody, err := json.Marshal(agentwire.ResultsRequest{Results: []agentwire.RoundReport{ordinary("t")}})
+	if err != nil {
+		t.Fatalf("marshal ordinary round: %v", err)
+	}
+	hugeBody, err := json.Marshal(agentwire.ResultsRequest{Results: []agentwire.RoundReport{huge}})
+	if err != nil {
+		t.Fatalf("marshal huge round: %v", err)
+	}
+	const ordinaryBudget = 20 // fake cap fits ~20 batched ordinary rounds, but not the huge one
+	fakeCap := len(ordinaryBody)*ordinaryBudget + 64
+	if fakeCap >= len(hugeBody) {
+		t.Fatalf("test setup invalid: huge round (%d bytes) does not exceed fake cap (%d bytes) — grow the huge round's RTTs", len(hugeBody), fakeCap)
+	}
+
+	var (
+		mu       sync.Mutex
+		received []agentwire.RoundReport
+		requests int
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if len(body) > fakeCap {
+			w.WriteHeader(http.StatusRequestEntityTooLarge)
+			return
+		}
+		var req agentwire.ResultsRequest
+		_ = json.Unmarshal(body, &req)
+		mu.Lock()
+		received = append(received, req.Results...)
+		requests++
+		mu.Unlock()
+		_ = json.NewEncoder(w).Encode(agentwire.ResultsResponse{Accepted: len(req.Results)})
+	}))
+	defer srv.Close()
+
+	a := New(Options{Hub: srv.URL, Key: "smk_k_s", Vantage: "nyc",
+		Timeout: time.Second, Workers: 1, BufferCap: 1000, FlushMax: 100})
+
+	const numOrdinary = 50
+	a.buf.add(huge)
+	for i := 0; i < numOrdinary; i++ {
+		a.buf.add(ordinary(fmt.Sprintf("t%d", i)))
+	}
+
+	a.finalFlush(5 * time.Second)
+
+	if n := a.buf.len(); n != 0 {
+		t.Fatalf("buffer not drained (wedged): %d rounds still buffered", n)
+	}
+	mu.Lock()
+	gotReceived := len(received)
+	gotRequests := requests
+	mu.Unlock()
+	if gotReceived != numOrdinary {
+		t.Errorf("hub received %d rounds, want exactly %d ordinary rounds (the split must isolate and drop only the huge one, not the whole batch)", gotReceived, numOrdinary)
+	}
+	for _, r := range received {
+		if r.Target == "huge" {
+			t.Error("the oversized round reached the hub — it alone exceeds the fake cap and can never be sendable")
+		}
+	}
+	if got := a.buf.rejected(); got != 1 {
+		t.Errorf("rejected = %d, want exactly 1 (only the single unsendable huge round)", got)
+	}
+	// Sanity bound: 51 rounds split by binary halving cannot need more than a few hundred
+	// requests. A number in that range instead would point at non-terminating/runaway
+	// recursion rather than a bounded split — the "split terminates" assertion the review asked
+	// for, made concrete rather than just "the test finished".
+	if gotRequests > 500 {
+		t.Errorf("hub received %d requests for %d rounds — suspiciously many, possible non-terminating split", gotRequests, numOrdinary+1)
+	}
+}
+
+// A malformed (400) batch must be dropped WHOLESALE, unsplit — unlike a 413, a 400 means the
+// hub's decoder rejected the shape of the request, and no sub-batch of the same shape is any
+// more acceptable, so splitting would just waste requests without recovering anything.
+func TestSendBatchDropsMalformedBatchWholesaleWithoutSplitting(t *testing.T) {
+	var requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusBadRequest)
+	}))
+	defer srv.Close()
+	a := New(Options{Hub: srv.URL, Key: "smk_k_s", Vantage: "nyc",
+		Timeout: time.Second, Workers: 1, BufferCap: 100, FlushMax: 10})
+
+	batch := make([]agentwire.RoundReport, 5)
+	for i := range batch {
+		batch[i] = agentwire.RoundReport{Target: fmt.Sprintf("t%d", i), Pings: 1, RTTs: []float64{0.01}}
+	}
+	sent, dropped, err := a.sendBatch(context.Background(), batch)
+	if err != nil {
+		t.Fatalf("sendBatch returned err=%v, want nil (400 is handled, not propagated)", err)
+	}
+	if sent != 0 || dropped != len(batch) {
+		t.Errorf("sent=%d dropped=%d, want sent=0 dropped=%d (whole batch dropped)", sent, dropped, len(batch))
+	}
+	if requests != 1 {
+		t.Errorf("hub received %d requests, want exactly 1 (a 400 must not trigger a split)", requests)
+	}
+}
+
+// A transient (5xx) failure must propagate as an error — never split, never dropped — so the
+// caller retains and retries the WHOLE batch later, exactly the pre-existing transient-retry
+// contract this fix must not disturb.
+func TestSendBatchPropagatesTransientErrorWithoutSplittingOrDropping(t *testing.T) {
+	var requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+	a := New(Options{Hub: srv.URL, Key: "smk_k_s", Vantage: "nyc",
+		Timeout: time.Second, Workers: 1, BufferCap: 100, FlushMax: 10})
+
+	batch := make([]agentwire.RoundReport, 5)
+	for i := range batch {
+		batch[i] = agentwire.RoundReport{Target: fmt.Sprintf("t%d", i), Pings: 1, RTTs: []float64{0.01}}
+	}
+	sent, dropped, err := a.sendBatch(context.Background(), batch)
+	if err == nil {
+		t.Fatal("sendBatch returned err=nil for a 503, want a propagated error so the caller retries")
+	}
+	if sent != 0 || dropped != 0 {
+		t.Errorf("sent=%d dropped=%d, want both 0 (transient failure hands nothing back but the error)", sent, dropped)
+	}
+	if requests != 1 {
+		t.Errorf("hub received %d requests, want exactly 1 (a transient failure must not trigger a split)", requests)
 	}
 }

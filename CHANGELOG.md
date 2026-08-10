@@ -192,6 +192,19 @@ breaking changes.
   gained an optional `-config`/`--config DIR` flag to effective-validate the merged fragment
   against that base config before persisting; without it, an invalid fragment is now caught (and
   logged) at the daemon's next reload instead of being validated too strictly up front.
+- **Agent flush no longer discards a whole oversized backlog on a 413.** A results batch that
+  tripped the hub's 16 MiB body cap (`413`) used to be treated the same as a malformed (`400`)
+  batch — dropped wholesale, even though every round in it except the one(s) that pushed it over
+  the cap was perfectly valid and individually sendable. A high-ping-count assignment recovering
+  from a hub outage with a large backlog (e.g. 5,000 buffered rounds serializing past 16 MiB)
+  could lose the *entire* backlog to a single oversized batch. `pushError` now distinguishes a
+  size rejection (`oversize()`, 413 only) from the broader `permanent()` (413 or 400); a new
+  `Agent.sendBatch` helper, shared by `flushLoop` and `finalFlush`, retries a 413 by splitting
+  the batch in half and recursing on each half — isolating the unsendable round(s) so every other
+  round still reaches the hub — while a `400` (the hub's decoder rejected the request's shape, not
+  its size) still drops the whole batch as before, and a transient error (5xx/429/auth) still
+  propagates untouched so the caller retries the whole batch later. Only a round that alone
+  exceeds the byte cap is ever dropped (and counted in the existing `rejected` metric).
 - **Config reload race.** A concurrent SIGHUP reload and an API config-apply could leave the live
   runtime out of sync with the persisted config (a slow reload build swapping a stale runtime over
   a completed apply). Both writers now serialize the whole read/build/swap under one mutex.
