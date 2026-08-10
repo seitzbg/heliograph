@@ -425,6 +425,15 @@ func runHistory(dir, dataFlag, rrdtoolFlag, dsn string) int {
 	}
 
 	refreshed := false
+	// partialRefresh: RefreshAggregates (via refreshWindowFor) caps `until`
+	// at now()-1h, since continuous aggregates only refresh closed,
+	// bucket-aligned ranges — a still-live SmokePing install being imported
+	// mid-collection can have maxTS newer than that cap, in which case the
+	// refresh genuinely does NOT cover the newest imported samples yet (they
+	// land in the raw `samples` table either way — nothing is lost — but
+	// won't show up via the hourly/daily aggregate views until the regular
+	// background refresh policy catches up).
+	partialRefresh := false
 	if hasCaggs && !minTS.IsZero() && !maxTS.IsZero() {
 		refreshFrom, refreshUntil := refreshWindowFor(minTS, maxTS, now)
 		if err := pg.RefreshAggregates(ctx, refreshFrom, refreshUntil); err != nil {
@@ -432,9 +441,10 @@ func runHistory(dir, dataFlag, rrdtoolFlag, dsn string) int {
 			return 1
 		}
 		refreshed = true
+		partialRefresh = maxTS.After(refreshUntil)
 	}
 
-	printHistorySummary(os.Stdout, backfilled, totalRows, len(rec.ConfigOnly), len(rec.Orphans), hasCaggs, refreshed)
+	printHistorySummary(os.Stdout, backfilled, totalRows, len(rec.ConfigOnly), len(rec.Orphans), hasCaggs, refreshed, partialRefresh)
 	return 0
 }
 
@@ -478,12 +488,19 @@ func refreshWindowFor(minTS, maxTS, now time.Time) (time.Time, time.Time) {
 // ImportSamples' ON CONFLICT DO NOTHING), and how many config-only targets
 // and orphan .rrds it left untouched, matching printReconciliationSummary's
 // counts so --report's preview and --history's outcome read the same way.
-func printHistorySummary(w io.Writer, backfilled int, rows int64, configOnly, orphans int, hasCaggs, refreshed bool) {
+// The aggregate-refresh line is deliberately not a flat "done": partialRefresh
+// means RefreshAggregates' own now()-1h cap left the newest imported samples
+// (from a still-live SmokePing source) outside the refreshed range — raw data
+// is never lost, but claiming an unqualified "done" there would overstate
+// what's actually queryable via the hourly/daily views right now.
+func printHistorySummary(w io.Writer, backfilled int, rows int64, configOnly, orphans int, hasCaggs, refreshed, partialRefresh bool) {
 	fmt.Fprintf(w, "smokeping history: %d target(s) backfilled, %d row(s) inserted, %d config-only skipped, %d orphan(s) skipped\n",
 		backfilled, rows, configOnly, orphans)
 	switch {
 	case !hasCaggs:
 		fmt.Fprintln(w, "aggregate refresh: skipped (no continuous aggregates — run `smoked -downsample` first)")
+	case refreshed && partialRefresh:
+		fmt.Fprintln(w, "aggregate refresh: done up through the last full hour; the most recent (<1h old) imported samples are stored but not yet reflected in the hourly/daily views — the regular background refresh policy will pick them up")
 	case refreshed:
 		fmt.Fprintln(w, "aggregate refresh: done")
 	default:

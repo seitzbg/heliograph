@@ -65,10 +65,6 @@ var rrdTiers = []rrdTier{
 // Results are sorted by TS ascending. An RRD with no first/last data (e.g.
 // freshly created, never updated) yields (nil, nil), not an error.
 func ExtractRRD(rrdtoolBin, rrdPath string, now time.Time) ([]RRDSample, error) {
-	first, err := rrdEpoch(rrdtoolBin, rrdPath, "first")
-	if err != nil {
-		return nil, err
-	}
 	last, err := rrdEpoch(rrdtoolBin, rrdPath, "last")
 	if err != nil {
 		return nil, err
@@ -76,6 +72,20 @@ func ExtractRRD(rrdtoolBin, rrdPath string, now time.Time) ([]RRDSample, error) 
 	if nowUnix := now.Unix(); last > nowUnix {
 		last = nowUnix
 	}
+	// first is deliberately NOT `rrdtool first <rrdPath>`: that bare command
+	// returns RRA index 0's own first timestamp — SmokePing's finest, 300s
+	// archive, sized to hold only ~3.5 days — not the RRD's true earliest
+	// data. Using it here silently truncated every RRD's imported history to
+	// its most recent ~3.5 days: with first ≈ last-3.5d, the tier loop below
+	// processes tier 1 (300s) and then immediately hits `end <= first` and
+	// breaks, so tier 2 (hourly, 180d) and tier 3 (12h, 360d) were never
+	// fetched. rrdOldestSeconds instead derives first from the RRD's actual
+	// RRA layout (the true oldest AVERAGE-consolidated data available).
+	oldest, err := rrdOldestSeconds(rrdtoolBin, rrdPath)
+	if err != nil {
+		return nil, err
+	}
+	first := last - oldest
 	if last <= first {
 		return nil, nil
 	}
@@ -155,6 +165,121 @@ func rrdEpoch(rrdtoolBin, rrdPath, cmd string) (int64, error) {
 		return 0, fmt.Errorf("smokeping: rrdtool %s %s: unparsable output %q: %w", cmd, rrdPath, out, err)
 	}
 	return epoch, nil
+}
+
+// rrdOldestSeconds returns how far back before the RRD's last update its
+// truly oldest AVERAGE-consolidated data can exist: the largest coverage
+// (rows * pdp_per_row * step) among the RRD's AVERAGE RRAs — the archive
+// ExtractRRD's coarsest tier expects to hold the oldest history. This shells
+// out to `rrdtool info` once and derives the bound from the RRA layout,
+// rather than an extra `rrdtool first --rraindex <n>` call for whichever RRA
+// wins: safe even if these numbers don't line up exactly with rrdTiers'
+// hardcoded windows, since a fetch that reaches back further than an RRA
+// actually holds data for just returns unknown/NaN rows, which the true-gap
+// skip in parseFetch already discards. Only AVERAGE RRAs count (MIN/MAX
+// archives, even if longer-lived on some non-standard install, are never
+// queried by fetchTier).
+func rrdOldestSeconds(rrdtoolBin, rrdPath string) (int64, error) {
+	out, err := exec.Command(rrdtoolBin, "info", rrdPath).Output()
+	if err != nil {
+		return 0, fmt.Errorf("smokeping: rrdtool info %s: %w", rrdPath, exitErr(err))
+	}
+	return parseRRDMaxCoverage(out)
+}
+
+// rraLayout accumulates the fields of one `rra[N].*` block from `rrdtool
+// info` output as they're seen — the fields aren't necessarily adjacent
+// (cdp_prep entries interleave), so this is filled incrementally.
+type rraLayout struct {
+	cf        string
+	rows, pdp int64
+}
+
+// parseRRDMaxCoverage parses `rrdtool info` output and returns the largest
+// (rows * pdp_per_row * step) among its AVERAGE RRAs. Lines are shaped
+// `key = value` (value optionally double-quoted), e.g. `step = 300`,
+// `rra[1].cf = "AVERAGE"`, `rra[1].rows = 4320`, `rra[1].pdp_per_row = 12` —
+// order-independent and freely interleaved with fields this doesn't care
+// about (xff, cdp_prep[*].*, ...), so every line is parsed into `step` or
+// keyed into the RRA index found in its `rra[N].` prefix before computing
+// coverage, rather than assuming any particular field order.
+func parseRRDMaxCoverage(out []byte) (int64, error) {
+	var step int64
+	rras := map[int]*rraLayout{}
+	sc := bufio.NewScanner(bytes.NewReader(out))
+	sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
+	for sc.Scan() {
+		key, val, ok := strings.Cut(strings.TrimSpace(sc.Text()), "=")
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		val = strings.Trim(strings.TrimSpace(val), `"`)
+		if key == "step" {
+			step, _ = strconv.ParseInt(val, 10, 64)
+			continue
+		}
+		idx, field, ok := parseRRAKey(key)
+		if !ok {
+			continue
+		}
+		r, ok := rras[idx]
+		if !ok {
+			r = &rraLayout{}
+			rras[idx] = r
+		}
+		switch field {
+		case "cf":
+			r.cf = val
+		case "rows":
+			r.rows, _ = strconv.ParseInt(val, 10, 64)
+		case "pdp_per_row":
+			r.pdp, _ = strconv.ParseInt(val, 10, 64)
+		}
+	}
+	if err := sc.Err(); err != nil {
+		return 0, fmt.Errorf("smokeping: read rrdtool info: %w", err)
+	}
+	if step <= 0 {
+		return 0, fmt.Errorf("smokeping: rrdtool info: no step found")
+	}
+	var maxCoverage int64
+	for _, r := range rras {
+		if r.cf != "AVERAGE" {
+			continue
+		}
+		if cov := r.rows * r.pdp * step; cov > maxCoverage {
+			maxCoverage = cov
+		}
+	}
+	if maxCoverage <= 0 {
+		return 0, fmt.Errorf("smokeping: rrdtool info: no AVERAGE RRA found")
+	}
+	return maxCoverage, nil
+}
+
+// parseRRAKey splits an `rrdtool info` key like `rra[1].pdp_per_row` (or the
+// deeper `rra[1].cdp_prep[0].value`, which simply won't match any field this
+// package cares about) into its RRA index and field name. Keys with no
+// `rra[N].` prefix (`step`, `filename`, ...) return ok=false.
+func parseRRAKey(key string) (idx int, field string, ok bool) {
+	rest, ok := strings.CutPrefix(key, "rra[")
+	if !ok {
+		return 0, "", false
+	}
+	end := strings.IndexByte(rest, ']')
+	if end < 0 {
+		return 0, "", false
+	}
+	idx, err := strconv.Atoi(rest[:end])
+	if err != nil {
+		return 0, "", false
+	}
+	field, ok = strings.CutPrefix(rest[end+1:], ".")
+	if !ok {
+		return 0, "", false
+	}
+	return idx, field, true
 }
 
 // fetchTier runs `rrdtool fetch <rrdPath> AVERAGE -r <step> -s <start> -e <end>`

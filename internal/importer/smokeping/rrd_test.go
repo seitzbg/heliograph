@@ -5,6 +5,8 @@ import (
 	"math"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -270,5 +272,89 @@ func TestExtractRRDTierBoundaryNoDuplicateFinestWins(t *testing.T) {
 	if math.Abs(dupSample.Median-expectMedian) > 1e-6 {
 		t.Errorf("at overlap ts=%d: Median = %v, want %v (the finer 300s tier's value, not a coarse hourly average like ~0.255)",
 			dupTS, dupSample.Median, expectMedian)
+	}
+}
+
+// TestExtractRRDFetchesBeyondFinestRRA is the regression for a critical
+// production bug: `first` used to come from bare `rrdtool first`, which
+// returns RRA index 0's own first timestamp (SmokePing's finest,
+// shortest-lived archive — ~3.5 days in the real layout) rather than the
+// RRD's true earliest data. Since the tier loop's `end <= first` break
+// condition then fired right after the finest tier finished, every coarser
+// tier (hourly, 12-hourly) was silently never fetched: a --history import
+// only ever pulled a target's most recent ~3.5 days, no matter how much
+// older history its RRD actually held (proven against the real fixture:
+// `rrdtool first OpenDNS1.rrd` vs `... --rraindex 1` differ by ~180 days,
+// and the hourly RRA has real, non-NaN data across that whole span).
+//
+// This builds an RRD with a deliberately tiny 300s RRA (fineRows, holding
+// only ~2.5h) and a much larger 3600s RRA (coarseRows, holding well over 4
+// days), then pushes 4 days of 300s-interval data — far more than the fine
+// RRA can retain (it wraps, keeping only the trailing ~2.5h) but well within
+// the coarse RRA's window. The pushed span (4 days) is also deliberately
+// chosen to exceed rrdTiers' hardcoded tier-1 lookback (3.5 days), so
+// tier 1's own window doesn't just get clamped down to the whole span — the
+// only way to reach the oldest pushed data is for tier 2 (the 3600s/hourly
+// tier) to actually run.
+func TestExtractRRDFetchesBeyondFinestRRA(t *testing.T) {
+	bin, err := exec.LookPath("rrdtool")
+	if err != nil {
+		t.Skip("rrdtool not on PATH")
+	}
+	dir := t.TempDir()
+	rrd := filepath.Join(dir, "t.rrd")
+
+	const (
+		step       = 300 // base PDP step, matches SmokePing's own
+		fineRows   = 30  // 300s RRA: 30*300s = 2.5h window — wraps well before the pushed span ends
+		coarseStep = 3600
+		coarsePDP  = coarseStep / step // 12
+		coarseRows = 110               // 110*3600s ≈ 4.58 days — comfortably covers the pushed span
+
+		pushedSpanSeconds = 4 * 24 * 3600 // 4 days: > rrdTiers' 3.5-day tier-1 lookback
+	)
+	last := int64(1_700_000_000)
+	last -= last % coarseStep // land on the coarse tier's own grid, as the other tier tests do
+	pushedFirst := last - pushedSpanSeconds
+
+	mustRun(t, bin, "create", rrd, "--start", fmt.Sprint(pushedFirst-step), "--step", fmt.Sprint(step),
+		"DS:median:GAUGE:600:0:180", "DS:loss:GAUGE:600:0:20",
+		fmt.Sprintf("RRA:AVERAGE:0.5:1:%d", fineRows),
+		fmt.Sprintf("RRA:AVERAGE:0.5:%d:%d", coarsePDP, coarseRows))
+
+	args := []string{"update", rrd}
+	for ts := pushedFirst; ts <= last; ts += step {
+		args = append(args, fmt.Sprintf("%d:0.02:0", ts))
+	}
+	mustRun(t, bin, args...)
+
+	// Sanity check: confirm this RRD setup actually reproduces the bug's
+	// precondition — bare `rrdtool first` must land well after the true
+	// pushed start (proving the fine RRA wrapped), or the rest of this test
+	// wouldn't be exercising anything.
+	bareFirstOut, err := exec.Command(bin, "first", rrd).Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bareFirst, err := strconv.ParseInt(strings.TrimSpace(string(bareFirstOut)), 10, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bareFirst < pushedFirst+24*3600 {
+		t.Fatalf("test setup invalid: bare `rrdtool first` = %d is not comfortably after the true pushed start %d — fineRows didn't actually wrap", bareFirst, pushedFirst)
+	}
+
+	got, err := ExtractRRD(bin, rrd, time.Unix(last+step, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) == 0 {
+		t.Fatal("no samples extracted")
+	}
+
+	oldestExtracted := got[0].TS.Unix() // sorted ascending
+	if oldestExtracted > pushedFirst+2*coarseStep {
+		t.Fatalf("oldest extracted sample ts=%d, want within ~%ds of the true pushed start %d — the coarser (hourly) tier was never fetched, reproducing the truncation bug (bare `rrdtool first` was %d)",
+			oldestExtracted, 2*coarseStep, pushedFirst, bareFirst)
 	}
 }

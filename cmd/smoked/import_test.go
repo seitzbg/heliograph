@@ -318,6 +318,27 @@ func TestRefreshWindowForPadsNarrowRange(t *testing.T) {
 	}
 }
 
+// TestPrintHistorySummaryPartialRefreshWording is the regression for finding
+// 2 of the Task-4 review: printHistorySummary used to print an unqualified
+// "aggregate refresh: done" even when RefreshAggregates' own now()-1h cap
+// left the newest imported samples outside the refreshed range (a still-live
+// SmokePing source being imported mid-collection). Raw data is never lost
+// either way, but the summary must say so rather than overclaim.
+func TestPrintHistorySummaryPartialRefreshWording(t *testing.T) {
+	var full bytes.Buffer
+	printHistorySummary(&full, 3, 100, 0, 0, true, true, false)
+	if !strings.Contains(full.String(), "aggregate refresh: done") || strings.Contains(full.String(), "most recent") {
+		t.Errorf("fully-covered refresh should report a plain \"done\", got:\n%s", full.String())
+	}
+
+	var partial bytes.Buffer
+	printHistorySummary(&partial, 3, 100, 0, 0, true, true, true)
+	s := partial.String()
+	if !strings.Contains(s, "most recent") || !strings.Contains(s, "background refresh policy") {
+		t.Errorf("partially-covered refresh should note the trailing gap and the background policy, got:\n%s", s)
+	}
+}
+
 // mustRunRRDTool runs an rrdtool subcommand and fails the test with its
 // combined output on error (local twin of internal/importer/smokeping's
 // rrd_test.go mustRun — test helpers aren't shared across packages).
