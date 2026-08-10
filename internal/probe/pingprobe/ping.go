@@ -7,6 +7,7 @@ package pingprobe
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -148,11 +149,24 @@ sendLoop:
 		}
 	}
 
+	// A genuine cancellation (context.Canceled — e.g. process shutdown firing
+	// the scheduler's ctx mid-round) is not ordinary loss: abandon the round
+	// and surface it, so the caller doesn't persist a bogus "high loss"
+	// sample for a round that was cut short, not actually unanswered. An
+	// ordinary per-round deadline (context.DeadlineExceeded, or no ctx error
+	// at all) keeps the existing behavior: unanswered pings are just loss.
+	if errors.Is(ctx.Err(), context.Canceled) {
+		return probe.Result{}, ctx.Err()
+	}
+
 	if len(sent) == 0 {
 		return probe.Result{}, nil
 	}
 
 	rtts := receiveReplies(ctx, conn, isV6, token, pings, sent, p.interval)
+	if errors.Is(ctx.Err(), context.Canceled) {
+		return probe.Result{Samples: rtts}, ctx.Err()
+	}
 	return probe.Result{Samples: rtts}, nil
 }
 
@@ -180,6 +194,24 @@ func receiveReplies(
 	deadline := receiveDeadline(ctx, sent, interval)
 	_ = conn.SetReadDeadline(deadline)
 
+	// conn.ReadFrom blocks the goroutine until a reply arrives or the read
+	// deadline set above is hit — it does NOT wake up when ctx is merely
+	// canceled (net.Conn has no context-aware Read). So a cancellation firing
+	// while a read is already in flight would otherwise sit blocked until the
+	// full deadline anyway. Fix: a watcher yanks the read deadline to "now"
+	// the moment ctx.Done() fires, unblocking ReadFrom immediately. Setting a
+	// deadline concurrently with an in-flight read is documented-safe for
+	// net.Conn/PacketConn implementations.
+	watchDone := make(chan struct{})
+	defer close(watchDone)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.SetReadDeadline(time.Now())
+		case <-watchDone:
+		}
+	}()
+
 	var rtts []float64
 	seen := make(map[int]bool, len(sent))
 	buf := make([]byte, 1500)
@@ -189,8 +221,13 @@ func receiveReplies(
 		}
 		n, _, err := conn.ReadFrom(buf)
 		if err != nil {
-			break // read timeout (deadline) or conn closed — stop, keep what we have
+			break // read timeout (deadline, possibly forced by cancellation above) or conn closed — stop, keep what we have
 		}
+		// buf[:n] is handed to ParseMessage with no IP-header stripping: this
+		// assumes the kernel already strips the IPv4 header before delivering
+		// to a raw ICMP socket, which is true on Linux (verified empirically —
+		// see the Task 3 report) but not guaranteed on a BSD-heritage raw
+		// socket, which would need IP_STRIPHDR handling here.
 		msg, err := icmp.ParseMessage(echoProto(isV6), buf[:n])
 		if err != nil {
 			continue // not a parseable ICMP message — ignore and keep listening

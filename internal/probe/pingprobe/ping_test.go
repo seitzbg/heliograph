@@ -2,6 +2,7 @@ package pingprobe
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"testing"
 	"time"
@@ -61,5 +62,67 @@ func TestPingLossOnUnroutableReturnsPromptly(t *testing.T) {
 	}
 	if time.Since(start) > 2*time.Second {
 		t.Error("Measure did not return promptly on loss")
+	}
+}
+
+// TestPingCancelDuringRoundReturnsCanceled is a regression test: a genuine
+// context cancellation (not the round's own deadline) must be surfaced as an
+// error, not silently swallowed into a 0-sample "loss" result — otherwise a
+// round cut short by e.g. process shutdown would be persisted as a bogus
+// high-loss sample instead of being recognizable as abandoned.
+//
+// It cancels the round while it is genuinely in flight and blocked waiting
+// for replies (an unroutable target, well after all sends have gone out —
+// see the timing comments below), and asserts both that the error is
+// context.Canceled and that Measure returns promptly rather than sitting
+// blocked until the outer (generous) context deadline.
+func TestPingCancelDuringRoundReturnsCanceled(t *testing.T) {
+	p, err := newPingProbe(map[string]string{"interval_ms": "20"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Outer deadline is generous (5s) so it never fires on its own — only the
+	// explicit cancel() below should end the round.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	type outcome struct {
+		res probe.Result
+		err error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		// 5 pings, unroutable TEST-NET-1 target so nothing ever replies:
+		// sends finish around 4*20ms=80ms, then Measure sits blocked inside
+		// conn.ReadFrom waiting out the receive window.
+		res, err := p.Measure(ctx, probe.Target{Host: "192.0.2.1"}, 5)
+		done <- outcome{res, err}
+	}()
+
+	// Give the round time to finish sending and be blocked in the receive
+	// phase (genuinely in flight, not still sending) before cancelling.
+	time.Sleep(300 * time.Millisecond)
+	start := time.Now()
+	cancel()
+
+	select {
+	case o := <-done:
+		if o.err == nil {
+			t.Fatal("expected an error on cancellation, got nil")
+		}
+		if !errors.Is(o.err, context.Canceled) {
+			// Not a cancellation-shaped error at all — most likely no ICMP
+			// socket available in this environment, matching the other
+			// tests' skip convention.
+			t.Skipf("cannot open ICMP socket here (or unexpected error): %v", o.err)
+		}
+		if elapsed := time.Since(start); elapsed > 1*time.Second {
+			t.Errorf("Measure did not return promptly on cancellation, took %v", elapsed)
+		}
+		if len(o.res.Samples) != 0 {
+			t.Errorf("expected 0 samples (unroutable target never replies), got %d", len(o.res.Samples))
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Measure did not return within 2s of cancellation")
 	}
 }
