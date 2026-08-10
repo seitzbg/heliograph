@@ -2,10 +2,12 @@ package pgstore
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // importBatchSize bounds how many rows a single pgx.Batch/SendBatch round-trip
@@ -101,9 +103,44 @@ func (s *PGStore) RefreshAggregates(ctx context.Context, from, until time.Time) 
 		// range is formatted as RFC3339 literals. Safe here: both timestamps are
 		// computed above (time.Time -> time.RFC3339), never user-supplied text.
 		q := fmt.Sprintf(`CALL refresh_continuous_aggregate('%s', '%s'::timestamptz, '%s'::timestamptz)`, view, fromLit, untilLit)
-		if _, err := s.pool.Exec(ctx, q); err != nil {
+		if err := s.execWithRetry(ctx, q); err != nil {
 			return fmt.Errorf("pgstore: refresh aggregates (%s): %w", view, err)
 		}
 	}
 	return nil
+}
+
+// refreshRetryAttempts and refreshRetryDelay bound execWithRetry's backoff for
+// SQLSTATE 55P03 (lock_not_available): a smokeping-modern DB whose background
+// continuous-aggregate refresh policy is active can hold the same cagg's refresh
+// lock when the importer's own CALL runs at the same moment, and TimescaleDB
+// aborts the loser rather than queuing it. This is expected contention on a live
+// DB, not a real failure, so a few short retries let the importer's refresh land
+// once the background job releases the lock.
+const (
+	refreshRetryAttempts = 4
+	refreshRetryDelay    = 500 * time.Millisecond
+)
+
+// execWithRetry runs q, retrying up to refreshRetryAttempts times only when the
+// error is TimescaleDB's 55P03 (lock_not_available) — a concurrent-refresh
+// collision with the background refresh policy. Any other error (including a
+// genuine 55P03 that never clears) returns immediately/after the last attempt.
+func (s *PGStore) execWithRetry(ctx context.Context, q string) error {
+	var lastErr error
+	for attempt := 0; attempt < refreshRetryAttempts; attempt++ {
+		_, err := s.pool.Exec(ctx, q)
+		if err == nil {
+			return nil
+		}
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.Code != "55P03" {
+			return err
+		}
+		lastErr = err
+		if attempt < refreshRetryAttempts-1 {
+			time.Sleep(refreshRetryDelay)
+		}
+	}
+	return lastErr
 }

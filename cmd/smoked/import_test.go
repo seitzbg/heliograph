@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"smokeping-modern/internal/config"
 	"smokeping-modern/internal/store/pgstore"
 )
@@ -364,6 +366,27 @@ func TestImportCmdHistoryE2E(t *testing.T) {
 	if err != nil {
 		t.Skip("rrdtool not on PATH")
 	}
+
+	// This test's ImpHist* targets are unique per run (see suffix below), so they
+	// never collide with a concurrent run — but nothing ever deletes the rows a
+	// run inserts, so the shared samples table accretes them across every CI/local
+	// run forever. Mirror the pgstore DB tests' self-isolation (delete-before, plus
+	// a Cleanup in case a later assertion fails mid-test) so re-runs stay stable.
+	// A bare pgxpool connection is used here (rather than pgstore.New) since the
+	// cleanup only needs a raw DELETE and pgstore exposes no generic Exec.
+	ctxCleanup := context.Background()
+	deleteImpHistRows := func() {
+		pool, err := pgxpool.New(ctxCleanup, dsn)
+		if err != nil {
+			t.Fatalf("cleanup: connect: %v", err)
+		}
+		defer pool.Close()
+		if _, err := pool.Exec(ctxCleanup, "DELETE FROM samples WHERE target LIKE 'ImpHist%'"); err != nil {
+			t.Fatalf("cleanup: delete ImpHist* rows: %v", err)
+		}
+	}
+	deleteImpHistRows()
+	t.Cleanup(deleteImpHistRows)
 
 	root := t.TempDir()
 	configDir := filepath.Join(root, "config")

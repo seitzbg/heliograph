@@ -412,7 +412,7 @@ func runHistory(dir, dataFlag, rrdtoolFlag, dsn string) int {
 		}
 		totalRows += n
 		backfilled++
-		fmt.Fprintf(os.Stdout, "[%d/%d] %s: %d rows\n", i+1, len(rec.Matched), t.Name, len(samples))
+		fmt.Fprintf(os.Stdout, "[%d/%d] %s: %d rows\n", i+1, len(rec.Matched), t.Name, n)
 		if len(samples) > 0 {
 			if minTS.IsZero() || samples[0].TS.Before(minTS) {
 				minTS = samples[0].TS

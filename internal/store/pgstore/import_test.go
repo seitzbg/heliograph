@@ -8,6 +8,39 @@ import (
 	"time"
 )
 
+// TestExecWithRetryNonLockErrorReturnsImmediately covers RefreshAggregates' retry
+// wrapper (execWithRetry): a non-55P03 error (here, a syntax error) must return on
+// the first attempt, not be mistaken for the "concurrent refresh" lock-contention
+// case and burn through refreshRetryAttempts * refreshRetryDelay of sleeping.
+// Simulating a live 55P03 (a real overlapping concurrent-refresh) isn't practical
+// here — refreshAgg's own retry loop in pgstore_test.go already exercises that
+// SQLSTATE end-to-end against a real background refresh policy — so this test
+// only pins down the "any other error returns immediately" half of the contract.
+func TestExecWithRetryNonLockErrorReturnsImmediately(t *testing.T) {
+	dsn := os.Getenv("SMOKE_TEST_DSN")
+	if dsn == "" {
+		t.Skip("SMOKE_TEST_DSN not set")
+	}
+	ctx := context.Background()
+	s, err := New(ctx, dsn, 8, func(error) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	start := time.Now()
+	err = s.execWithRetry(ctx, "SELECT this is not valid sql")
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("execWithRetry with invalid SQL should error")
+	}
+	// A retried 55P03 would sleep at least refreshRetryDelay between attempts;
+	// a syntax error must come straight back well under that.
+	if elapsed >= refreshRetryDelay {
+		t.Errorf("execWithRetry took %v for a non-55P03 error, want well under the %v retry delay (it should not have retried)", elapsed, refreshRetryDelay)
+	}
+}
+
 // TestImportSamplesIdempotentAndAggregates covers the Slice B backfill primitives:
 // ImportSamples bulk-inserts historical rows idempotently (ON CONFLICT ... DO NOTHING),
 // AggregatesExist reports whether the continuous aggregates are present, and
