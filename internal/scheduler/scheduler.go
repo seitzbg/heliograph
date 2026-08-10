@@ -9,6 +9,7 @@ package scheduler
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -43,7 +44,7 @@ func runOne(ctx context.Context, j Job) Outcome {
 	jctx, cancel := context.WithTimeout(ctx, j.Timeout)
 	defer cancel()
 	start := time.Now()
-	res, err := j.Probe.Measure(jctx, j.Target, j.Pings)
+	res, err := safeMeasure(jctx, j)
 	return Outcome{
 		Target:    j.Target,
 		ProbeName: j.Probe.Name(),
@@ -52,6 +53,23 @@ func runOne(ctx context.Context, j Job) Outcome {
 		When:      start,
 		Duration:  time.Since(start),
 	}
+}
+
+// safeMeasure calls j.Probe.Measure and recovers a panic, turning it into an
+// ordinary error result instead of a process crash. The per-probe goroutines
+// started by RunRound and Dispatcher.Go are not otherwise supervised, so a
+// misbehaving probe (e.g. a config value that slips past validation and
+// drives an oversized allocation) would otherwise take down the whole
+// daemon instead of just failing its own round. The recovered value and the
+// target name are both included so the failure is diagnosable from the
+// Outcome's Err alone.
+func safeMeasure(ctx context.Context, j Job) (res probe.Result, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("probe %s target %q panicked: %v", j.Probe.Name(), j.Target.Name, r)
+		}
+	}()
+	return j.Probe.Measure(ctx, j.Target, j.Pings)
 }
 
 // RunRound executes all jobs concurrently, capped at `workers` in flight, each

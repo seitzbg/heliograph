@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strconv"
 	"testing"
 	"time"
 
@@ -22,6 +23,72 @@ func TestPingRegisteredWithSchema(t *testing.T) {
 	}
 	if err := sc["mode"].ValidateValue("mode", "bogus"); err == nil {
 		t.Error("bad mode accepted")
+	}
+}
+
+// TestPingPacketSizeSchemaBounds is the regression test for the finding that
+// packetsize had no upper bound: a schema-valid value like 1073741824 would
+// reach buildEcho's make([]byte, packetsize) and OOM or panic-allocate. The
+// schema must reject anything over maxPacketSize while still accepting the
+// boundary value itself, and must still reject non-integers/negatives.
+func TestPingPacketSizeSchemaBounds(t *testing.T) {
+	sc, _ := probe.SchemaOf("Ping")
+	spec := sc["packetsize"]
+
+	if err := spec.ValidateValue("packetsize", strconv.Itoa(maxPacketSize)); err != nil {
+		t.Errorf("packetsize at the max (%d) should be accepted, got: %v", maxPacketSize, err)
+	}
+	if err := spec.ValidateValue("packetsize", strconv.Itoa(maxPacketSize+1)); err == nil {
+		t.Error("packetsize one over the max should be rejected")
+	}
+	if err := spec.ValidateValue("packetsize", "1073741824"); err == nil {
+		t.Error("huge packetsize (1073741824) should be rejected")
+	}
+	if err := spec.ValidateValue("packetsize", "-1"); err == nil {
+		t.Error("negative packetsize should still be rejected")
+	}
+	if err := spec.ValidateValue("packetsize", "abc"); err == nil {
+		t.Error("non-integer packetsize should still be rejected")
+	}
+	if err := spec.ValidateValue("packetsize", "56"); err != nil {
+		t.Errorf("ordinary packetsize 56 should be accepted, got: %v", err)
+	}
+}
+
+// TestNewPingProbeRejectsOversizedDefaultPacketsize: a per-target override
+// bypasses the schema check that runs at config-load time (target params
+// aren't necessarily re-validated the same way), but the probe-level default
+// itself must still be rejected by the factory — otherwise a bad probe-level
+// config would only surface as a crash on the first Measure call.
+func TestNewPingProbeRejectsOversizedDefaultPacketsize(t *testing.T) {
+	_, err := newPingProbe(map[string]string{"packetsize": strconv.Itoa(maxPacketSize + 1)})
+	if err == nil {
+		t.Fatal("expected newPingProbe to reject an out-of-range default packetsize")
+	}
+	// The boundary value itself must still be accepted.
+	if _, err := newPingProbe(map[string]string{"packetsize": strconv.Itoa(maxPacketSize)}); err != nil {
+		t.Errorf("newPingProbe should accept packetsize at the max (%d), got: %v", maxPacketSize, err)
+	}
+}
+
+// TestMeasureRejectsOversizedPerTargetPacketsize: a per-target packetsize
+// override can bypass probe-level validation entirely, so Measure itself
+// must guard against it — returning a clear error instead of reaching
+// buildEcho's make([]byte, packetsize) with an enormous size.
+func TestMeasureRejectsOversizedPerTargetPacketsize(t *testing.T) {
+	p, err := newPingProbe(map[string]string{"interval_ms": "5"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	target := probe.Target{Host: "127.0.0.1", Params: map[string]string{"packetsize": "1073741824"}}
+	res, err := p.Measure(ctx, target, 1)
+	if err == nil {
+		t.Fatal("expected Measure to reject an out-of-range per-target packetsize")
+	}
+	if len(res.Samples) != 0 {
+		t.Errorf("expected no samples on a rejected packetsize, got %d", len(res.Samples))
 	}
 }
 

@@ -198,6 +198,16 @@ breaking changes.
   logged under another. Internal robustness alongside it: `pgstore.Latest` binds the
   `DefaultVantage` constant instead of a hardcoded `'local'` SQL literal, and `VantageOf` reuses
   `VantageOrDefault` so the "empty ⇒ local" rule lives in exactly one place.
+- **Unbounded `Ping.packetsize` could OOM or panic the collector.** The schema accepted any
+  non-negative integer (e.g. `1073741824`), which reached `buildEcho`'s `make([]byte, packetsize)`
+  on every send. A `maxPacketSize` (65500 bytes, under the ~65507-byte IPv4 ICMP payload ceiling
+  and safe for IPv6) is now enforced in three places — the schema's `Validate` hook, the `Ping`
+  factory's probe-level default, and `Measure`'s effective per-target value (a per-target override
+  bypasses the first two) — so an oversized value is a loud config/measurement error instead of a
+  crash. Hardening alongside it: the scheduler's per-probe goroutine (`runOne`) now recovers a
+  panicking `Measure` call into a failed `Outcome` (error names the probe + target + recovered
+  value) instead of taking down the whole daemon, so one misbehaving probe can no longer crash
+  every other target's round.
 - **Store read failures now surface as HTTP 503** on `/api/targets`, `/api/charts`, `/api/sla`,
   and `/metrics`, instead of a false-empty "0 targets" success that a Prometheus scrape could
   not distinguish from a healthy empty configuration. The base `Store.History`/`Keys` reads are
