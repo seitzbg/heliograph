@@ -134,7 +134,9 @@ v2.0 line; these build on it.
   - ✅ Slice B: RRD history backfill — `--report` (dry-run) reconciles config targets against the
     RRD data dir (matched/config-only/orphan counts, data dir resolved as sibling `../data` or a
     `data` subdir); `--history` extracts each matched target's full RRD history via `rrdtool` and
-    backfills median/loss into `samples` + the hourly/daily aggregates, idempotently
+    backfills median/loss into `samples` + the hourly/daily aggregates, idempotently. Requires the
+    continuous aggregates already enabled (`smoked -downsample`) — refuses to import (no rows
+    written) otherwise, so old history is never left unmaterialized ahead of raw retention
 - ✅ **Native ICMP probe** — a new `Ping` probe kind (`internal/probe/pingprobe`) speaks ICMP
   echo itself via `golang.org/x/net/icmp`: datagram socket first (unprivileged, needs the
   `net.ipv4.ping_group_range` sysctl), raw-socket fallback (`CAP_NET_RAW`). Ships alongside

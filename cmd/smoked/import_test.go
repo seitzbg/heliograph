@@ -801,3 +801,193 @@ func TestImportCmdHistoryPartialFailureMissingPings(t *testing.T) {
 		t.Fatalf("HistoryVantage(%s) = %d row(s), want 0 — the unresolvable-pings target must not be imported", bad, len(histBad))
 	}
 }
+
+// TestImportCmdHistoryFailsWithoutAggregates is the DB+rrdtool-gated regression for
+// review Finding #3: when the hourly/daily continuous aggregates are absent (downsampling
+// never enabled — production init doesn't create them; only `smoked -downsample` does),
+// --history used to print a warning and import the raw rows anyway, then skip the
+// aggregate refresh. That silently produced a DB where any imported history older than the
+// eventual 30-day raw retention window would NEVER be materialized into samples_daily — an
+// operator who later ran -downsample would see it get retention-deleted without ever having
+// shown up in the long-range view. --history must instead refuse to import anything at all
+// (non-zero exit, zero rows written, an actionable stderr message naming `-downsample`) so
+// the operator is forced into the correct order: enable downsampling first, then import.
+func TestImportCmdHistoryFailsWithoutAggregates(t *testing.T) {
+	dsn := os.Getenv("SMOKE_TEST_DSN")
+	if dsn == "" {
+		t.Skip("SMOKE_TEST_DSN not set")
+	}
+	rrdtoolBin, err := exec.LookPath("rrdtool")
+	if err != nil {
+		t.Skip("rrdtool not on PATH")
+	}
+
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer pool.Close()
+
+	// Drop the continuous aggregates to simulate a DB where downsampling has never been
+	// enabled — mirroring the drop+recreate pattern pgstore's own migration tests already
+	// use against this shared test DB (see TestMigrateAggregatesAddsMedianRounds). Restored
+	// in Cleanup via EnableDownsampling (idempotent) so later tests — in this package and in
+	// internal/store/pgstore, which several tests here rely on having aggregates present —
+	// see them back in place.
+	for _, view := range []string{"samples_daily", "samples_hourly"} {
+		if _, err := pool.Exec(ctx, "DROP MATERIALIZED VIEW IF EXISTS "+view+" CASCADE"); err != nil {
+			t.Fatalf("drop %s: %v", view, err)
+		}
+	}
+	t.Cleanup(func() {
+		cctx := context.Background()
+		s, err := pgstore.New(cctx, dsn, 8, func(error) {})
+		if err != nil {
+			t.Errorf("cleanup: restore aggregates: connect: %v", err)
+			return
+		}
+		defer s.Close()
+		if err := s.EnableDownsampling(cctx); err != nil {
+			t.Errorf("cleanup: restore aggregates: %v", err)
+		}
+	})
+
+	var before int64
+	if err := pool.QueryRow(ctx, "SELECT count(*) FROM samples").Scan(&before); err != nil {
+		t.Fatalf("count samples before: %v", err)
+	}
+
+	root := t.TempDir()
+	configDir := filepath.Join(root, "config")
+	dataDir := filepath.Join(root, "data")
+	mkdir(t, configDir)
+	mkdir(t, dataDir)
+
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	name := "ImpNoAgg" + suffix
+	targetsBody := fmt.Sprintf("*** Targets ***\nprobe = FPing\n+ %s\nhost = a.example\n", name)
+	writeFile(t, filepath.Join(configDir, "Targets"), targetsBody)
+	writeFile(t, filepath.Join(configDir, "Probes"), "*** Probes ***\n+ FPing\nbinary = /usr/sbin/fping\n")
+	writeFile(t, filepath.Join(configDir, "Database"), "*** Database ***\nstep = 300\npings = 20\n")
+
+	start := time.Now().Add(-2 * time.Hour).Truncate(300 * time.Second).Unix()
+	rrd := filepath.Join(dataDir, name+".rrd")
+	mustRunRRDTool(t, rrdtoolBin, "create", rrd, "--start", fmt.Sprint(start-300), "--step", "300",
+		"DS:median:GAUGE:600:0:180", "DS:loss:GAUGE:600:0:20", "RRA:AVERAGE:0.5:1:100")
+	for i := 0; i < 5; i++ {
+		ts := start + int64(i)*300
+		mustRunRRDTool(t, rrdtoolBin, "update", rrd, fmt.Sprintf("%d:%f:%d", ts, 0.010+float64(i)*0.001, i%3))
+	}
+
+	var code int
+	stdout, stderr := captureOutput(t, func() {
+		code = importCmd([]string{"smokeping", configDir, "--history", "--dsn", dsn, "--rrdtool", rrdtoolBin})
+	})
+	if code == 0 {
+		t.Fatalf("importCmd --history with no aggregates: exit = 0, want non-zero\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+	}
+	if !strings.Contains(stderr, "-downsample") {
+		t.Errorf("stderr should point the operator at -downsample, got:\n%s", stderr)
+	}
+	if !strings.Contains(strings.ToLower(stderr), "no rows") {
+		t.Errorf("stderr should state that no rows were imported, got:\n%s", stderr)
+	}
+
+	var after int64
+	if err := pool.QueryRow(ctx, "SELECT count(*) FROM samples").Scan(&after); err != nil {
+		t.Fatalf("count samples after: %v", err)
+	}
+	if after != before {
+		t.Errorf("samples count changed (before=%d, after=%d) — no rows should have been inserted", before, after)
+	}
+}
+
+// TestImportCmdHistoryMaterializesOldHistoryIntoDailyAggregate is the DB+rrdtool-gated
+// regression proving the supported path (aggregates present) actually fixes review Finding
+// #3: history OLDER than the 30-day raw retention window must be reflected in samples_daily
+// (the daily continuous aggregate) after --history, not just sit in the raw `samples` table
+// where the eventual retention policy would delete it unmaterialized. This directly exercises
+// runHistory's refreshWindowFor(minTS, maxTS, now) covering the FULL extracted range, however
+// old, not just a trailing window.
+func TestImportCmdHistoryMaterializesOldHistoryIntoDailyAggregate(t *testing.T) {
+	dsn := os.Getenv("SMOKE_TEST_DSN")
+	if dsn == "" {
+		t.Skip("SMOKE_TEST_DSN not set")
+	}
+	rrdtoolBin, err := exec.LookPath("rrdtool")
+	if err != nil {
+		t.Skip("rrdtool not on PATH")
+	}
+
+	ctx := context.Background()
+	s, err := pgstore.New(ctx, dsn, 8, func(error) {})
+	if err != nil {
+		t.Fatalf("pgstore.New: %v", err)
+	}
+	defer s.Close()
+	if err := s.EnableDownsampling(ctx); err != nil {
+		t.Fatalf("EnableDownsampling: %v", err)
+	}
+
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	deleteRows := func() {
+		if _, err := pool.Exec(ctx, "DELETE FROM samples WHERE target LIKE 'ImpOld%'"); err != nil {
+			t.Fatalf("cleanup: delete ImpOld* rows: %v", err)
+		}
+	}
+	deleteRows()
+	t.Cleanup(deleteRows)
+
+	root := t.TempDir()
+	configDir := filepath.Join(root, "config")
+	dataDir := filepath.Join(root, "data")
+	mkdir(t, configDir)
+	mkdir(t, dataDir)
+
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	name := "ImpOld" + suffix
+	targetsBody := fmt.Sprintf("*** Targets ***\nprobe = FPing\n+ %s\nhost = old.example\n", name)
+	writeFile(t, filepath.Join(configDir, "Targets"), targetsBody)
+	writeFile(t, filepath.Join(configDir, "Probes"), "*** Probes ***\n+ FPing\nbinary = /usr/sbin/fping\n")
+	writeFile(t, filepath.Join(configDir, "Database"), "*** Database ***\nstep = 300\npings = 20\n")
+
+	// 40 days old — strictly older than the 30-day raw retention (pgstore.EnableDownsampling
+	// installs `add_retention_policy('samples', INTERVAL '30 days', ...)`) — so this data
+	// proves its point only if it shows up via samples_daily, not merely in raw `samples`.
+	start := time.Now().Add(-40 * 24 * time.Hour).Truncate(300 * time.Second).Unix()
+	rrd := filepath.Join(dataDir, name+".rrd")
+	mustRunRRDTool(t, rrdtoolBin, "create", rrd, "--start", fmt.Sprint(start-300), "--step", "300",
+		"DS:median:GAUGE:600:0:180", "DS:loss:GAUGE:600:0:20", "RRA:AVERAGE:0.5:1:100")
+	for i := 0; i < 10; i++ {
+		ts := start + int64(i)*300
+		mustRunRRDTool(t, rrdtoolBin, "update", rrd, fmt.Sprintf("%d:%f:%d", ts, 0.010+float64(i)*0.001, i%3))
+	}
+
+	var code int
+	out := captureStdout(t, func() {
+		code = importCmd([]string{"smokeping", configDir, "--history", "--dsn", dsn, "--rrdtool", rrdtoolBin})
+	})
+	if code != 0 {
+		t.Fatalf("importCmd --history exit code = %d, want 0\nstdout:\n%s", code, out)
+	}
+
+	var rounds int
+	var bucketAge time.Duration
+	row := pool.QueryRow(ctx,
+		`SELECT rounds, now() - bucket FROM samples_daily WHERE target=$1 AND vantage='local' ORDER BY bucket LIMIT 1`, name)
+	if err := row.Scan(&rounds, &bucketAge); err != nil {
+		t.Fatalf("query samples_daily for %s: %v (old history was not materialized into the daily aggregate)", name, err)
+	}
+	if rounds == 0 {
+		t.Errorf("samples_daily bucket for %s has rounds=0, want >0", name)
+	}
+	if bucketAge < 30*24*time.Hour {
+		t.Errorf("samples_daily bucket for %s is only %v old, want >30 days (fixture data must actually be OLD)", name, bucketAge)
+	}
+}

@@ -121,7 +121,22 @@ func (s *PGStore) AggregatesExist(ctx context.Context) (bool, error) {
 // regular refresh policy, matching backfillAggregates' own end_offset. Must run outside
 // an explicit transaction, like backfillAggregates (TimescaleDB requires CALL
 // refresh_continuous_aggregate to not be inside one).
+//
+// Both bounds are widened out to whole UTC days before use: verified against a live
+// TimescaleDB instance, `CALL refresh_continuous_aggregate(view, from, until)` can leave
+// the bucket containing `until` entirely unmaterialized when `until` sits exactly at (or
+// only seconds past) the newest raw sample it's meant to cover — the daily bucket comes
+// back with zero rows, not a partial one. Rounding `from` down and `until` up to the
+// next UTC-day boundary guarantees the daily aggregate's bucket (the coarser, binding
+// one — see minRefreshSpan) at both ends is unambiguously covered, regardless of the
+// exact half-open/closed semantics TimescaleDB applies internally. This only widens the
+// requested range (never narrows it), so it's safe for every caller — including one that
+// already asks for a generously-wide window. This is what review Finding #3's fix relies
+// on to actually materialize old history into samples_daily, not just land it in raw
+// `samples` (see cmd/smoked's DB-gated TestImportCmdHistoryMaterializesOldHistoryIntoDailyAggregate).
 func (s *PGStore) RefreshAggregates(ctx context.Context, from, until time.Time) error {
+	from = from.UTC().Truncate(24 * time.Hour)
+	until = until.UTC().Truncate(24 * time.Hour).Add(24 * time.Hour)
 	refreshCeiling := time.Now().Add(-time.Hour)
 	if until.After(refreshCeiling) {
 		until = refreshCeiling

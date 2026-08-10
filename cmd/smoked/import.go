@@ -437,14 +437,29 @@ func runHistory(dir, dataFlag, rrdtoolFlag, dsn string) int {
 	}
 	defer pg.Close()
 
-	// Long-range history (anything older than the raw-retention window) is
-	// only queryable through the hourly/daily aggregates — without them, the
-	// import still lands the raw rows (never silently dropped), but an
-	// operator who hasn't run `smoked -downsample` yet needs to know why the
-	// dashboard won't show old history until they do.
-	hasCaggs, _ := pg.AggregatesExist(ctx)
+	// Long-range history (anything older than the raw-retention window) is only
+	// queryable through the hourly/daily aggregates. Without them, importing raw
+	// rows anyway and continuing (the old behavior) would silently produce a DB
+	// where any history older than the eventual 30-day raw retention window can
+	// NEVER be materialized into samples_daily: once -downsample is later enabled,
+	// EnableDownsampling's one-time backfill only reaches back 30 days (matching
+	// the raw retention it installs at the same time), and the retention policy
+	// then deletes the raw rows out from under the older history before it's ever
+	// aggregated — the "full consolidated history" this importer promises would be
+	// silently lost (review Finding #3). So --history refuses to import anything at
+	// all until aggregates already exist, forcing the correct operator order:
+	// enable downsampling first, then import.
+	hasCaggs, err := pg.AggregatesExist(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "import: checking continuous aggregates: %v\n", err)
+		return 1
+	}
 	if !hasCaggs {
-		fmt.Fprintln(os.Stderr, "import: warning: continuous aggregates not found; long-range history needs `smoked -downsample` first — importing raw samples only")
+		fmt.Fprintln(os.Stderr, "import: continuous aggregates are not enabled on this database; start the "+
+			"collector with `-downsample` (or otherwise enable downsampling) before importing history, so "+
+			"history older than the 30-day raw retention is materialized into the daily aggregate. No rows "+
+			"were imported.")
+		return 1
 	}
 
 	now := time.Now()

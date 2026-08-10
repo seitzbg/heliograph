@@ -30,10 +30,12 @@ breaking changes.
   reported (`config-only`), an `.rrd` with no matching target is reported as an `orphan` and never
   imported. History from before smokeping-modern's own raw-sample retention window still renders
   on the dashboard, just from the aggregate (its smoke band collapses to the median line — there's
-  no per-round distribution in an RRD's consolidated data to draw a band from). A dry-run
-  `--report` mode prints the same target/matched/config-only/orphan counts without touching the
-  DB, for previewing config-vs-RRD drift before running `--history`. This completes the SmokePing
-  importer (slice B on top of slice A's config-only import below).
+  no per-round distribution in an RRD's consolidated data to draw a band from) — which is why
+  `--history` requires the continuous aggregates already enabled (`smoked -downsample`) and refuses
+  to import at all otherwise (see Fixed below). A dry-run `--report` mode prints the same
+  target/matched/config-only/orphan counts without touching the DB, and works with or without
+  downsampling enabled, for previewing config-vs-RRD drift before running `--history`. This
+  completes the SmokePing importer (slice B on top of slice A's config-only import below).
 - **SmokePing config import.** `smoked import smokeping <dir>` reads a legacy SmokePing install's
   `Targets`/`Probes`/`Database` config and turns the target tree into a modern config fragment:
   by default it prints tidy YAML (or writes it with `--out FILE`) for review; `--apply` (with
@@ -193,6 +195,23 @@ breaking changes.
   history shouldn't cost the rest of it. `pgstore.ImportSamples` also gained a defense-in-depth
   backstop (`pings<1`, `pings>MaxPings`, `loss<0`, or `loss>pings` now rejects the whole call) so
   no caller, present or future, can slip an invalid row past it.
+- **History import could silently lose old history to retention before it was ever aggregated.**
+  When the hourly/daily continuous aggregates weren't enabled yet (production init doesn't create
+  them; only `smoked -downsample` does), `--history` used to print a warning and import the raw
+  rows anyway, then skip the aggregate refresh entirely. If the operator enabled downsampling
+  later, `EnableDownsampling`'s one-time backfill only reaches back 30 days (matching the raw
+  retention policy it installs at the same time) — so any imported history older than that window
+  was never materialized into `samples_daily`, and the raw rows behind it were eventually deleted
+  by the retention policy, silently losing the "full consolidated history" the importer promises.
+  `runHistory` now checks for the continuous aggregates *before* extracting or inserting anything
+  and refuses to import at all when they're absent — a clear, actionable error names
+  `smoked -downsample` and confirms no rows were written — forcing the correct order (enable
+  downsampling, then import). Separately, `pgstore.RefreshAggregates` itself could leave the daily
+  bucket containing the newest imported sample completely unmaterialized: TimescaleDB's
+  `refresh_continuous_aggregate` can return zero rows for a bucket when the refresh window's upper
+  bound lands exactly at (or only seconds past) that bucket's newest raw timestamp, rather than
+  materializing it. `RefreshAggregates` now widens both bounds out to whole UTC days before
+  refreshing, guaranteeing the daily aggregate's bucket at each end is unambiguously covered.
 - **Config import rejected valid fragments that relied on base-YAML inheritance.**
   `config.AppendImport` used to schema-validate the DB fragment in isolation — building a bare
   target tree and calling `Monitors()` on it *before* the fragment was ever composed with
