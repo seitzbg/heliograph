@@ -101,7 +101,7 @@
 <div class="wrap">
   <header class="top">
     <div>
-      <div class="eyebrow">Fidelity proof-of-concept · smokeping-modern</div>
+      <div class="eyebrow">Fidelity proof-of-concept · Heliograph</div>
       <h1>The smoke graph, rebuilt on canvas</h1>
       <p class="lede">Reproducing SmokePing's signature latency-distribution chart from a modern client-side renderer. Each vertical slice shows the spread of <em>N</em> pings that round — the dark cloud is jitter, the colored line is the median tinted by packet loss. Rendered here from the same sorted per-round sample arrays the Go collector already returns from <code>/api/series</code>.</p>
     </div>
@@ -126,7 +126,7 @@
 
   <p class="note"><strong>What to check:</strong> the dense dark core = tightly-clustered pings (low jitter); a tall fuzzy cloud = high variance; the median line changes color where pings are lost. This is the exact algorithm from the code map (§05): nested percentile bands darkening toward the median, an 8-bucket green→red loss ramp on the median, and unison Y-scaling. In the production build this same renderer reads live data and is fully theme-aware — the graphs adapt to dark mode instead of being baked light like the current Perl/RRDtool SVGs.</p>
 
-  <footer>smokeping-modern · smoke renderer v0 · deterministic sample data for demonstration</footer>
+  <footer>Heliograph · smoke renderer v0 · deterministic sample data for demonstration</footer>
 </div>
 
 <script>

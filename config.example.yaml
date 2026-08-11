@@ -1,4 +1,4 @@
-# Example smokeping-modern config.
+# Example Heliograph config.
 # The target tree resolves by inheritance: a setting (probe, pings, step, params)
 # applies to a node and everything under it until a descendant overrides it.
 # A node with a `host` becomes a monitored leaf; run with:  smoked -config config.example.yaml

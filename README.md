@@ -1,15 +1,22 @@
-# smokeping-modern
+# Heliograph
 
-A modern, non-Perl reimplementation of [SmokePing](https://github.com/oetiker/SmokePing) in Go on
-TimescaleDB. It reproduces SmokePing's features and its signature **smoke graphs** with a fast,
-parallel, plugin-based poller, and goes beyond parity with multi-vantage **federation** and
-database-sourced configuration.
+[![CI](https://github.com/seitzbg/heliograph/actions/workflows/ci.yml/badge.svg)](https://github.com/seitzbg/heliograph/actions/workflows/ci.yml)
+&nbsp;[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
+**Read the network in smoke and light** — a modern, non-Perl reimplementation of
+[SmokePing](https://oss.oetiker.ch/smokeping/) in Go on TimescaleDB. It reproduces SmokePing's
+features and its signature **smoke graphs** with a fast, parallel, plugin-based poller, and goes
+beyond parity with multi-vantage **federation** and database-sourced configuration.
+
+> A *heliograph* is a signaling instrument that flashes messages across long distances — and it has
+> *graph* right in the name. Fitting for a tool whose remote **vantages** signal what they see and
+> whose smoke bands you read at a glance. (The daemon is still `smoked`.)
 
 Stable since **v1.0.0** — see [CHANGELOG.md](CHANGELOG.md) and the [roadmap](ROADMAP.md).
 
 ## What works today (verified)
 
-- **Smoke-graph renderer** (`web/smoke-poc.html`) — a self-contained canvas re-implementation of SmokePing's signature chart: nested percentile bands darkening toward the median + the 8-bucket loss-colored median line, light/dark theme-aware, across four latency scenarios. This de-risks the "keep the look & feel" requirement. Open it in a browser, or view the published version at the artifact URL noted in the session.
+- **Smoke-graph renderer** (`web/smoke-poc.html`) — a self-contained canvas re-implementation of SmokePing's signature chart: nested percentile bands darkening toward the median + the 8-bucket loss-colored median line, light/dark theme-aware, across four latency scenarios. This de-risks the "keep the look & feel" requirement. Open it in a browser to explore.
 - **Plugin probes** — a `Probe` interface + registry; probes self-register via `init()`. Seven shipped, all live-tested against real hosts:
   - `FPing` — wraps `fping(8)` for ICMP echo RTT (CLI-wrapper style).
   - `Ping` — native ICMP echo via `golang.org/x/net/icmp`, no `fping` binary/`setcap`: an
@@ -47,6 +54,21 @@ go run ./cmd/smoked -serve -dsn 'postgres://user:pass@host:5432/smoke?sslmode=di
 # Load targets from a YAML tree (with inheritance) instead of the demo set:
 go run ./cmd/smoked -serve -config config.example.yaml
 ```
+
+### Container image
+
+Prebuilt images are published to the [GitHub Container Registry](https://github.com/seitzbg/heliograph/pkgs/container/heliograph)
+by CI on every push to `main` (and tagged releases):
+
+```sh
+docker pull ghcr.io/seitzbg/heliograph:main
+docker run --rm -p 8087:8087 ghcr.io/seitzbg/heliograph:main \
+  -serve -addr :8087 -webdir /web
+#   -> open http://localhost:8087/
+```
+
+For a full stack (collector + TimescaleDB, behind Traefik/Caddy) see
+[`docker-compose.yml`](docker-compose.yml).
 
 ### TimescaleDB (dev + integration test)
 
@@ -190,7 +212,7 @@ web/
   dashboard.js   the single-page dashboard (overview, graphs, config, vantages)
   smoke.js       shared canvas smoke renderer (bands + loss-coloured median)
   index.html     live dashboard (fetches /api/series)
-  smoke-poc.html self-contained synthetic demo (published as an Artifact)
+  smoke-poc.html self-contained synthetic smoke-graph demo
 ```
 
 ## Design decisions
@@ -209,3 +231,19 @@ alongside YAML (additive, `conf.d`-style), edited from an in-browser **Config** 
 
 Still planned: richer notifier integrations beyond log + webhook (e.g. email, PagerDuty). See the
 [roadmap](ROADMAP.md).
+
+## Acknowledgements
+
+- **Inspired by [SmokePing](https://oss.oetiker.ch/smokeping/)** by Tobi Oetiker — the classic that
+  made latency "smoke" graphs and the inherited target tree the way a generation of us learned to
+  watch a network. This project is a ground-up Go reimagining of those ideas, not a fork; all credit
+  for the original concept and its iconic visualization is Tobi's.
+- **Built with AI.** Heliograph was designed, implemented, tested, and reviewed
+  collaboratively with [Claude Code](https://www.anthropic.com/claude-code), Anthropic's agentic
+  coding tool — from the smoke-graph renderer and probe plugins through the TimescaleDB store,
+  federation, and CI. A human directed the work, made the calls, and verified the results; the AI
+  did much of the typing.
+
+## License
+
+[MIT](LICENSE) © 2026 Bryan Seitz

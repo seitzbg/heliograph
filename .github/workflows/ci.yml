@@ -1,5 +1,5 @@
 # CI: test → build → scan, publishing the collector image to GHCR
-# (ghcr.io/<owner>/smokeping-modern) so the docker hosts can pull it. Migrated from
+# (ghcr.io/<owner>/heliograph) so the docker hosts can pull it. Migrated from
 # the former GitLab CI (.gitlab-ci.yml) — see docs/CHANGELOG for the git.fiber.house →
 # GitHub move. Runs on GitHub-hosted ubuntu-latest runners.
 name: CI
