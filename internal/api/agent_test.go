@@ -358,6 +358,17 @@ func TestIngestStrictFingerprintDropsEmpty(t *testing.T) {
 	if !strings.Contains(mw.Body.String(), `smokeping_agent_missing_fingerprint_total{vantage="nyc"} 1`) {
 		t.Fatalf("strict drop should still be counted on /metrics, got:\n%s", mw.Body.String())
 	}
+	// The HELP text must not claim these rounds were "accepted": in strict mode they were
+	// DROPPED. The counter is rounds RECEIVED without a fingerprint, whether accepted (lenient)
+	// or dropped (strict), so dashboards/alerts don't misstate rejected traffic (CODE_REVIEW #4).
+	help := mw.Body.String()
+	if !strings.Contains(help, "# HELP smokeping_agent_missing_fingerprint_total") ||
+		!strings.Contains(help, "received with no measurement fingerprint") {
+		t.Fatalf("HELP text should describe rounds RECEIVED (not accepted) without a fingerprint, got:\n%s", help)
+	}
+	if strings.Contains(help, "accepted with no measurement fingerprint") {
+		t.Fatalf("HELP text still claims strict-mode drops were 'accepted':\n%s", help)
+	}
 
 	// Lenient (default): the same round is accepted and stored.
 	ing2 := &fakeIngester{}
