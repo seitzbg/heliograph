@@ -355,6 +355,40 @@ func TestEnableDownsampling(t *testing.T) {
 	}
 }
 
+// AggregatesExist (the --history preflight) must require BOTH samples_hourly and
+// samples_daily, so an interrupted/partial schema (hourly present, daily dropped) can't pass
+// the fail-before-write check and then fail mid-import on the daily refresh (CODE_REVIEW #6).
+func TestAggregatesExistRequiresBothViews(t *testing.T) {
+	dsn := os.Getenv("SMOKE_TEST_DSN")
+	if dsn == "" {
+		t.Skip("set SMOKE_TEST_DSN to run the TimescaleDB integration test")
+	}
+	ctx := context.Background()
+	s, err := New(ctx, dsn, 100, func(e error) { t.Errorf("store error: %v", e) })
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer s.Close()
+	if err := s.EnableDownsampling(ctx); err != nil {
+		t.Fatalf("EnableDownsampling: %v", err)
+	}
+	// Both views present -> true.
+	if ok, err := s.AggregatesExist(ctx); err != nil || !ok {
+		t.Fatalf("AggregatesExist with both views = (%v,%v), want (true,nil)", ok, err)
+	}
+	// Drop only the daily view: the preflight must now report false, not "hourly is enough".
+	if _, err := s.pool.Exec(ctx, "DROP MATERIALIZED VIEW IF EXISTS samples_daily CASCADE"); err != nil {
+		t.Fatalf("drop daily cagg: %v", err)
+	}
+	if ok, err := s.AggregatesExist(ctx); err != nil || ok {
+		t.Fatalf("AggregatesExist with daily absent = (%v,%v), want (false,nil)", ok, err)
+	}
+	// Restore for any subsequent test sharing this database.
+	if err := s.EnableDownsampling(ctx); err != nil {
+		t.Fatalf("EnableDownsampling (restore): %v", err)
+	}
+}
+
 // An existing continuous aggregate created before median_rounds existed must be rebuilt by
 // EnableDownsampling — the migrateAggregates drop+recreate — so the new column appears
 // (CODE_REVIEW #6 / P2-6). Without the rebuild, Rollup's SELECT of median_rounds would fail.

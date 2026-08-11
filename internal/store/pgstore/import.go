@@ -104,12 +104,20 @@ func (s *PGStore) importBatch(ctx context.Context, rows []ImportRow) (int64, err
 	return total, nil
 }
 
-// AggregatesExist reports whether the hourly (and, by construction, daily) continuous
-// aggregates are present — exposing the existing aggregateExists check so the
-// importer CLI can tell the operator to run `smoked -downsample` first rather than
-// silently skipping the RefreshAggregates step.
+// AggregatesExist reports whether BOTH continuous aggregates the importer depends on —
+// samples_hourly and samples_daily — are present, so `--history` refuses to write when
+// either is missing rather than inserting raw rows and only then failing on the daily
+// refresh. `--history` refreshes both views over the imported range, so both must exist
+// before any insert; an interrupted downsampling init or a manually dropped daily view can
+// leave hourly present and daily absent, which the earlier hourly-only check missed
+// (CODE_REVIEW #6). The operator is told to run `smoked -downsample` first.
 func (s *PGStore) AggregatesExist(ctx context.Context) (bool, error) {
-	return s.aggregateExists(ctx)
+	var ok bool
+	if err := s.pool.QueryRow(ctx,
+		`SELECT to_regclass('samples_hourly') IS NOT NULL AND to_regclass('samples_daily') IS NOT NULL`).Scan(&ok); err != nil {
+		return false, fmt.Errorf("pgstore: check aggregates: %w", err)
+	}
+	return ok, nil
 }
 
 // RefreshAggregates materializes the hourly and daily continuous aggregates over
