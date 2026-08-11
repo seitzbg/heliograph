@@ -826,15 +826,16 @@ func (srv *Server) seriesAll(w http.ResponseWriter, r *http.Request) {
 			cutoff = st
 		}
 	}
-	all, err := sa.SeriesAll(r.Context(), vant, cutoff)
+	all, storeTruncated, err := sa.SeriesAll(r.Context(), vant, cutoff, maxSeriesAllTotalRounds)
 	if err != nil {
 		slog.Error("series/all query failed", "err", err)
 		http.Error(w, `{"error":"series unavailable"}`, http.StatusServiceUnavailable)
 		return
 	}
-	// Bound the total response across all targets, keeping each target's newest rounds. Trimming is
-	// visible via `truncated` so a client can narrow the window / use /api/rollup (CODE_REVIEW M5).
-	truncated := capSeriesAll(all, maxSeriesAllTotalRounds)
+	// The store already bounds the query to the global budget (keeping each target's newest rounds);
+	// capSeriesAll is a cheap response-side backstop for a store that doesn't. Either counts as
+	// truncation (CODE_REVIEW M5).
+	truncated := storeTruncated || capSeriesAll(all, maxSeriesAllTotalRounds)
 	targets := make(map[string]any, len(all))
 	total := 0
 	for name, hist := range all {

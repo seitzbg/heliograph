@@ -156,7 +156,7 @@ func TestMemStoreSeriesAll(t *testing.T) {
 	add("b", 3*time.Minute)
 
 	// cutoff at t0+1m: strictly-after keeps a@2m and b@3m only.
-	got, err := s.SeriesAll(context.Background(), "", t0.Add(1*time.Minute))
+	got, _, err := s.SeriesAll(context.Background(), "", t0.Add(1*time.Minute), 0) // 0 = unbounded
 	if err != nil {
 		t.Fatalf("SeriesAll: %v", err)
 	}
@@ -168,7 +168,7 @@ func TestMemStoreSeriesAll(t *testing.T) {
 	}
 
 	// zero cutoff -> everything, oldest->newest per target.
-	all, _ := s.SeriesAll(context.Background(), "", time.Time{})
+	all, _, _ := s.SeriesAll(context.Background(), "", time.Time{}, 0)
 	if len(all["a"]) != 3 {
 		t.Fatalf("a full len = %d, want 3", len(all["a"]))
 	}
@@ -179,9 +179,46 @@ func TestMemStoreSeriesAll(t *testing.T) {
 	}
 
 	// cutoff past everything -> no targets in the map.
-	none, _ := s.SeriesAll(context.Background(), "", t0.Add(1*time.Hour))
+	none, _, _ := s.SeriesAll(context.Background(), "", t0.Add(1*time.Hour), 0)
 	if len(none) != 0 {
 		t.Errorf("past-cutoff map len = %d, want 0", len(none))
+	}
+}
+
+// CODE_REVIEW M5 (store-query bound): SeriesAll bounds the TOTAL rounds across all targets by
+// maxTotal, keeping each target's newest rounds so every target stays represented, and reports
+// truncation — so a bulk read over many targets can't materialize an unbounded result.
+func TestMemStoreSeriesAllGlobalBound(t *testing.T) {
+	s := NewMem(1000)
+	base := time.Unix(1_700_000_000, 0).UTC()
+	for _, tgt := range []string{"a", "b", "c"} {
+		for i := 0; i < 100; i++ {
+			s.Add([]scheduler.Outcome{{Target: probe.Target{Name: tgt, Host: "h"}, When: base.Add(time.Duration(i) * time.Second)}})
+		}
+	}
+	// maxTotal=30 across 3 targets -> each keeps its 10 newest; truncated.
+	got, truncated, err := s.SeriesAll(context.Background(), "", base.Add(-time.Second), 30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !truncated {
+		t.Fatal("want truncated=true when the total exceeds maxTotal")
+	}
+	total := 0
+	for name, h := range got {
+		total += len(h)
+		if len(h) == 0 {
+			t.Fatalf("target %q dropped entirely; every target must stay represented", name)
+		}
+		if !h[len(h)-1].When.Equal(base.Add(99 * time.Second)) {
+			t.Fatalf("target %q must keep its NEWEST rounds, last=%v", name, h[len(h)-1].When)
+		}
+	}
+	if total > 30 {
+		t.Fatalf("bounded total = %d, want <= 30", total)
+	}
+	if _, tr, _ := s.SeriesAll(context.Background(), "", base.Add(-time.Second), 0); tr {
+		t.Fatal("maxTotal=0 (unbounded) must not truncate")
 	}
 }
 

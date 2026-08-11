@@ -169,8 +169,38 @@ type AvailabilityAller interface {
 // after (not at) cutoff, so an incremental fetch never re-sends the watermark round.
 // Targets with no rounds after cutoff are omitted; returned oldest->newest per target.
 // The error lets a backing-store failure surface as an API 503, not a false-empty view.
+//
+// maxTotal bounds the TOTAL rounds returned across all targets (a global budget on top of any
+// per-target cap), keeping each target's newest rounds so every target stays represented — so a
+// bulk read over many targets can't materialize an unbounded result. The bool reports whether that
+// bound (or a per-target cap) truncated the result (CODE_REVIEW M5).
 type SeriesAller interface {
-	SeriesAll(ctx context.Context, vantage string, cutoff time.Time) (map[string][]scheduler.Outcome, error)
+	SeriesAll(ctx context.Context, vantage string, cutoff time.Time, maxTotal int) (rounds map[string][]scheduler.Outcome, truncated bool, err error)
+}
+
+// boundSeriesTotal trims all[*] in place so the total rounds across every target does not exceed
+// maxTotal, keeping each target's NEWEST rounds (an equal per-target share) so every target stays
+// represented. Returns whether anything was trimmed. Each target's rounds are oldest->newest.
+func boundSeriesTotal(all map[string][]scheduler.Outcome, maxTotal int) bool {
+	total := 0
+	for _, h := range all {
+		total += len(h)
+	}
+	if maxTotal <= 0 || total <= maxTotal || len(all) == 0 {
+		return false
+	}
+	share := maxTotal / len(all)
+	if share < 1 {
+		share = 1 // more targets than the budget: keep each target's single newest round
+	}
+	trimmed := false
+	for k, h := range all {
+		if len(h) > share {
+			all[k] = h[len(h)-share:]
+			trimmed = true
+		}
+	}
+	return trimmed
 }
 
 // vk is the composite key MemStore's latest/history maps are indexed by, so rounds
@@ -382,7 +412,7 @@ func (s *MemStore) LatestAll(vantage string) (map[string]scheduler.Outcome, erro
 // oldest->newest (history is kept in insertion order). Best-effort like History,
 // bounded by the in-memory cap; production uses the pgstore implementation. Targets
 // with no rounds after cutoff are omitted.
-func (s *MemStore) SeriesAll(_ context.Context, vantage string, cutoff time.Time) (map[string][]scheduler.Outcome, error) {
+func (s *MemStore) SeriesAll(_ context.Context, vantage string, cutoff time.Time, maxTotal int) (map[string][]scheduler.Outcome, bool, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	want := VantageOrDefault(vantage)
@@ -401,7 +431,8 @@ func (s *MemStore) SeriesAll(_ context.Context, vantage string, cutoff time.Time
 			out[k.target] = rounds
 		}
 	}
-	return out, nil
+	truncated := boundSeriesTotal(out, maxTotal)
+	return out, truncated, nil
 }
 
 // AvailabilityAll aggregates every target over [cutoff, now) — the same best-effort
