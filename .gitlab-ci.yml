@@ -1,5 +1,6 @@
 stages:
   - test
+  - build
 
 # Shared Go job settings (image, runner tag, module cache).
 .go-base:
@@ -80,3 +81,24 @@ db-test:
     # with each other. (Same reasons a local `go test ./...` with a DSN can flake — run
     # those packages with -p 1.)
     - go test -p 1 -count=1 ./internal/store/pgstore/ ./internal/vantage/ ./internal/api/ ./internal/configstore/ ./cmd/smoked/
+
+# Build the collector image and push it to the GitLab container registry
+# (git.fiber.house:5050/munro/smokeping-modern) so the docker hosts can pull it.
+# Runs after the test stage, so a red test blocks the image. The fleet runner is
+# privileged with the host docker socket bind-mounted into every job, so the
+# `docker` CLI talks straight to the host daemon — no docker:dind service needed.
+# Builds on any branch push and on tags (a branch pipeline tags the image with
+# the branch slug + short SHA, which the ansible stack pulls for a test deploy).
+build-image:
+  stage: build
+  image: docker:27-cli
+  tags:
+    - ubuntu-26.04-amd64
+  rules:
+    - if: '$CI_COMMIT_TAG'
+    - if: '$CI_COMMIT_BRANCH'
+  script:
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+    - docker build -t "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA" -t "$CI_REGISTRY_IMAGE:$CI_COMMIT_REF_SLUG" .
+    - docker push "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA"
+    - docker push "$CI_REGISTRY_IMAGE:$CI_COMMIT_REF_SLUG"
