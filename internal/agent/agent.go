@@ -27,6 +27,8 @@ type Options struct {
 	Workers   int // max concurrent probes
 	BufferCap int // bounded store-and-forward buffer capacity (rounds)
 	FlushMax  int // max rounds per push
+
+	SpoolDir string // on-disk store-and-forward directory ("" = in-memory only)
 }
 
 // Validate rejects an Options that would make an unusable or dangerous agent — the
@@ -66,6 +68,7 @@ type Agent struct {
 	opts   Options
 	client *Client
 	buf    *buffer
+	spool  *spool
 
 	// jobs is the current runnable job set, built from the latest assignment.
 	// It is written by the poll goroutine and read by the measure goroutine;
@@ -105,6 +108,18 @@ func (a *Agent) Run(ctx context.Context) error {
 	}
 	slog.Info("smoke-agent starting", "hub", a.opts.Hub, "vantage", a.opts.Vantage, "interval", a.opts.Interval)
 
+	if a.opts.SpoolDir != "" {
+		sp, head, live, err := openSpool(a.opts.SpoolDir)
+		if err != nil {
+			return fmt.Errorf("spool: %w", err)
+		}
+		a.spool = sp
+		a.buf.setPersister(sp)
+		a.buf.reload(head, live)
+		sp.start()
+		slog.Info("spool ready", "dir", a.opts.SpoolDir, "replayed", len(live))
+	}
+
 	var wg sync.WaitGroup
 	wg.Add(3)
 	go func() { defer wg.Done(); a.pollLoop(ctx) }()
@@ -112,7 +127,12 @@ func (a *Agent) Run(ctx context.Context) error {
 	go func() { defer wg.Done(); a.flushLoop(ctx) }()
 	wg.Wait()
 
-	slog.Info("smoke-agent stopped", "dropped", a.buf.dropped(), "rejected", a.buf.rejected())
+	args := []any{"dropped", a.buf.dropped(), "rejected", a.buf.rejected()}
+	if a.spool != nil {
+		args = append(args, "spool_replayed", a.spool.replayed(),
+			"spool_errors", a.spool.errors(), "spool_reclaimed", a.spool.reclaimed())
+	}
+	slog.Info("smoke-agent stopped", args...)
 	return nil
 }
 
@@ -267,6 +287,11 @@ func (a *Agent) flushLoop(ctx context.Context) {
 	shutdown := func() {
 		a.awaitMeasureDrain(drainWait)
 		a.finalFlush(finalFlushTTL)
+		if a.spool != nil {
+			if err := a.spool.close(); err != nil {
+				slog.Warn("spool close failed", "err", err)
+			}
+		}
 	}
 	backoff := backoffStart
 	for {
