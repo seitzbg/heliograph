@@ -766,9 +766,9 @@ type countingStore struct {
 	latest, latestAll, avail, availAll, seriesAll int
 }
 
-func (c *countingStore) SeriesAll(ctx context.Context, vantage string, cutoff time.Time) (map[string][]scheduler.Outcome, error) {
+func (c *countingStore) SeriesAll(ctx context.Context, vantage string, cutoff time.Time, maxTotal int) (map[string][]scheduler.Outcome, bool, error) {
 	c.seriesAll++
-	return c.MemStore.SeriesAll(ctx, vantage, cutoff)
+	return c.MemStore.SeriesAll(ctx, vantage, cutoff, maxTotal)
 }
 
 func (c *countingStore) Latest(k string) (scheduler.Outcome, bool) {
@@ -895,8 +895,8 @@ func TestSeriesAllBulk(t *testing.T) {
 // 503, not a false-empty grid (CODE_REVIEW #4 discipline extended to the new endpoint).
 type errSeriesStore struct{ *store.MemStore }
 
-func (errSeriesStore) SeriesAll(context.Context, string, time.Time) (map[string][]scheduler.Outcome, error) {
-	return nil, errors.New("db read failed")
+func (errSeriesStore) SeriesAll(context.Context, string, time.Time, int) (map[string][]scheduler.Outcome, bool, error) {
+	return nil, false, errors.New("db read failed")
 }
 
 func TestSeriesAllReadFailure503(t *testing.T) {

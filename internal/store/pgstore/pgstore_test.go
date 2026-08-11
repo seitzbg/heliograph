@@ -925,7 +925,7 @@ func TestPGStoreSeriesAllPerTargetCap(t *testing.T) {
 	}
 	s.Add(outs)
 
-	all, err := s.SeriesAll(ctx, "local", base.Add(-time.Second)) // everything is after this
+	all, _, err := s.SeriesAll(ctx, "local", base.Add(-time.Second), 0) // 0 = no global bound; everything is after this
 	if err != nil {
 		t.Fatalf("SeriesAll: %v", err)
 	}
@@ -940,7 +940,7 @@ func TestPGStoreSeriesAllPerTargetCap(t *testing.T) {
 		t.Errorf("a cap kept %v..%v, want rounds 2..4 (newest 3)", all["a"][0].When, all["a"][2].When)
 	}
 	// strictly-after cutoff: a cutoff at round 2's ts drops a's 0..2 and all of b.
-	after, err := s.SeriesAll(ctx, "local", base.Add(2*time.Minute))
+	after, _, err := s.SeriesAll(ctx, "local", base.Add(2*time.Minute), 0)
 	if err != nil {
 		t.Fatalf("SeriesAll (cutoff): %v", err)
 	}
@@ -949,6 +949,60 @@ func TestPGStoreSeriesAllPerTargetCap(t *testing.T) {
 	}
 	if _, ok := after["b"]; ok {
 		t.Errorf("b should be absent after the cutoff (its newest round is at the cutoff)")
+	}
+}
+
+// CODE_REVIEW M5 (store-query bound): SeriesAll caps EACH target at min(perTarget, maxTotal/targets)
+// in the query itself, so the total materialized stays under the global budget, every target stays
+// represented, and it reports truncation — bounding the query, not just the response.
+func TestPGStoreSeriesAllGlobalBound(t *testing.T) {
+	dsn := os.Getenv("SMOKE_TEST_DSN")
+	if dsn == "" {
+		t.Skip("set SMOKE_TEST_DSN to run the TimescaleDB integration test")
+	}
+	ctx := context.Background()
+	s, err := New(ctx, dsn, 100, func(e error) { t.Errorf("store error: %v", e) })
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.pool.Exec(ctx, "TRUNCATE samples"); err != nil {
+		t.Fatalf("truncate: %v", err)
+	}
+	base := time.Unix(1_700_600_000, 0).UTC()
+	mk := func(name string, i int) scheduler.Outcome {
+		return scheduler.Outcome{
+			Target: probe.Target{Name: name, Host: "h"}, ProbeName: "FPing",
+			When: base.Add(time.Duration(i) * time.Minute), Computed: sample.Compute(1, []float64{0.01}),
+		}
+	}
+	var outs []scheduler.Outcome
+	for _, tgt := range []string{"a", "b", "c"} {
+		for i := 0; i < 4; i++ { // 3 targets x 4 rounds = 12 total
+			outs = append(outs, mk(tgt, i))
+		}
+	}
+	s.Add(outs)
+	// maxTotal=6 over 3 targets -> each capped to its 2 newest; truncated.
+	all, truncated, err := s.SeriesAll(ctx, "local", base.Add(-time.Second), 6)
+	if err != nil {
+		t.Fatalf("SeriesAll: %v", err)
+	}
+	if !truncated {
+		t.Fatal("want truncated=true when the global budget bites")
+	}
+	total := 0
+	for name, h := range all {
+		total += len(h)
+		if len(h) != 2 {
+			t.Fatalf("target %q kept %d rounds, want 2 (fair share of the 6-round budget over 3 targets)", name, len(h))
+		}
+		if !h[len(h)-1].When.Equal(base.Add(3 * time.Minute)) {
+			t.Fatalf("target %q must keep its NEWEST rounds, last=%v", name, h[len(h)-1].When)
+		}
+	}
+	if total != 6 {
+		t.Fatalf("total = %d, want 6", total)
 	}
 }
 

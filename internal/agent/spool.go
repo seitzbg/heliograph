@@ -1,11 +1,13 @@
 package agent
 
 import (
+	"bufio"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"hash/crc32"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -72,32 +74,80 @@ type record struct {
 	body []byte
 }
 
-// readSegment decodes every complete, checksum-valid frame from path, in order. It returns the
-// decoded records, the number of bytes it consumed (the offset of the first undecodable byte), and
-// the decode's stop reason: nil if the whole file decoded cleanly (reached EOF), errShortFrame for
-// a truncated final frame (a crash-torn tail), or errBadFrame for a checksum mismatch (corruption).
-// It does NOT modify the file: the caller decides what an incomplete decode means — a torn tail on
-// the active segment is truncated to consumed, while a checksum failure (any segment) or any
-// incomplete decode of a closed segment is fatal (CODE_REVIEW M3). A missing/unreadable file is a
-// hard error.
-func readSegment(path string) (recs []record, consumed int64, stopErr error, err error) {
-	data, err := os.ReadFile(path)
+// streamSegment decodes path frame-by-frame, calling onFrame(seq, body) for each complete,
+// checksum-valid frame in order. It streams via a bufio reader into ONE reused buffer (grown to the
+// largest frame) instead of loading the whole segment, and passes body as a slice into that buffer —
+// valid only for the duration of the call. The callback must copy or unmarshal whatever it retains;
+// recovery unmarshals only the live records it keeps, so a segment full of dead/evicted records
+// costs no per-body copy, keeping the transient recovery footprint near the live budget rather than
+// the segment size (CODE_REVIEW L3).
+//
+// It returns the byte offset where decoding stopped (the start of the first undecodable frame, or
+// EOF), the stop reason (nil = clean EOF at a frame boundary, errShortFrame = truncated final frame,
+// errBadFrame = checksum mismatch), and a hard error (an onFrame error, e.g. non-contiguous or
+// undecodable, or an I/O failure). It does NOT modify the file. A missing/unreadable file is a hard
+// error. Torn/short reads (partial header or payload) map to errShortFrame so openSpool's active
+// segment can be truncated; a corrupt closed segment is fatal there.
+func streamSegment(path string, onFrame func(seq int64, body []byte) error) (consumed int64, stopErr error, err error) {
+	f, err := os.Open(path)
 	if err != nil {
-		return nil, 0, nil, err
+		return 0, nil, err
 	}
-	off := 0
-	for off < len(data) {
-		seq, body, n, derr := decodeFrame(data[off:])
-		if derr != nil {
-			stopErr = derr // errShortFrame (torn tail) or errBadFrame (corruption)
-			break
+	defer f.Close()
+	r := bufio.NewReaderSize(f, 64*1024)
+	buf := make([]byte, frameHeader)
+	var off int64
+	for {
+		if _, e := io.ReadFull(r, buf[:frameHeader]); e != nil {
+			if e == io.EOF {
+				return off, nil, nil // clean end at a frame boundary
+			}
+			if e == io.ErrUnexpectedEOF {
+				return off, errShortFrame, nil // torn header (a crash mid-append)
+			}
+			return off, nil, e
 		}
+		payloadLen := int(binary.LittleEndian.Uint32(buf[0:4]))
+		if payloadLen < 8 {
+			return off, errBadFrame, nil // a frame's payload always carries at least the 8-byte seq
+		}
+		total := frameHeader + payloadLen
+		if cap(buf) < total {
+			nb := make([]byte, total)
+			copy(nb, buf[:frameHeader])
+			buf = nb
+		} else {
+			buf = buf[:total]
+		}
+		if _, e := io.ReadFull(r, buf[frameHeader:total]); e != nil {
+			if e == io.EOF || e == io.ErrUnexpectedEOF {
+				return off, errShortFrame, nil // torn payload
+			}
+			return off, nil, e
+		}
+		seq, body, n, derr := decodeFrame(buf[:total]) // reuse the same decode/CRC logic; only errBadFrame here
+		if derr != nil {
+			return off, derr, nil
+		}
+		if e := onFrame(seq, body); e != nil {
+			return off, nil, e
+		}
+		off += int64(n)
+	}
+}
+
+// readSegment collects every frame of a segment into records — a convenience wrapper over
+// streamSegment for the frame-level tests. Recovery (openSpool) uses streamSegment directly so it
+// never materializes a whole segment's bodies. The stop-reason/consumed contract matches
+// streamSegment (see CODE_REVIEW M3 for how openSpool acts on it).
+func readSegment(path string) (recs []record, consumed int64, stopErr error, err error) {
+	consumed, stopErr, err = streamSegment(path, func(seq int64, body []byte) error {
 		cp := make([]byte, len(body))
 		copy(cp, body)
 		recs = append(recs, record{seq: seq, body: cp})
-		off += n
-	}
-	return recs, int64(off), stopErr, nil
+		return nil
+	})
+	return recs, consumed, stopErr, err
 }
 
 // fsyncDir flushes a directory entry change (a rename or create) to disk, so it
@@ -271,10 +321,47 @@ func openSpool(dir string, capRounds, maxBytes int) (*spool, int64, []agentwire.
 	wantSeq := int64(-1) // -1 until the first record fixes the expected next sequence
 	for i, p := range segPaths {
 		isLast := i == len(segPaths)-1
-		recs, consumed, stopErr, rerr := readSegment(p)
+		maxSeq := int64(-1)
+		// Stream the segment, checking contiguity and unmarshalling ONLY the live records we keep
+		// (seq >= head) directly from the read buffer — a segment full of dead or budget-evicted
+		// records costs no per-body copy, so recovery's transient footprint stays near the live
+		// budget rather than the segment size (CODE_REVIEW L3). Contiguity/undecodable-live are hard
+		// errors (returned as rerr); a torn/corrupt tail is reported via stopErr and handled below.
+		consumed, stopErr, rerr := streamSegment(p, func(seq int64, body []byte) error {
+			if wantSeq >= 0 && seq != wantSeq {
+				// Records must form one strictly-increasing contiguous run; a gap/duplicate that the
+				// per-frame CRC did not catch still breaks adoption, so fail (CODE_REVIEW #2).
+				return fmt.Errorf("spool: non-contiguous sequence in %s: got %d, want %d", p, seq, wantSeq)
+			}
+			wantSeq = seq + 1
+			if seq > maxSeq {
+				maxSeq = seq
+			}
+			if seq >= head {
+				var r agentwire.RoundReport
+				if uerr := json.Unmarshal(body, &r); uerr != nil {
+					// A CRC-valid frame that will not decode is corruption; skipping it would open
+					// the same silent-gap hole as a dropped frame, so fail (CODE_REVIEW #2).
+					return fmt.Errorf("spool: undecodable live record seq %d in %s: %w", seq, p, uerr)
+				}
+				sz := estimatedJSONBytes(r)
+				for len(live) > 0 && (len(live) >= capRounds || liveBytes+sz > maxBytes) {
+					liveBytes -= estimatedJSONBytes(live[0])
+					// Zero the evicted round so its RTTs slice and strings are collectable now,
+					// rather than lingering in the shared backing array until append reallocates —
+					// keeps the transient recovery footprint near the budget, not ~2x it.
+					live[0] = agentwire.RoundReport{}
+					live = live[1:]
+					dropped++
+				}
+				live = append(live, r)
+				liveBytes += sz
+			}
+			return nil
+		})
 		if rerr != nil {
 			lock.Close()
-			return nil, 0, nil, fmt.Errorf("read segment %s: %w", p, rerr)
+			return nil, 0, nil, rerr // already carries the segment path + a specific reason
 		}
 		if stopErr != nil {
 			switch {
@@ -302,40 +389,6 @@ func openSpool(dir string, capRounds, maxBytes int) (*spool, int64, []agentwire.
 				// sequence numbers (CODE_REVIEW #2).
 				lock.Close()
 				return nil, 0, nil, fmt.Errorf("spool: closed segment %s is corrupt at byte %d; clear the spool dir to recover (the buffered backlog is lost)", p, consumed)
-			}
-		}
-		maxSeq := int64(-1)
-		for _, rec := range recs {
-			if wantSeq >= 0 && rec.seq != wantSeq {
-				// Records must form one strictly-increasing contiguous run; a gap/duplicate that
-				// the per-frame CRC did not catch still breaks adoption, so fail (CODE_REVIEW #2).
-				lock.Close()
-				return nil, 0, nil, fmt.Errorf("spool: non-contiguous sequence in %s: got %d, want %d", p, rec.seq, wantSeq)
-			}
-			wantSeq = rec.seq + 1
-			if rec.seq > maxSeq {
-				maxSeq = rec.seq
-			}
-			if rec.seq >= head {
-				var r agentwire.RoundReport
-				if uerr := json.Unmarshal(rec.body, &r); uerr != nil {
-					// A CRC-valid frame that will not decode is corruption; skipping it would open
-					// the same silent-gap hole as a dropped frame, so fail (CODE_REVIEW #2).
-					lock.Close()
-					return nil, 0, nil, fmt.Errorf("spool: undecodable live record seq %d in %s: %w", rec.seq, p, uerr)
-				}
-				sz := estimatedJSONBytes(r)
-				for len(live) > 0 && (len(live) >= capRounds || liveBytes+sz > maxBytes) {
-					liveBytes -= estimatedJSONBytes(live[0])
-					// Zero the evicted round so its RTTs slice and strings are collectable now,
-					// rather than lingering in the shared backing array until append reallocates —
-					// keeps the transient recovery footprint near the budget, not ~2x it.
-					live[0] = agentwire.RoundReport{}
-					live = live[1:]
-					dropped++
-				}
-				live = append(live, r)
-				liveBytes += sz
 			}
 		}
 		segs = append(segs, segInfo{path: p, maxSeq: maxSeq})

@@ -821,7 +821,33 @@ var maxSeriesAllPerTarget = 20_000
 // tick. Targets with no rounds after cutoff are absent from the map. Each target is
 // capped to its newest maxSeriesAllPerTarget rounds. A query/scan error is returned
 // (not swallowed) so the API answers 503, not a false-empty grid.
-func (s *PGStore) SeriesAll(ctx context.Context, vantage string, cutoff time.Time) (map[string][]scheduler.Outcome, error) {
+func (s *PGStore) SeriesAll(ctx context.Context, vantage string, cutoff time.Time, maxTotal int) (map[string][]scheduler.Outcome, bool, error) {
+	v := store.VantageOrDefault(vantage)
+	// Bound the query fairly BEFORE it runs: cap each target at min(maxSeriesAllPerTarget,
+	// maxTotal/targets), so the server never sorts an unbounded windowed set and the client never
+	// builds an unbounded map for a many-target request, while every target keeps its newest rounds
+	// (CODE_REVIEW M5 — the deeper, store-query bound on top of the per-target cap). The distinct-
+	// target count and the fetch are separate reads, so the split is approximate under concurrent
+	// writes — fine for a DoS bound.
+	perTarget := maxSeriesAllPerTarget
+	globalTruncated := false
+	if maxTotal > 0 {
+		var nTargets int
+		if err := s.pool.QueryRow(ctx,
+			`SELECT count(DISTINCT target) FROM samples WHERE vantage=$1 AND ts > $2`, v, cutoff.UTC()).Scan(&nTargets); err != nil {
+			s.onErr(err)
+			return nil, false, err
+		}
+		if nTargets > 0 {
+			if fair := maxTotal / nTargets; fair < perTarget {
+				perTarget = fair
+				if perTarget < 1 {
+					perTarget = 1
+				}
+				globalTruncated = true
+			}
+		}
+	}
 	// row_number() per target keeps the newest N of each (so no target is dropped whole,
 	// as a bare LIMIT would); the outer query then returns them oldest->newest.
 	rows, err := s.pool.Query(ctx,
@@ -831,10 +857,10 @@ func (s *PGStore) SeriesAll(ctx context.Context, vantage string, cutoff time.Tim
 		       FROM samples WHERE vantage=$1 AND ts > $2
 		   ) q
 		   WHERE rn <= $3
-		   ORDER BY target, ts`, store.VantageOrDefault(vantage), cutoff.UTC(), maxSeriesAllPerTarget)
+		   ORDER BY target, ts`, v, cutoff.UTC(), perTarget)
 	if err != nil {
 		s.onErr(err)
-		return nil, err
+		return nil, false, err
 	}
 	defer rows.Close()
 	out := map[string][]scheduler.Outcome{}
@@ -842,25 +868,27 @@ func (s *PGStore) SeriesAll(ctx context.Context, vantage string, cutoff time.Tim
 		o, err := scanOutcome(rows)
 		if err != nil {
 			s.onErr(err)
-			return nil, err
+			return nil, false, err
 		}
 		out[o.Target.Name] = append(out[o.Target.Name], o)
 	}
 	if err := rows.Err(); err != nil {
 		s.onErr(err)
-		return nil, err
+		return nil, false, err
 	}
-	capped := 0
+	perTargetTruncated := false
 	for _, hist := range out {
-		if len(hist) == maxSeriesAllPerTarget {
-			capped++
+		if len(hist) == perTarget {
+			perTargetTruncated = true
+			break
 		}
 	}
-	if capped > 0 {
-		slog.Warn("pgstore: bulk series hit the per-target row cap; oldest rounds omitted — narrow the window or raise the step",
-			"cap", maxSeriesAllPerTarget, "targets_capped", capped)
+	truncated := globalTruncated || perTargetTruncated
+	if truncated {
+		slog.Warn("pgstore: bulk series truncated; oldest rounds omitted — narrow the window or raise the step",
+			"per_target_cap", perTarget, "global_budget", maxTotal, "global_bound_hit", globalTruncated)
 	}
-	return out, nil
+	return out, truncated, nil
 }
 
 var _ interface {

@@ -73,6 +73,18 @@ All notable changes to **smokeping-modern** are recorded here. The format follow
   rate limiting it does not configure.
 
 ### Changed
+- **Spool recovery streams each segment instead of loading it whole and copying every body.** On
+  agent restart, recovery read each segment fully into memory and copied every decoded body before
+  deciding which to keep, so a segment full of dead or budget-evicted rounds still cost a full copy
+  of every body — pushing the transient footprint well above the live budget on constrained vantages.
+  It now streams frame-by-frame and unmarshals only the records it retains; torn-tail/corruption/
+  contiguity/eviction behavior is unchanged.
+- **`/api/series/all` is now bounded in the query, not only the response.** The store previously
+  materialized up to (targets × 20k) rounds — and the database sorted that whole windowed set —
+  before the handler could trim it. `SeriesAll` now takes a global budget and caps each target at
+  `min(perTarget, budget/targets)`, so the server never sorts and the client never builds an
+  unbounded result for a many-target bulk read, while every target keeps its newest rounds; the
+  response carries `truncated` when the bound bit.
 - **Startup and reload now warn about alert recipients with no enabled notifier.** An alert `to` or a
   target `alertee` referencing an unknown notifier (a typo, or `webhook` without `-webhook`) was only
   noticed when an event was dispatched — invisible until the incident whose notification got silently
