@@ -34,7 +34,7 @@ Full design rationale and the original-system code map live at `~/.claude/plans/
 - ✅ Graceful shutdown (SIGINT/SIGTERM: cancel in-flight probes + clean HTTP shutdown)
 - ✅ Config reload without restart (SIGHUP; atomic runtime swap, keeps running config on error)
 - ✅ Structured logging (slog; `-log-format` text/json) + operational metrics (round duration/size/errors + per-probe timings on `/metrics`)
-- ✅ Preserve alert firing state across config reload (reload inherits firing state + sample windows, so alerts don't re-fire or lose hysteresis history)
+- ✅ Preserve alert firing state across config reload (reload reconciles by identity: it inherits firing state + sample windows for unchanged targets/matchers so alerts don't re-fire or lose hysteresis, seeds newly-alerted or redefined targets from durable history, and drops in-flight rounds measured under an obsolete definition — see CHANGELOG "reconciled by identity, not names")
 
 ## Phase 4 — Federation (multi-vantage) ✅
 The hub, the `smoke-agent` remote collector, the per-vantage overlay UI, the Vantages admin
