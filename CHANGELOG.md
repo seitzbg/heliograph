@@ -28,6 +28,13 @@ All notable changes to **smokeping-modern** are recorded here. The format follow
   history" promise. The coarsest tier now reaches down to the RRD's oldest AVERAGE data; standard
   installs (coarsest RRA = exactly ~360 days) are unaffected.
 
+### Changed
+- **CI now installs `rrdtool`, so the SmokePing RRD-extraction path is actually exercised.** The
+  `rrd`-extraction and `import … --history` tests skip without the binary, and neither CI image
+  installed it — the most bug-prone importer code (RRA stitching / tier selection) ran in no job.
+  `rrdtool` is now installed in the blocking `go-test` job (RRA stitching) and the `db-test` job
+  (the `--history` end-to-end path).
+
 ## [1.0.0] - 2026-08-11
 
 First stable release — a modern, non-Perl reimplementation of SmokePing in Go on TimescaleDB:
