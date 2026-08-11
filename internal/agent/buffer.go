@@ -212,6 +212,15 @@ func (b *buffer) len() int {
 	return len(b.rounds)
 }
 
+// budget returns the buffer's count and byte bounds so spool recovery (openSpool) can apply the
+// same eviction policy while decoding, rather than building an unbounded intermediate slice and
+// only trimming it after the fact.
+func (b *buffer) budget() (capRounds, maxBytes int) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.cap, b.maxBytes
+}
+
 func (b *buffer) dropped() int64 { return b.dropCnt.Load() }
 
 // reject counts rounds discarded because the hub permanently rejected their batch (distinct

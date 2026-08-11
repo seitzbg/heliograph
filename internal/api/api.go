@@ -104,10 +104,11 @@ type Server struct {
 	RequireFingerprint bool
 	// ingestMu guards the agent-ingest observability counters below.
 	ingestMu sync.Mutex
-	// missingFP counts, per vantage, agent rounds accepted with no measurement fingerprint —
-	// the transitional-compatibility path for a pre-fingerprint agent (CODE_REVIEW #2). Exposed
-	// on /metrics (smokeping_agent_missing_fingerprint_total) so an operator can watch a rolling
-	// agent upgrade complete — the counter stops rising — rather than relying on a single
+	// missingFP counts, per vantage, agent rounds received with no measurement fingerprint (a
+	// pre-fingerprint agent) — accepted-unverified in the lenient default, or dropped in strict
+	// mode (-require-fingerprint) (CODE_REVIEW #2). Exposed on /metrics
+	// (smokeping_agent_missing_fingerprint_total) so an operator can watch a rolling agent
+	// upgrade complete — the counter stops rising — rather than relying on a single
 	// process-wide log line that goes silent for later-affected vantages.
 	missingFP map[string]int64
 	// warnedMissingFP debounces the missing-fingerprint warning to once per vantage.
@@ -992,7 +993,7 @@ func (srv *Server) writeIngestMetrics(b *strings.Builder) {
 		vantages = append(vantages, v)
 	}
 	sort.Strings(vantages) // deterministic scrape output
-	b.WriteString("# HELP smokeping_agent_missing_fingerprint_total Agent rounds accepted with no measurement fingerprint (a pre-fingerprint agent); attribution is unverified until it is upgraded.\n")
+	b.WriteString("# HELP smokeping_agent_missing_fingerprint_total Agent rounds received with no measurement fingerprint (a pre-fingerprint agent): accepted-unverified in the lenient default, or dropped in strict mode (-require-fingerprint).\n")
 	b.WriteString("# TYPE smokeping_agent_missing_fingerprint_total counter\n")
 	for _, v := range vantages {
 		fmt.Fprintf(b, "smokeping_agent_missing_fingerprint_total{vantage=%q} %d\n", escapeLabel(v), srv.missingFP[v])

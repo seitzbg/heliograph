@@ -680,7 +680,7 @@ func TestAgentRunRecoversSpooledBacklog(t *testing.T) {
 
 	// Phase 1: populate the spool as a previous agent would have, then close it (releases
 	// the flock) — simulating an agent that buffered a backlog while the hub was down.
-	sp, head, live, err := openSpool(dir)
+	sp, head, live, err := openSpoolT(dir)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -75,14 +75,16 @@ type fileConfig struct {
 // means "flag not passed" and never overrides a value the config file provided. insecure
 // is a *bool (nil = flag omitted) so an explicit `-insecure=false` can override a file's
 // `insecure: true` — a plain bool couldn't distinguish "false" from "not passed"
-// (CodeRabbit #5).
+// (CodeRabbit #5). spoolDir is a *string for the same reason: an explicit `-spool-dir=`
+// must be able to disable a file's `spool_dir` (select in-memory mode), which a plain
+// string treated as "not passed" could not (CODE_REVIEW #3).
 type cliFlags struct {
 	hub, key, vantage string
 	interval, timeout time.Duration
 	insecure          *bool
 	workers, buffer   int
 	flushMax          int
-	spoolDir          string
+	spoolDir          *string
 }
 
 // resolveConfig builds the effective agentConfig: it starts from the YAML file at path
@@ -169,8 +171,8 @@ func resolveConfig(path string, f cliFlags) (agentConfig, error) {
 	if f.flushMax != 0 {
 		cfg.FlushMax = f.flushMax
 	}
-	if f.spoolDir != "" {
-		cfg.SpoolDir = f.spoolDir
+	if f.spoolDir != nil {
+		cfg.SpoolDir = *f.spoolDir
 	}
 
 	// Defaults for anything still unset (zero). A negative value is NOT zero, so it skips
@@ -241,19 +243,24 @@ func main() {
 
 	setupLogger(*logFormat, *logLevel)
 
-	// Pass insecure only when the flag was explicitly set, so `-insecure=false` overrides a
-	// file's `insecure: true` while an omitted flag leaves the file value alone (CodeRabbit #5).
+	// Pass insecure and spool-dir only when the flag was explicitly set, so `-insecure=false`
+	// / `-spool-dir=` override a file's value while an omitted flag leaves the file value alone
+	// (CodeRabbit #5; CODE_REVIEW #3).
 	var insecureOverride *bool
+	var spoolDirOverride *string
 	flag.Visit(func(fl *flag.Flag) {
-		if fl.Name == "insecure" {
+		switch fl.Name {
+		case "insecure":
 			insecureOverride = insecure
+		case "spool-dir":
+			spoolDirOverride = spoolDir
 		}
 	})
 
 	cfg, err := resolveConfig(*configPath, cliFlags{
 		hub: *hub, key: *key, vantage: *vantage,
 		interval: *interval, timeout: *timeout, insecure: insecureOverride,
-		workers: *workers, buffer: *buffer, flushMax: *flushMax, spoolDir: *spoolDir,
+		workers: *workers, buffer: *buffer, flushMax: *flushMax, spoolDir: spoolDirOverride,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "smoke-agent: %v\n", err)
