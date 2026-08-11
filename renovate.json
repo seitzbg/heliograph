@@ -1,0 +1,21 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended"],
+  "labels": ["dependencies", "supply-chain"],
+  "packageRules": [
+    {
+      "matchDatasources": ["docker"],
+      "pinDigests": true,
+      "groupName": "container base images"
+    }
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Keep the xcaddy DNS-provider plugin versions in Caddy.Dockerfile current",
+      "managerFilePatterns": ["/^Caddy\\.Dockerfile$/"],
+      "matchStrings": ["--with (?<depName>github\\.com/caddy-dns/[a-z0-9-]+)@(?<currentValue>\\S+)"],
+      "datasourceTemplate": "go"
+    }
+  ]
+}

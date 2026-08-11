@@ -9,9 +9,9 @@
 # The default `docker compose up` above is unchanged and starts no proxy.
 services:
   timescaledb:
-    # Pinned to a specific release rather than a moving `latest-pg16` tag, so a
-    # rebuild can't silently pull a different TimescaleDB major/behaviour.
-    image: timescale/timescaledb:2.29.1-pg16
+    # Pinned to a specific release AND digest, so a rebuild can't silently pull a different
+    # TimescaleDB (Renovate keeps the digest current — see renovate.json). CODE_REVIEW M4/L7.
+    image: timescale/timescaledb:2.29.1-pg16@sha256:252a443e2936039b83dd8da1373d01e59e932d1054fa6adf1bc061f1d56ae60a
     environment:
       POSTGRES_USER: smoke
       POSTGRES_PASSWORD: smoke

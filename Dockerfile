@@ -1,7 +1,10 @@
 # Build a static smoked binary, then ship it on a small base that carries the
 # external tools some probes shell out to (fping; irtt is optional and skipped
 # if absent). ICMP via fping needs CAP_NET_RAW at runtime (see compose).
-FROM golang:1.26-alpine AS build
+# Build image pinned by digest for reproducibility. Bump the tag + digest together on a refresh
+# (Renovate keeps these current — see renovate.json); a pinned Go toolchain trades automatic patch
+# uptake for a reviewable, reproducible build. CODE_REVIEW M4/L7.
+FROM golang:1.26-alpine@sha256:0178a641fbb4858c5f1b48e34bdaabe0350a330a1b1149aabd498d0699ff5fb2 AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
