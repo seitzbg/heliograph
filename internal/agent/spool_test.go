@@ -289,6 +289,44 @@ func TestSpoolReclaimDeletesSegmentFile(t *testing.T) {
 	}
 }
 
+func TestSpoolFlockRejectsSecondOpener(t *testing.T) {
+	dir := t.TempDir()
+	sp1, _, _, err := openSpool(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sp1.close()
+	if _, _, _, err := openSpool(dir); err == nil {
+		t.Fatal("second openSpool on the same dir must fail (lock contended)")
+	}
+	// After close, a new opener succeeds.
+	sp1.close()
+	sp3, _, _, err := openSpool(dir)
+	if err != nil {
+		t.Fatalf("reopen after close: %v", err)
+	}
+	sp3.close()
+}
+
+func TestSpoolDegradesOnWriteError(t *testing.T) {
+	dir := t.TempDir()
+	sp, _, _, _ := openSpool(dir)
+	defer sp.close()
+	sp.writeErr = errors.New("disk full")
+	sp.append(0, rr("a"))
+	if err := sp.flush(); err == nil {
+		t.Fatal("flush should surface the injected write error")
+	}
+	if sp.errors() == 0 {
+		t.Fatal("error count not incremented")
+	}
+	// Degraded: further appends are no-ops and must not panic or re-error.
+	sp.append(1, rr("b"))
+	if err := sp.flush(); err != nil {
+		t.Fatalf("degraded flush should be a no-op, got %v", err)
+	}
+}
+
 // TestSpoolStartCloseLifecycleIsIdempotent covers the background flusher goroutine
 // (start/flushLoop) end to end, and is the regression test for the close()-after-start()
 // double-close panic: a second close() must be a safe, error-free no-op.

@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"syscall"
 	"time"
 
 	"smokeping-modern/internal/agentwire"
@@ -151,6 +152,21 @@ const (
 
 func segmentName(firstSeq int64) string { return fmt.Sprintf("seg-%020d.log", firstSeq) }
 
+// lockDir acquires an exclusive, non-blocking flock on dir/spool.lock. The returned
+// file must stay open for the lock to be held; close() releases it. A contended lock
+// (another agent already holds it) is a returned error.
+func lockDir(dir string) (*os.File, error) {
+	f, err := os.OpenFile(filepath.Join(dir, "spool.lock"), os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("spool dir %s is locked by another agent: %w", dir, err)
+	}
+	return f, nil
+}
+
 type stagedData struct {
 	seq int64
 	r   agentwire.RoundReport
@@ -164,6 +180,9 @@ type segMeta struct {
 type spool struct {
 	dir    string
 	segMax int64 // == segmentMaxBytes; overridable in tests
+
+	lockFile *os.File // exclusive flock on dir/spool.lock; held for the spool's lifetime
+	writeErr error    // test seam: when set, writeRecordLocked returns it (simulates a disk error)
 
 	mu          sync.Mutex
 	active      *os.File
@@ -198,17 +217,23 @@ func openSpool(dir string) (*spool, int64, []agentwire.RoundReport, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, 0, nil, fmt.Errorf("create spool dir: %w", err)
 	}
+	lock, err := lockDir(dir)
+	if err != nil {
+		return nil, 0, nil, err
+	}
 	head, err := readHead(dir)
 	if err != nil {
+		lock.Close()
 		return nil, 0, nil, fmt.Errorf("read head: %w", err)
 	}
 	segPaths, err := filepath.Glob(filepath.Join(dir, segGlob))
 	if err != nil {
+		lock.Close()
 		return nil, 0, nil, err
 	}
 	sort.Strings(segPaths) // zero-padded names sort by firstSeq
 
-	s := &spool{dir: dir, segMax: segmentMaxBytes, head: head, headDurable: head, activeMax: -1}
+	s := &spool{dir: dir, segMax: segmentMaxBytes, lockFile: lock, head: head, headDurable: head, activeMax: -1}
 
 	type segRead struct {
 		path   string
@@ -220,6 +245,7 @@ func openSpool(dir string) (*spool, int64, []agentwire.RoundReport, error) {
 	for i, p := range segPaths {
 		recs, err := readSegment(p, i == len(segPaths)-1) // truncate only the last (active) segment
 		if err != nil {
+			lock.Close()
 			return nil, 0, nil, fmt.Errorf("read segment %s: %w", p, err)
 		}
 		maxSeq := int64(-1)
@@ -265,6 +291,7 @@ func openSpool(dir string) (*spool, int64, []agentwire.RoundReport, error) {
 	}
 	f, err := os.OpenFile(activePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
+		lock.Close()
 		return nil, 0, nil, fmt.Errorf("open active segment: %w", err)
 	}
 	fi, _ := f.Stat()
@@ -335,6 +362,9 @@ func (s *spool) flushLocked() error {
 // writeRecordLocked appends one framed DATA record to the active segment, rolling a new
 // segment first when the record would exceed segMax.
 func (s *spool) writeRecordLocked(seq int64, body []byte) error {
+	if s.writeErr != nil {
+		return s.writeErr
+	}
 	frame := encodeFrame(nil, seq, body)
 	if s.activeBytes > 0 && s.activeBytes+int64(len(frame)) > s.segMax {
 		if err := s.rollLocked(seq); err != nil {
@@ -446,6 +476,11 @@ func (s *spool) close() error {
 		if s.active != nil {
 			s.active.Close()
 			s.active = nil
+		}
+		if s.lockFile != nil {
+			syscall.Flock(int(s.lockFile.Fd()), syscall.LOCK_UN)
+			s.lockFile.Close()
+			s.lockFile = nil
 		}
 	})
 	return ferr
