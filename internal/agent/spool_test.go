@@ -531,6 +531,37 @@ func TestSpoolRecoveryEvictsToByteBudget(t *testing.T) {
 // Corruption in a CLOSED (already-synced) segment is not a crash tail: openSpool must fail loudly
 // rather than silently returning its valid prefix, which would drop the corrupt-onward records and
 // break the buffer's contiguous-sequence adoption (seq reuse / double replay) (CODE_REVIEW #2).
+// BenchmarkSpoolRecovery measures recovery of a large spool into a small live budget. After
+// CODE_REVIEW L3, openSpool streams each segment frame-by-frame and unmarshals only the records it
+// retains, instead of loading whole segments and copying every body — so recovery's transient
+// footprint tracks the live budget, not the total records on disk. Run with -benchmem.
+func BenchmarkSpoolRecovery(b *testing.B) {
+	dir := b.TempDir()
+	sp, _, _, err := openSpoolT(dir)
+	if err != nil {
+		b.Fatal(err)
+	}
+	const n = 5000
+	for i := 0; i < n; i++ {
+		sp.append(int64(i), rr(fmt.Sprintf("target-%d", i)))
+	}
+	if err := sp.flush(); err != nil {
+		b.Fatal(err)
+	}
+	if err := sp.close(); err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		sp2, _, _, err := openSpool(dir, 50, 1<<30) // small round budget vs 5000 on disk
+		if err != nil {
+			b.Fatal(err)
+		}
+		_ = sp2.close()
+	}
+}
+
 func TestSpoolClosedSegmentCorruptionFails(t *testing.T) {
 	dir := t.TempDir()
 	sp, _, _, _ := openSpoolT(dir)
