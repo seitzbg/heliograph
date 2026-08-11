@@ -1,8 +1,7 @@
 # Roadmap
 
 The plan for **smokeping-modern** — a modern, non-Perl reimplementation of SmokePing.
-Full design rationale and the original-system code map live at `~/.claude/plans/smokeping-codemap/`
-(`07-modernization-blueprint.md` is the north star). Legend: ✅ done · 🚧 in progress · ⬜ todo.
+Legend: ✅ done · 🚧 in progress · ⬜ todo.
 
 ## Guiding requirements
 1. **Keep the smoke-graph look & feel** — band distribution + loss-colored median. ✅ (canvas renderer, verified light/dark)
@@ -10,7 +9,7 @@ Full design rationale and the original-system code map live at `~/.claude/plans/
 3. **Probes as plugins** — add a probe without touching the core. ✅ (Probe interface + registry)
 
 ## Phase 0 — Analysis ✅
-- ✅ Full code map of SmokePing 2.9.0 + modernization blueprint (external: `~/.claude/plans/smokeping-codemap/`).
+- ✅ Full code map of SmokePing 2.9.0 + modernization blueprint (kept as external design notes).
 
 ## Phase 1 — MVP collector core ✅
 - ✅ Probe plugin interface + registry

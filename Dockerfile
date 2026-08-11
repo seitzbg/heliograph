@@ -8,7 +8,10 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 go build -trimpath -o /out/smoked ./cmd/smoked
 
-FROM alpine:3.20
+# Runtime base pinned by digest to a SUPPORTED Alpine branch (3.20 reached end of
+# normal security support 2026-04-01). Bump the tag + digest together on a refresh
+# (get the digest with `docker buildx imagetools inspect alpine:<ver>`). CODE_REVIEW M4.
+FROM alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
 # Grant fping just CAP_NET_RAW via a file capability (needs NET_RAW in the
 # container's bounding set — see compose cap_add), so the collector can drop to a
 # non-root user instead of running as root for ICMP. libcap is only needed to run

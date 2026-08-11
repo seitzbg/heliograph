@@ -44,26 +44,24 @@ frontend:
     - node web/dashboard.test.mjs
     - node web/smoke.render.test.mjs
 
-# Dependency vulnerability scan. Needs network to fetch the tool + the vuln DB, so it
-# is allowed to fail (informative, non-blocking) rather than red a pipeline on a runner
-# without outbound access. The tool is pinned (not @latest) so the scan is reproducible
-# — a given commit always runs against the same govulncheck build.
+# Dependency vulnerability scan. BLOCKING (CODE_REVIEW M6): "green CI" must mean the vuln DB was
+# actually reached and clean — a scan that can't run is a gap, not a pass, so it reds the pipeline
+# rather than being silently ignored. The fleet runner has outbound access. The tool is pinned (not
+# @latest) so the scan is reproducible — a given commit always runs against the same govulncheck build.
 govulncheck:
   extends: .go-base
   stage: test
-  allow_failure: true
   script:
     - go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
     - "$GOPATH/bin/govulncheck ./..."
 
-# Integration tests against a real TimescaleDB. Without SMOKE_TEST_DSN the pgstore/vantage
-# tests skip (as they do in go-test); this job spins up a TimescaleDB service and runs them.
-# allow_failure while the service-readiness is proven in CI — the tests RUN and report, but a
-# transient DB-startup flake doesn't red an MR. Tighten to blocking once it's shown stable.
+# Integration tests against a real TimescaleDB (pgstore/vantage/configstore/history-import + the
+# DB-backed API). BLOCKING (CODE_REVIEW M6): these carry the highest production risk, so a failure
+# must red the pipeline, not skip silently. Readiness is an explicit connect loop (below), not a
+# fixed sleep, so making it blocking doesn't introduce startup flakiness.
 db-test:
   extends: .go-base
   stage: test
-  allow_failure: true
   services:
     - name: timescale/timescaledb:2.29.1-pg16
       alias: timescaledb
@@ -74,11 +72,22 @@ db-test:
     SMOKE_TEST_DSN: "postgres://smoke:smoke@timescaledb:5432/smoke?sslmode=disable"
   before_script:
     - go version
-    # rrdtool: the `smoked import ... --history` end-to-end tests (cmd/smoked)
-    # need both a DB and rrdtool; installed here so they run instead of skipping.
-    - apt-get update && apt-get install -y --no-install-recommends rrdtool
-    # TimescaleDB restarts once during first-boot init; wait past it before connecting.
-    - sleep 20
+    # rrdtool: the `smoked import ... --history` end-to-end tests (cmd/smoked) need both a DB and
+    # rrdtool. postgresql-client: pg_isready for the readiness loop below.
+    - apt-get update && apt-get install -y --no-install-recommends rrdtool postgresql-client
+    # Wait for TimescaleDB to actually accept connections, requiring two consecutive successes so a
+    # blip during its first-boot init restart can't slip through, then fail hard if it never came up.
+    - |
+      ok=0
+      for i in $(seq 1 60); do
+        if pg_isready -h timescaledb -p 5432 -U smoke -d smoke -q; then
+          ok=$((ok+1)); [ "$ok" -ge 2 ] && break
+        else
+          ok=0
+        fi
+        echo "waiting for timescaledb (attempt $i, streak $ok)..."; sleep 2
+      done
+      pg_isready -h timescaledb -p 5432 -U smoke -d smoke
   script:
     # -p 1 serializes the package test binaries: internal/configstore and cmd/smoked
     # both mutate the single-row `config_fragment` table, so running them concurrently
