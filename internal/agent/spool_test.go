@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"smokeping-modern/internal/agentwire"
 )
 
 func TestFrameRoundTrip(t *testing.T) {
@@ -140,5 +142,87 @@ func TestHeadFileRoundTrip(t *testing.T) {
 	}
 	if h, _ := readHead(dir); h != 456 {
 		t.Fatalf("h=%d, want 456 after rewrite", h)
+	}
+}
+
+func TestSpoolAppendFlushReplay(t *testing.T) {
+	dir := t.TempDir()
+	sp, head, live, err := openSpool(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if head != 0 || len(live) != 0 {
+		t.Fatalf("fresh spool: head=%d live=%d, want 0,0", head, len(live))
+	}
+	sp.append(0, rr("a"))
+	sp.append(1, rr("b"))
+	if err := sp.flush(); err != nil {
+		t.Fatal(err)
+	}
+	if err := sp.close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// reopen == crash recovery
+	sp2, head2, live2, err := openSpool(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sp2.close()
+	if head2 != 0 {
+		t.Fatalf("head2 = %d, want 0", head2)
+	}
+	if len(live2) != 2 || live2[0].Target != "a" || live2[1].Target != "b" {
+		t.Fatalf("live2 = %+v, want [a b]", live2)
+	}
+	if sp2.replayed() != 2 {
+		t.Fatalf("replayed() = %d, want 2", sp2.replayed())
+	}
+}
+
+func TestSpoolHeadExcludesDead(t *testing.T) {
+	dir := t.TempDir()
+	sp, _, _, _ := openSpool(dir)
+	sp.append(0, rr("a"))
+	sp.append(1, rr("b"))
+	sp.append(2, rr("c"))
+	sp.advanceHead(2) // seq 0,1 now dead; seq 2 live
+	if err := sp.flush(); err != nil {
+		t.Fatal(err)
+	}
+	sp.close()
+
+	sp2, head2, live2, _ := openSpool(dir)
+	defer sp2.close()
+	if head2 != 2 {
+		t.Fatalf("head2 = %d, want 2", head2)
+	}
+	if len(live2) != 1 || live2[0].Target != "c" {
+		t.Fatalf("live2 = %+v, want [c]", live2)
+	}
+}
+
+func TestSpoolSegmentRoll(t *testing.T) {
+	dir := t.TempDir()
+	sp, _, _, _ := openSpool(dir)
+	// Force several rolls with a small cap override.
+	sp.segMax = 512
+	big := agentwire.RoundReport{Target: "x", TS: "2026-01-01T00:00:00Z", RTTs: make([]float64, 20)}
+	for i := 0; i < 50; i++ {
+		sp.append(int64(i), big)
+	}
+	if err := sp.flush(); err != nil {
+		t.Fatal(err)
+	}
+	sp.close()
+
+	segs, _ := filepath.Glob(filepath.Join(dir, "seg-*.log"))
+	if len(segs) < 2 {
+		t.Fatalf("got %d segments, want >= 2 (rolls)", len(segs))
+	}
+	sp2, _, live2, _ := openSpool(dir)
+	defer sp2.close()
+	if len(live2) != 50 {
+		t.Fatalf("live2 = %d, want 50 across segments", len(live2))
 	}
 }

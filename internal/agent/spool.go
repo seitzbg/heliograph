@@ -2,10 +2,18 @@ package agent
 
 import (
 	"encoding/binary"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"hash/crc32"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
+	"sync"
+	"time"
+
+	"smokeping-modern/internal/agentwire"
 )
 
 var crcTable = crc32.MakeTable(crc32.Castagnoli)
@@ -134,3 +142,307 @@ func readHead(dir string) (int64, error) {
 	}
 	return int64(binary.LittleEndian.Uint64(data[0:8])), nil
 }
+
+const (
+	fsyncEvery      = time.Second
+	segmentMaxBytes = 64 << 20
+	segGlob         = "seg-*.log"
+)
+
+func segmentName(firstSeq int64) string { return fmt.Sprintf("seg-%020d.log", firstSeq) }
+
+type stagedData struct {
+	seq int64
+	r   agentwire.RoundReport
+}
+
+type segMeta struct {
+	path   string
+	maxSeq int64 // max DATA seq in this closed segment (-1 if none)
+}
+
+type spool struct {
+	dir    string
+	segMax int64 // == segmentMaxBytes; overridable in tests
+
+	mu          sync.Mutex
+	active      *os.File
+	activePath  string
+	activeBytes int64
+	activeMax   int64 // max DATA seq in the active segment (-1 if none)
+	segments    []segMeta
+
+	pending     []stagedData
+	head        int64 // latest staged head watermark
+	headDurable int64 // latest fsynced head watermark
+
+	degraded bool
+	closed   bool
+
+	replayedN  int
+	errN       int
+	reclaimedN int
+
+	started bool
+	stop    chan struct{}
+	done    chan struct{}
+}
+
+// openSpool replays the existing segments in dir to recover the live round set and head
+// watermark, truncates a crash-torn tail on the last segment, deletes fully-dead closed
+// segments, and opens the active segment for appending. It returns the recovered head and
+// the live rounds (contiguous, seq order) for the buffer to adopt. The background flusher
+// is NOT started here — the caller calls start().
+func openSpool(dir string) (*spool, int64, []agentwire.RoundReport, error) {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, 0, nil, fmt.Errorf("create spool dir: %w", err)
+	}
+	head, err := readHead(dir)
+	if err != nil {
+		return nil, 0, nil, fmt.Errorf("read head: %w", err)
+	}
+	segPaths, err := filepath.Glob(filepath.Join(dir, segGlob))
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	sort.Strings(segPaths) // zero-padded names sort by firstSeq
+
+	s := &spool{dir: dir, segMax: segmentMaxBytes, head: head, headDurable: head, activeMax: -1}
+
+	type segRead struct {
+		path   string
+		recs   []record
+		maxSeq int64
+	}
+	var reads []segRead
+	var live []agentwire.RoundReport
+	for i, p := range segPaths {
+		recs, err := readSegment(p, i == len(segPaths)-1) // truncate only the last (active) segment
+		if err != nil {
+			return nil, 0, nil, fmt.Errorf("read segment %s: %w", p, err)
+		}
+		maxSeq := int64(-1)
+		for _, rec := range recs {
+			if rec.seq > maxSeq {
+				maxSeq = rec.seq
+			}
+			if rec.seq >= head {
+				var r agentwire.RoundReport
+				if err := json.Unmarshal(rec.body, &r); err != nil {
+					slog.Warn("spool: skipping unparseable record", "seq", rec.seq, "err", err)
+					continue
+				}
+				live = append(live, r)
+			}
+		}
+		reads = append(reads, segRead{path: p, recs: recs, maxSeq: maxSeq})
+	}
+
+	// Delete fully-dead closed segments; keep the rest. The last segment is always kept as
+	// the active append target (even if dead — we continue appending to it).
+	for i, sr := range reads {
+		isLast := i == len(reads)-1
+		if !isLast && sr.maxSeq < head {
+			os.Remove(sr.path)
+			s.reclaimedN++
+			continue
+		}
+		if !isLast {
+			s.segments = append(s.segments, segMeta{path: sr.path, maxSeq: sr.maxSeq})
+		}
+	}
+
+	// Open (or create) the active segment.
+	var activePath string
+	var activeMax int64 = -1
+	if len(reads) > 0 {
+		last := reads[len(reads)-1]
+		activePath = last.path
+		activeMax = last.maxSeq
+	} else {
+		activePath = filepath.Join(dir, segmentName(head))
+	}
+	f, err := os.OpenFile(activePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return nil, 0, nil, fmt.Errorf("open active segment: %w", err)
+	}
+	fi, _ := f.Stat()
+	s.active = f
+	s.activePath = activePath
+	s.activeBytes = fi.Size()
+	s.activeMax = activeMax
+	s.replayedN = len(live)
+	return s, head, live, nil
+}
+
+func (s *spool) append(seq int64, r agentwire.RoundReport) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.degraded || s.closed {
+		return
+	}
+	s.pending = append(s.pending, stagedData{seq: seq, r: r})
+}
+
+func (s *spool) advanceHead(headSeq int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.degraded || s.closed {
+		return
+	}
+	if headSeq > s.head {
+		s.head = headSeq
+	}
+}
+
+func (s *spool) flush() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.flushLocked()
+}
+
+func (s *spool) flushLocked() error {
+	if s.degraded || s.closed {
+		s.pending = s.pending[:0]
+		return nil
+	}
+	for _, pr := range s.pending {
+		body, err := json.Marshal(pr.r)
+		if err != nil { // effectively impossible for RoundReport; skip + count, don't degrade
+			s.errN++
+			slog.Warn("spool: dropping unmarshalable round", "seq", pr.seq, "err", err)
+			continue
+		}
+		if err := s.writeRecordLocked(pr.seq, body); err != nil {
+			return s.degradeLocked(err)
+		}
+	}
+	s.pending = s.pending[:0]
+	if err := s.active.Sync(); err != nil {
+		return s.degradeLocked(err)
+	}
+	if s.head > s.headDurable {
+		if err := writeHead(s.dir, s.head); err != nil {
+			return s.degradeLocked(err)
+		}
+		s.headDurable = s.head
+		s.reclaimLocked()
+	}
+	return nil
+}
+
+// writeRecordLocked appends one framed DATA record to the active segment, rolling a new
+// segment first when the record would exceed segMax.
+func (s *spool) writeRecordLocked(seq int64, body []byte) error {
+	frame := encodeFrame(nil, seq, body)
+	if s.activeBytes > 0 && s.activeBytes+int64(len(frame)) > s.segMax {
+		if err := s.rollLocked(seq); err != nil {
+			return err
+		}
+	}
+	if _, err := s.active.Write(frame); err != nil {
+		return err
+	}
+	s.activeBytes += int64(len(frame))
+	if seq > s.activeMax {
+		s.activeMax = seq
+	}
+	return nil
+}
+
+func (s *spool) rollLocked(nextSeq int64) error {
+	if err := s.active.Sync(); err != nil {
+		return err
+	}
+	if err := s.active.Close(); err != nil {
+		return err
+	}
+	s.segments = append(s.segments, segMeta{path: s.activePath, maxSeq: s.activeMax})
+	p := filepath.Join(s.dir, segmentName(nextSeq))
+	f, err := os.OpenFile(p, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return err
+	}
+	s.active = f
+	s.activePath = p
+	s.activeBytes = 0
+	s.activeMax = -1
+	return nil
+}
+
+// reclaimLocked deletes closed segments whose every record is now dead (maxSeq < headDurable).
+func (s *spool) reclaimLocked() {
+	kept := s.segments[:0]
+	for _, m := range s.segments {
+		if m.maxSeq < s.headDurable {
+			os.Remove(m.path)
+			s.reclaimedN++
+			continue
+		}
+		kept = append(kept, m)
+	}
+	s.segments = kept
+}
+
+func (s *spool) degradeLocked(err error) error {
+	s.degraded = true
+	s.errN++
+	s.pending = nil
+	slog.Error("spool write failed, degrading to memory-only", "err", err, "dir", s.dir)
+	return err
+}
+
+func (s *spool) start() {
+	s.mu.Lock()
+	if s.started || s.closed {
+		s.mu.Unlock()
+		return
+	}
+	s.started = true
+	s.stop = make(chan struct{})
+	s.done = make(chan struct{})
+	s.mu.Unlock()
+	go s.flushLoop()
+}
+
+func (s *spool) flushLoop() {
+	defer close(s.done)
+	t := time.NewTicker(fsyncEvery)
+	defer t.Stop()
+	for {
+		select {
+		case <-s.stop:
+			return
+		case <-t.C:
+			if err := s.flush(); err != nil {
+				// already logged in degradeLocked; nothing more to do
+			}
+		}
+	}
+}
+
+func (s *spool) close() error {
+	s.mu.Lock()
+	started := s.started
+	s.mu.Unlock()
+	if started {
+		close(s.stop)
+		<-s.done
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var ferr error
+	if !s.degraded && !s.closed {
+		ferr = s.flushLocked()
+	}
+	s.closed = true
+	if s.active != nil {
+		s.active.Close()
+		s.active = nil
+	}
+	return ferr
+}
+
+func (s *spool) replayed() int  { s.mu.Lock(); defer s.mu.Unlock(); return s.replayedN }
+func (s *spool) errors() int    { s.mu.Lock(); defer s.mu.Unlock(); return s.errN }
+func (s *spool) reclaimed() int { s.mu.Lock(); defer s.mu.Unlock(); return s.reclaimedN }
