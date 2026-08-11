@@ -73,6 +73,16 @@ All notable changes to **smokeping-modern** are recorded here. The format follow
   rate limiting it does not configure.
 
 ### Changed
+- **Container supply chain hardened: all images digest-pinned, plugins version-pinned, SBOM + image
+  scanning, and a refresh config.** Every base image (Go build, Alpine runtime, Caddy builder/runtime,
+  TimescaleDB, and the CI `golang`/`node`/`docker` images) is now pinned by digest, and every bundled
+  Caddy DNS-provider plugin is pinned to a version — so builds are reproducible and a moving upstream
+  can't change a credential-bearing binary without a reviewed change. A new `image-scan` CI stage
+  generates an SPDX SBOM (artifact) and runs a finished-image vulnerability scan (Trivy) on top of the
+  existing Go-module `govulncheck`; it also re-scans the current `:main` on scheduled pipelines to
+  catch newly-disclosed CVEs against pinned images. A `renovate.json` keeps the digests and plugin
+  versions current so the pins don't go stale. (The image scan is report-only for now — tighten to
+  blocking once the base image is clean.) CODE_REVIEW M4/L7.
 - **Spool recovery streams each segment instead of loading it whole and copying every body.** On
   agent restart, recovery read each segment fully into memory and copied every decoded body before
   deciding which to keep, so a segment full of dead or budget-evicted rounds still cost a full copy
