@@ -142,10 +142,7 @@ v2.0 line; these build on it.
   `net.ipv4.ping_group_range` sysctl), raw-socket fallback (`CAP_NET_RAW`). Ships alongside
   `FPing` rather than replacing it — the external binary and `setcap` dance stay for users who
   keep using `FPing`, but new deployments can drop both by using `Ping` instead. *(Small–medium.)*
-- ✅ **On-disk agent store-and-forward** — the agent persists its buffer to disk (opt-in
-  `spool_dir`) so a vantage restart — including a hard crash — no longer drops unpushed
-  rounds; append-only CRC-framed segments mirror the in-memory buffer, ~1s bounded loss,
-  crash-safe replay on startup, `flock` against shared dirs, degrade-to-memory on I/O error.
+- ✅ **On-disk agent store-and-forward** — the agent persists its buffer to disk (opt-in `spool_dir`) so a vantage restart — including a hard crash — loses at most ~1s of unpushed rounds instead of the whole buffer; append-only CRC-framed segments mirror the in-memory buffer, crash-safe replay on startup, `flock` against shared dirs, degrade-to-memory on I/O error.
 - ⬜ **Cut the release** — bump the version off `0.1.0`; tag the single-node line **v1.0** and
   federation **v2.0** with release notes. *(Small.)*
 
