@@ -414,6 +414,56 @@ func TestEnableDownsampling(t *testing.T) {
 	}
 }
 
+// CODE_REVIEW L1: if samples_hourly is present but samples_daily is missing (a partial/interrupted
+// schema), EnableDownsampling must still run its one-time backfill so the recreated daily view is
+// populated from existing raw history — not left empty until trailing refreshes catch up. The
+// backfill decision now keys off BOTH aggregates existing, not just hourly.
+func TestEnableDownsamplingBackfillsDailyWhenOnlyDailyMissing(t *testing.T) {
+	dsn := os.Getenv("SMOKE_TEST_DSN")
+	if dsn == "" {
+		t.Skip("set SMOKE_TEST_DSN to run the TimescaleDB integration test")
+	}
+	ctx := context.Background()
+	s, err := New(ctx, dsn, 100, func(e error) { t.Errorf("store error: %v", e) })
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer s.Close()
+	// Clean slate with both aggregates present.
+	if _, err := s.pool.Exec(ctx, "DROP MATERIALIZED VIEW IF EXISTS samples_hourly CASCADE"); err != nil {
+		t.Fatalf("drop hourly: %v", err)
+	}
+	if _, err := s.pool.Exec(ctx, "TRUNCATE samples"); err != nil {
+		t.Fatalf("truncate: %v", err)
+	}
+	if err := s.EnableDownsampling(ctx); err != nil {
+		t.Fatalf("EnableDownsampling: %v", err)
+	}
+	// A raw sample ~48h ago: a completed past daily bucket, inside the daily backfill window
+	// (now-30d .. now-1h) and within raw retention.
+	when := time.Now().Add(-48 * time.Hour).UTC()
+	s.Add([]scheduler.Outcome{{
+		Target: probe.Target{Name: "d", Host: "h"}, ProbeName: "FPing",
+		Computed: sample.Compute(3, []float64{0.01, 0.02, 0.03}), When: when,
+	}})
+	// Simulate the partial schema: drop ONLY daily, keep hourly.
+	if _, err := s.pool.Exec(ctx, "DROP MATERIALIZED VIEW IF EXISTS samples_daily CASCADE"); err != nil {
+		t.Fatalf("drop daily: %v", err)
+	}
+	// Re-enable: hourly present but daily missing must still trigger the backfill.
+	if err := s.EnableDownsampling(ctx); err != nil {
+		t.Fatalf("EnableDownsampling (daily missing): %v", err)
+	}
+	var rounds int
+	if err := s.pool.QueryRow(ctx,
+		"SELECT COALESCE(sum(rounds),0)::int FROM samples_daily WHERE target='d'").Scan(&rounds); err != nil {
+		t.Fatalf("query samples_daily: %v", err)
+	}
+	if rounds < 1 {
+		t.Fatalf("samples_daily not backfilled after re-enable with only daily missing: rounds=%d (want >=1)", rounds)
+	}
+}
+
 // AggregatesExist (the --history preflight) must require BOTH samples_hourly and
 // samples_daily, so an interrupted/partial schema (hourly present, daily dropped) can't pass
 // the fail-before-write check and then fail mid-import on the daily refresh (CODE_REVIEW #6).

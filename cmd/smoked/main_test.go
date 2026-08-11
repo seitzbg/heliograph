@@ -239,6 +239,33 @@ type capNotify struct{ n int }
 
 func (c *capNotify) Notify(alert.Event) { c.n++ }
 
+// CODE_REVIEW L2: an alert `to` or target `alertee` recipient with no enabled notifier (a typo, or
+// `webhook` without -webhook) must be surfaced up front, not stay invisible until the dropped
+// notification. unresolvedRecipients returns exactly the unresolved names, deduped and sorted.
+func TestUnresolvedRecipients(t *testing.T) {
+	notifiers := map[string]alert.Notifier{"log": alert.LogNotifier{}}
+	alertDefs := map[string]*alert.Alert{
+		"loss": {Name: "loss", To: []string{"log", "webhook"}},        // webhook not enabled
+		"slow": {Name: "slow", To: []string{"log", "pagerduty-typo"}}, // typo
+	}
+	alerteeByTarget := map[string][]string{
+		"t1": {"log"},            // resolved
+		"t2": {"webhook", "sms"}, // webhook (dup of the alert's) + sms (missing)
+	}
+	got := strings.Join(unresolvedRecipients(alertDefs, alerteeByTarget, notifiers), ",")
+	if got != "pagerduty-typo,sms,webhook" {
+		t.Fatalf("unresolvedRecipients = %q, want sorted/deduped \"pagerduty-typo,sms,webhook\"", got)
+	}
+	// A fully-resolved config reports nothing.
+	if got := unresolvedRecipients(
+		map[string]*alert.Alert{"a": {To: []string{"log"}}},
+		map[string][]string{"t": {"log"}},
+		notifiers,
+	); len(got) != 0 {
+		t.Fatalf("fully-resolved config must report nothing, got %v", got)
+	}
+}
+
 // Bug D (CODE_REVIEW #4): a local round that finishes measuring under an obsolete target
 // definition (a reload redefined the target between measure and eval) carries a stale
 // fingerprint and must be dropped, not evaluated against the new alert identity.

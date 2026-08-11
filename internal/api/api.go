@@ -751,6 +751,38 @@ func roundsDTO(hist []scheduler.Outcome) []roundDTO {
 // all-targets full-table scan from a hand-crafted request. Long ranges use /api/rollup.
 const maxGridWindow = 48 * time.Hour
 
+// maxSeriesAllTotalRounds bounds the TOTAL rounds /api/series/all serializes across all targets.
+// SeriesAll caps rows per target (20k), but a bulk request over many targets could still
+// materialize a huge response (1000 targets × 20k = 20M) — an authenticated memory/DoS sink on the
+// response path. capSeriesAll trims to this budget, keeping the newest rounds of each target so
+// every target stays represented, and the handler surfaces `truncated` (CODE_REVIEW M5).
+const maxSeriesAllTotalRounds = 300_000
+
+// capSeriesAll trims all[*] in place so the total rounds across every target does not exceed max,
+// keeping each target's NEWEST rounds (an equal per-target share) so every target stays
+// represented. Returns whether anything was trimmed. Each target's rounds are oldest→newest.
+func capSeriesAll(all map[string][]scheduler.Outcome, max int) bool {
+	total := 0
+	for _, h := range all {
+		total += len(h)
+	}
+	if total <= max || len(all) == 0 {
+		return false
+	}
+	share := max / len(all)
+	if share < 1 {
+		share = 1 // more targets than the budget: keep each target's single newest round
+	}
+	trimmed := false
+	for name, h := range all {
+		if len(h) > share {
+			all[name] = h[len(h)-share:]
+			trimmed = true
+		}
+	}
+	return trimmed
+}
+
 // seriesAll returns recent per-round samples for every target in one response — the
 // bulk, incremental read behind the Graphs grid. `window` (required, a Go duration)
 // bounds the first fetch; `since` (unix ms) is the client's watermark, so a refresh
@@ -800,13 +832,24 @@ func (srv *Server) seriesAll(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"series unavailable"}`, http.StatusServiceUnavailable)
 		return
 	}
+	// Bound the total response across all targets, keeping each target's newest rounds. Trimming is
+	// visible via `truncated` so a client can narrow the window / use /api/rollup (CODE_REVIEW M5).
+	truncated := capSeriesAll(all, maxSeriesAllTotalRounds)
 	targets := make(map[string]any, len(all))
+	total := 0
 	for name, hist := range all {
+		total += len(hist)
 		targets[name] = map[string]any{"rounds": roundsDTO(hist)}
 	}
+	if truncated {
+		slog.Warn("series/all response truncated to the global round budget",
+			"budget", maxSeriesAllTotalRounds, "targets", len(all), "vantage", vant)
+	}
 	writeJSON(w, map[string]any{
-		"cutoff":  cutoff.UTC().Format("2006-01-02T15:04:05Z"),
-		"targets": targets,
+		"cutoff":    cutoff.UTC().Format("2006-01-02T15:04:05Z"),
+		"targets":   targets,
+		"rounds":    total,
+		"truncated": truncated,
 	})
 }
 
@@ -1116,7 +1159,15 @@ func (srv *Server) addVantage(w http.ResponseWriter, r *http.Request) {
 	}
 	key, err := srv.Vantages.Add(r.Context(), body.Name)
 	if err != nil {
-		http.Error(w, `{"error":"store unavailable"}`, http.StatusServiceUnavailable)
+		switch {
+		case errors.Is(err, vantage.ErrReserved):
+			http.Error(w, `{"error":"\"local\" is reserved for the hub"}`, http.StatusConflict)
+		case errors.Is(err, vantage.ErrInvalidName):
+			http.Error(w, `{"error":"invalid vantage name (use letters, digits, . _ -)"}`, http.StatusBadRequest)
+		default:
+			slog.Error("addVantage: store add failed", "err", err)
+			http.Error(w, `{"error":"store unavailable"}`, http.StatusServiceUnavailable)
+		}
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store") // the one-time key is in this body — never cache it

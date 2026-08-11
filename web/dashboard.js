@@ -1027,9 +1027,10 @@
       const name = $('vantName').value.trim();
       if (!name) { $('vantAddErr').textContent = 'Name required.'; return; }
       if (!/^[A-Za-z0-9._-]+$/.test(name)) { $('vantAddErr').textContent = 'Use letters, digits, . _ - only.'; return; }
-      // "local" is the hub's own vantage — agents don't use it. Hint, but don't hard-block
-      // (design §11: allowed-but-hinted): let the user proceed via confirm.
-      if (name === 'local' && !window.confirm('"local" is the hub’s own vantage — agents don’t use it. Mint a key anyway?')) return;
+      // "local" is the hub's own vantage — the backend always rejects it (409). Block it here with
+      // the reason rather than a misleading "proceed anyway" confirm that just leads to an error
+      // (CODE_REVIEW L5).
+      if (name === 'local') { $('vantAddErr').textContent = '"local" is the hub’s own vantage and can’t be used for an agent key.'; return; }
       mintVantage(name, false);
     });
     $('vantRows').addEventListener('click', async (e) => {

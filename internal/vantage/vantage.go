@@ -41,6 +41,14 @@ CREATE TABLE IF NOT EXISTS vantage_keys (
 // locally-probed data.
 const reserved = "local"
 
+// ErrInvalidName and ErrReserved are client-input errors from Add: a bad name shape, or the
+// reserved hub name "local". The admin API maps these to a 400/409 rather than a generic 5xx, so the
+// operator sees a useful reason instead of "store unavailable" (CODE_REVIEW L5).
+var (
+	ErrInvalidName = errors.New("vantage: invalid name (use letters, digits, . _ -)")
+	ErrReserved    = errors.New(`vantage: "local" is reserved for the hub`)
+)
+
 // Info is a vantage's public metadata — never its key material.
 type Info struct {
 	Name     string
@@ -81,10 +89,10 @@ func hashSecret(salt []byte, secret string) []byte {
 // full key `smk_<keyId>_<secret>`. Only the salted hash is stored.
 func (s *Store) Add(ctx context.Context, name string) (string, error) {
 	if !ValidName(name) {
-		return "", errors.New("vantage: invalid name (use letters, digits, . _ -)")
+		return "", ErrInvalidName
 	}
 	if name == reserved {
-		return "", errors.New(`vantage: "local" is reserved for the hub`)
+		return "", ErrReserved
 	}
 	keyID, err := randHex(6)
 	if err != nil {
