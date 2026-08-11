@@ -205,11 +205,16 @@ func (s *PGStore) EnableDownsampling(ctx context.Context) error {
 	return nil
 }
 
-// aggregateExists reports whether the samples_hourly continuous aggregate is already present.
+// aggregateExists reports whether BOTH continuous aggregates (samples_hourly and samples_daily) are
+// already present. Requiring both — not just hourly — means EnableDownsampling runs its one-time
+// backfill whenever EITHER is missing: an hourly-present-but-daily-absent DB would otherwise recreate
+// samples_daily empty (WITH NO DATA) and skip the initial backfill, leaving daily history incomplete
+// until trailing refreshes catch up (CODE_REVIEW L1).
 func (s *PGStore) aggregateExists(ctx context.Context) (bool, error) {
 	var ok bool
-	if err := s.pool.QueryRow(ctx, `SELECT to_regclass('samples_hourly') IS NOT NULL`).Scan(&ok); err != nil {
-		return false, fmt.Errorf("pgstore: check aggregate: %w", err)
+	if err := s.pool.QueryRow(ctx,
+		`SELECT to_regclass('samples_hourly') IS NOT NULL AND to_regclass('samples_daily') IS NOT NULL`).Scan(&ok); err != nil {
+		return false, fmt.Errorf("pgstore: check aggregates: %w", err)
 	}
 	return ok, nil
 }
