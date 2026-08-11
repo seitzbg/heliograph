@@ -11,6 +11,20 @@ All notable changes to **smokeping-modern** are recorded here. The format follow
   modification, and redistribution rights unstated; MIT makes them explicit.
 
 ### Fixed
+- **Minting the reserved vantage name `local` now returns a clear 409, not a generic 503.** It passed
+  the name-shape check (it is a valid name) and the store's reserved-name rejection was funneled into
+  `store unavailable`, misrepresenting an operator mistake as an outage; the Vantages UI compounded it
+  with an "allowed-but-hinted" confirm that led straight into the error. The API maps the reserved and
+  invalid-name cases to 409/400, and the UI blocks `local` up front with the reason.
+- **`/api/series/all` now bounds the total rounds it serializes across all targets.** Rows were capped
+  per target (20k) but not globally, so a bulk request over many targets could materialize a very
+  large response (an authenticated memory/DoS path). The response is trimmed to a global budget —
+  keeping each target's newest rounds so every target stays represented — and carries `rounds` +
+  `truncated` so a client can narrow the window or use `/api/rollup`.
+- **Downsampling backfills the daily aggregate when it is missing even if hourly exists.** The backfill
+  decision keyed off only `samples_hourly`, so a partial schema (hourly present, `samples_daily`
+  dropped/absent) recreated the daily view empty and skipped the one-time backfill, leaving daily
+  history incomplete until trailing refreshes caught up. It now keys off both aggregates.
 - **Agent no longer discards buffered rounds on a malformed hub success response.** `PushResults`
   accepted any 2xx and ignored the response-decode error, so an empty `200`, a `204`, HTML from a
   proxy/maintenance page, or truncated JSON made the flush loop commit and reclaim the batch even
@@ -59,6 +73,10 @@ All notable changes to **smokeping-modern** are recorded here. The format follow
   rate limiting it does not configure.
 
 ### Changed
+- **Startup and reload now warn about alert recipients with no enabled notifier.** An alert `to` or a
+  target `alertee` referencing an unknown notifier (a typo, or `webhook` without `-webhook`) was only
+  noticed when an event was dispatched — invisible until the incident whose notification got silently
+  dropped. `buildRuntime` now logs the unresolved recipients at startup and on every reload.
 - **Runtime container image moved off end-of-support Alpine 3.20 to a digest-pinned Alpine 3.22.**
   Alpine 3.20 left normal security support on 2026-04-01; the runtime stage now pins a supported
   branch by digest (bump the tag + digest together on a refresh). CODE_REVIEW M4.
