@@ -180,6 +180,15 @@ breaking changes.
   instead of a moving `latest-pg16` tag.
 
 ### Fixed
+- **The agent buffers and flushes by bytes, not just round count, so a constrained vantage can't
+  OOM.** A round may carry up to `MaxPings` (10 000) RTTs, so bounding only by round count let a
+  count-selected flush batch (default `flush_max` 5 000) marshal a multi-hundred-MB request body
+  the hub would only 413 *after* the agent had already built it — OOM-killing a low-memory vantage
+  before the recursive 413 split could run — and let a prolonged outage grow the buffer without a
+  practical memory bound. Both the store-and-forward buffer and each flush batch are now bounded by
+  estimated serialized bytes (batch under `agentwire.MaxResultsBytes`; buffer under a 256 MiB
+  default) as well as round count; the recursive 413 split remains as a fallback for estimation
+  variance.
 - **Replayed agent rounds are no longer double-counted for alerting.** The store insert is
   idempotent (`ON CONFLICT (target,vantage,ts) DO NOTHING`), but the alert side effect was not: the
   hub evaluated alerts over the entire submitted batch, including rows that conflicted and were not

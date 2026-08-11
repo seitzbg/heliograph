@@ -7,9 +7,38 @@ import (
 	"smokeping-modern/internal/agentwire"
 )
 
+// Byte accounting for the buffer and its flush batches. A round is bounded in COUNT (up to
+// config.MaxPings = 10000 RTTs) but that makes its serialized size vary by orders of magnitude,
+// so bounding only by round count lets a prolonged outage of high-ping targets grow the buffer
+// past a practical memory bound, and lets a count-selected flush batch marshal a
+// multi-hundred-MB body the hub will only 413 AFTER the agent has already built it — OOM-killing
+// a constrained vantage before the recursive 413 split can ever run (CODE_REVIEW #5). Both the
+// buffer and the flush batch are therefore bounded by ESTIMATED serialized bytes as well.
+const (
+	// rttJSONBytes over-estimates one float64 RTT's JSON size (value + comma); real values are
+	// shorter, so batches land safely under the hub's byte cap and the 413 split stays a mere
+	// fallback for estimation variance.
+	rttJSONBytes = 24
+	// roundJSONOverhead covers a round's fixed JSON keys/punctuation; the variable-length
+	// target/fingerprint/err strings are added on top.
+	roundJSONOverhead = 160
+	// defaultBufferBytes bounds total buffered memory independent of the round cap. Generous, so
+	// it only bites pathological (very high pings) configs; ordinary small rounds hit the round
+	// cap first.
+	defaultBufferBytes = 256 << 20 // 256 MiB
+)
+
+// estimatedJSONBytes is a cheap upper-ish estimate of a round's serialized size. It need not be
+// exact — it is used to pack a flush batch under agentwire.MaxResultsBytes before marshaling and
+// to bound total buffer memory; the recursive 413 split covers any underestimate.
+func estimatedJSONBytes(r agentwire.RoundReport) int {
+	return roundJSONOverhead + len(r.Target) + len(r.Fingerprint) + len(r.Err) + len(r.RTTs)*rttJSONBytes
+}
+
 // buffer is a bounded FIFO of pending rounds. The measure loop add()s; the flush loop
-// peekBatch()es and commit()s on a successful push. When full, add drops the oldest
-// (and counts it) rather than blocking the measure loop — bounded memory, never silent.
+// peekBatch()es and commit()s on a successful push. When full (by round count OR estimated
+// bytes), add drops the oldest (and counts it) rather than blocking the measure loop — bounded
+// memory, never silent.
 //
 // commit is keyed by sequence number rather than count: peekBatch hands back the seq
 // of the last round in the batch, and commit removes only rounds up to that seq. This
@@ -19,46 +48,65 @@ import (
 // eviction is no longer the batch that was actually pushed (silently dropping an
 // un-pushed, never-counted round). See TestBufferCommitSurvivesConcurrentEviction.
 type buffer struct {
-	mu      sync.Mutex
-	rounds  []agentwire.RoundReport
-	headSeq int64 // sequence number of rounds[0]; advances on evict and commit
-	cap     int
-	dropCnt atomic.Int64
-	rejCnt  atomic.Int64 // rounds discarded because the hub permanently rejected their batch
+	mu       sync.Mutex
+	rounds   []agentwire.RoundReport
+	headSeq  int64 // sequence number of rounds[0]; advances on evict and commit
+	cap      int
+	maxBytes int // byte budget for total buffered memory
+	curBytes int // running sum of estimatedJSONBytes(rounds[i])
+	dropCnt  atomic.Int64
+	rejCnt   atomic.Int64 // rounds discarded because the hub permanently rejected their batch
 }
 
 func newBuffer(capRounds int) *buffer {
 	if capRounds <= 0 {
 		capRounds = 100_000
 	}
-	return &buffer{cap: capRounds}
+	return &buffer{cap: capRounds, maxBytes: defaultBufferBytes}
 }
 
 func (b *buffer) add(r agentwire.RoundReport) {
+	sz := estimatedJSONBytes(r)
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if len(b.rounds) >= b.cap {
-		b.rounds = b.rounds[1:] // drop oldest
+	// Evict oldest until this round fits within BOTH the round cap and the byte budget. Never
+	// evict below one round: a lone round bigger than the whole budget is kept and later handled
+	// by the flush 413-split/drop path (CODE_REVIEW #5).
+	for len(b.rounds) > 0 && (len(b.rounds) >= b.cap || b.curBytes+sz > b.maxBytes) {
+		b.curBytes -= estimatedJSONBytes(b.rounds[0])
+		b.rounds = b.rounds[1:]
 		b.headSeq++
 		b.dropCnt.Add(1)
 	}
 	b.rounds = append(b.rounds, r)
+	b.curBytes += sz
 }
 
-// peekBatch returns a copy of up to max oldest rounds, without removing them, plus
-// upto: the sequence number of the last round in the returned batch. Pass upto to
-// commit after a successful push of the batch. When the buffer is empty, upto is
-// headSeq-1 so a subsequent commit is a no-op.
-func (b *buffer) peekBatch(max int) ([]agentwire.RoundReport, int64) {
+// peekBatch returns a copy of the oldest rounds — up to maxRounds AND up to (but not exceeding)
+// maxBytes of estimated serialized size — without removing them, plus upto: the sequence number
+// of the last round in the returned batch. Pass upto to commit after a successful push. At least
+// one round is always returned when the buffer is non-empty, even if that single round exceeds
+// maxBytes (the flush path splits/drops it), so the loop can never stall. When the buffer is
+// empty, upto is headSeq-1 so a subsequent commit is a no-op.
+func (b *buffer) peekBatch(maxRounds, maxBytes int) ([]agentwire.RoundReport, int64) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	n := len(b.rounds)
-	if n > max {
-		n = max
+	if n > maxRounds {
+		n = maxRounds
 	}
-	out := make([]agentwire.RoundReport, n)
-	copy(out, b.rounds[:n])
-	return out, b.headSeq + int64(n) - 1
+	bytes, take := 0, 0
+	for take < n {
+		sz := estimatedJSONBytes(b.rounds[take])
+		if take > 0 && bytes+sz > maxBytes {
+			break // adding this round would exceed the byte budget; stop (we already have >=1)
+		}
+		bytes += sz
+		take++
+	}
+	out := make([]agentwire.RoundReport, take)
+	copy(out, b.rounds[:take])
+	return out, b.headSeq + int64(take) - 1
 }
 
 // commit removes all still-present rounds with sequence number <= upto (i.e. the
@@ -80,6 +128,9 @@ func (b *buffer) commit(upto int64) {
 	}
 	if remove > int64(len(b.rounds)) {
 		remove = int64(len(b.rounds))
+	}
+	for i := int64(0); i < remove; i++ {
+		b.curBytes -= estimatedJSONBytes(b.rounds[i])
 	}
 	// Re-slicing (here and in add's [1:]) retains the backing array's head over time
 	// rather than reallocating; acceptable for a bounded buffer since the array is
