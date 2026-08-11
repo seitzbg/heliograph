@@ -482,7 +482,11 @@ func runHistory(dir, dataFlag, rrdtoolFlag, dsn string) int {
 		rrdPath := filepath.Join(dataDir, t.Name+".rrd")
 		samples, err := smokeping.ExtractRRD(rrdtoolBin, rrdPath, now)
 		if err != nil {
+			// A corrupt/unreadable RRD is a partial failure, not a silent skip: count it so the
+			// summary and exit code reflect that this target's history was NOT imported, rather
+			// than reporting 0 failed / exit 0 on an incomplete migration (CODE_REVIEW #4).
 			fmt.Fprintf(os.Stderr, "import: [%d/%d] %s: extract failed, skipping: %v\n", i+1, len(rec.Matched), t.Name, err)
+			failed++
 			continue
 		}
 		samples, droppedLoss := validLossSamples(samples, t.Pings)

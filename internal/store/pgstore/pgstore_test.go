@@ -355,6 +355,40 @@ func TestEnableDownsampling(t *testing.T) {
 	}
 }
 
+// AggregatesExist (the --history preflight) must require BOTH samples_hourly and
+// samples_daily, so an interrupted/partial schema (hourly present, daily dropped) can't pass
+// the fail-before-write check and then fail mid-import on the daily refresh (CODE_REVIEW #6).
+func TestAggregatesExistRequiresBothViews(t *testing.T) {
+	dsn := os.Getenv("SMOKE_TEST_DSN")
+	if dsn == "" {
+		t.Skip("set SMOKE_TEST_DSN to run the TimescaleDB integration test")
+	}
+	ctx := context.Background()
+	s, err := New(ctx, dsn, 100, func(e error) { t.Errorf("store error: %v", e) })
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer s.Close()
+	if err := s.EnableDownsampling(ctx); err != nil {
+		t.Fatalf("EnableDownsampling: %v", err)
+	}
+	// Both views present -> true.
+	if ok, err := s.AggregatesExist(ctx); err != nil || !ok {
+		t.Fatalf("AggregatesExist with both views = (%v,%v), want (true,nil)", ok, err)
+	}
+	// Drop only the daily view: the preflight must now report false, not "hourly is enough".
+	if _, err := s.pool.Exec(ctx, "DROP MATERIALIZED VIEW IF EXISTS samples_daily CASCADE"); err != nil {
+		t.Fatalf("drop daily cagg: %v", err)
+	}
+	if ok, err := s.AggregatesExist(ctx); err != nil || ok {
+		t.Fatalf("AggregatesExist with daily absent = (%v,%v), want (false,nil)", ok, err)
+	}
+	// Restore for any subsequent test sharing this database.
+	if err := s.EnableDownsampling(ctx); err != nil {
+		t.Fatalf("EnableDownsampling (restore): %v", err)
+	}
+}
+
 // An existing continuous aggregate created before median_rounds existed must be rebuilt by
 // EnableDownsampling — the migrateAggregates drop+recreate — so the new column appears
 // (CODE_REVIEW #6 / P2-6). Without the rebuild, Rollup's SELECT of median_rounds would fail.
@@ -1015,11 +1049,19 @@ func TestAddResultsIdempotent(t *testing.T) {
 			Computed: sample.Compute(3, []float64{0.010, 0.011, 0.012}),
 		}}
 	}
-	if err := s.AddResults(ctx, mk()); err != nil {
+	ins1, err := s.AddResults(ctx, mk())
+	if err != nil {
 		t.Fatalf("AddResults #1: %v", err)
 	}
-	if err := s.AddResults(ctx, mk()); err != nil { // replay
+	if len(ins1) != 1 {
+		t.Fatalf("first AddResults should report 1 newly-inserted round, got %d", len(ins1))
+	}
+	ins2, err := s.AddResults(ctx, mk()) // replay
+	if err != nil {
 		t.Fatalf("AddResults #2 (replay): %v", err)
+	}
+	if len(ins2) != 0 {
+		t.Fatalf("replay must report 0 newly-inserted rounds (so alerts aren't re-evaluated), got %d", len(ins2))
 	}
 	var n int
 	if err := s.pool.QueryRow(ctx,
@@ -1047,7 +1089,7 @@ func TestVantageReadIsolation(t *testing.T) {
 			Target: tgt, ProbeName: "FPing", When: base.Add(time.Duration(i) * time.Minute),
 			Vantage: vant, Computed: sample.Compute(2, []float64{rtt, rtt}),
 		}
-		if err := s.AddResults(ctx, []scheduler.Outcome{o}); err != nil {
+		if _, err := s.AddResults(ctx, []scheduler.Outcome{o}); err != nil {
 			t.Fatalf("write %s/%d: %v", vant, i, err)
 		}
 	}
@@ -1125,7 +1167,7 @@ func TestEnableDownsamplingBackfillsHistory(t *testing.T) {
 			When:     old.Add(time.Duration(i) * time.Minute),
 		})
 	}
-	if err := s.AddResults(ctx, rounds); err != nil {
+	if _, err := s.AddResults(ctx, rounds); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	if err := s.EnableDownsampling(ctx); err != nil {

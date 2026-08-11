@@ -84,20 +84,36 @@ func TestAssignmentNotModified(t *testing.T) {
 }
 
 type fakeIngester struct {
-	got []scheduler.Outcome
-	err error
+	got  []scheduler.Outcome
+	seen map[string]bool // (vantage,target,ts) already stored — models the DB's uniqueness
+	err  error
 }
 
 func (f *fakeIngester) Add(o []scheduler.Outcome)                   { f.got = append(f.got, o...) }
 func (f *fakeIngester) Keys() ([]string, error)                     { return nil, nil }
 func (f *fakeIngester) Latest(string) (scheduler.Outcome, bool)     { return scheduler.Outcome{}, false }
 func (f *fakeIngester) History(string) ([]scheduler.Outcome, error) { return nil, nil }
-func (f *fakeIngester) AddResults(_ context.Context, o []scheduler.Outcome) error {
+
+// AddResults models the real stores: it stores each (vantage,target,ts) once and returns
+// only the newly-inserted subset, so a replayed round is not re-evaluated (CODE_REVIEW #4).
+func (f *fakeIngester) AddResults(_ context.Context, o []scheduler.Outcome) ([]scheduler.Outcome, error) {
 	if f.err != nil {
-		return f.err
+		return nil, f.err
 	}
-	f.got = append(f.got, o...)
-	return nil
+	if f.seen == nil {
+		f.seen = map[string]bool{}
+	}
+	var inserted []scheduler.Outcome
+	for _, x := range o {
+		k := x.Vantage + "\x00" + x.Target.Name + "\x00" + x.When.UTC().Format(time.RFC3339Nano)
+		if f.seen[k] {
+			continue
+		}
+		f.seen[k] = true
+		f.got = append(f.got, x)
+		inserted = append(inserted, x)
+	}
+	return inserted, nil
 }
 
 func ingestServer(ing store.Store) *Server {
@@ -263,6 +279,50 @@ func TestIngestEvaluatesAlertsAfterStore(t *testing.T) {
 	}
 	if len(seen) != 1 || seen[0].Vantage != "nyc" || seen[0].Target.Name != "cf" {
 		t.Fatalf("OnIngest must receive stored remote outcomes with their vantage, got %+v", seen)
+	}
+}
+
+// A replayed round (an HTTP retry, or the agent's deliberate resend of an already-delivered
+// split half) is deduplicated by the store, so the hub must store AND evaluate it exactly
+// once — otherwise one lost round replayed twice could satisfy an X=2 consecutive-loss
+// matcher and emit a false FIRING (CODE_REVIEW #4/replay).
+func TestIngestReplayStoredAndEvaluatedOnce(t *testing.T) {
+	ing := &fakeIngester{}
+	srv := ingestServer(ing)
+	var seen []scheduler.Outcome
+	srv.OnIngest = func(out []scheduler.Outcome) { seen = append(seen, out...) }
+	body := fmt.Sprintf(`{"results":[{"target":"cf","ts":%q,"pings":1,"rtts":[0.01]}]}`, recentTS())
+	for i := 0; i < 2; i++ { // submit the identical round twice
+		if w := postResults(t, srv, body); w.Code != 200 {
+			t.Fatalf("post %d: status=%d body=%s", i, w.Code, w.Body)
+		}
+	}
+	if len(ing.got) != 1 {
+		t.Fatalf("replayed round must be stored once, got %d", len(ing.got))
+	}
+	if len(seen) != 1 {
+		t.Fatalf("replayed round must be alert-evaluated once, got %d", len(seen))
+	}
+}
+
+// An empty-fingerprint round (a pre-fingerprint agent) is accepted transitionally, but must be
+// counted per vantage on /metrics so an operator can watch a rolling agent upgrade complete —
+// the counter stops rising — rather than relying on a single process-wide log line (#2).
+func TestIngestMissingFingerprintMetric(t *testing.T) {
+	srv := ingestServer(&fakeIngester{})
+	body := fmt.Sprintf(`{"results":[{"target":"cf","ts":%q,"pings":1,"rtts":[0.01]}]}`, recentTS())
+	if w := postResults(t, srv, body); w.Code != 200 { // no "fingerprint" field
+		t.Fatalf("status=%d body=%s", w.Code, w.Body)
+	}
+	r := httptest.NewRequest("GET", "/metrics", nil)
+	w := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(w, r)
+	if w.Code != 200 {
+		t.Fatalf("/metrics status=%d", w.Code)
+	}
+	want := `smokeping_agent_missing_fingerprint_total{vantage="nyc"} 1`
+	if !strings.Contains(w.Body.String(), want) {
+		t.Fatalf("/metrics should expose %q, got:\n%s", want, w.Body.String())
 	}
 }
 

@@ -180,6 +180,39 @@ breaking changes.
   instead of a moving `latest-pg16` tag.
 
 ### Fixed
+- **The agent buffers and flushes by bytes, not just round count, so a constrained vantage can't
+  OOM.** A round may carry up to `MaxPings` (10 000) RTTs, so bounding only by round count let a
+  count-selected flush batch (default `flush_max` 5 000) marshal a multi-hundred-MB request body
+  the hub would only 413 *after* the agent had already built it — OOM-killing a low-memory vantage
+  before the recursive 413 split could run — and let a prolonged outage grow the buffer without a
+  practical memory bound. Both the store-and-forward buffer and each flush batch are now bounded by
+  estimated serialized bytes (batch under `agentwire.MaxResultsBytes`; buffer under a 256 MiB
+  default) as well as round count; the recursive 413 split remains as a fallback for estimation
+  variance.
+- **Replayed agent rounds are no longer double-counted for alerting.** The store insert is
+  idempotent (`ON CONFLICT (target,vantage,ts) DO NOTHING`), but the alert side effect was not: the
+  hub evaluated alerts over the entire submitted batch, including rows that conflicted and were not
+  inserted. A replayed round — an HTTP retry, or the agent's deliberate resend when a split batch's
+  later half fails transiently — therefore re-advanced the alert window, so one lost round replayed
+  twice could satisfy an `X=2` consecutive-loss matcher and emit a false FIRING (or a duplicate
+  notification). `AddResults` now returns the subset of rounds that were *newly* persisted (Postgres
+  via each insert's `RowsAffected`; the in-memory store via a `(vantage,target,ts)` dedup set), and
+  the hub evaluates alerts only over that subset.
+- **Reload alert-state reconciliation now honors alert attachment and delivery routing.** Beyond the
+  target/matcher identity checks added earlier, a reload no longer inherits a `(target, alert)`
+  firing state for an alert that is not attached to that target in the new config (so detaching an
+  alert and later re-attaching it can't resurrect its old firing state), and it resets the
+  delivered/`visible` bit when an alert's `To` recipients or a target's `alertee` change — so a
+  newly added recipient gets a coherent FIRING/RESOLVED lifecycle instead of inheriting a stale
+  "already delivered" flag. Matcher firing state still survives a recipient-only edit.
+- **`smoked import … --history` counts RRD extraction failures.** A corrupt or unreadable RRD was
+  logged and skipped without counting toward the run's partial-failure total, so a migration that
+  imported no history for some targets could still report `0 failed` and exit `0`. Extraction
+  failures now count and the run exits with the partial-failure status.
+- **The `--history` aggregate preflight now verifies both continuous aggregates.** It checked only
+  `samples_hourly`; a schema with the hourly view present but `samples_daily` absent (an interrupted
+  downsampling init or a manually dropped view) passed the fail-before-write check, inserted raw
+  rows, then failed mid-import on the daily refresh. It now requires both views before writing.
 - **Alert reload state is now reconciled by identity, not names.** A live config reload
   (`SIGHUP` or the admin config API) inherited each target's sample window and firing/visible state
   by target *name* + alert *name*, so it could carry stale state across an incompatible redefinition
@@ -195,7 +228,7 @@ breaking changes.
   target is dropped rather than evaluated against the new identity (jobs and ingested rounds carry
   the fingerprint, and `eval` skips a mismatch). The common unchanged-config reload behaves exactly
   as before — hysteresis preserved, no re-fire. (CODE_REVIEW #4.)
-- **Buffered agent results can no longer be attributed to a redefined target.** An agent's
+- **Fingerprinted agent results can no longer be attributed to a redefined target.** An agent's
   store-and-forward buffer keyed rounds only by target *name*, and the hub, on ingest, looked the
   name up in the *current* assignment and stamped that target's current host/probe onto the old
   round — so a round measured under one identity and replayed (up to 30 days later) after the
@@ -207,10 +240,12 @@ breaking changes.
   opaquely on every round (carried through `scheduler.Job`→`Outcome`→`RoundReport`, so it survives a
   replay). On ingest the hub recomputes the fingerprint from the target's *current* config and drops
   any round whose fingerprint differs — counted in the response `dropped` and logged with a
-  `fingerprint_mismatch` breakdown — so a stale round can never be misattributed. **Compatibility:**
-  a round with no fingerprint (from a pre-fingerprint agent) is still accepted, with a one-time
-  per-process warning to upgrade the agent, so a rolling upgrade doesn't drop data; a later release
-  may require it.
+  `fingerprint_mismatch` breakdown — so a stale round carrying a fingerprint can never be
+  misattributed. **Compatibility:** a round with *no* fingerprint (from a not-yet-upgraded,
+  pre-fingerprint agent) is still accepted so a rolling upgrade doesn't drop data — meaning the
+  original misattribution is still possible for such an agent until it is upgraded. Those rounds are
+  counted per vantage on `/metrics` (`smokeping_agent_missing_fingerprint_total`) and warned once per
+  vantage, so an operator can watch a rollout finish; a later release may require a fingerprint.
 - **`EnableDownsampling`'s one-time backfill could fail on ordinary refresh-policy contention.**
   `backfillAggregates` ran its two `CALL refresh_continuous_aggregate(...)` statements via a raw
   `pool.Exec`, with no retry — unlike `RefreshAggregates`, which already wraps the same kind of

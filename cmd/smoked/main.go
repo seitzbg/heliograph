@@ -798,14 +798,54 @@ func swapRuntime(current *atomic.Pointer[runtime], evalMu *sync.Mutex, nrt *runt
 	evalMu.Lock()
 	old := current.Load()
 	if nrt.engine != nil && old.engine != nil {
-		valid := make(map[string]bool, len(nrt.alertsByTarget))
-		for t := range nrt.alertsByTarget {
-			valid[t] = true
-		}
-		nrt.engine.InheritStateFrom(old.engine, valid, sameTargetIdentity(old, nrt))
+		nrt.engine.InheritStateFrom(old.engine, reloadIdentity(old, nrt))
 	}
 	current.Store(nrt)
 	evalMu.Unlock()
+}
+
+// reloadIdentity builds the per-target/per-alert identity InheritStateFrom uses to decide what
+// survives a reload: which targets exist (ValidTarget) with an unchanged measurement identity
+// (SameTarget), which alerts are attached to each target now (Attached), and whether each
+// target's alertee recipients are unchanged (SameAlertee). The alert's own To recipients and
+// matcher identity are compared inside the engine (CODE_REVIEW #3/#4).
+func reloadIdentity(old, nrt *runtime) alert.ReloadIdentity {
+	valid := make(map[string]bool, len(nrt.alertsByTarget))
+	attached := make(map[string]map[string]bool, len(nrt.alertsByTarget))
+	sameAlertee := make(map[string]bool, len(nrt.alertsByTarget))
+	for t, names := range nrt.alertsByTarget {
+		valid[t] = true
+		set := make(map[string]bool, len(names))
+		for _, n := range names {
+			set[n] = true
+		}
+		attached[t] = set
+		sameAlertee[t] = sameStringSet(old.alerteeByTarget[t], nrt.alerteeByTarget[t])
+	}
+	return alert.ReloadIdentity{
+		ValidTarget: valid,
+		SameTarget:  sameTargetIdentity(old, nrt),
+		Attached:    attached,
+		SameAlertee: sameAlertee,
+	}
+}
+
+// sameStringSet reports whether two string slices hold the same elements, ignoring order —
+// used to compare a target's alertee recipients across a reload.
+func sameStringSet(x, y []string) bool {
+	if len(x) != len(y) {
+		return false
+	}
+	xs := append([]string(nil), x...)
+	ys := append([]string(nil), y...)
+	sort.Strings(xs)
+	sort.Strings(ys)
+	for i := range xs {
+		if xs[i] != ys[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // sameTargetIdentity maps target name -> whether its measurement identity is unchanged between

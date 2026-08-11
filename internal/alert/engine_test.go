@@ -410,7 +410,7 @@ func TestInheritStateAcrossReloadNoSpuriousRefire(t *testing.T) {
 	// Reload: fresh engine inherits state, then the outage continues.
 	cap2 := &capture{}
 	e2 := newEng(cap2)
-	e2.InheritStateFrom(e1, map[string]bool{"t": true}, nil)
+	e2.InheritStateFrom(e1, ReloadIdentity{ValidTarget: map[string]bool{"t": true}})
 	e2.Dispatch(e2.Evaluate("t", "local", []string{"loss"}, 60, math.NaN(), when.Add(2*time.Minute)))
 	if got := statuses(cap2.events); len(got) != 0 {
 		t.Fatalf("post-reload while still down emitted %v, want none (no re-fire)", got)
@@ -438,7 +438,7 @@ func TestInheritStateDropsStaleTargets(t *testing.T) {
 	e1.Evaluate("gone", "local", []string{"loss"}, 60, math.NaN(), when) // firing on a target dropped in the new config
 
 	e2 := mk()
-	e2.InheritStateFrom(e1, map[string]bool{"kept": true}, nil) // "gone" not in valid set
+	e2.InheritStateFrom(e1, ReloadIdentity{ValidTarget: map[string]bool{"kept": true}}) // "gone" not in valid set
 	if _, ok := e2.state["gone\x00loss"]; ok {
 		t.Errorf("state for removed target was carried over")
 	}
@@ -461,7 +461,7 @@ func TestInheritDropsStateOnTargetIdentityChange(t *testing.T) {
 	e1.Dispatch(e1.Evaluate("t", "local", []string{"loss"}, 60, math.NaN(), when)) // firing + visible
 
 	e2 := mk()
-	e2.InheritStateFrom(e1, map[string]bool{"t": true}, map[string]bool{"t": false}) // identity changed
+	e2.InheritStateFrom(e1, ReloadIdentity{ValidTarget: map[string]bool{"t": true}, SameTarget: map[string]bool{"t": false}}) // identity changed
 	if _, ok := e2.state["local\x00t\x00loss"]; ok {
 		t.Error("firing state carried across a target identity change")
 	}
@@ -489,7 +489,7 @@ func TestInheritDropsStateOnMatcherChange(t *testing.T) {
 		"a": {Name: "a", Matcher: CheckLoss{L: 50, X: 1}, EdgeTrigger: true, To: []string{"cap"}},
 		"b": {Name: "b", Matcher: CheckLoss{L: 80, X: 1}, EdgeTrigger: true, To: []string{"cap"}},
 	}, map[string]Notifier{"cap": &capture{}})
-	e2.InheritStateFrom(e1, map[string]bool{"t": true}, map[string]bool{"t": true}) // same target
+	e2.InheritStateFrom(e1, ReloadIdentity{ValidTarget: map[string]bool{"t": true}, SameTarget: map[string]bool{"t": true}}) // same target
 
 	if _, ok := e2.win["local\x00t"]; !ok {
 		t.Error("window must carry across a matcher-only change (same target identity)")
@@ -502,6 +502,84 @@ func TestInheritDropsStateOnMatcherChange(t *testing.T) {
 	}
 	if _, ok := e2.visible["local\x00t\x00b"]; ok {
 		t.Error("redefined alert 'b' must NOT inherit stale visible state")
+	}
+}
+
+// Bug 3a (CODE_REVIEW #3): an alert detached from a target must not keep its firing/visible
+// state through the detached interval and resurrect it on re-attach. Inheritance drops state
+// for an alert not currently attached to that target, even though it's still defined globally
+// (for other targets) with an unchanged matcher. A still-attached sibling alert is unaffected.
+func TestInheritDropsStateForDetachedAlert(t *testing.T) {
+	mk := func() *Engine {
+		return NewEngine(map[string]*Alert{
+			"a": {Name: "a", Matcher: CheckLoss{L: 50, X: 1}, EdgeTrigger: true, To: []string{"cap"}},
+			"b": {Name: "b", Matcher: CheckLoss{L: 50, X: 1}, EdgeTrigger: true, To: []string{"cap"}},
+		}, map[string]Notifier{"cap": &capture{}})
+	}
+	when := time.Unix(1_700_000_000, 0)
+	e1 := mk()
+	e1.Dispatch(e1.Evaluate("t", "local", []string{"a", "b"}, 60, math.NaN(), when)) // a+b firing on t
+
+	// Reload: alert a is still defined globally but NO LONGER attached to t; b remains attached.
+	e2 := mk()
+	e2.InheritStateFrom(e1, ReloadIdentity{
+		ValidTarget: map[string]bool{"t": true},
+		SameTarget:  map[string]bool{"t": true},
+		Attached:    map[string]map[string]bool{"t": {"b": true}},
+	})
+	if _, ok := e2.state["local\x00t\x00a"]; ok {
+		t.Error("firing state for a detached alert must not be inherited")
+	}
+	if _, ok := e2.visible["local\x00t\x00a"]; ok {
+		t.Error("visible state for a detached alert must not be inherited")
+	}
+	if _, ok := e2.state["local\x00t\x00b"]; !ok {
+		t.Error("still-attached alert b must inherit its firing state")
+	}
+}
+
+// Bug 3b (CODE_REVIEW #3): when an alert's delivery recipients change — its own To, or the
+// target's alertee — the delivered/visible bit must NOT be inherited, so a newly added
+// recipient gets a coherent FIRING/RESOLVED lifecycle. The matcher firing state (no delivery
+// dependency) still carries, so the alert doesn't re-detect the outage from scratch.
+func TestInheritResetsVisibleOnRoutingChange(t *testing.T) {
+	when := time.Unix(1_700_000_000, 0)
+	drive := func(to string) *Engine {
+		e := NewEngine(map[string]*Alert{
+			"a": {Name: "a", Matcher: CheckLoss{L: 50, X: 1}, EdgeTrigger: true, To: []string{to}},
+		}, map[string]Notifier{"old": &capture{}, "new": &capture{}})
+		e.Dispatch(e.Evaluate("t", "local", []string{"a"}, 60, math.NaN(), when)) // firing + visible
+		return e
+	}
+
+	// (1) The alert's To recipients change: To is compared inside the engine.
+	e2 := NewEngine(map[string]*Alert{
+		"a": {Name: "a", Matcher: CheckLoss{L: 50, X: 1}, EdgeTrigger: true, To: []string{"new"}},
+	}, map[string]Notifier{"old": &capture{}, "new": &capture{}})
+	e2.InheritStateFrom(drive("old"), ReloadIdentity{
+		ValidTarget: map[string]bool{"t": true}, SameTarget: map[string]bool{"t": true},
+		Attached: map[string]map[string]bool{"t": {"a": true}}, SameAlertee: map[string]bool{"t": true},
+	})
+	if _, ok := e2.state["local\x00t\x00a"]; !ok {
+		t.Error("matcher firing state should survive a To-recipient change")
+	}
+	if _, ok := e2.visible["local\x00t\x00a"]; ok {
+		t.Error("visible bit must reset when the alert's To recipients change")
+	}
+
+	// (2) The target's alertee recipients change: signaled by SameAlertee[t]=false (To unchanged).
+	e3 := NewEngine(map[string]*Alert{
+		"a": {Name: "a", Matcher: CheckLoss{L: 50, X: 1}, EdgeTrigger: true, To: []string{"old"}},
+	}, map[string]Notifier{"old": &capture{}, "new": &capture{}})
+	e3.InheritStateFrom(drive("old"), ReloadIdentity{
+		ValidTarget: map[string]bool{"t": true}, SameTarget: map[string]bool{"t": true},
+		Attached: map[string]map[string]bool{"t": {"a": true}}, SameAlertee: map[string]bool{"t": false},
+	})
+	if _, ok := e3.state["local\x00t\x00a"]; !ok {
+		t.Error("matcher firing state should survive an alertee-only change")
+	}
+	if _, ok := e3.visible["local\x00t\x00a"]; ok {
+		t.Error("visible bit must reset when the target's alertee recipients change")
 	}
 }
 

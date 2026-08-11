@@ -820,6 +820,104 @@ func TestImportCmdHistoryPartialFailureMissingPings(t *testing.T) {
 	}
 }
 
+// TestImportCmdHistoryPartialFailureCorruptRRD is the DB+rrdtool-gated regression for
+// CODE_REVIEW #4: a matched target whose RRD is corrupt/unreadable fails ExtractRRD. Before
+// the fix that was logged and skipped WITHOUT counting toward the partial-failure total, so a
+// run where a target's history was never imported still reported 0 failed and exited 0. The
+// extraction failure must now be counted, the valid target must still import, and the run must
+// exit exitPartialFailure.
+func TestImportCmdHistoryPartialFailureCorruptRRD(t *testing.T) {
+	dsn := os.Getenv("SMOKE_TEST_DSN")
+	if dsn == "" {
+		t.Skip("SMOKE_TEST_DSN not set")
+	}
+	rrdtoolBin, err := exec.LookPath("rrdtool")
+	if err != nil {
+		t.Skip("rrdtool not on PATH")
+	}
+	ctx := context.Background()
+	s, err := pgstore.New(ctx, dsn, 8, func(error) {})
+	if err != nil {
+		t.Fatalf("pgstore.New: %v", err)
+	}
+	defer s.Close()
+	if err := s.EnableDownsampling(ctx); err != nil {
+		t.Fatalf("EnableDownsampling: %v", err)
+	}
+
+	ctxCleanup := context.Background()
+	deleteRows := func() {
+		pool, err := pgxpool.New(ctxCleanup, dsn)
+		if err != nil {
+			t.Fatalf("cleanup: connect: %v", err)
+		}
+		defer pool.Close()
+		if _, err := pool.Exec(ctxCleanup, "DELETE FROM samples WHERE target LIKE 'ImpCorrupt%'"); err != nil {
+			t.Fatalf("cleanup: delete ImpCorrupt* rows: %v", err)
+		}
+	}
+	deleteRows()
+	t.Cleanup(deleteRows)
+
+	root := t.TempDir()
+	configDir := filepath.Join(root, "config")
+	dataDir := filepath.Join(root, "data")
+	mkdir(t, configDir)
+	mkdir(t, dataDir)
+
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	good := "ImpCorruptGood" + suffix
+	bad := "ImpCorruptBad" + suffix
+
+	// Both targets resolve pings validly (via the Database file), so the ONLY failure is the
+	// bad target's unreadable RRD — isolating the extraction-failure path this fix covers.
+	targetsBody := fmt.Sprintf("*** Targets ***\nprobe = FPing\n+ %s\nhost = a.example\n+ %s\nhost = b.example\n", good, bad)
+	writeFile(t, filepath.Join(configDir, "Targets"), targetsBody)
+	writeFile(t, filepath.Join(configDir, "Probes"), "*** Probes ***\n+ FPing\nbinary = /usr/sbin/fping\n")
+	writeFile(t, filepath.Join(configDir, "Database"), "*** Database ***\nstep = 300\npings = 20\n")
+
+	start := time.Now().Add(-2 * time.Hour).Truncate(300 * time.Second).Unix()
+	goodRRD := filepath.Join(dataDir, good+".rrd")
+	mustRunRRDTool(t, rrdtoolBin, "create", goodRRD, "--start", fmt.Sprint(start-300), "--step", "300",
+		"DS:median:GAUGE:600:0:180", "DS:loss:GAUGE:600:0:20", "RRA:AVERAGE:0.5:1:100")
+	for i := 0; i < 5; i++ {
+		ts := start + int64(i)*300
+		mustRunRRDTool(t, rrdtoolBin, "update", goodRRD, fmt.Sprintf("%d:%f:%d", ts, 0.010+float64(i)*0.001, i%3))
+	}
+	// The bad target's .rrd exists (so Reconcile matches it) but is garbage, so ExtractRRD fails.
+	writeFile(t, filepath.Join(dataDir, bad+".rrd"), "not a valid rrd file\n")
+
+	var code int
+	stdout, stderr := captureOutput(t, func() {
+		code = importCmd([]string{"smokeping", configDir, "--history", "--dsn", dsn, "--rrdtool", rrdtoolBin})
+	})
+	if code != exitPartialFailure {
+		t.Fatalf("importCmd --history exit code = %d, want %d (partial failure)\nstdout:\n%s\nstderr:\n%s",
+			code, exitPartialFailure, stdout, stderr)
+	}
+	if !strings.Contains(stderr, bad) || !strings.Contains(stderr, "extract failed") {
+		t.Errorf("stderr should name the failed target %s and mention 'extract failed', got:\n%s", bad, stderr)
+	}
+	if !strings.Contains(stdout, "1 failed") {
+		t.Errorf("stdout summary should report 1 failed target, got:\n%s", stdout)
+	}
+
+	histGood, err := s.HistoryVantage(ctx, good, "local")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(histGood) == 0 {
+		t.Fatalf("HistoryVantage(%s) empty — the valid target should still be imported", good)
+	}
+	histBad, err := s.HistoryVantage(ctx, bad, "local")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(histBad) != 0 {
+		t.Fatalf("HistoryVantage(%s) = %d row(s), want 0 — the corrupt-RRD target must not be imported", bad, len(histBad))
+	}
+}
+
 // TestImportCmdHistoryFailsWithoutAggregates is the DB+rrdtool-gated regression for
 // review Finding #3: when the hourly/daily continuous aggregates are absent (downsampling
 // never enabled — production init doesn't create them; only `smoked -downsample` does),

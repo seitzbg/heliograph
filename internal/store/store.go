@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"regexp"
+	"strconv"
 	"sync"
 	"time"
 
@@ -65,7 +66,13 @@ type Store interface {
 // rather than silently dropping under a transient store failure. The local
 // collector keeps the fire-and-forget Add; only ingest needs the feedback.
 type ResultIngester interface {
-	AddResults(ctx context.Context, outcomes []scheduler.Outcome) error
+	// AddResults persists a batch idempotently by (target, vantage, ts) and returns the
+	// subset of outcomes that were NEWLY persisted (not already present). The caller
+	// evaluates alerts only over that subset, so a replayed round — an HTTP retry, or the
+	// deliberate resend when a split batch's later half fails transiently — is stored once
+	// and never double-advances alert hysteresis (CODE_REVIEW #4/replay). A non-nil error
+	// means the whole batch is uncertain; nothing should be treated as persisted.
+	AddResults(ctx context.Context, outcomes []scheduler.Outcome) ([]scheduler.Outcome, error)
 }
 
 // RollupPoint is one downsampled bucket for a target (hourly or daily). Median
@@ -179,7 +186,11 @@ type MemStore struct {
 	history map[vk][]scheduler.Outcome
 	keys    []string // distinct target names, insertion order (for Keys())
 	seen    map[string]bool
-	cap     int
+	// ingested records (vantage,target,ts) already accepted via AddResults, so a replayed
+	// agent round is stored once — the dev/test analogue of the DB's unique constraint, so
+	// MemStore doesn't double-count a replay for alert evaluation (CODE_REVIEW #4/replay).
+	ingested map[string]bool
+	cap      int
 }
 
 func NewMem(historyCap int) *MemStore {
@@ -187,10 +198,11 @@ func NewMem(historyCap int) *MemStore {
 		historyCap = 512
 	}
 	return &MemStore{
-		latest:  map[vk]scheduler.Outcome{},
-		history: map[vk][]scheduler.Outcome{},
-		seen:    map[string]bool{},
-		cap:     historyCap,
+		latest:   map[vk]scheduler.Outcome{},
+		history:  map[vk][]scheduler.Outcome{},
+		seen:     map[string]bool{},
+		ingested: map[string]bool{},
+		cap:      historyCap,
 	}
 }
 
@@ -198,27 +210,52 @@ func (s *MemStore) Add(outcomes []scheduler.Outcome) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, o := range outcomes {
-		o.Vantage = VantageOf(o) // resolve "" -> local once, on write
-		k := vk{o.Vantage, o.Target.Name}
-		if !s.seen[o.Target.Name] {
-			s.seen[o.Target.Name] = true
-			s.keys = append(s.keys, o.Target.Name)
-		}
-		s.latest[k] = o
-		h := append(s.history[k], o)
-		if len(h) > s.cap {
-			h = h[len(h)-s.cap:]
-		}
-		s.history[k] = h
+		s.storeOne(o)
 	}
 }
 
-// AddResults implements ResultIngester by appending like Add. MemStore is a
-// dev/test store; idempotency (dropping a replayed batch) is a DB guarantee, so
-// this always succeeds.
-func (s *MemStore) AddResults(_ context.Context, outcomes []scheduler.Outcome) error {
-	s.Add(outcomes)
-	return nil
+// storeOne records one outcome into latest/history/keys. The caller holds s.mu. Vantage is
+// resolved here so callers pass raw outcomes. Shared by Add (fire-and-forget local writes)
+// and AddResults (deduplicated agent ingest).
+func (s *MemStore) storeOne(o scheduler.Outcome) {
+	o.Vantage = VantageOf(o) // resolve "" -> local once, on write
+	k := vk{o.Vantage, o.Target.Name}
+	if !s.seen[o.Target.Name] {
+		s.seen[o.Target.Name] = true
+		s.keys = append(s.keys, o.Target.Name)
+	}
+	s.latest[k] = o
+	h := append(s.history[k], o)
+	if len(h) > s.cap {
+		h = h[len(h)-s.cap:]
+	}
+	s.history[k] = h
+}
+
+// resultKey identifies one ingested round by (vantage, target, ts) — the same tuple the DB's
+// unique constraint uses — so a replay is detected regardless of resolved-vantage timing.
+func resultKey(o scheduler.Outcome) string {
+	return VantageOf(o) + "\x00" + o.Target.Name + "\x00" + strconv.FormatInt(o.When.UTC().UnixNano(), 10)
+}
+
+// AddResults implements ResultIngester: it stores each round at most once (keyed by
+// vantage,target,ts) and returns only the newly-stored subset, so a replayed agent round
+// isn't double-counted for alert evaluation — the dev/test analogue of the DB's ON CONFLICT
+// DO NOTHING (CODE_REVIEW #4/replay). MemStore is not durable, so this never errors.
+func (s *MemStore) AddResults(_ context.Context, outcomes []scheduler.Outcome) ([]scheduler.Outcome, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var inserted []scheduler.Outcome
+	for _, o := range outcomes {
+		key := resultKey(o)
+		if s.ingested[key] {
+			continue // already stored — a replay
+		}
+		s.ingested[key] = true
+		s.storeOne(o)
+		inserted = append(inserted, o)
+	}
+	return inserted, nil
 }
 
 func (s *MemStore) Keys() ([]string, error) {
