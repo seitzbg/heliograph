@@ -10,6 +10,13 @@ All notable changes to **smokeping-modern** are recorded here. The format follow
 - **Project `LICENSE` (MIT).** The v1.0.0 source shipped with no license, leaving downstream use,
   modification, and redistribution rights unstated; MIT makes them explicit.
 
+### Changed
+- **CI and container registry moved to GitHub.** The project now lives on GitHub; CI runs as GitHub
+  Actions workflows (`.github/workflows/ci.yml` for test → build → scan, `image-scan.yml` for the
+  scheduled re-scan) replacing the former `.gitlab-ci.yml`, and the collector image is published to
+  GHCR (`ghcr.io/<owner>/smokeping-modern`) instead of the git.fiber.house registry. The jobs, their
+  blocking/report-only semantics, digest-pinned images, and tool versions are carried over unchanged.
+
 ### Fixed
 - **Minting the reserved vantage name `local` now returns a clear 409, not a generic 503.** It passed
   the name-shape check (it is a valid name) and the store's reserved-name rejection was funneled into
@@ -755,5 +762,6 @@ the smoke-graph look, a fast/parallel poller, and probes as plugins.
 - Full re-implementation reference / code map maintained outside the repo at
   `~/.claude/plans/smokeping-codemap/`.
 
-[Unreleased]: https://git.fiber.house/munro/smokeping-modern/-/compare/v0.1.0...main
-[0.1.0]: https://git.fiber.house/munro/smokeping-modern/-/tags/v0.1.0
+[Unreleased]: https://github.com/seitzbg/smokeping-modern/compare/v1.0.0...main
+[1.0.0]: https://github.com/seitzbg/smokeping-modern/releases/tag/v1.0.0
+[0.1.0]: https://github.com/seitzbg/smokeping-modern/releases/tag/v0.1.0
