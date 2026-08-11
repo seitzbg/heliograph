@@ -32,6 +32,11 @@ type Matcher interface {
 	Length() int                   // trailing samples needed
 	Test(w Window, prev bool) bool // new firing state
 	Describe() string
+	// Key is a canonical, stable semantic identity for the matcher: two matchers share a
+	// key iff they mean the same thing. A config reload inherits an alert's firing state
+	// only when the matcher key is unchanged, so a redefined matcher under the same alert
+	// name doesn't carry stale hysteresis into new semantics (CODE_REVIEW #4).
+	Key() string
 }
 
 // ---- hysteresis matchers ----
@@ -44,6 +49,7 @@ type CheckLoss struct {
 }
 
 func (m CheckLoss) Length() int      { return m.X }
+func (m CheckLoss) Key() string      { return fmt.Sprintf("loss(l=%g,x=%d)", m.L, m.X) }
 func (m CheckLoss) Describe() string { return fmt.Sprintf("loss >= %g%% for %d samples", m.L, m.X) }
 func (m CheckLoss) Test(w Window, prev bool) bool {
 	return hysteresis(w.Loss, m.X, prev, func(v float64) bool { return v >= m.L })
@@ -57,6 +63,7 @@ type CheckLatency struct {
 }
 
 func (m CheckLatency) Length() int { return m.X }
+func (m CheckLatency) Key() string { return fmt.Sprintf("rtt(l=%g,x=%d)", m.L, m.X) }
 func (m CheckLatency) Describe() string {
 	return fmt.Sprintf("rtt >= %gms for %d samples", m.L*1000, m.X)
 }
@@ -136,6 +143,7 @@ type Pattern struct {
 	Src   string
 }
 
+func (p Pattern) Key() string      { return "pattern:" + p.Field + ":" + p.Src }
 func (p Pattern) Describe() string { return p.Field + " pattern " + p.Src }
 
 // Length is the maximum number of trailing samples the pattern can inspect —

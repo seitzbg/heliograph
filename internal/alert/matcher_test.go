@@ -5,6 +5,56 @@ import (
 	"testing"
 )
 
+// Key is the matcher's semantic identity, used to decide on a config reload whether an
+// alert's firing state may be inherited. Distinct semantics must produce distinct keys;
+// identical semantics must produce identical keys.
+func TestMatcherKey(t *testing.T) {
+	lossPat, err := ParsePattern("loss", ">50%,>50%")
+	if err != nil {
+		t.Fatalf("ParsePattern: %v", err)
+	}
+	cases := []struct {
+		m    Matcher
+		want string
+	}{
+		{CheckLoss{L: 50, X: 3}, "loss(l=50,x=3)"},
+		{CheckLatency{L: 0.2, X: 2}, "rtt(l=0.2,x=2)"},
+		{lossPat, "pattern:loss:>50%,>50%"},
+	}
+	for _, c := range cases {
+		if got := c.m.Key(); got != c.want {
+			t.Errorf("%T.Key() = %q, want %q", c.m, got, c.want)
+		}
+	}
+
+	// Every field that changes the matcher's meaning must change the key; equal semantics
+	// must match. (loss vs rtt with the same numbers must not collide.)
+	same := CheckLoss{L: 50, X: 3}.Key() == CheckLoss{L: 50, X: 3}.Key()
+	if !same {
+		t.Error("identical CheckLoss produced different keys")
+	}
+	for _, pair := range [][2]Matcher{
+		{CheckLoss{L: 50, X: 3}, CheckLoss{L: 60, X: 3}},    // threshold
+		{CheckLoss{L: 50, X: 3}, CheckLoss{L: 50, X: 4}},    // window
+		{CheckLoss{L: 50, X: 3}, CheckLatency{L: 50, X: 3}}, // type
+		{lossPat, mustPat(t, "rtt", ">50%,>50%")},           // pattern field
+		{lossPat, mustPat(t, "loss", ">50%,>50%,>50%")},     // pattern source
+	} {
+		if pair[0].Key() == pair[1].Key() {
+			t.Errorf("distinct matchers share a key: %q", pair[0].Key())
+		}
+	}
+}
+
+func mustPat(t *testing.T, field, src string) Matcher {
+	t.Helper()
+	m, err := ParsePattern(field, src)
+	if err != nil {
+		t.Fatalf("ParsePattern(%q,%q): %v", field, src, err)
+	}
+	return m
+}
+
 func TestCheckLossHysteresis(t *testing.T) {
 	m := CheckLoss{L: 50, X: 3}
 	if m.Test(Window{Loss: []float64{60, 60}}, false) { // < X samples worth of bad? only 2

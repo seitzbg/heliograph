@@ -215,6 +215,11 @@ func TestIngestFingerprintAttribution(t *testing.T) {
 	if len(ing.got) != 1 || ing.got[0].Target.Host != "2.2.2.2" {
 		t.Fatalf("current-fingerprint round must be stored as current host: %+v", ing.got)
 	}
+	// The validated fingerprint rides on the stored outcome so a later reload can drop a
+	// remote round that crossed a redefinition, the same way it drops a local one (#4).
+	if ing.got[0].Fingerprint != fpCurrent {
+		t.Fatalf("ingested outcome must carry its fingerprint, got %q want %q", ing.got[0].Fingerprint, fpCurrent)
+	}
 }
 
 func TestIngestDropsUnassignedTarget(t *testing.T) {

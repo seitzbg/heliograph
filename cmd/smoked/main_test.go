@@ -20,8 +20,11 @@ import (
 	"smokeping-modern/internal/config"
 	"smokeping-modern/internal/configstore"
 	"smokeping-modern/internal/federation"
+	"smokeping-modern/internal/model"
 	"smokeping-modern/internal/probe"
+	"smokeping-modern/internal/sample"
 	"smokeping-modern/internal/scheduler"
+	"smokeping-modern/internal/store"
 
 	_ "smokeping-modern/internal/probe/tcpconnect" // register TCPConnect for the config
 )
@@ -232,13 +235,110 @@ func TestBuildRuntimeRejectsGenuinelyInvalidImportNotAppendImport(t *testing.T) 
 	})
 }
 
+type capNotify struct{ n int }
+
+func (c *capNotify) Notify(alert.Event) { c.n++ }
+
+// Bug D (CODE_REVIEW #4): a local round that finishes measuring under an obsolete target
+// definition (a reload redefined the target between measure and eval) carries a stale
+// fingerprint and must be dropped, not evaluated against the new alert identity.
+func TestEvalDropsOutcomeWithStaleFingerprint(t *testing.T) {
+	cap := &capNotify{}
+	eng := alert.NewEngine(
+		map[string]*alert.Alert{"loss": {Name: "loss", Matcher: alert.CheckLoss{L: 50, X: 1}, To: []string{"cap"}}},
+		map[string]alert.Notifier{"cap": cap},
+	)
+	rt := &runtime{
+		engine:         eng,
+		alertsByTarget: map[string][]string{"t": {"loss"}},
+		targetFP:       map[string]string{"t": "sha256:current"},
+	}
+	lost := scheduler.Outcome{Target: probe.Target{Name: "t"}, Computed: sample.Compute(1, nil)} // 100% loss
+
+	stale := lost
+	stale.Fingerprint = "sha256:old" // measured under an obsolete definition
+	rt.eval([]scheduler.Outcome{stale})
+	if cap.n != 0 {
+		t.Fatalf("stale-fingerprint outcome must not be evaluated/alerted, got %d events", cap.n)
+	}
+
+	cur := lost
+	cur.Fingerprint = "sha256:current"
+	rt.eval([]scheduler.Outcome{cur})
+	if cap.n != 1 {
+		t.Fatalf("current-fingerprint outcome must fire, got %d events", cap.n)
+	}
+}
+
+// Bug C (CODE_REVIEW #4): attaching an alert to a previously-unalerted target on reload must
+// seed its window from durable history, so an already-breaching target fires immediately
+// instead of waiting X fresh rounds. swapRuntime runs the seed before the swap.
+func TestSwapRuntimeSeedsNewlyAlertedTarget(t *testing.T) {
+	st := store.NewMem(16)
+	now := time.Now()
+	st.Add([]scheduler.Outcome{{ // one recent breaching round, local vantage
+		Target: probe.Target{Name: "t", Host: "h"}, ProbeName: "FPing",
+		Computed: sample.Compute(1, nil), When: now.Add(-30 * time.Second),
+	}})
+	alertDef := map[string]*alert.Alert{"loss": {Name: "loss", Matcher: alert.CheckLoss{L: 50, X: 2}, To: []string{"cap"}}}
+	cap := &capNotify{}
+
+	mon := model.Monitor{Name: "t", ProbeKind: "FPing", Host: "h", Pings: 1, Step: time.Minute, Vantages: []string{store.DefaultVantage}}
+	old := &runtime{ // target present but NOT alerted yet
+		engine:   alert.NewEngine(alertDef, map[string]alert.Notifier{"cap": cap}),
+		monitors: []model.Monitor{mon}, alertsByTarget: map[string][]string{}, targetFP: map[string]string{"t": "fp"},
+	}
+	var current atomic.Pointer[runtime]
+	current.Store(old)
+	var mu sync.Mutex
+
+	monAlerted := mon
+	monAlerted.Alerts = []string{"loss"}
+	nrt := &runtime{ // target now carries a 2-sample loss alert
+		engine:   alert.NewEngine(alertDef, map[string]alert.Notifier{"cap": cap}),
+		monitors: []model.Monitor{monAlerted}, alertsByTarget: map[string][]string{"t": {"loss"}}, targetFP: map[string]string{"t": "fp"},
+	}
+	seed := func(r *runtime) { warmStartAlerts(context.Background(), r.engine, r.monitors, st, now) }
+	swapRuntime(&current, &mu, nrt, seed)
+
+	// Window seeded with the 1 prior breaching round; one more now meets X=2 → fires immediately.
+	current.Load().eval([]scheduler.Outcome{{
+		Target: probe.Target{Name: "t", Host: "h"}, ProbeName: "FPing",
+		Computed: sample.Compute(1, nil), When: now, Fingerprint: "fp",
+	}})
+	if cap.n != 1 {
+		t.Fatalf("newly-alerted target should fire immediately from seeded history, got %d events", cap.n)
+	}
+}
+
+// sameTargetIdentity underpins Bug A: only a target whose measurement fingerprint is unchanged
+// keeps its inherited window/firing state across a reload. It compares the runtimes' targetFP,
+// so any identity-changing field (host, probe, params, pings, probe-config) flips it.
+func TestSameTargetIdentity(t *testing.T) {
+	old := &runtime{targetFP: map[string]string{
+		"keep": "fp1", "rehost": "fpA", "reparam": "fp2", "gone": "fpG",
+	}}
+	nrt := &runtime{targetFP: map[string]string{
+		"keep": "fp1", "rehost": "fpB", "reparam": "fp3", "new": "fpN",
+	}}
+	same := sameTargetIdentity(old, nrt)
+	for name, want := range map[string]bool{"keep": true, "rehost": false, "reparam": false, "new": false} {
+		if same[name] != want {
+			t.Errorf("sameTargetIdentity[%q] = %v, want %v", name, same[name], want)
+		}
+	}
+	if _, ok := same["gone"]; ok {
+		t.Error("removed target must not appear in sameTargetIdentity")
+	}
+}
+
 func TestSwapRuntimeInstallsAndInherits(t *testing.T) {
 	var current atomic.Pointer[runtime]
 	var mu sync.Mutex
 	old := &runtime{jobs: nil} // nil engine → inheritance guarded off
 	current.Store(old)
 	nrt := &runtime{}
-	swapRuntime(&current, &mu, nrt)
+	swapRuntime(&current, &mu, nrt, nil)
 	if current.Load() != nrt {
 		t.Fatal("swapRuntime did not install the new runtime")
 	}
@@ -266,7 +366,7 @@ func TestApplyConfigValidatesPersistsSwaps(t *testing.T) {
 
 	// invalid → ErrConfigInvalid, NOT persisted, NOT swapped
 	_, verBefore, _ := cs.Get(ctx)
-	if err := applyConfig(cs, &current, &mu, badBuild, json.RawMessage(`{}`), verBefore); !errors.Is(err, api.ErrConfigInvalid) {
+	if err := applyConfig(cs, &current, &mu, badBuild, json.RawMessage(`{}`), verBefore, nil); !errors.Is(err, api.ErrConfigInvalid) {
 		t.Fatalf("want ErrConfigInvalid, got %v", err)
 	}
 	if _, verAfter, _ := cs.Get(ctx); verAfter != verBefore {
@@ -277,7 +377,7 @@ func TestApplyConfigValidatesPersistsSwaps(t *testing.T) {
 	}
 
 	// valid → persists (version bumps) + swaps
-	if err := applyConfig(cs, &current, &mu, goodBuild, json.RawMessage(`{"targets":{"children":{}}}`), verBefore); err != nil {
+	if err := applyConfig(cs, &current, &mu, goodBuild, json.RawMessage(`{"targets":{"children":{}}}`), verBefore, nil); err != nil {
 		t.Fatalf("valid apply: %v", err)
 	}
 	if _, verAfter, _ := cs.Get(ctx); verAfter != verBefore+1 {
@@ -288,7 +388,7 @@ func TestApplyConfigValidatesPersistsSwaps(t *testing.T) {
 	}
 
 	// stale version → ErrConfigConflict
-	if err := applyConfig(cs, &current, &mu, goodBuild, json.RawMessage(`{}`), verBefore); !errors.Is(err, api.ErrConfigConflict) {
+	if err := applyConfig(cs, &current, &mu, goodBuild, json.RawMessage(`{}`), verBefore, nil); !errors.Is(err, api.ErrConfigConflict) {
 		t.Fatalf("want ErrConfigConflict on stale version, got %v", err)
 	}
 }
@@ -328,7 +428,7 @@ func TestApplyMuSerializesRuntimeSwaps(t *testing.T) {
 		applyMu.Lock()
 		defer applyMu.Unlock()
 		time.Sleep(buildDelay) // simulate build time while holding the lock
-		swapRuntime(&current, &evalMu, nrt)
+		swapRuntime(&current, &evalMu, nrt, nil)
 	}
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -576,7 +676,7 @@ func TestConfigImportMergeThenApply(t *testing.T) {
 	if ierr != nil || added != 1 || unchanged != 0 {
 		t.Fatalf("first import: added=%d unchanged=%d err=%v", added, unchanged, ierr)
 	}
-	if err := applyConfig(cs, &current, &evalMu, build, merged, ver0); err != nil {
+	if err := applyConfig(cs, &current, &evalMu, build, merged, ver0, nil); err != nil {
 		t.Fatalf("apply after import: %v", err)
 	}
 	doc1, ver1, _ := cs.Get(ctx)

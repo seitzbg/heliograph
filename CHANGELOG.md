@@ -180,6 +180,21 @@ breaking changes.
   instead of a moving `latest-pg16` tag.
 
 ### Fixed
+- **Alert reload state is now reconciled by identity, not names.** A live config reload
+  (`SIGHUP` or the admin config API) inherited each target's sample window and firing/visible state
+  by target *name* + alert *name*, so it could carry stale state across an incompatible redefinition
+  and miss seeding a newly-attached alert. Four cases are fixed: reusing a target name for a target
+  whose measurement identity changed (host, probe, params, pings, or probe-level config — the same
+  `federation.Fingerprint` the ingest path keys on) no longer inherits the old window or firing state
+  (it's seeded fresh from history for the new identity); changing a matcher while keeping the alert
+  name no longer inherits hysteresis for the old semantics (matchers now carry a `Key()` identity,
+  and firing/visible state is inherited only when the key is unchanged); attaching an alert to a
+  previously-unalerted target now seeds its window from durable history during the swap (via the
+  existing warm-start), so an already-breaching target fires immediately instead of after X fresh
+  rounds; and a round (local or ingested) that finishes measuring *during* the swap of a redefined
+  target is dropped rather than evaluated against the new identity (jobs and ingested rounds carry
+  the fingerprint, and `eval` skips a mismatch). The common unchanged-config reload behaves exactly
+  as before — hysteresis preserved, no re-fire. (CODE_REVIEW #4.)
 - **Buffered agent results can no longer be attributed to a redefined target.** An agent's
   store-and-forward buffer keyed rounds only by target *name*, and the hub, on ingest, looked the
   name up in the *current* assignment and stamped that target's current host/probe onto the old
