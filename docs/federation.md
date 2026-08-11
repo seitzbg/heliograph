@@ -140,8 +140,8 @@ $ smoke-agent -config /etc/smoke-agent.yaml
 ```
 
 Every flag can override the file: `-hub`, `-key`, `-vantage`, `-interval`,
-`-timeout`, `-workers`, `-buffer`, `-flush-max`, `-insecure`, plus `-log-format`
-(text|json) and `-log-level`. The agent has **no listener** — it only makes
+`-timeout`, `-workers`, `-buffer`, `-flush-max`, `-insecure`, `-spool-dir`, plus
+`-log-format` (text|json) and `-log-level`. The agent has **no listener** — it only makes
 outbound HTTPS calls, so it works behind NAT. On push failure it retains rounds
 in a bounded in-memory buffer and retries with backoff; when the buffer is full
 it drops the oldest and logs the drop.

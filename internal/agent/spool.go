@@ -101,9 +101,26 @@ func readSegment(path string, truncate bool) ([]record, error) {
 	return recs, nil
 }
 
+// fsyncDir flushes a directory entry change (a rename or create) to disk, so it
+// survives a crash independently of filesystem metadata-ordering guarantees.
+func fsyncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	if err := d.Sync(); err != nil {
+		d.Close()
+		return err
+	}
+	return d.Close()
+}
+
 // writeHead atomically records the head watermark: write a temp file (with a CRC),
 // fsync it, then rename over dir/head. Rename is atomic on a single filesystem, so
-// a crash leaves either the old value or the new one, never a torn file.
+// a crash leaves either the old value or the new one, never a torn file. The
+// directory is fsynced after the rename so the new watermark is durable independently
+// of filesystem metadata-ordering guarantees, before the caller (flushLocked) may act
+// on it by reclaiming (deleting) segments the new watermark marks dead.
 func writeHead(dir string, head int64) error {
 	var buf [12]byte // u64 head + u32 crc
 	binary.LittleEndian.PutUint64(buf[0:8], uint64(head))
@@ -125,7 +142,10 @@ func writeHead(dir string, head int64) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmpName, filepath.Join(dir, headFile))
+	if err := os.Rename(tmpName, filepath.Join(dir, headFile)); err != nil {
+		return err
+	}
+	return fsyncDir(dir)
 }
 
 // readHead returns the durable head watermark, or 0 when the file is absent (first
@@ -294,7 +314,12 @@ func openSpool(dir string) (*spool, int64, []agentwire.RoundReport, error) {
 		lock.Close()
 		return nil, 0, nil, fmt.Errorf("open active segment: %w", err)
 	}
-	fi, _ := f.Stat()
+	fi, err := f.Stat()
+	if err != nil {
+		f.Close()
+		lock.Close() // release flock on this error path like the others
+		return nil, 0, nil, fmt.Errorf("stat active segment: %w", err)
+	}
 	s.active = f
 	s.activePath = activePath
 	s.activeBytes = fi.Size()
@@ -392,6 +417,13 @@ func (s *spool) rollLocked(nextSeq int64) error {
 	p := filepath.Join(s.dir, segmentName(nextSeq))
 	f, err := os.OpenFile(p, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
+		return err
+	}
+	// Fsync the directory so the new segment's directory entry is durable before any
+	// records are written+fsynced into it — otherwise a crash could lose an entire
+	// freshly-rolled segment's fsynced rounds if the rename/create never made it to disk.
+	if err := fsyncDir(s.dir); err != nil {
+		f.Close()
 		return err
 	}
 	s.active = f
