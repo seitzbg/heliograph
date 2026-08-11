@@ -140,8 +140,10 @@ type fakePersister struct {
 	heads   []int64 // headSeq values advanced to
 }
 
-func (f *fakePersister) append(seq int64, r agentwire.RoundReport) { f.appends = append(f.appends, seq) }
-func (f *fakePersister) advanceHead(h int64)                       { f.heads = append(f.heads, h) }
+func (f *fakePersister) append(seq int64, r agentwire.RoundReport) {
+	f.appends = append(f.appends, seq)
+}
+func (f *fakePersister) advanceHead(h int64) { f.heads = append(f.heads, h) }
 
 func TestBufferPersistsAddAndCommit(t *testing.T) {
 	b := newBuffer(10)
