@@ -155,6 +155,32 @@ func TestIngestAcceptsAssignedTarget(t *testing.T) {
 	}
 }
 
+// Audit M1: a round whose self-reported `pings` exceeds the assigned monitor's
+// pings must be dropped, not accepted. ingestServer pins cf.Pings=20; a round
+// claiming pings=10000 with no RTTs would otherwise make sample.Compute allocate
+// a 10000-element array per round from a tiny request body — a memory
+// amplification vector reachable by any authenticated vantage. Bounding the
+// per-round pings by the authoritative assignment closes it.
+func TestIngestDropsRoundExceedingAssignedPings(t *testing.T) {
+	ing := &fakeIngester{}
+	srv := ingestServer(ing)
+	w := postResults(t, srv,
+		fmt.Sprintf(`{"results":[{"target":"cf","ts":%q,"pings":10000,"rtts":[]}]}`, recentTS()))
+	if w.Code != 200 {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body)
+	}
+	var resp struct{ Accepted, Dropped int }
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Accepted != 0 || resp.Dropped != 1 {
+		t.Fatalf("round exceeding assigned pings must be dropped: accepted=%d dropped=%d", resp.Accepted, resp.Dropped)
+	}
+	if len(ing.got) != 0 {
+		t.Fatalf("a round over the assigned ping count must not be stored, got %d", len(ing.got))
+	}
+}
+
 // The assignment must stamp each target with federation.Fingerprint over its current
 // identity, so the agent can echo it back and the hub can verify attribution on ingest.
 func TestAssignmentStampsFingerprint(t *testing.T) {
