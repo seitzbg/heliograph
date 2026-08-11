@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to **smokeping-modern** are recorded here. The format follows
+All notable changes to **Heliograph** are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project aims to follow
 [Semantic Versioning](https://semver.org/) — 1.0.0 is the first stable release.
 
@@ -11,10 +11,14 @@ All notable changes to **smokeping-modern** are recorded here. The format follow
   modification, and redistribution rights unstated; MIT makes them explicit.
 
 ### Changed
+- **Renamed to Heliograph.** The project's outward identity is now **Heliograph** — the GitHub repo
+  (`seitzbg/heliograph`), the container image (`ghcr.io/seitzbg/heliograph`), CI badges, and docs.
+  The Go module path (`smokeping-modern`) and the daemon binary (`smoked`) are unchanged, so imports
+  and command-line usage are unaffected; this is a branding rename, not a code change.
 - **CI and container registry moved to GitHub.** The project now lives on GitHub; CI runs as GitHub
   Actions workflows (`.github/workflows/ci.yml` for test → build → scan, `image-scan.yml` for the
   scheduled re-scan) replacing the former `.gitlab-ci.yml`, and the collector image is published to
-  GHCR (`ghcr.io/<owner>/smokeping-modern`) instead of the git.fiber.house registry. The jobs, their
+  GHCR (`ghcr.io/seitzbg/heliograph`) instead of the git.fiber.house registry. The jobs, their
   blocking/report-only semantics, digest-pinned images, and tool versions are carried over unchanged.
 
 ### Fixed
@@ -762,6 +766,6 @@ the smoke-graph look, a fast/parallel poller, and probes as plugins.
 - Full re-implementation reference / code map maintained outside the repo at
   `~/.claude/plans/smokeping-codemap/`.
 
-[Unreleased]: https://github.com/seitzbg/smokeping-modern/compare/v1.0.0...main
-[1.0.0]: https://github.com/seitzbg/smokeping-modern/releases/tag/v1.0.0
-[0.1.0]: https://github.com/seitzbg/smokeping-modern/releases/tag/v0.1.0
+[Unreleased]: https://github.com/seitzbg/heliograph/compare/v1.0.0...main
+[1.0.0]: https://github.com/seitzbg/heliograph/releases/tag/v1.0.0
+[0.1.0]: https://github.com/seitzbg/heliograph/releases/tag/v0.1.0

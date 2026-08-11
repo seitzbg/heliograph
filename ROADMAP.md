@@ -1,6 +1,6 @@
 # Roadmap
 
-The plan for **smokeping-modern** — a modern, non-Perl reimplementation of SmokePing.
+The plan for **Heliograph** — a modern, non-Perl reimplementation of SmokePing.
 Legend: ✅ done · 🚧 in progress · ⬜ todo.
 
 ## Guiding requirements

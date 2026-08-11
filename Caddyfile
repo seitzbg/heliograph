@@ -1,4 +1,4 @@
-# Bundled reverse proxy for smokeping-modern federation.
+# Bundled reverse proxy for Heliograph federation.
 #
 #   docker compose --profile federation up
 #

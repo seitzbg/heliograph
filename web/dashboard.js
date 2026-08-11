@@ -1,4 +1,4 @@
-// dashboard.js — the smokeping-modern SPA. Reads the Go collector's JSON API and
+// dashboard.js — the Heliograph SPA. Reads the Go collector's JSON API and
 // renders it with the shared Smoke canvas renderer (smoke.js).
 //
 // Views (hash-routed, Back/deep-link friendly):
