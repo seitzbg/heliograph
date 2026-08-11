@@ -7,6 +7,26 @@ All notable changes to **smokeping-modern** are recorded here. The format follow
 ## [Unreleased]
 
 ### Fixed
+- **Agent no longer discards buffered rounds on a malformed hub success response.** `PushResults`
+  accepted any 2xx and ignored the response-decode error, so an empty `200`, a `204`, HTML from a
+  proxy/maintenance page, or truncated JSON made the flush loop commit and reclaim the batch even
+  though the hub never acknowledged storing it — silent, irreversible measurement loss. It now
+  requires `200` with a single well-formed JSON object whose `accepted + dropped` accounts for the
+  batch, and treats any malformed/inconsistent success as a transient error so the batch stays
+  buffered for retry.
+- **A local probe crossing a config reload is no longer stored under the redefined target.** The
+  completion path wrote the sample to the store before the fingerprint check (which lived in alert
+  evaluation), so a round measured under definition A that finished after a SIGHUP/API reload
+  redefined the target to B was persisted and could surface as B's latest value — the remote ingest
+  path already gated storage on the fingerprint. Local storage and alert evaluation now run under one
+  runtime snapshot held against the reload swap, dropping an obsolete-identity round from both.
+- **Checksum corruption in the active agent spool segment now fails startup instead of being
+  silently truncated.** Recovery treated any incomplete decode of the active segment as a crash-torn
+  tail and truncated to the last good frame — so a CRC mismatch (storage corruption, partial media
+  failure, accidental edit) silently dropped the bad frame and every valid frame after it, with no
+  operator signal. Recovery now distinguishes a genuinely short/torn final frame (truncated and
+  recovered, the expected crash artifact) from a checksum mismatch (`errBadFrame`), which fails
+  loudly in any segment — closing the gap that made the frame CRC pointless for the active segment.
 - **SmokePing importer now inherits probe target-variables down the target tree.** Previously only
   the `probe` was inherited from ancestor `+`/`++` folders; a probe's target-variables (`lookup`,
   `port`, `recordtype`, `pings`, …) were read only from a target's own inline fields and the Probes

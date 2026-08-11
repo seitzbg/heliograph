@@ -84,12 +84,12 @@ func TestReadSegmentAllGood(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "seg.log")
 	all := append(encodeFrame(nil, 1, []byte("a")), encodeFrame(nil, 2, []byte("b"))...)
 	writeRaw(t, p, all)
-	recs, consumed, complete, err := readSegment(p)
+	recs, consumed, stopErr, err := readSegment(p)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !complete || consumed != int64(len(all)) {
-		t.Fatalf("complete=%v consumed=%d, want true %d", complete, consumed, len(all))
+	if stopErr != nil || consumed != int64(len(all)) {
+		t.Fatalf("stopErr=%v consumed=%d, want nil %d (clean decode)", stopErr, consumed, len(all))
 	}
 	if len(recs) != 2 || recs[0].seq != 1 || recs[1].seq != 2 {
 		t.Fatalf("recs = %+v", recs)
@@ -107,12 +107,12 @@ func TestReadSegmentTornTailIsIncomplete(t *testing.T) {
 	good := encodeFrame(nil, 1, []byte("a"))
 	torn := encodeFrame(nil, 2, []byte("bbbb"))[:5] // partial second frame
 	writeRaw(t, p, good, torn)
-	recs, consumed, complete, err := readSegment(p)
+	recs, consumed, stopErr, err := readSegment(p)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if complete || consumed != int64(len(good)) {
-		t.Fatalf("complete=%v consumed=%d, want false %d (stop at last good frame)", complete, consumed, len(good))
+	if !errors.Is(stopErr, errShortFrame) || consumed != int64(len(good)) {
+		t.Fatalf("stopErr=%v consumed=%d, want errShortFrame %d (torn tail, stop at last good frame)", stopErr, consumed, len(good))
 	}
 	if len(recs) != 1 || recs[0].seq != 1 {
 		t.Fatalf("recs = %+v, want just seq 1", recs)
@@ -129,12 +129,12 @@ func TestReadSegmentCorruptStopsThere(t *testing.T) {
 	f2[len(f2)-1] ^= 0xFF // corrupt second frame's payload
 	f3 := encodeFrame(nil, 3, []byte("c"))
 	writeRaw(t, p, f1, f2, f3)
-	recs, consumed, complete, err := readSegment(p)
+	recs, consumed, stopErr, err := readSegment(p)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if complete || consumed != int64(len(f1)) {
-		t.Fatalf("complete=%v consumed=%d, want false %d (stop at corruption)", complete, consumed, len(f1))
+	if !errors.Is(stopErr, errBadFrame) || consumed != int64(len(f1)) {
+		t.Fatalf("stopErr=%v consumed=%d, want errBadFrame %d (checksum corruption, stop there)", stopErr, consumed, len(f1))
 	}
 	if len(recs) != 1 || recs[0].seq != 1 {
 		t.Fatalf("recs = %+v, want to stop at corruption after seq 1", recs)
@@ -559,6 +559,41 @@ func TestSpoolClosedSegmentCorruptionFails(t *testing.T) {
 
 	if _, _, _, err := openSpool(dir, 1_000_000, 1<<30); err == nil {
 		t.Fatal("openSpool must fail on corruption in a closed segment, not silently drop records")
+	}
+}
+
+// CODE_REVIEW M3: a checksum-CORRUPT frame in the active (last) segment is real corruption, not a
+// crash-torn tail — openSpool must fail loudly (as it does for a closed segment), not silently
+// truncate the bad frame and every valid frame after it. Contrast TestSpoolTornLastSegmentTruncates,
+// where a genuinely SHORT (torn) tail is the expected crash artifact and is recovered.
+func TestSpoolActiveSegmentCorruptionFails(t *testing.T) {
+	dir := t.TempDir()
+	sp, _, _, _ := openSpoolT(dir)
+	for i := 0; i < 5; i++ {
+		sp.append(int64(i), rr(fmt.Sprintf("t%d", i)))
+	}
+	if err := sp.flush(); err != nil {
+		t.Fatal(err)
+	}
+	sp.close()
+
+	segs, _ := filepath.Glob(filepath.Join(dir, "seg-*.log"))
+	if len(segs) != 1 {
+		t.Fatalf("want 1 (active) segment, got %d", len(segs))
+	}
+	data, err := os.ReadFile(segs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Flip a byte in the first frame's CRC field ([4:8]) -> a guaranteed checksum mismatch
+	// (errBadFrame), not a length change that would read as a short/torn tail (errShortFrame).
+	data[4] ^= 0xFF
+	if err := os.WriteFile(segs[0], data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, _, err := openSpool(dir, 1_000_000, 1<<30); err == nil {
+		t.Fatal("openSpool must fail on checksum corruption in the active segment, not silently truncate it")
 	}
 }
 
