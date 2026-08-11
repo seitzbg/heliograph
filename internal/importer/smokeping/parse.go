@@ -125,8 +125,11 @@ var probeMap = map[string]string{
 // smokeTargetInfo carries, for one target node buildTree created, the
 // SmokePing-side data Parse needs later to project probe-level params onto
 // it: the resolved (inherited/overridden) SmokePing probe name, and the
-// target section's own inline fields — so an inline override (e.g. a
-// per-target `port`) can be told apart from the probe's file-level default.
+// target's effective fields — its own inline fields merged over everything
+// inherited from ancestor Targets folders (nearest-set-wins) — so both an
+// inline override and a value set on an ancestor folder (e.g. a per-subtree
+// `lookup`/`port`/`pings`) are carried, and are distinguishable from the
+// probe's Probes-file default when projected.
 type smokeTargetInfo struct {
 	probe  string
 	fields map[string]string
@@ -167,8 +170,14 @@ func buildTree(secs []Section) (*config.Node, Summary, map[*config.Node]smokeTar
 	names := []string{""}
 	depths := []int{0}
 	spProbe := []string{""}
+	// spFields[i] is the set of inheritable target-variables in scope at frame i
+	// (see noInheritKeys/inheritFields): each frame inherits its ancestor's
+	// fields and overlays its own, so a target resolves params/pings set on an
+	// ancestor folder, not just its own inline fields (audit H1).
+	spFields := []map[string]string{{}}
 	if len(secs) > 0 && secs[0].Depth == 0 {
 		spProbe[0] = secs[0].Fields["probe"] // top-level default probe
+		spFields[0] = inheritFields(nil, secs[0].Fields)
 	}
 	for _, s := range secs {
 		if s.Depth == 0 {
@@ -179,12 +188,16 @@ func buildTree(secs []Section) (*config.Node, Summary, map[*config.Node]smokeTar
 			names = names[:len(names)-1]
 			depths = depths[:len(depths)-1]
 			spProbe = spProbe[:len(spProbe)-1]
+			spFields = spFields[:len(spFields)-1]
 		}
 		parent := stack[len(stack)-1]
 		sp := spProbe[len(spProbe)-1]
 		if p, ok := s.Fields["probe"]; ok {
 			sp = p
 		}
+		// Effective (inherited + this section's own) target-variables. Used as
+		// smokeTargetInfo.fields for a target, and pushed so descendants inherit.
+		fields := inheritFields(spFields[len(spFields)-1], s.Fields)
 
 		_, dup := parent.Children[s.Name]
 		host, isTarget := s.Fields["host"]
@@ -201,7 +214,7 @@ func buildTree(secs []Section) (*config.Node, Summary, map[*config.Node]smokeTar
 			modern, ok := probeMap[sp]
 			if ok {
 				node = &config.Node{Probe: modern, Host: host}
-				info[node] = smokeTargetInfo{probe: sp, fields: s.Fields}
+				info[node] = smokeTargetInfo{probe: sp, fields: fields}
 			} else {
 				sum.Skipped = append(sum.Skipped, SkipNote{Path: pathOf(names, s.Name), Probe: sp, Reason: "unmapped probe"})
 				// Linked, host-less placeholder: the skipped target itself is
@@ -220,6 +233,7 @@ func buildTree(secs []Section) (*config.Node, Summary, map[*config.Node]smokeTar
 		names = append(names, s.Name)
 		depths = append(depths, s.Depth)
 		spProbe = append(spProbe, sp)
+		spFields = append(spFields, fields)
 	}
 	pruneEmptyFolders(root)
 	countTree(root, &sum)
@@ -327,6 +341,36 @@ var nonParamKeys = map[string]bool{
 	"slaves":       true,
 	"parents":      true,
 	"nomasterpoll": true,
+}
+
+// noInheritKeys are Targets-section keys that describe a single node and must
+// NOT propagate to descendants: `host` is per-target, and menu/title/remark are
+// per-node presentation. Every other key — a probe's target-variables (lookup,
+// port, recordtype, pings, ...) plus directives like alerts/alertee/slaves —
+// inherits down the tree the way SmokePing's grammar does once a probe is
+// chosen (`push @{_inherited}, @targetvars`), so a target that declares only
+// `host` still resolves params/pings set on an ancestor folder (audit H1).
+var noInheritKeys = map[string]bool{
+	"host":   true,
+	"menu":   true,
+	"title":  true,
+	"remark": true,
+}
+
+// inheritFields returns a fresh map: parent's inheritable fields overlaid with
+// own's (own wins — nearest-set-wins), dropping own's per-node keys
+// (noInheritKeys) so they don't leak to descendants. parent may be nil.
+func inheritFields(parent, own map[string]string) map[string]string {
+	m := make(map[string]string, len(parent)+len(own))
+	for k, v := range parent {
+		m[k] = v
+	}
+	for k, v := range own {
+		if !noInheritKeys[k] {
+			m[k] = v
+		}
+	}
+	return m
 }
 
 // Parse reads the three SmokePing config bodies (Targets, Probes, Database)

@@ -6,6 +6,16 @@ All notable changes to **smokeping-modern** are recorded here. The format follow
 
 ## [Unreleased]
 
+### Fixed
+- **SmokePing importer now inherits probe target-variables down the target tree.** Previously only
+  the `probe` was inherited from ancestor `+`/`++` folders; a probe's target-variables (`lookup`,
+  `port`, `recordtype`, `pings`, …) were read only from a target's own inline fields and the Probes
+  file. The standard SmokePing idiom — e.g. `lookup=` set once on a `+ DNS` folder, or `pings=` on a
+  subtree — therefore imported children with those settings **silently missing** (a DNS target that
+  couldn't resolve; a wrong `pings` denominator skewing `--history` loss). The importer now
+  accumulates inheritable fields down the tree (nearest-set-wins), matching SmokePing's grammar,
+  while per-node keys (`host`/`menu`/`title`/`remark`) still never inherit.
+
 ## [1.0.0] - 2026-08-11
 
 First stable release — a modern, non-Perl reimplementation of SmokePing in Go on TimescaleDB:
