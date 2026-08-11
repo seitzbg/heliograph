@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 
 	"smokeping-modern/internal/agentwire"
@@ -357,5 +358,86 @@ func TestSpoolStartCloseLifecycleIsIdempotent(t *testing.T) {
 	}
 	if len(live2) != 1 || live2[0].Target != "a" {
 		t.Fatalf("live2 = %+v, want [a]", live2)
+	}
+}
+
+func TestBufferSpoolCrashReplay(t *testing.T) {
+	dir := t.TempDir()
+
+	// Run 1: buffer with a spool. Add 3 rounds, flush (fsync), commit the first, flush again.
+	sp, head, live, err := openSpool(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := newBuffer(100)
+	b.setPersister(sp)
+	b.reload(head, live)
+	b.add(rr("a")) // seq 0
+	b.add(rr("b")) // seq 1
+	b.add(rr("c")) // seq 2
+	if err := sp.flush(); err != nil {
+		t.Fatal(err)
+	}
+	batch, upto := b.peekBatch(1, 1<<30) // just seq 0
+	if len(batch) != 1 || batch[0].Target != "a" {
+		t.Fatalf("batch = %+v", batch)
+	}
+	b.commit(upto)                     // headSeq -> 1
+	if err := sp.flush(); err != nil { // persist the advanced watermark
+		t.Fatal(err)
+	}
+	// simulate a hard crash: the kernel reclaims fds (releasing the flock) but no
+	// graceful flush/close runs — on-disk state is exactly what the last flush() fsynced.
+	if err := syscall.Flock(int(sp.lockFile.Fd()), syscall.LOCK_UN); err != nil {
+		t.Fatal(err)
+	}
+	sp.lockFile.Close()
+	sp = nil
+	b = nil
+
+	// Run 2: reopen; expect b and c live, a gone.
+	sp2, head2, live2, err := openSpool(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sp2.close()
+	b2 := newBuffer(100)
+	b2.setPersister(sp2)
+	b2.reload(head2, live2)
+	if b2.len() != 2 {
+		t.Fatalf("recovered len = %d, want 2 (b,c)", b2.len())
+	}
+	got, _ := b2.peekBatch(10, 1<<30)
+	if got[0].Target != "b" || got[1].Target != "c" {
+		t.Fatalf("recovered = %+v, want [b c]", got)
+	}
+}
+
+func TestBufferSpoolCrashBeforeWatermarkReplaysDuplicate(t *testing.T) {
+	dir := t.TempDir()
+	sp, head, live, _ := openSpool(dir)
+	b := newBuffer(100)
+	b.setPersister(sp)
+	b.reload(head, live)
+	b.add(rr("a"))
+	b.add(rr("b"))
+	sp.flush() // data persisted
+	_, upto := b.peekBatch(2, 1<<30)
+	b.commit(upto) // headSeq advances in memory, but we crash before the next flush
+	// no flush here -> watermark NOT persisted
+	// simulate a hard crash: the kernel reclaims fds (releasing the flock) but no
+	// graceful flush/close runs — on-disk state is exactly what the last flush() fsynced.
+	if err := syscall.Flock(int(sp.lockFile.Fd()), syscall.LOCK_UN); err != nil {
+		t.Fatal(err)
+	}
+	sp.lockFile.Close()
+	sp = nil
+
+	sp2, head2, live2, _ := openSpool(dir)
+	defer sp2.close()
+	// Bounded duplication: both rounds replay because the watermark wasn't fsynced.
+	// This is safe — the hub dedups on (target,vantage,ts).
+	if len(live2) != 2 || head2 != 0 {
+		t.Fatalf("live2=%d head2=%d, want 2 rounds re-presented (bounded dup)", len(live2), head2)
 	}
 }
