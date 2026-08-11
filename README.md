@@ -1,10 +1,11 @@
-# smokeping-modern (working codename)
+# smokeping-modern
 
-A modern, non-Perl reimplementation of [SmokePing](https://github.com/oetiker/SmokePing) — MVP scaffold.
-Goal: reproduce SmokePing's features and its signature **smoke graphs**, with a fast, parallel, plugin-based poller.
+A modern, non-Perl reimplementation of [SmokePing](https://github.com/oetiker/SmokePing) in Go on
+TimescaleDB. It reproduces SmokePing's features and its signature **smoke graphs** with a fast,
+parallel, plugin-based poller, and goes beyond parity with multi-vantage **federation** and
+database-sourced configuration.
 
-> Full analysis of the original and the rewrite plan: `~/.claude/plans/smokeping-codemap/`.
-> This repo is the MVP **collector core** (steps 1–2 of the roadmap in `07-modernization-blueprint.md`).
+Stable since **v1.0.0** — see [CHANGELOG.md](CHANGELOG.md) and the [roadmap](ROADMAP.md).
 
 ## What works today (verified)
 
@@ -85,8 +86,10 @@ The default `docker compose up` starts no proxy (federation stays dark). With th
 obtains and auto-renews the cert and reverse-proxies `https://$DOMAIN/` to smoked: `/agent/v1/*`
 by API key, everything else behind Basic Auth (`DASH_USER` / `DASH_PASSWORD_HASH`). Set
 `SMOKED_ADMIN_PASSWORD` in `.env` to also enable the Vantages admin GUI panel (over the proxy's
-TLS, the admin session cookie works remotely). smoked's own `127.0.0.1:8087` stays available on
-the hub for direct LAN access.
+TLS, the admin session cookie works remotely). smoked's own `127.0.0.1:8087` stays available **on
+the hub itself only** — it binds loopback, so it is not reachable from other LAN hosts; reach it
+remotely through the proxy or an SSH tunnel, never by rebinding it to `0.0.0.0` (the read API is
+unauthenticated).
 
 **Certificate challenge.** By default Caddy uses **HTTP-01** (needs inbound port 80 during
 issuance/renewal). To use **DNS-01** instead — no inbound port needed, works behind NAT, supports
@@ -173,22 +176,36 @@ internal/
   model/         Monitor (a configured leaf target)
   store/         store.Store interface + MemStore (in-memory)
     pgstore/     TimescaleDB implementation (samples hypertable, raw sample arrays)
-  api/           JSON HTTP API + static file serving (SmokePing CGI replacement)
-cmd/smoked/      the collector binary
+  configstore/   versioned DB config fragment (config-in-DB, optimistic concurrency)
+  api/           JSON HTTP API + agent + admin endpoints + static file serving
+  federation/    per-vantage assignment builder + measurement fingerprint
+  vantage/        per-vantage API-key store (salted hash, constant-time verify)
+  agentwire/     shared hub<->agent wire types
+  agent/         smoke-agent buffer + on-disk spool + hub client
+  importer/
+    smokeping/   SmokePing Targets/Probes/RRD import (config + history backfill)
+cmd/smoked/      the hub/collector binary (serve, vantage, config/smokeping import)
+cmd/smoke-agent/ the remote-vantage collector binary
 web/
+  dashboard.js   the single-page dashboard (overview, graphs, config, vantages)
   smoke.js       shared canvas smoke renderer (bands + loss-coloured median)
   index.html     live dashboard (fetches /api/series)
   smoke-poc.html self-contained synthetic demo (published as an Artifact)
 ```
 
-## Design decisions (see codemap `07`)
+## Design decisions
 
 - **Go** for the poller: goroutines make massively-parallel probing with per-target timeouts cheap; replaces SmokePing's process-per-probe + fork-pool with one worker pool.
 - **Probes as plugins**: native interface for the core set; a gRPC `go-plugin` protocol (planned) will let third parties add probes in any language without recompiling.
 - **Storage keeps raw samples**: the smoke graph needs the per-round distribution, so store the N samples (not just the median) and compute bands at query time.
 
-## Not built yet (roadmap)
+## Beyond parity and roadmap
 
 **Federation (multi-vantage) is complete** — the hub, the `smoke-agent` remote collector, the per-vantage overlay UI, the Vantages admin GUI panel, and the bundled reverse proxy: a per-vantage storage dimension (the hub probes as `local`), `vantages:` config with a per-vantage assignment builder, a TimescaleDB-backed API-key store with a `smoked vantage` CLI + a password-gated admin API and login-gated GUI panel, the agent-facing endpoints (`GET /agent/v1/assignment`, `POST /agent/v1/results`) with idempotent ingest and per-vantage alert evaluation, per-vantage overlay graphs in the detail views, and a bundled Caddy compose profile that terminates TLS (automatic Let's Encrypt / DNS-01) and serves the agent API by key + the dashboard behind Basic Auth. Transport is HTTPS/JSON with per-vantage API keys behind a required reverse proxy (the bundled Caddy, or your own) — superseding the earlier gRPC+mTLS plan. See the **[federation operator guide](docs/federation.md)** and [Federation deployment](#federation-deployment-reverse-proxy).
 
-Still planned: config sourced from a database (today it's YAML files only) · richer notifier integrations beyond log + webhook. See `07-modernization-blueprint.md` §8.
+**Database-sourced configuration also ships in 1.0** — targets/probes/alerts can live in the store
+alongside YAML (additive, `conf.d`-style), edited from an in-browser **Config** tab, with a
+`smoked config import` / `smoked import smokeping` path to migrate an existing SmokePing install.
+
+Still planned: richer notifier integrations beyond log + webhook (e.g. email, PagerDuty). See the
+[roadmap](ROADMAP.md).

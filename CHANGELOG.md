@@ -6,6 +6,10 @@ All notable changes to **smokeping-modern** are recorded here. The format follow
 
 ## [Unreleased]
 
+### Added
+- **Project `LICENSE` (MIT).** The v1.0.0 source shipped with no license, leaving downstream use,
+  modification, and redistribution rights unstated; MIT makes them explicit.
+
 ### Fixed
 - **Agent no longer discards buffered rounds on a malformed hub success response.** `PushResults`
   accepted any 2xx and ignored the response-decode error, so an empty `200`, a `204`, HTML from a
@@ -47,8 +51,22 @@ All notable changes to **smokeping-modern** are recorded here. The format follow
   everything older silently dropped by `smoked import … --history`, despite the "full consolidated
   history" promise. The coarsest tier now reaches down to the RRD's oldest AVERAGE data; standard
   installs (coarsest RRA = exactly ~360 days) are unaffected.
+- **Documentation corrected to the stable 1.0.** The README dropped the "working codename" / "MVP
+  scaffold" framing and the claim that DB-sourced config was "not built yet" (it ships in 1.0);
+  clarified that the `127.0.0.1:8087` bind is loopback-only (not LAN-reachable); listed the shipped
+  packages/commands (federation, agent, importer, configstore, vantage, `smoke-agent`) in the layout;
+  and removed local-only planning-path references. The bundled reverse proxy's docs no longer claim
+  rate limiting it does not configure.
 
 ### Changed
+- **Runtime container image moved off end-of-support Alpine 3.20 to a digest-pinned Alpine 3.22.**
+  Alpine 3.20 left normal security support on 2026-04-01; the runtime stage now pins a supported
+  branch by digest (bump the tag + digest together on a refresh). CODE_REVIEW M4.
+- **CI: the TimescaleDB integration (`db-test`) and vulnerability scan (`govulncheck`) are now
+  blocking**, so "green CI" proves the database-backed paths and the vuln scan actually passed
+  rather than skipped. `db-test` waits for the database with an explicit readiness loop (two
+  consecutive `pg_isready` successes) instead of a fixed sleep, so making it blocking doesn't add
+  startup flakiness. CODE_REVIEW M6.
 - **CI now installs `rrdtool`, so the SmokePing RRD-extraction path is actually exercised.** The
   `rrd`-extraction and `import … --history` tests skip without the binary, and neither CI image
   installed it — the most bug-prone importer code (RRA stitching / tier selection) ran in no job.
