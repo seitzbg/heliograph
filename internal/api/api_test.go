@@ -30,6 +30,41 @@ func (errRollupStore) Rollup(context.Context, string, string, string, time.Time,
 	return nil, errors.New(rollupInternalErr)
 }
 
+// CODE_REVIEW M5: /api/series/all must bound the TOTAL rounds across all targets, not just per
+// target, keeping each target's newest rounds so every target stays represented.
+func TestCapSeriesAll(t *testing.T) {
+	mk := func(n int) []scheduler.Outcome {
+		out := make([]scheduler.Outcome, n)
+		for i := range out {
+			out[i] = scheduler.Outcome{When: time.Unix(int64(i), 0)} // oldest -> newest
+		}
+		return out
+	}
+	// Under budget: untouched.
+	all := map[string][]scheduler.Outcome{"a": mk(10), "b": mk(10)}
+	if capSeriesAll(all, 100) || len(all["a"]) != 10 || len(all["b"]) != 10 {
+		t.Fatalf("under-budget must not truncate, got a=%d b=%d", len(all["a"]), len(all["b"]))
+	}
+	// Over budget: trimmed to <= budget, every target represented, newest kept.
+	all = map[string][]scheduler.Outcome{"a": mk(1000), "b": mk(1000), "c": mk(1000)}
+	if !capSeriesAll(all, 300) {
+		t.Fatal("over-budget must report truncation")
+	}
+	total := 0
+	for name, h := range all {
+		total += len(h)
+		if len(h) == 0 {
+			t.Fatalf("target %q dropped entirely; every target must stay represented", name)
+		}
+		if h[len(h)-1].When != time.Unix(999, 0) {
+			t.Fatalf("target %q must keep its NEWEST rounds, last When=%v", name, h[len(h)-1].When)
+		}
+	}
+	if total > 300 {
+		t.Fatalf("trimmed total = %d, want <= 300", total)
+	}
+}
+
 func TestRollupHidesInternalError(t *testing.T) {
 	srv := New(errRollupStore{store.NewMem(10)}, "")
 	rec := httptest.NewRecorder()
