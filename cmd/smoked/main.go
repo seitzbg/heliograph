@@ -1015,6 +1015,34 @@ func recentContiguous(hist []scheduler.Outcome, m warmMeta, now time.Time) []sch
 	return hist[start:]
 }
 
+// unresolvedRecipients returns the recipient names referenced by any alert's `to` or any target's
+// `alertee` that have no matching enabled notifier — a typo, or `webhook` configured without
+// `-webhook`. Deduped and sorted. buildRuntime logs these at startup and on every reload so a
+// misrouted alert is visible up front, instead of only when the incident whose notification is
+// silently dropped finally happens (CODE_REVIEW L2).
+func unresolvedRecipients(alertDefs map[string]*alert.Alert, alerteeByTarget map[string][]string, notifiers map[string]alert.Notifier) []string {
+	missing := map[string]bool{}
+	check := func(recips []string) {
+		for _, r := range recips {
+			if _, ok := notifiers[r]; !ok {
+				missing[r] = true
+			}
+		}
+	}
+	for _, a := range alertDefs {
+		check(a.To)
+	}
+	for _, recips := range alerteeByTarget {
+		check(recips)
+	}
+	out := make([]string, 0, len(missing))
+	for r := range missing {
+		out = append(out, r)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // buildRuntime loads targets (from YAML config, or the demo set) and builds the
 // probe jobs and alert engine. A probe whose binary/deps are unavailable is
 // skipped with a warning, not fatal.
@@ -1112,6 +1140,15 @@ func buildRuntime(configPath string, demoPings int, demoStep, timeout time.Durat
 		if len(m.Alertee) > 0 {
 			alerteeByTarget[m.Name] = m.Alertee
 		}
+	}
+	if miss := unresolvedRecipients(alertDefs, alerteeByTarget, notifiers); len(miss) > 0 {
+		known := make([]string, 0, len(notifiers))
+		for n := range notifiers {
+			known = append(known, n)
+		}
+		sort.Strings(known)
+		slog.Warn("alert recipients reference unknown notifiers; their notifications will be dropped until the notifier is enabled",
+			"unresolved", miss, "known", known)
 	}
 	var engine *alert.Engine
 	if len(alertDefs) > 0 {
