@@ -107,10 +107,25 @@ func (c *Client) PushResults(ctx context.Context, rounds []agentwire.RoundReport
 		return agentwire.ResultsResponse{}, err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode/100 != 2 {
+	// Require the exact success status the hub emits (200), one well-formed JSON object, and
+	// counters that account for every submitted round. A proxy/maintenance/misroute 2xx (204,
+	// empty 200, HTML, truncated JSON) or inconsistent counts is treated as a TRANSIENT error,
+	// not success, so the flush loop retains the batch instead of reclaiming rounds the hub never
+	// acknowledged storing (CODE_REVIEW M1). These are non-*pushError, so sendBatch classifies
+	// them as transient and retries the whole batch.
+	if resp.StatusCode != http.StatusOK {
 		return agentwire.ResultsResponse{}, &pushError{status: resp.StatusCode}
 	}
 	var out agentwire.ResultsResponse
-	_ = json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&out)
+	dec := json.NewDecoder(io.LimitReader(resp.Body, 1<<20))
+	if err := dec.Decode(&out); err != nil {
+		return agentwire.ResultsResponse{}, fmt.Errorf("agent: results: unreadable hub acknowledgment: %w", err)
+	}
+	if dec.More() {
+		return agentwire.ResultsResponse{}, fmt.Errorf("agent: results: trailing data after hub acknowledgment")
+	}
+	if out.Accepted < 0 || out.Dropped < 0 || out.Accepted+out.Dropped != len(rounds) {
+		return agentwire.ResultsResponse{}, fmt.Errorf("agent: results: hub acknowledgment does not account for the batch (accepted=%d dropped=%d, sent=%d)", out.Accepted, out.Dropped, len(rounds))
+	}
 	return out, nil
 }

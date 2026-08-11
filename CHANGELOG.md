@@ -7,6 +7,13 @@ All notable changes to **smokeping-modern** are recorded here. The format follow
 ## [Unreleased]
 
 ### Fixed
+- **Agent no longer discards buffered rounds on a malformed hub success response.** `PushResults`
+  accepted any 2xx and ignored the response-decode error, so an empty `200`, a `204`, HTML from a
+  proxy/maintenance page, or truncated JSON made the flush loop commit and reclaim the batch even
+  though the hub never acknowledged storing it — silent, irreversible measurement loss. It now
+  requires `200` with a single well-formed JSON object whose `accepted + dropped` accounts for the
+  batch, and treats any malformed/inconsistent success as a transient error so the batch stays
+  buffered for retry.
 - **SmokePing importer now inherits probe target-variables down the target tree.** Previously only
   the `probe` was inherited from ancestor `+`/`++` folders; a probe's target-variables (`lookup`,
   `port`, `recordtype`, `pings`, …) were read only from a target's own inline fields and the Probes

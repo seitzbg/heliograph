@@ -69,6 +69,63 @@ func TestPushResults(t *testing.T) {
 	}
 }
 
+// CODE_REVIEW M1: a malformed or inconsistent 2xx from the hub (an empty 200, a 204, HTML from
+// a proxy, truncated/garbage JSON, or counters that don't account for the batch) must be a
+// TRANSIENT error so the flush loop retains the buffered rounds — never a silent success, which
+// would make sendBatch reclaim rounds the hub never acknowledged storing (irreversible loss).
+// Only a well-formed 200 whose accepted+dropped exactly covers the batch is a success.
+func TestPushResultsRejectsMalformedSuccess(t *testing.T) {
+	rounds := []agentwire.RoundReport{{Target: "a"}, {Target: "b"}} // batch of 2
+	cases := []struct {
+		name    string
+		handler http.HandlerFunc
+		wantErr bool
+	}{
+		{"valid 200 all accepted", func(w http.ResponseWriter, r *http.Request) {
+			_ = json.NewEncoder(w).Encode(agentwire.ResultsResponse{Accepted: 2, Dropped: 0})
+		}, false},
+		{"valid 200 split accept/drop", func(w http.ResponseWriter, r *http.Request) {
+			_ = json.NewEncoder(w).Encode(agentwire.ResultsResponse{Accepted: 1, Dropped: 1})
+		}, false},
+		{"204 no body", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) }, true},
+		{"200 empty body", func(w http.ResponseWriter, r *http.Request) {}, true},
+		{"200 malformed json", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("{not json")) }, true},
+		{"200 html from a proxy", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("<html>ok</html>")) }, true},
+		{"200 trailing data", func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(`{"accepted":2,"dropped":0}{"x":1}`))
+		}, true},
+		{"200 negative counter", func(w http.ResponseWriter, r *http.Request) {
+			_ = json.NewEncoder(w).Encode(agentwire.ResultsResponse{Accepted: -1, Dropped: 3})
+		}, true},
+		{"200 sum too small", func(w http.ResponseWriter, r *http.Request) {
+			_ = json.NewEncoder(w).Encode(agentwire.ResultsResponse{Accepted: 1, Dropped: 0})
+		}, true},
+		{"200 sum too large", func(w http.ResponseWriter, r *http.Request) {
+			_ = json.NewEncoder(w).Encode(agentwire.ResultsResponse{Accepted: 2, Dropped: 1})
+		}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(tc.handler)
+			defer srv.Close()
+			c := NewClient(srv.URL, "smk_k_s", false, 5*time.Second)
+			_, err := c.PushResults(context.Background(), rounds)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("want error so the batch is retained, got nil (silent commit)")
+				}
+				// Must be transient, not a permanent drop — the rounds should be retried, not lost.
+				var pe *pushError
+				if errors.As(err, &pe) && pe.permanent() {
+					t.Errorf("a malformed success must be transient (retained), got permanent drop: %v", err)
+				}
+			} else if err != nil {
+				t.Fatalf("want success, got err=%v", err)
+			}
+		})
+	}
+}
+
 func TestPushResultsNon2xxErrors(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(503) }))
 	defer srv.Close()
