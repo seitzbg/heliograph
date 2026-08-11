@@ -135,12 +135,33 @@ func TestResolveConfigSpoolDirFlagOverrides(t *testing.T) {
 	if err := os.WriteFile(p, []byte("hub: https://h.example\nkey: k\nspool_dir: /from/file\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cfg, err := resolveConfig(p, cliFlags{spoolDir: "/from/flag"})
+	cfg, err := resolveConfig(p, cliFlags{spoolDir: strp("/from/flag")})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if cfg.SpoolDir != "/from/flag" {
 		t.Fatalf("SpoolDir = %q, want flag override", cfg.SpoolDir)
+	}
+}
+
+// strp returns a pointer to s, for setting the *string cliFlags.spoolDir in tests (nil = flag
+// omitted; non-nil, incl. the empty string, = flag explicitly passed).
+func strp(s string) *string { return &s }
+
+// An explicit empty `-spool-dir=` must disable a file-configured spool (select in-memory mode),
+// not be treated as "flag not passed". Regression for the plain-string bug where `-spool-dir=`
+// left the YAML spool active (CODE_REVIEW #3).
+func TestResolveConfigEmptySpoolDirFlagDisablesFileSpool(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "agent.yaml")
+	if err := os.WriteFile(p, []byte("hub: https://h.example\nkey: k\nspool_dir: /from/file\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := resolveConfig(p, cliFlags{spoolDir: strp("")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SpoolDir != "" {
+		t.Fatalf("SpoolDir = %q, want empty (explicit -spool-dir= disables the file spool)", cfg.SpoolDir)
 	}
 }
 
