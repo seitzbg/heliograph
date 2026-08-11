@@ -6,6 +6,22 @@ All notable changes to **smokeping-modern** are recorded here. The format follow
 
 ## [Unreleased]
 
+### Fixed
+- **SmokePing importer now inherits probe target-variables down the target tree.** Previously only
+  the `probe` was inherited from ancestor `+`/`++` folders; a probe's target-variables (`lookup`,
+  `port`, `recordtype`, `pings`, …) were read only from a target's own inline fields and the Probes
+  file. The standard SmokePing idiom — e.g. `lookup=` set once on a `+ DNS` folder, or `pings=` on a
+  subtree — therefore imported children with those settings **silently missing** (a DNS target that
+  couldn't resolve; a wrong `pings` denominator skewing `--history` loss). The importer now
+  accumulates inheritable fields down the tree (nearest-set-wins), matching SmokePing's grammar,
+  while per-node keys (`host`/`menu`/`title`/`remark`) still never inherit.
+- **Agent ingest bounds a round's `pings` by the assigned monitor, not the global ceiling.** The hub
+  validated a submitted round's self-reported `pings` only against the global `MaxPings` (10000), then
+  allocated a `pings`-length sample array per round — so an authenticated vantage could submit a full
+  5000-round batch of `pings=10000, rtts=[]` (a ~340 KB body) and force ~400 MB of allocation, a
+  memory-amplification vector. Ingest now drops any round whose `pings` exceeds the target's assigned
+  `pings`, which a legitimate agent never exceeds.
+
 ## [1.0.0] - 2026-08-11
 
 First stable release — a modern, non-Perl reimplementation of SmokePing in Go on TimescaleDB:

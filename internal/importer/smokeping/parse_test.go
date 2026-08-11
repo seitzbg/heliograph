@@ -24,6 +24,54 @@ func TestParseProjectsProbeParams(t *testing.T) {
 	}
 }
 
+// Audit H1: SmokePing inherits a probe's target-variables (lookup, port, ...)
+// down the Targets tree exactly as it inherits `probe`. A `lookup` set on a
+// `+ DNS` folder must therefore be projected onto a child target that only
+// declares `host` — not dropped. The probe param is set on the FOLDER here and
+// is absent from the Probes file, so only ancestor inheritance can supply it.
+func TestParseInheritsProbeParamFromAncestorFolder(t *testing.T) {
+	targets := "*** Targets ***\nprobe = FPing\n+ DNS\nprobe = DNS\nlookup = inherited.example\n++ G\nhost = 8.8.8.8\n"
+	probes := "*** Probes ***\n+ FPing\nbinary = /usr/sbin/fping\n+ DNS\nbinary = /usr/bin/dig\n"
+	root, _, err := Parse(targets, probes, "*** Database ***\nstep = 300\npings = 20\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := root.Children["DNS"].Children["G"]
+	if g == nil {
+		t.Fatal("target G missing")
+	}
+	if g.Params["lookup"] != "inherited.example" {
+		t.Errorf("inherited DNS lookup not projected onto child: got Params=%+v", g.Params)
+	}
+}
+
+// Audit H1: `pings` set on an ancestor Targets folder must flow into the
+// resolved per-target ping count (which RRD --history uses as the loss
+// denominator), overriding the Database default, for a child that declares
+// only `host`. `pings` is on the FOLDER and absent from the Probes file, so
+// only ancestor inheritance can supply it.
+func TestTargetsInheritsPingsFromAncestorFolder(t *testing.T) {
+	targets := "*** Targets ***\nprobe = FPing\n+ Site\npings = 7\n++ Node\nhost = 10.0.0.9\n"
+	probes := "*** Probes ***\n+ FPing\nbinary = /usr/sbin/fping\n"
+	database := "*** Database ***\nstep = 300\npings = 20\n"
+	tgts, _, err := Targets(targets, probes, database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var node *ImportTarget
+	for i := range tgts {
+		if tgts[i].Name == "Site/Node" {
+			node = &tgts[i]
+		}
+	}
+	if node == nil {
+		t.Fatalf("target Site/Node missing: got %+v", tgts)
+	}
+	if node.Pings != 7 {
+		t.Errorf("inherited pings not resolved: want 7, got %d", node.Pings)
+	}
+}
+
 // Review finding 1: an inline presentation key (menu/title) on a target must
 // never land in Summary.DroppedParams — only a genuinely-unsupported probe
 // setting (here FPing's `binary`, which paramMap["FPing"] accepts nothing

@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"smokeping-modern/internal/agentwire"
-	"smokeping-modern/internal/config"
 	"smokeping-modern/internal/federation"
 	"smokeping-modern/internal/model"
 	"smokeping-modern/internal/probe"
@@ -147,7 +146,12 @@ func (srv *Server) agentResults(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		ts, err := time.Parse(time.RFC3339Nano, rd.TS)
-		if err != nil || rd.Pings < 1 || rd.Pings > config.MaxPings || len(rd.RTTs) > rd.Pings {
+		// rd.Pings is bounded by the target's ASSIGNED pings (m.Pings), not the
+		// global config ceiling. A legitimate agent measures with the assigned
+		// count, so a larger self-reported pings is a bug or a hostile client
+		// trying to make sample.Compute allocate an oversized per-round array
+		// from a tiny request body (audit M1); m.Pings is already ≤ MaxPings.
+		if err != nil || rd.Pings < 1 || rd.Pings > m.Pings || len(rd.RTTs) > rd.Pings {
 			dropped++
 			continue
 		}
