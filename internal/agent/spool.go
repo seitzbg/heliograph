@@ -73,28 +73,31 @@ type record struct {
 }
 
 // readSegment decodes every complete, checksum-valid frame from path, in order. It returns the
-// decoded records, the number of bytes it consumed (the offset of the first undecodable byte),
-// and whether the whole file decoded cleanly (complete == the decode reached EOF). It does NOT
-// modify the file: the caller decides whether an incomplete decode is an expected crash-torn tail
-// on the active segment (truncate to consumed) or corruption in a closed segment (fail). A
-// missing/unreadable file is a hard error.
-func readSegment(path string) (recs []record, consumed int64, complete bool, err error) {
+// decoded records, the number of bytes it consumed (the offset of the first undecodable byte), and
+// the decode's stop reason: nil if the whole file decoded cleanly (reached EOF), errShortFrame for
+// a truncated final frame (a crash-torn tail), or errBadFrame for a checksum mismatch (corruption).
+// It does NOT modify the file: the caller decides what an incomplete decode means — a torn tail on
+// the active segment is truncated to consumed, while a checksum failure (any segment) or any
+// incomplete decode of a closed segment is fatal (CODE_REVIEW M3). A missing/unreadable file is a
+// hard error.
+func readSegment(path string) (recs []record, consumed int64, stopErr error, err error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, 0, false, err
+		return nil, 0, nil, err
 	}
 	off := 0
 	for off < len(data) {
 		seq, body, n, derr := decodeFrame(data[off:])
 		if derr != nil {
-			break // torn or corrupt frame; stop at the last good one
+			stopErr = derr // errShortFrame (torn tail) or errBadFrame (corruption)
+			break
 		}
 		cp := make([]byte, len(body))
 		copy(cp, body)
 		recs = append(recs, record{seq: seq, body: cp})
 		off += n
 	}
-	return recs, int64(off), off == len(data), nil
+	return recs, int64(off), stopErr, nil
 }
 
 // fsyncDir flushes a directory entry change (a rename or create) to disk, so it
@@ -268,24 +271,31 @@ func openSpool(dir string, capRounds, maxBytes int) (*spool, int64, []agentwire.
 	wantSeq := int64(-1) // -1 until the first record fixes the expected next sequence
 	for i, p := range segPaths {
 		isLast := i == len(segPaths)-1
-		recs, consumed, complete, rerr := readSegment(p)
+		recs, consumed, stopErr, rerr := readSegment(p)
 		if rerr != nil {
 			lock.Close()
 			return nil, 0, nil, fmt.Errorf("read segment %s: %w", p, rerr)
 		}
-		if !complete {
-			if isLast {
+		if stopErr != nil {
+			switch {
+			case isLast && errors.Is(stopErr, errShortFrame):
 				// The active segment being appended when the process crashed can end in a torn
-				// tail; truncate to the last good frame so appends resume cleanly. Because the
-				// active tail is expected to be torn, mid-file corruption HERE is indistinguishable
-				// from a crash tail and is likewise truncated (its trailing good frames are lost) —
-				// unlike a closed segment below, which is durable and so fails loudly on any bad frame.
+				// tail (a truncated final frame); truncate to the last good frame so appends
+				// resume cleanly. This is the ONLY case truncation is permitted.
 				if terr := os.Truncate(p, consumed); terr != nil {
 					lock.Close()
 					return nil, 0, nil, fmt.Errorf("truncate torn segment %s: %w", p, terr)
 				}
-			} else {
-				// A closed segment was synced and closed before its successor was created, so a
+			case isLast:
+				// A checksum mismatch (errBadFrame) in the active segment is real corruption, not
+				// a crash-torn tail. Fail loudly instead of silently truncating the bad frame and
+				// every valid frame after it — which would lose durable backlog with no operator
+				// signal, break the buffer's contiguous-sequence assumption, and reuse/replay
+				// sequence numbers (CODE_REVIEW M3).
+				lock.Close()
+				return nil, 0, nil, fmt.Errorf("spool: active segment %s is corrupt at byte %d (checksum mismatch, not a torn tail); clear the spool dir to recover (the buffered backlog is lost)", p, consumed)
+			default:
+				// A closed segment was synced and closed before its successor was created, so any
 				// short/bad frame there is corruption, not a crash tail. Fail loudly instead of
 				// silently returning the valid prefix: dropping its (and every later segment's)
 				// records would break the buffer's contiguous-sequence assumption and reuse/replay

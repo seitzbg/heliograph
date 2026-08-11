@@ -20,6 +20,13 @@ All notable changes to **smokeping-modern** are recorded here. The format follow
   redefined the target to B was persisted and could surface as B's latest value — the remote ingest
   path already gated storage on the fingerprint. Local storage and alert evaluation now run under one
   runtime snapshot held against the reload swap, dropping an obsolete-identity round from both.
+- **Checksum corruption in the active agent spool segment now fails startup instead of being
+  silently truncated.** Recovery treated any incomplete decode of the active segment as a crash-torn
+  tail and truncated to the last good frame — so a CRC mismatch (storage corruption, partial media
+  failure, accidental edit) silently dropped the bad frame and every valid frame after it, with no
+  operator signal. Recovery now distinguishes a genuinely short/torn final frame (truncated and
+  recovered, the expected crash artifact) from a checksum mismatch (`errBadFrame`), which fails
+  loudly in any segment — closing the gap that made the frame CRC pointless for the active segment.
 - **SmokePing importer now inherits probe target-variables down the target tree.** Previously only
   the `probe` was inherited from ancestor `+`/`++` folders; a probe's target-variables (`lookup`,
   `port`, `recordtype`, `pings`, …) were read only from a target's own inline fields and the Probes
