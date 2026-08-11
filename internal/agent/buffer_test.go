@@ -134,3 +134,57 @@ func TestBufferCommitSurvivesConcurrentEviction(t *testing.T) {
 		t.Fatalf("after evict+commit want [d e f], got %v (d must not be lost)", names)
 	}
 }
+
+type fakePersister struct {
+	appends []int64 // seqs appended
+	heads   []int64 // headSeq values advanced to
+}
+
+func (f *fakePersister) append(seq int64, r agentwire.RoundReport) { f.appends = append(f.appends, seq) }
+func (f *fakePersister) advanceHead(h int64)                       { f.heads = append(f.heads, h) }
+
+func TestBufferPersistsAddAndCommit(t *testing.T) {
+	b := newBuffer(10)
+	fp := &fakePersister{}
+	b.setPersister(fp)
+	b.add(rr("a")) // seq 0
+	b.add(rr("b")) // seq 1
+	if len(fp.appends) != 2 || fp.appends[0] != 0 || fp.appends[1] != 1 {
+		t.Fatalf("appends = %v, want [0 1]", fp.appends)
+	}
+	_, upto := b.peekBatch(10, 1<<30)
+	b.commit(upto)
+	if len(fp.heads) == 0 || fp.heads[len(fp.heads)-1] != 2 {
+		t.Fatalf("heads = %v, want last == 2 (both committed)", fp.heads)
+	}
+}
+
+func TestBufferPersistsEviction(t *testing.T) {
+	b := newBuffer(2) // cap 2 rounds
+	fp := &fakePersister{}
+	b.setPersister(fp)
+	b.add(rr("a")) // seq 0
+	b.add(rr("b")) // seq 1
+	b.add(rr("c")) // seq 2 -> evicts seq 0, headSeq -> 1
+	if len(fp.heads) == 0 || fp.heads[len(fp.heads)-1] != 1 {
+		t.Fatalf("heads = %v, want last == 1 after eviction", fp.heads)
+	}
+}
+
+func TestBufferReloadAdoptsWithoutRepersisting(t *testing.T) {
+	b := newBuffer(10)
+	fp := &fakePersister{}
+	b.setPersister(fp)
+	b.reload(5, []agentwire.RoundReport{rr("a"), rr("b")})
+	if b.len() != 2 {
+		t.Fatalf("len = %d, want 2", b.len())
+	}
+	if len(fp.appends) != 0 {
+		t.Fatalf("reload must not re-append; got %v", fp.appends)
+	}
+	// New adds continue from the adopted seq range (headSeq=5, 2 live -> next seq 7).
+	b.add(rr("c"))
+	if fp.appends[len(fp.appends)-1] != 7 {
+		t.Fatalf("post-reload append seq = %d, want 7", fp.appends[len(fp.appends)-1])
+	}
+}
