@@ -249,7 +249,7 @@ func TestUnresolvedRecipients(t *testing.T) {
 		"slow": {Name: "slow", To: []string{"log", "pagerduty-typo"}}, // typo
 	}
 	alerteeByTarget := map[string][]string{
-		"t1": {"log"},           // resolved
+		"t1": {"log"},            // resolved
 		"t2": {"webhook", "sms"}, // webhook (dup of the alert's) + sms (missing)
 	}
 	got := strings.Join(unresolvedRecipients(alertDefs, alerteeByTarget, notifiers), ",")
