@@ -19,6 +19,10 @@ go-test:
   stage: test
   before_script:
     - go version
+    # rrdtool: the SmokePing RRD-extraction tests (internal/importer/smokeping)
+    # skip without it — without this the most bug-prone importer path (RRA
+    # stitching / tier selection) would run in NO CI job (audit M3).
+    - apt-get update && apt-get install -y --no-install-recommends rrdtool
   script:
     # Formatting must be clean (gofmt -l prints files that need formatting).
     - test -z "$(gofmt -l cmd internal)"
@@ -70,6 +74,9 @@ db-test:
     SMOKE_TEST_DSN: "postgres://smoke:smoke@timescaledb:5432/smoke?sslmode=disable"
   before_script:
     - go version
+    # rrdtool: the `smoked import ... --history` end-to-end tests (cmd/smoked)
+    # need both a DB and rrdtool; installed here so they run instead of skipping.
+    - apt-get update && apt-get install -y --no-install-recommends rrdtool
     # TimescaleDB restarts once during first-boot init; wait past it before connecting.
     - sleep 20
   script:

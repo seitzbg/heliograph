@@ -59,6 +59,55 @@ func TestExtractRRD(t *testing.T) {
 	}
 }
 
+// Audit M2: an install whose coarsest AVERAGE RRA retains more than the standard
+// ~360 days (a common retention tweak) must have that older history imported, not
+// silently truncated at the hard-coded 360-day coarsest tier. This RRD's coarsest
+// (only) AVERAGE RRA holds ~400 days, with a real data cluster ~380 days before
+// `last` — older than the 360-day tier lookback. ExtractRRD must reach it.
+func TestExtractRRDBeyond360DayCoarseRRA(t *testing.T) {
+	bin, err := exec.LookPath("rrdtool")
+	if err != nil {
+		t.Skip("rrdtool not on PATH")
+	}
+	dir := t.TempDir()
+	rrd := filepath.Join(dir, "long.rrd")
+	const step = int64(43200)    // 12h base step
+	last := int64(1_728_000_000) // aligned to the 43200 grid
+	old := last - 760*step       // exactly 380 days before last
+	mustRun(t, bin, "create", rrd, "--start", fmt.Sprint(old-step), "--step", fmt.Sprint(step),
+		"DS:median:GAUGE:86400:0:180", "DS:loss:GAUGE:86400:0:20",
+		"RRA:AVERAGE:0.5:1:800") // 800 * 12h = 400 days of AVERAGE history
+	// A cluster ~380d old and a cluster near `last`; the long middle stays NaN (a gap).
+	for _, ts := range []int64{old, old + step, old + 2*step, last - 2*step, last - step, last} {
+		mustRun(t, bin, "update", rrd, fmt.Sprintf("%d:%f:%d", ts, 0.025, 1))
+	}
+
+	got, err := ExtractRRD(bin, rrd, time.Unix(last, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) == 0 {
+		t.Fatal("no samples extracted from a 400-day RRD")
+	}
+	cutoff := last - 360*86400 // the 360-day boundary the buggy coarsest tier stopped at
+	var beyond bool
+	for _, s := range got {
+		if s.TS.Unix() < cutoff {
+			beyond = true
+		}
+	}
+	if !beyond {
+		var oldest int64 = last
+		for _, s := range got {
+			if s.TS.Unix() < oldest {
+				oldest = s.TS.Unix()
+			}
+		}
+		t.Fatalf("history older than 360d was dropped: oldest extracted sample is %ds before last (want a sample >%ds before last, at ~%ds)",
+			last-oldest, last-cutoff, last-old)
+	}
+}
+
 // TestExtractRRDGapVsTotalLoss covers the refinement over the brief's "skip
 // NaN rows": a monitoring migration must be able to tell "nobody measured
 // this round" (a true gap: the loss cell itself is unknown) apart from

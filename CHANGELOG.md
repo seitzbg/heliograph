@@ -21,6 +21,19 @@ All notable changes to **smokeping-modern** are recorded here. The format follow
   5000-round batch of `pings=10000, rtts=[]` (a ~340 KB body) and force ~400 MB of allocation, a
   memory-amplification vector. Ingest now drops any round whose `pings` exceeds the target's assigned
   `pings`, which a legitimate agent never exceeds.
+- **RRD history import no longer truncates archives longer than ~360 days.** The coarsest stitching
+  tier stopped at a hard-coded 360-day look-back and was only clamped *up* to the RRD's true oldest
+  data, never *down* — so an install whose coarsest AVERAGE RRA retains more than ~360 days had
+  everything older silently dropped by `smoked import … --history`, despite the "full consolidated
+  history" promise. The coarsest tier now reaches down to the RRD's oldest AVERAGE data; standard
+  installs (coarsest RRA = exactly ~360 days) are unaffected.
+
+### Changed
+- **CI now installs `rrdtool`, so the SmokePing RRD-extraction path is actually exercised.** The
+  `rrd`-extraction and `import … --history` tests skip without the binary, and neither CI image
+  installed it — the most bug-prone importer code (RRA stitching / tier selection) ran in no job.
+  `rrdtool` is now installed in the blocking `go-test` job (RRA stitching) and the `db-test` job
+  (the `--history` end-to-end path).
 
 ## [1.0.0] - 2026-08-11
 

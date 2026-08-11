@@ -111,12 +111,22 @@ func ExtractRRD(rrdtoolBin, rrdPath string, now time.Time) ([]RRDSample, error) 
 	// from the previous (finer) tier: that tier already claimed everything
 	// in (its own start, end], so this tier's window stops at end.
 	end := last
-	for _, tier := range rrdTiers {
+	for i, tier := range rrdTiers {
 		if end <= first {
 			break
 		}
 		start := last - tier.Lookback
 		if start < first {
+			start = first
+		}
+		// The coarsest (last) tier owns ALL remaining history down to the RRD's
+		// true oldest data (first), even when that predates its nominal lookback:
+		// an install whose coarsest AVERAGE RRA retains more than the standard
+		// ~360 days would otherwise have everything older than the lookback
+		// silently dropped (audit M2). rrdtool fetch selects the RRA that spans
+		// the widened window, so the extra span is read at the best resolution
+		// still available for it.
+		if i == len(rrdTiers)-1 {
 			start = first
 		}
 		if start >= end {
