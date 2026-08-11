@@ -302,17 +302,32 @@ func openSpool(dir string) (*spool, int64, []agentwire.RoundReport, error) {
 	// Open (or create) the active segment.
 	var activePath string
 	var activeMax int64 = -1
+	created := false
 	if len(reads) > 0 {
 		last := reads[len(reads)-1]
 		activePath = last.path
 		activeMax = last.maxSeq
 	} else {
 		activePath = filepath.Join(dir, segmentName(head))
+		created = true
 	}
 	f, err := os.OpenFile(activePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		lock.Close()
 		return nil, 0, nil, fmt.Errorf("open active segment: %w", err)
+	}
+	// A brand-new first segment's directory entry needs an explicit dir fsync: per
+	// fsync(2), fsyncing the file itself does not guarantee the new directory entry is
+	// durable. Without this, a crash before the watermark ever advances (writeHead) or
+	// the segment ever rolls (rollLocked) — the only other two dir-fsync points — could
+	// lose the whole first segment. A reused last segment's dentry is already durable;
+	// it survived to this startup.
+	if created {
+		if err := fsyncDir(dir); err != nil {
+			f.Close()
+			lock.Close()
+			return nil, 0, nil, fmt.Errorf("fsync spool dir: %w", err)
+		}
 	}
 	fi, err := f.Stat()
 	if err != nil {
