@@ -158,12 +158,17 @@ func (srv *Server) agentResults(w http.ResponseWriter, r *http.Request) {
 		// Attribution: the round must have been measured under this target's CURRENT
 		// identity. The hub recomputes the fingerprint from the live assignment and drops a
 		// round whose target has since been redefined, so a buffered old measurement can't be
-		// stored or alerted as the new target (CODE_REVIEW #2). An empty fingerprint comes from
-		// a pre-fingerprint agent; accept it transitionally (warn once) so a rolling upgrade
-		// doesn't drop data — a not-yet-upgraded agent self-heals once its binary is updated.
+		// stored or alerted as the new target (CODE_REVIEW #2). An empty fingerprint comes from a
+		// pre-fingerprint agent: in the default lenient mode it's accepted (counted) so a rolling
+		// upgrade doesn't drop data; in strict mode (RequireFingerprint) it's a visible permanent
+		// drop, since an unverifiable round could otherwise be misattributed across a redefinition.
 		switch {
 		case rd.Fingerprint == "":
-			noFP++
+			noFP++ // counted per vantage on /metrics either way
+			if srv.RequireFingerprint {
+				dropped++
+				continue
+			}
 		case rd.Fingerprint != wantFP[rd.Target]:
 			dropped++
 			mismatched++

@@ -183,6 +183,25 @@ retention window** — the raw rows behind them are already gone, so the long-ra
 logs a warning when this runs. If that history matters, snapshot the database
 before upgrading. New deployments are unaffected.
 
+### Agent fingerprint migration
+
+Each agent round now carries a **measurement fingerprint** so the hub can reject a
+buffered result whose target was redefined (host/probe/params/pings/probe-config)
+while the round sat in the agent's store-and-forward buffer. A round from an agent
+old enough not to send one is still **accepted by default** so a rolling upgrade
+never drops data — but until that agent is upgraded, one of its buffered rounds
+*can* still be misattributed across a redefinition.
+
+Watch the rollout with the per-vantage counter on `/metrics`:
+
+```
+smokeping_agent_missing_fingerprint_total{vantage="nyc"} 0
+```
+
+Once it stops rising for every vantage (all agents upgraded), start `smoked` with
+`-require-fingerprint` to enforce strictly: a round with no fingerprint is then a
+visible permanent drop (still counted by the metric above) rather than accepted.
+
 ## Troubleshooting
 
 - **Agent gets `401`** — key wrong, revoked, or rotated (`vantage add`/`regenerate`

@@ -92,14 +92,12 @@ func (s *PGStore) importBatch(ctx context.Context, rows []ImportRow) (int64, err
 			r.TS.UTC(), r.Target, r.Probe, r.Host, r.Pings, r.Loss, nanToNil(r.MedianSeconds))
 	}
 	br := s.pool.SendBatch(ctx, batch)
-	defer br.Close()
 	var total int64
-	for range rows {
-		tag, err := br.Exec()
-		if err != nil {
-			return total, fmt.Errorf("pgstore: import insert: %w", err)
-		}
-		total += tag.RowsAffected()
+	// drainBatch also checks the batch finalization error, so an unconfirmed/rolled-back import
+	// batch isn't reported as inserted rows and then aggregate-refreshed (CODE_REVIEW: batch
+	// finalization). On error the count is not trusted — the caller fails the import.
+	if err := drainBatch(br, len(rows), func(_ int, ra int64) { total += ra }); err != nil {
+		return 0, fmt.Errorf("pgstore: import insert: %w", err)
 	}
 	return total, nil
 }

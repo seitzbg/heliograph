@@ -90,6 +90,7 @@ func main() {
 	webdir := flag.String("webdir", "web", "directory of static web assets to serve at /")
 	dsn := flag.String("dsn", "", "TimescaleDB/PostgreSQL DSN; if set, persist there instead of in-memory")
 	downsample := flag.Bool("downsample", false, "with -dsn: enable the hourly continuous aggregate + retention policies")
+	requireFingerprint := flag.Bool("require-fingerprint", false, "reject agent results that carry no measurement fingerprint (strict mode); default accepts them for pre-fingerprint agents. Flip on once every vantage's agent is upgraded (watch smokeping_agent_missing_fingerprint_total)")
 	configPath := flag.String("config", "", "path to a YAML config file, or a directory holding default.yaml + conf.d/*.yaml; replaces the built-in demo targets")
 	webhook := flag.String("webhook", "", "webhook URL for alerts named 'to: [webhook]'")
 	logFormat := flag.String("log-format", "text", "operational log format: text or json")
@@ -342,6 +343,10 @@ func main() {
 			// set, since a remote vantage's agent needs to authenticate and report results
 			// regardless of whether the (human) admin key-management API is enabled.
 			srv.VantageAuth = vst
+			// Strict-mode toggle for the ingest path enabled just above: with it on, an agent
+			// round carrying no fingerprint is a visible permanent drop instead of accepted
+			// (CODE_REVIEW #2). Lenient by default.
+			srv.RequireFingerprint = *requireFingerprint
 			srv.Assignment = func(v string) ([]model.Monitor, map[string]map[string]string, string) {
 				rt := current.Load()
 				a := federation.AssignmentFor(rt.monitors, v)

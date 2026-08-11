@@ -8,6 +8,11 @@ breaking changes.
 ## [Unreleased]
 
 ### Added
+- **`-require-fingerprint` strict ingest mode.** Off by default (a pre-fingerprint agent's rounds
+  are still accepted so a rolling upgrade doesn't drop data). When enabled, the hub drops any agent
+  round that carries no measurement fingerprint as a visible permanent drop, closing the residual
+  misattribution path for not-yet-upgraded agents. An operator flips it on once
+  `smokeping_agent_missing_fingerprint_total` shows every vantage's agent upgraded.
 - **Native ICMP `Ping` probe.** A new `Ping` probe kind sends and matches ICMP Echo itself via
   `golang.org/x/net/icmp` — no `fping` binary, no `setcap`. Per round it opens a socket
   **datagram-first** (an unprivileged `udp4`/`udp6` ICMP socket, gated by the kernel's
@@ -180,6 +185,24 @@ breaking changes.
   instead of a moving `latest-pg16` tag.
 
 ### Fixed
+- **Ingest no longer treats an unconfirmed PostgreSQL batch as durable.** All three batch write
+  paths (`Add`, `AddResults`, `importBatch`) checked each row's `Exec` but discarded the batch's
+  finalization (`Close`) error. pgx runs `SendBatch` in an implicit transaction and reports a
+  commit/finalization failure from `Close`, *after* the per-row command tags — so a batch that
+  didn't actually commit could be reported as newly-inserted, and the hub would then evaluate
+  alerts and reply success over unpersisted rounds. A shared `drainBatch` helper now checks the
+  finalization error; on any error the ingest handler answers 503 and the agent retries (idempotent
+  via `ON CONFLICT`), preserving store-before-alert.
+- **The agent's byte estimator no longer undercounts JSON-escaped strings.** It counted the raw
+  lengths of the target/error/fingerprint fields, but `encoding/json` expands `&`, `<`, `>`, and
+  control bytes to 6-byte `\u00xx` sequences — so an adversarial (e.g. all-`&`) target could let a
+  batch estimated under the cap marshal to ~6× larger, recreating the pre-413 OOM the byte bound
+  was meant to prevent. String fields are now counted at worst-case escaped width and each flush
+  batch is packed under a budget with headroom below `agentwire.MaxResultsBytes`.
+- **The in-memory store's replay-dedup index is now bounded.** `MemStore` caps history per
+  `(vantage,target)` but had added every agent-result key to its replay index permanently, so a
+  long-lived in-memory `ResultIngester` grew with the total number of rounds ever seen. The key is
+  now evicted when its round ages out of the capped history, so the index tracks the retained data.
 - **The agent buffers and flushes by bytes, not just round count, so a constrained vantage can't
   OOM.** A round may carry up to `MaxPings` (10 000) RTTs, so bounding only by round count let a
   count-selected flush batch (default `flush_max` 5 000) marshal a multi-hundred-MB request body

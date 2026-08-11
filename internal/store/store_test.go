@@ -213,3 +213,32 @@ func TestMemStoreVantageDefaulting(t *testing.T) {
 		t.Errorf("VantageOf(zero) = %q, want \"local\"", got)
 	}
 }
+
+// The MemStore replay dedup index must stay bounded to the retained history, not grow with every
+// unique round ever ingested — else a long-lived in-memory ResultIngester leaks (CODE_REVIEW:
+// MemStore replay index). With a small history cap, ingesting many unique rounds for one target
+// keeps the index at (roughly) the cap.
+func TestMemStoreReplayIndexBounded(t *testing.T) {
+	s := NewMem(3) // history cap 3 per (vantage,target)
+	base := time.Unix(1_700_000_000, 0).UTC()
+	for i := 0; i < 100; i++ {
+		o := scheduler.Outcome{
+			Target: probe.Target{Name: "t", Host: "h"}, ProbeName: "FPing",
+			When: base.Add(time.Duration(i) * time.Minute), Computed: sample.Compute(1, []float64{0.01}),
+		}
+		if _, err := s.AddResults(context.Background(), []scheduler.Outcome{o}); err != nil {
+			t.Fatalf("AddResults %d: %v", i, err)
+		}
+	}
+	if n := len(s.ingested); n > 3 {
+		t.Fatalf("replay index grew to %d after 100 unique ingests, want <= cap (3)", n)
+	}
+	// And a replay of a still-retained round is still deduplicated (stored/returned once).
+	last := scheduler.Outcome{
+		Target: probe.Target{Name: "t", Host: "h"}, ProbeName: "FPing",
+		When: base.Add(99 * time.Minute), Computed: sample.Compute(1, []float64{0.01}),
+	}
+	if ins, _ := s.AddResults(context.Background(), []scheduler.Outcome{last}); len(ins) != 0 {
+		t.Fatalf("replay of a retained round must report 0 newly-inserted, got %d", len(ins))
+	}
+}

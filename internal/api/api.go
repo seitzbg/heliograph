@@ -96,6 +96,12 @@ type Server struct {
 	// vantage) — the post-ingest hook that closes CODE_REVIEW #5 / P2-5. nil = no alerting
 	// on ingest (e.g. pure API tests).
 	OnIngest func(outcomes []scheduler.Outcome)
+	// RequireFingerprint, when true, makes agent ingest STRICT: a round with no measurement
+	// fingerprint (a pre-fingerprint agent) is dropped as a visible permanent drop instead of
+	// accepted. Default false keeps the lenient/compatible behavior (accepted + counted) so a
+	// rolling agent upgrade doesn't lose data; an operator flips this on once the per-vantage
+	// missing-fingerprint metric shows every agent upgraded (CODE_REVIEW #2).
+	RequireFingerprint bool
 	// ingestMu guards the agent-ingest observability counters below.
 	ingestMu sync.Mutex
 	// missingFP counts, per vantage, agent rounds accepted with no measurement fingerprint —
@@ -948,9 +954,11 @@ func (srv *Server) metrics(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write([]byte(b.String()))
 }
 
-// recordMissingFingerprint counts n rounds accepted from `vantage` without a measurement
-// fingerprint (a pre-fingerprint agent) and warns once per vantage. The count is scrapeable so
-// an operator can tell when every vantage's agent has been upgraded (CODE_REVIEW #2).
+// recordMissingFingerprint counts n rounds from `vantage` that carried no measurement
+// fingerprint (a pre-fingerprint agent) and warns once per vantage. The count is scrapeable
+// (smokeping_agent_missing_fingerprint_total) so an operator can tell when every vantage's agent
+// has been upgraded; the warning's wording reflects whether those rounds were dropped (strict
+// mode) or accepted-unverified (lenient default) (CODE_REVIEW #2).
 func (srv *Server) recordMissingFingerprint(vantage string, n int) {
 	srv.ingestMu.Lock()
 	if srv.missingFP == nil {
@@ -964,7 +972,11 @@ func (srv *Server) recordMissingFingerprint(vantage string, n int) {
 	srv.missingFP[vantage] += int64(n)
 	srv.ingestMu.Unlock()
 	if first {
-		slog.Warn("agent ingest: accepting rounds with no fingerprint; result attribution is unverified until the agent is upgraded", "vantage", vantage)
+		if srv.RequireFingerprint {
+			slog.Warn("agent ingest: DROPPING rounds with no fingerprint (strict mode enabled); upgrade the agent to a fingerprinting build", "vantage", vantage)
+		} else {
+			slog.Warn("agent ingest: accepting rounds with no fingerprint; result attribution is unverified until the agent is upgraded", "vantage", vantage)
+		}
 	}
 }
 

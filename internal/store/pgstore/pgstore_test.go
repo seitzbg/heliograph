@@ -5,16 +5,75 @@ import (
 	"errors"
 	"math"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"smokeping-modern/internal/probe"
 	"smokeping-modern/internal/sample"
 	"smokeping-modern/internal/scheduler"
 )
+
+// fakeBatch is a minimal pgx.BatchResults for exercising drainBatch's finalization handling
+// without a database: it succeeds on every Exec (reporting rowsAffected) except an optional
+// execAt-th call, and Close returns closeErr. Query/QueryRow are unused by drainBatch.
+type fakeBatch struct {
+	rowsAffected int64
+	execAt       int // 1-based Exec call that fails; 0 = never
+	execErr      error
+	closeErr     error
+	calls        int
+	closed       bool
+}
+
+func (f *fakeBatch) Exec() (pgconn.CommandTag, error) {
+	f.calls++
+	if f.execAt > 0 && f.calls == f.execAt {
+		return pgconn.CommandTag{}, f.execErr
+	}
+	return pgconn.NewCommandTag("INSERT 0 " + strconv.FormatInt(f.rowsAffected, 10)), nil
+}
+func (f *fakeBatch) Query() (pgx.Rows, error) { return nil, nil }
+func (f *fakeBatch) QueryRow() pgx.Row        { return nil }
+func (f *fakeBatch) Close() error             { f.closed = true; return f.closeErr }
+
+// drainBatch must surface a batch finalization (Close) error even when every per-row Exec
+// succeeded, and must always Close the batch — the store-before-alert guarantee depends on not
+// reporting an unconfirmed batch as durable (CODE_REVIEW: batch finalization).
+func TestDrainBatchSurfacesFinalizationError(t *testing.T) {
+	fb := &fakeBatch{rowsAffected: 1, closeErr: errors.New("commit failed")}
+	inserted := 0
+	err := drainBatch(fb, 3, func(_ int, ra int64) {
+		if ra == 1 {
+			inserted++
+		}
+	})
+	if err == nil || !strings.Contains(err.Error(), "commit failed") {
+		t.Fatalf("drainBatch must return the Close error, got %v", err)
+	}
+	if !fb.closed {
+		t.Error("drainBatch must always Close the batch")
+	}
+
+	// A per-row Exec error takes precedence over Close, and Close still runs.
+	fb2 := &fakeBatch{rowsAffected: 1, execAt: 2, execErr: errors.New("exec boom"), closeErr: errors.New("commit failed")}
+	if err := drainBatch(fb2, 3, nil); err == nil || !strings.Contains(err.Error(), "exec boom") {
+		t.Fatalf("loop Exec error should take precedence, got %v", err)
+	}
+	if !fb2.closed {
+		t.Error("drainBatch must Close even after an Exec error")
+	}
+
+	// The happy path: all Execs succeed and Close succeeds -> no error.
+	fb3 := &fakeBatch{rowsAffected: 1}
+	if err := drainBatch(fb3, 2, nil); err != nil {
+		t.Fatalf("clean batch should not error, got %v", err)
+	}
+}
 
 // refreshAgg manually refreshes a continuous aggregate, retrying on TimescaleDB's
 // "concurrent refresh" error (SQLSTATE 55P03): a background refresh-policy job can overlap

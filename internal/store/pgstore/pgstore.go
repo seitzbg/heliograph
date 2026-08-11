@@ -310,6 +310,33 @@ func dbToCentered(a []*float64) []float64 {
 	return out
 }
 
+// drainBatch runs each queued statement in br (calling onRow with the 0-based index and that
+// statement's RowsAffected), then finalizes the batch, returning the first error. Close is ALWAYS
+// called so the pooled connection is released — and its error is checked and returned when the
+// per-row loop otherwise succeeded, because pgx runs SendBatch in an implicit transaction and
+// reports finalization/commit errors from Close AFTER the last CommandComplete. Without that
+// check a batch that failed to commit could be reported as durable, breaking the store-before-
+// alert guarantee (CODE_REVIEW: batch finalization). Callers must treat any error as "nothing
+// persisted" and (for ingest) retry, relying on the ON CONFLICT idempotency.
+func drainBatch(br pgx.BatchResults, n int, onRow func(i int, rowsAffected int64)) error {
+	var loopErr error
+	for i := 0; i < n; i++ {
+		tag, err := br.Exec()
+		if err != nil {
+			loopErr = err
+			break
+		}
+		if onRow != nil {
+			onRow(i, tag.RowsAffected())
+		}
+	}
+	closeErr := br.Close()
+	if loopErr != nil {
+		return loopErr
+	}
+	return closeErr
+}
+
 // buildBatch turns outcomes into an idempotent insert batch. Shared by the
 // fire-and-forget local Add and the error-returning AddResults.
 func buildBatch(outcomes []scheduler.Outcome) *pgx.Batch {
@@ -347,13 +374,11 @@ func (s *PGStore) Add(outcomes []scheduler.Outcome) {
 	ctx, cancel := context.WithTimeout(context.Background(), writeTimeout)
 	defer cancel()
 	br := s.pool.SendBatch(ctx, buildBatch(outcomes))
-	defer br.Close()
-	for range outcomes {
-		if _, err := br.Exec(); err != nil {
-			s.writeFails.Add(1)
-			s.onErr(fmt.Errorf("pgstore: insert: %w", err))
-			return
-		}
+	// Checking the finalization (Close) error too, so a local round reported as written but not
+	// committed is surfaced through the same failure metric/handler (CODE_REVIEW: batch finalization).
+	if err := drainBatch(br, len(outcomes), nil); err != nil {
+		s.writeFails.Add(1)
+		s.onErr(fmt.Errorf("pgstore: insert: %w", err))
 	}
 }
 
@@ -374,17 +399,20 @@ func (s *PGStore) AddResults(ctx context.Context, outcomes []scheduler.Outcome) 
 	wctx, cancel := context.WithTimeout(ctx, writeTimeout)
 	defer cancel()
 	br := s.pool.SendBatch(wctx, buildBatch(outcomes))
-	defer br.Close()
 	var inserted []scheduler.Outcome
-	for i := range outcomes {
-		tag, err := br.Exec()
-		if err != nil {
-			s.writeFails.Add(1)
-			return nil, fmt.Errorf("pgstore: ingest insert: %w", err)
-		}
-		if tag.RowsAffected() == 1 { // 0 => ON CONFLICT DO NOTHING skipped a duplicate
+	// drainBatch also checks the batch's finalization (Close) error — pgx runs SendBatch in an
+	// implicit transaction and reports a commit/finalization failure there, after the per-row
+	// command tags — so a batch that didn't actually commit is never reported as durable. On any
+	// error we return no inserted rows: the handler answers 503, the agent retries, and alerts
+	// are not evaluated over unpersisted data (CODE_REVIEW: batch finalization).
+	err := drainBatch(br, len(outcomes), func(i int, rows int64) {
+		if rows == 1 { // 0 => ON CONFLICT DO NOTHING skipped a duplicate
 			inserted = append(inserted, outcomes[i])
 		}
+	})
+	if err != nil {
+		s.writeFails.Add(1)
+		return nil, fmt.Errorf("pgstore: ingest write: %w", err)
 	}
 	return inserted, nil
 }

@@ -287,7 +287,7 @@ func (a *Agent) flushLoop(ctx context.Context) {
 			continue
 		}
 
-		batch, upto := a.buf.peekBatch(a.opts.FlushMax, agentwire.MaxResultsBytes)
+		batch, upto := a.buf.peekBatch(a.opts.FlushMax, flushByteBudget)
 		sent, dropped, err := a.sendBatch(ctx, batch)
 		if err != nil {
 			// A transient failure somewhere in the (possibly split) push: nothing in this
@@ -360,7 +360,7 @@ func (a *Agent) finalFlush(ttl time.Duration) {
 				"sent", sent, "remaining", a.buf.len(), "dropped", a.buf.dropped())
 			return
 		}
-		batch, upto := a.buf.peekBatch(a.opts.FlushMax, agentwire.MaxResultsBytes)
+		batch, upto := a.buf.peekBatch(a.opts.FlushMax, flushByteBudget)
 		if len(batch) == 0 {
 			break // buffer drained
 		}
