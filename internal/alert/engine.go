@@ -10,6 +10,7 @@ import (
 	"math"
 	"net/http"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -102,6 +103,30 @@ func NewEngine(alerts map[string]*Alert, notifiers map[string]Notifier) *Engine 
 	}
 }
 
+// ReloadIdentity carries the per-target and per-alert identity a config reload computes so
+// InheritStateFrom knows what may survive the swap. Every map is keyed by the NEW runtime's
+// names. A nil map field is permissive ("unconstrained" / all-true) — used by tests and the
+// boot path — so a caller supplies only the dimensions it distinguishes.
+type ReloadIdentity struct {
+	// ValidTarget[t]: target t still exists (has alerts) in the new config. A target absent
+	// here has its window and all alert state dropped.
+	ValidTarget map[string]bool
+	// SameTarget[t]: t's measurement identity (host/probe/params/...) is unchanged. If it
+	// changed, t's window and alert state are not inherited (t is seeded from history instead).
+	SameTarget map[string]bool
+	// Attached[t][name]: alert `name` is attached to target t in the NEW config. State for an
+	// alert not currently attached to t is never inherited — so detaching an alert and later
+	// re-attaching it can't resurrect firing/visible state it held before it was detached
+	// (CODE_REVIEW #3a).
+	Attached map[string]map[string]bool
+	// SameAlertee[t]: t's per-target `alertee` recipients are unchanged. Together with the
+	// alert's own To recipients (compared inside the engine), this gates whether the delivered
+	// FIRING (visible) bit may be inherited: a recipient-set change must not let a newly added
+	// recipient miss an open FIRING, nor receive a RESOLVED for a firing it never saw
+	// (CODE_REVIEW #3b).
+	SameAlertee map[string]bool
+}
+
 // InheritStateFrom seeds this engine with the firing state and sample windows of
 // a previous engine, so a config reload (which builds a fresh engine) does not
 // reset alert hysteresis. Without this a reload would (a) re-emit FIRING for an
@@ -109,20 +134,20 @@ func NewEngine(alerts map[string]*Alert, notifiers map[string]Notifier) *Engine 
 // loss/RTT history, so a currently-firing alert reads as not-firing until X new
 // samples re-accumulate — silently resolving mid-outage, then re-raising later.
 //
-// Inheritance is gated by identity so a reload that redefines a target or an alert can't
-// carry stale state into the new definition (CODE_REVIEW #4):
-//   - validTargets: a target's window/state is carried only if it is still present. nil
-//     carries every target (used in tests).
-//   - sameTarget: a target's window/state is carried only if its measurement identity
-//     (host/probe) is unchanged between the old and new runtime. nil treats every target as
-//     unchanged (used in tests and by the boot path). A target whose identity changed (or a
-//     newly-defined one) is left to be seeded from durable history instead.
-//   - matcher identity: firing/visible state for an alert is carried only if the alert is
-//     still defined AND its matcher's Key() is unchanged, so a redefined matcher under the
-//     same name starts fresh rather than inheriting hysteresis for different semantics.
+// Inheritance is gated by identity so a reload that redefines a target, detaches/redefines an
+// alert, or changes an alert's delivery can't carry stale state into the new definition
+// (CODE_REVIEW #4, #3). For each key:
+//   - window (per target): inherited only if the target is present (ValidTarget) with an
+//     unchanged measurement identity (SameTarget).
+//   - matcher firing state (per target+alert): the above, AND the alert is still attached to
+//     that target (Attached), AND its matcher's Key() is unchanged.
+//   - delivered/visible bit (per target+alert): the matcher-state conditions above, AND the
+//     delivery recipients are unchanged (the alert's To — compared here — and the target's
+//     alertee, via SameAlertee). Matcher state may survive a recipient-only edit; the
+//     delivered bit may not.
 //
 // prev may be nil.
-func (e *Engine) InheritStateFrom(prev *Engine, validTargets, sameTarget map[string]bool) {
+func (e *Engine) InheritStateFrom(prev *Engine, id ReloadIdentity) {
 	if prev == nil {
 		return
 	}
@@ -134,22 +159,37 @@ func (e *Engine) InheritStateFrom(prev *Engine, validTargets, sameTarget map[str
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	// inheritTarget reports whether target T's window/state may carry across the reload:
-	// it must still exist (validTargets) and keep the same measurement identity (sameTarget).
+	// inheritTarget: target still present with an unchanged measurement identity.
 	inheritTarget := func(target string) bool {
-		if validTargets != nil && !validTargets[target] {
+		if id.ValidTarget != nil && !id.ValidTarget[target] {
 			return false
 		}
-		if sameTarget != nil && !sameTarget[target] {
+		if id.SameTarget != nil && !id.SameTarget[target] {
 			return false
 		}
 		return true
 	}
-	// sameAlert reports whether alert `name` means the same thing in both engines, so its
-	// firing/visible state is safe to inherit (defined in both + identical matcher semantics).
-	sameAlert := func(name string) bool {
+	// attached: alert `name` is attached to target `target` in the new config.
+	attached := func(target, name string) bool {
+		return id.Attached == nil || id.Attached[target][name]
+	}
+	// sameMatcher: alert defined in both engines with identical matcher semantics.
+	sameMatcher := func(name string) bool {
 		ea, pa := e.alerts[name], prev.alerts[name]
 		return ea != nil && pa != nil && ea.Matcher.Key() == pa.Matcher.Key()
+	}
+	// inheritState: matcher firing state for (target,name) may carry — target identity,
+	// current attachment, and matcher semantics all unchanged.
+	inheritState := func(target, name string) bool {
+		return inheritTarget(target) && attached(target, name) && sameMatcher(name)
+	}
+	// sameDelivery: the recipient set for (target,name) — the alert's To plus the target's
+	// alertee — is unchanged, so a previously-delivered FIRING is still meaningful to inherit.
+	sameDelivery := func(target, name string) bool {
+		if id.SameAlertee != nil && !id.SameAlertee[target] {
+			return false
+		}
+		return sameToRecipients(prev.alerts[name], e.alerts[name])
 	}
 
 	for key, w := range prev.win {
@@ -164,20 +204,44 @@ func (e *Engine) InheritStateFrom(prev *Engine, validTargets, sameTarget map[str
 	}
 	for key, firing := range prev.state {
 		target, name, ok := splitStateKey(key) // key is vantage\x00target\x00name
-		if !ok || !inheritTarget(target) || !sameAlert(name) {
+		if !ok || !inheritState(target, name) {
 			continue
 		}
 		e.state[key] = firing
 	}
 	// Carry the delivered-firing view too, so a reload mid-inhibition neither
-	// resurrects an orphan RESOLVED nor drops a real one.
+	// resurrects an orphan RESOLVED nor drops a real one — but only when the delivery
+	// recipients are unchanged, so a routing edit gives its current recipients a coherent
+	// FIRING/RESOLVED lifecycle rather than inheriting a stale "already delivered" bit.
 	for key, vis := range prev.visible {
 		target, name, ok := splitStateKey(key)
-		if !ok || !inheritTarget(target) || !sameAlert(name) {
+		if !ok || !inheritState(target, name) || !sameDelivery(target, name) {
 			continue
 		}
 		e.visible[key] = vis
 	}
+}
+
+// sameToRecipients reports whether two alerts route to the same notifier set (order-independent).
+func sameToRecipients(a, b *Alert) bool {
+	return a != nil && b != nil && sameStringSet(a.To, b.To)
+}
+
+// sameStringSet reports whether two string slices contain the same elements, ignoring order.
+func sameStringSet(x, y []string) bool {
+	if len(x) != len(y) {
+		return false
+	}
+	xs := append([]string(nil), x...)
+	ys := append([]string(nil), y...)
+	sort.Strings(xs)
+	sort.Strings(ys)
+	for i := range xs {
+		if xs[i] != ys[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // Evaluate pushes a new sample for (target, vantage), runs the attached alerts, updates
