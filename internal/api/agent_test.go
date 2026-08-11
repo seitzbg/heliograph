@@ -326,6 +326,49 @@ func TestIngestMissingFingerprintMetric(t *testing.T) {
 	}
 }
 
+// Strict mode (RequireFingerprint): a round with no fingerprint is a visible permanent drop —
+// not stored, not alerted — so an unverifiable round can't be misattributed across a target
+// redefinition. Lenient mode (default) still accepts it. Both count it on /metrics (CODE_REVIEW #2).
+func TestIngestStrictFingerprintDropsEmpty(t *testing.T) {
+	body := func() string {
+		return fmt.Sprintf(`{"results":[{"target":"cf","ts":%q,"pings":1,"rtts":[0.01]}]}`, recentTS())
+	}
+	// Strict: dropped, not stored, not alerted.
+	ing := &fakeIngester{}
+	srv := ingestServer(ing)
+	srv.RequireFingerprint = true
+	var alerted int
+	srv.OnIngest = func(o []scheduler.Outcome) { alerted += len(o) }
+	w := postResults(t, srv, body())
+	if w.Code != 200 {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body)
+	}
+	var resp struct{ Accepted, Dropped int }
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	if resp.Accepted != 0 || resp.Dropped != 1 {
+		t.Fatalf("strict mode: counts=%+v, want accepted=0 dropped=1", resp)
+	}
+	if len(ing.got) != 0 || alerted != 0 {
+		t.Fatalf("strict mode must not store or alert an empty-fingerprint round: stored=%d alerted=%d", len(ing.got), alerted)
+	}
+	// Still counted on /metrics so the operator sees it.
+	mr := httptest.NewRequest("GET", "/metrics", nil)
+	mw := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(mw, mr)
+	if !strings.Contains(mw.Body.String(), `smokeping_agent_missing_fingerprint_total{vantage="nyc"} 1`) {
+		t.Fatalf("strict drop should still be counted on /metrics, got:\n%s", mw.Body.String())
+	}
+
+	// Lenient (default): the same round is accepted and stored.
+	ing2 := &fakeIngester{}
+	srv2 := ingestServer(ing2) // RequireFingerprint defaults false
+	w2 := postResults(t, srv2, body())
+	_ = json.Unmarshal(w2.Body.Bytes(), &resp)
+	if resp.Accepted != 1 || resp.Dropped != 0 || len(ing2.got) != 1 {
+		t.Fatalf("lenient mode should accept the empty-fingerprint round: counts=%+v stored=%d", resp, len(ing2.got))
+	}
+}
+
 // A failed durable write must return 503 and NOT evaluate alerts — a firing must be
 // backed by persisted data, and the agent will retry the batch (P2-5).
 func TestIngestSkipsAlertsOnStoreError(t *testing.T) {

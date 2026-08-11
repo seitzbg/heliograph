@@ -19,20 +19,33 @@ const (
 	// shorter, so batches land safely under the hub's byte cap and the 413 split stays a mere
 	// fallback for estimation variance.
 	rttJSONBytes = 24
-	// roundJSONOverhead covers a round's fixed JSON keys/punctuation; the variable-length
-	// target/fingerprint/err strings are added on top.
+	// roundJSONOverhead covers a round's fixed JSON keys/punctuation, the RFC3339 ts, and the
+	// numeric pings/duration; the variable-length target/fingerprint/err strings are added on top.
 	roundJSONOverhead = 160
+	// jsonStringExpansion bounds how much `encoding/json` can inflate a string field. The client
+	// marshals with default HTML escaping, so `&`,`<`,`>` and control bytes each become a 6-byte
+	// \u00XX sequence. Counting the string fields (target/err/fingerprint — none length- or
+	// character-bounded) at this worst case keeps a packed batch's real encoded size under the
+	// hub's cap even for adversarial content, so the agent never marshals a body the hub will 413
+	// only after building it (CODE_REVIEW: estimator undercount).
+	jsonStringExpansion = 6
 	// defaultBufferBytes bounds total buffered memory independent of the round cap. Generous, so
 	// it only bites pathological (very high pings) configs; ordinary small rounds hit the round
 	// cap first.
 	defaultBufferBytes = 256 << 20 // 256 MiB
+	// flushByteBudget is the per-request byte budget peekBatch packs under: the hub's cap less a
+	// margin for the `{"results":[…]}` envelope and estimator variance, so a packed batch's real
+	// marshaled body stays below agentwire.MaxResultsBytes.
+	flushByteBudget = agentwire.MaxResultsBytes - (64 << 10)
 )
 
-// estimatedJSONBytes is a cheap upper-ish estimate of a round's serialized size. It need not be
-// exact — it is used to pack a flush batch under agentwire.MaxResultsBytes before marshaling and
-// to bound total buffer memory; the recursive 413 split covers any underestimate.
+// estimatedJSONBytes is a conservative upper estimate of a round's serialized size: string fields
+// are counted at their worst-case JSON-escaped width and RTTs at a padded per-value width, so it
+// never underestimates the real encoded size for adversarial content. It is used to pack a flush
+// batch under flushByteBudget before marshaling and to bound total buffer memory.
 func estimatedJSONBytes(r agentwire.RoundReport) int {
-	return roundJSONOverhead + len(r.Target) + len(r.Fingerprint) + len(r.Err) + len(r.RTTs)*rttJSONBytes
+	strBytes := jsonStringExpansion * (len(r.Target) + len(r.Fingerprint) + len(r.Err))
+	return roundJSONOverhead + strBytes + len(r.RTTs)*rttJSONBytes
 }
 
 // buffer is a bounded FIFO of pending rounds. The measure loop add()s; the flush loop

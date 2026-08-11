@@ -227,6 +227,12 @@ func (s *MemStore) storeOne(o scheduler.Outcome) {
 	s.latest[k] = o
 	h := append(s.history[k], o)
 	if len(h) > s.cap {
+		// The round scrolling out of the capped window also leaves the replay index, so
+		// `ingested` stays bounded to the retained history instead of growing with every round
+		// ever seen (CODE_REVIEW: MemStore replay index). Matching retention means a replay older
+		// than the window is re-accepted — fine for this dev/test store; the DB enforces true
+		// uniqueness. (A no-op for local rounds, which never enter `ingested`.)
+		delete(s.ingested, resultKey(h[0]))
 		h = h[len(h)-s.cap:]
 	}
 	s.history[k] = h

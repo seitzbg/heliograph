@@ -1,10 +1,34 @@
 package agent
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
 
 	"smokeping-modern/internal/agentwire"
 )
+
+// The estimator must never UNDERcount the real json.Marshal size, or a batch packed under the
+// byte budget could still marshal to a body over the hub's cap — the OOM path F5 aimed to close,
+// re-opened by JSON string escaping (CODE_REVIEW: estimator undercount). Cover HTML-escaped
+// bytes, quotes/backslash/control, and multibyte UTF-8.
+func TestEstimatedJSONBytesNeverUndercounts(t *testing.T) {
+	cases := []agentwire.RoundReport{
+		{Target: strings.Repeat("&", 500), RTTs: []float64{0.01, 0.02}},                                   // & -> & (6x)
+		{Target: strings.Repeat("<", 300), Err: strings.Repeat(">", 300)},                                 // <,> -> 6x
+		{Target: "\"\\\n\t", Err: "\x00\x01\x02"},                                                         // quotes/backslash/control
+		{Target: "café-δ-🚀", Fingerprint: "sha256:" + strings.Repeat("a", 64), RTTs: make([]float64, 50)}, // multibyte + rtts
+	}
+	for i, r := range cases {
+		body, err := json.Marshal(r) // same marshaler the client uses (default HTML escaping)
+		if err != nil {
+			t.Fatalf("case %d marshal: %v", i, err)
+		}
+		if est := estimatedJSONBytes(r); est < len(body) {
+			t.Errorf("case %d: estimate %d < real marshaled %d — undercount", i, est, len(body))
+		}
+	}
+}
 
 func rr(name string) agentwire.RoundReport { return agentwire.RoundReport{Target: name} }
 
