@@ -276,7 +276,10 @@ func openSpool(dir string, capRounds, maxBytes int) (*spool, int64, []agentwire.
 		if !complete {
 			if isLast {
 				// The active segment being appended when the process crashed can end in a torn
-				// tail; truncate to the last good frame so appends resume cleanly.
+				// tail; truncate to the last good frame so appends resume cleanly. Because the
+				// active tail is expected to be torn, mid-file corruption HERE is indistinguishable
+				// from a crash tail and is likewise truncated (its trailing good frames are lost) —
+				// unlike a closed segment below, which is durable and so fails loudly on any bad frame.
 				if terr := os.Truncate(p, consumed); terr != nil {
 					lock.Close()
 					return nil, 0, nil, fmt.Errorf("truncate torn segment %s: %w", p, terr)
@@ -314,6 +317,10 @@ func openSpool(dir string, capRounds, maxBytes int) (*spool, int64, []agentwire.
 				sz := estimatedJSONBytes(r)
 				for len(live) > 0 && (len(live) >= capRounds || liveBytes+sz > maxBytes) {
 					liveBytes -= estimatedJSONBytes(live[0])
+					// Zero the evicted round so its RTTs slice and strings are collectable now,
+					// rather than lingering in the shared backing array until append reallocates —
+					// keeps the transient recovery footprint near the budget, not ~2x it.
+					live[0] = agentwire.RoundReport{}
 					live = live[1:]
 					dropped++
 				}
