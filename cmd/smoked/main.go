@@ -253,6 +253,16 @@ func main() {
 
 	roundStats := &api.RoundStats{}
 
+	// localStore persists a completed round's outcomes and evaluates their alerts under one live
+	// runtime snapshot, serialized against a reload (swapRuntime) via evalMu so a target redefined
+	// mid-flight is dropped from BOTH storage and alerting (CODE_REVIEW M2). Used by the warm-up
+	// loop and the serving dispatcher's completion callback.
+	localStore := func(out []scheduler.Outcome) {
+		evalMu.Lock()
+		current.Load().storeLocal(st, out)
+		evalMu.Unlock()
+	}
+
 	// In serve mode the per-target planner fires each target on its own cadence, so
 	// synchronous warm-up rounds (run on the global -step, not per-target steps) would
 	// only double-fire every target and rush hysteresis at startup — skip them
@@ -266,10 +276,7 @@ func main() {
 		start := time.Now()
 		out := scheduler.RunRound(ctx, rt.jobs, *workers)
 		dur := time.Since(start)
-		st.Add(out)
-		evalMu.Lock()
-		current.Load().eval(out) // eval on the live runtime (may differ after a reload)
-		evalMu.Unlock()
+		localStore(out) // store + eval under one snapshot, dropping obsolete-identity rounds (CODE_REVIEW M2)
 		roundStats.Observe(dur, len(out), countErrs(out), start)
 		logRound(r, dur, out)
 		printRound(r, dur, out)
@@ -463,11 +470,8 @@ func main() {
 				if len(due) > 0 {
 					start := now
 					disp.Go(ctx, due,
-						func(o scheduler.Outcome) { // per outcome: store + alert eval, in completion order
-							st.Add([]scheduler.Outcome{o})
-							evalMu.Lock()
-							current.Load().eval([]scheduler.Outcome{o}) // eval on the live runtime (may differ after a reload)
-							evalMu.Unlock()
+						func(o scheduler.Outcome) { // per outcome: identity-gated store + alert eval, in completion order
+							localStore([]scheduler.Outcome{o}) // gate storage on the live fingerprint too (CODE_REVIEW M2)
 						},
 						func(bs scheduler.BatchStat) { // once per tick's batch: operational round metrics
 							roundStats.Observe(bs.Duration, bs.Ran, bs.Errs, start)
@@ -774,15 +778,52 @@ func (rt *runtime) eval(out []scheduler.Outcome) {
 		// Drop an outcome measured under an obsolete target definition: if a reload redefined
 		// this target between when the round was measured and now, the round's stamped
 		// fingerprint won't match the live target's, and evaluating it would feed a stale
-		// measurement into the new alert identity (CODE_REVIEW #4). An empty fingerprint (a
-		// path that predates stamping) is accepted, matching the ingest side's transitional rule.
-		if o.Fingerprint != "" && rt.targetFP[o.Target.Name] != o.Fingerprint {
+		// measurement into the new alert identity (CODE_REVIEW #4).
+		if rt.fingerprintStale(o) {
 			continue
 		}
 		events := rt.engine.Evaluate(o.Target.Name, store.VantageOf(o), names,
 			o.Computed.LossFraction()*100, o.Computed.Median, o.When)
 		rt.engine.Dispatch(events, rt.alerteeByTarget[o.Target.Name]...)
 	}
+}
+
+// fingerprintStale reports whether a locally-measured outcome was measured under a target
+// definition a reload has since replaced: its non-empty fingerprint no longer matches the live
+// target's. An empty fingerprint — a path predating stamping — is never stale, matching the
+// ingest side's transitional rule.
+func (rt *runtime) fingerprintStale(o scheduler.Outcome) bool {
+	return o.Fingerprint != "" && rt.targetFP[o.Target.Name] != o.Fingerprint
+}
+
+// storeLocal persists locally-measured outcomes and evaluates their alerts under THIS runtime
+// snapshot, dropping any measured under an obsolete target identity so a redefined target's
+// in-flight round is neither stored nor alerted. The caller holds evalMu so a concurrent
+// swapRuntime can't change the identity between the check and the write. The remote ingest path
+// already gates storage this way before st.Add (internal/api/agent.go); this closes the same gap
+// for local probes, whose completion previously stored before the fingerprint check (CODE_REVIEW M2).
+func (rt *runtime) storeLocal(st store.Store, out []scheduler.Outcome) {
+	stale := false
+	for _, o := range out {
+		if rt.fingerprintStale(o) {
+			stale = true
+			break
+		}
+	}
+	kept := out
+	if stale { // allocate only when a reload actually invalidated something
+		kept = make([]scheduler.Outcome, 0, len(out))
+		for _, o := range out {
+			if !rt.fingerprintStale(o) {
+				kept = append(kept, o)
+			}
+		}
+	}
+	if len(kept) == 0 {
+		return
+	}
+	st.Add(kept)
+	rt.eval(kept)
 }
 
 // swapRuntime atomically installs nrt as the live runtime, carrying alert firing

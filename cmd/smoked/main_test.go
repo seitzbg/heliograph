@@ -270,6 +270,47 @@ func TestEvalDropsOutcomeWithStaleFingerprint(t *testing.T) {
 	}
 }
 
+// CODE_REVIEW M2: a local round measured under an obsolete target identity (a reload redefined the
+// target between measure and completion) must be dropped from STORAGE too, not only alerting — the
+// remote ingest path already gates storage on the fingerprint before st.Add. storeLocal gates both,
+// so a redefined target's in-flight round never lands in history/latest under the new definition.
+func TestStoreLocalDropsObsoleteIdentityFromStorage(t *testing.T) {
+	cap := &capNotify{}
+	eng := alert.NewEngine(
+		map[string]*alert.Alert{"loss": {Name: "loss", Matcher: alert.CheckLoss{L: 50, X: 1}, To: []string{"cap"}}},
+		map[string]alert.Notifier{"cap": cap},
+	)
+	rt := &runtime{
+		engine:         eng,
+		alertsByTarget: map[string][]string{"t": {"loss"}},
+		targetFP:       map[string]string{"t": "sha256:current"},
+	}
+	mem := store.NewMem(16)
+	lost := scheduler.Outcome{Target: probe.Target{Name: "t"}, Computed: sample.Compute(1, nil)} // 100% loss
+
+	// Measured under an obsolete definition: neither stored nor alerted.
+	stale := lost
+	stale.Fingerprint = "sha256:old"
+	rt.storeLocal(mem, []scheduler.Outcome{stale})
+	if keys, _ := mem.Keys(); len(keys) != 0 {
+		t.Fatalf("obsolete-identity round must not be stored, store has keys %v", keys)
+	}
+	if cap.n != 0 {
+		t.Fatalf("obsolete-identity round must not alert, got %d events", cap.n)
+	}
+
+	// Measured under the current definition: stored and alerted.
+	cur := lost
+	cur.Fingerprint = "sha256:current"
+	rt.storeLocal(mem, []scheduler.Outcome{cur})
+	if keys, _ := mem.Keys(); len(keys) != 1 || keys[0] != "t" {
+		t.Fatalf("current-identity round must be stored, keys = %v", keys)
+	}
+	if cap.n != 1 {
+		t.Fatalf("current-identity round must alert, got %d events", cap.n)
+	}
+}
+
 // Bug C (CODE_REVIEW #4): attaching an alert to a previously-unalerted target on reload must
 // seed its window from durable history, so an already-breaching target fires immediately
 // instead of waiting X fresh rounds. swapRuntime runs the seed before the swap.

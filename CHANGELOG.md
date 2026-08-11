@@ -14,6 +14,12 @@ All notable changes to **smokeping-modern** are recorded here. The format follow
   requires `200` with a single well-formed JSON object whose `accepted + dropped` accounts for the
   batch, and treats any malformed/inconsistent success as a transient error so the batch stays
   buffered for retry.
+- **A local probe crossing a config reload is no longer stored under the redefined target.** The
+  completion path wrote the sample to the store before the fingerprint check (which lived in alert
+  evaluation), so a round measured under definition A that finished after a SIGHUP/API reload
+  redefined the target to B was persisted and could surface as B's latest value — the remote ingest
+  path already gated storage on the fingerprint. Local storage and alert evaluation now run under one
+  runtime snapshot held against the reload swap, dropping an obsolete-identity round from both.
 - **SmokePing importer now inherits probe target-variables down the target tree.** Previously only
   the `probe` was inherited from ancestor `+`/`++` folders; a probe's target-variables (`lookup`,
   `port`, `recordtype`, `pings`, …) were read only from a target's own inline fields and the Probes
