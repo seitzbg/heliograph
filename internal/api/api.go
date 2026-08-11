@@ -1116,7 +1116,15 @@ func (srv *Server) addVantage(w http.ResponseWriter, r *http.Request) {
 	}
 	key, err := srv.Vantages.Add(r.Context(), body.Name)
 	if err != nil {
-		http.Error(w, `{"error":"store unavailable"}`, http.StatusServiceUnavailable)
+		switch {
+		case errors.Is(err, vantage.ErrReserved):
+			http.Error(w, `{"error":"\"local\" is reserved for the hub"}`, http.StatusConflict)
+		case errors.Is(err, vantage.ErrInvalidName):
+			http.Error(w, `{"error":"invalid vantage name (use letters, digits, . _ -)"}`, http.StatusBadRequest)
+		default:
+			slog.Error("addVantage: store add failed", "err", err)
+			http.Error(w, `{"error":"store unavailable"}`, http.StatusServiceUnavailable)
+		}
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store") // the one-time key is in this body — never cache it

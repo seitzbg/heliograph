@@ -17,6 +17,9 @@ type fakeKeys struct {
 }
 
 func (f *fakeKeys) Add(_ context.Context, name string) (string, error) {
+	if name == "local" { // mirror the real store: the hub's own vantage is reserved
+		return "", vantage.ErrReserved
+	}
 	f.added = append(f.added, name)
 	return "smk_id_" + name, nil
 }
@@ -87,6 +90,24 @@ func TestAddVantageRejectsInvalidNameAndSetsNoStore(t *testing.T) {
 	mux.ServeHTTP(w, r)
 	if w.Header().Get("Cache-Control") != "no-store" {
 		t.Errorf("login response Cache-Control = %q, want no-store", w.Header().Get("Cache-Control"))
+	}
+}
+
+// CODE_REVIEW L5: minting the reserved "local" vantage must return a clear client error (409),
+// not a generic 503 "store unavailable" that misrepresents an operator input mistake as an outage.
+func TestAddVantageReservedNameIsConflict(t *testing.T) {
+	srv, fk := adminServer("hunter2")
+	mux := srv.Routes()
+	cookie := login(t, mux, "hunter2")
+	r := httptest.NewRequest("POST", "/api/admin/vantages", strings.NewReader(`{"name":"local"}`))
+	r.AddCookie(cookie)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, r)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("reserved-name add = %d, want 409", w.Code)
+	}
+	if len(fk.added) != 0 {
+		t.Fatalf("reserved name must not be recorded as added, got %v", fk.added)
 	}
 }
 
