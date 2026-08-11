@@ -445,6 +445,14 @@ breaking changes.
   slow surviving round no longer skews the long-range median average. (One-time aggregate rebuild.)
 - **`/api/series?vantage=` honored without a window.** The no-window recent-tail path now reads the
   selected vantage (vantage-aware capped read) instead of always returning local data.
+- **Agent on-disk store-and-forward** — the smoke-agent can now persist its
+  store-and-forward buffer to disk (opt-in via `spool_dir` / `--spool-dir`). Buffered
+  rounds survive an agent restart, including a hard crash (`kill -9`/OOM/power loss),
+  losing at most ~1s of the most recent rounds. Implemented as an append-only, CRC-framed,
+  size-rolled segment log mirroring the in-memory buffer, with an atomic head watermark and
+  crash-safe replay on startup; a shared spool dir is refused via `flock`, and a runtime
+  spool I/O error degrades to memory-only rather than stopping the agent. When `spool_dir`
+  is unset, behavior is unchanged (in-memory only).
 - **Agent shutdown drains its whole buffer.** The final flush loops over all buffered batches
   (bounded by a fresh deadline) instead of sending just one — a controlled shutdown after a hub
   outage no longer strands every buffered round past the first batch.

@@ -146,6 +146,28 @@ outbound HTTPS calls, so it works behind NAT. On push failure it retains rounds
 in a bounded in-memory buffer and retries with backoff; when the buffer is full
 it drops the oldest and logs the drop.
 
+### Durable buffering (`spool_dir`)
+
+By default the agent buffers unpushed rounds in memory only; a restart while the hub is
+unreachable drops them. Set `spool_dir` (config) or `--spool-dir` (flag) to a writable,
+durable directory to persist the buffer:
+
+```yaml
+spool_dir: /var/lib/smoke-agent/spool
+```
+
+- **Guarantee:** buffered rounds survive any restart, including `kill -9`/OOM/power loss,
+  losing at most ~1 second of the most recently measured rounds. A few already-delivered
+  rounds may be re-sent after a crash; the hub deduplicates on `(target, vantage, ts)`, so
+  this is harmless.
+- **Bounds:** on-disk data mirrors the in-memory buffer and stays within its ~256 MiB
+  budget; dead segments are reclaimed automatically.
+- **Exclusivity:** the directory is locked (`flock`); a second agent pointed at the same
+  `spool_dir` refuses to start.
+- **Failure handling:** if `spool_dir` is set but cannot be created/locked at startup, the
+  agent exits with an error. A spool I/O error *after* startup (e.g. a full disk) is logged
+  and the agent continues in memory-only mode rather than stopping.
+
 ## Step 4 — Verify
 
 - `smoked vantage ls` shows a recent **LAST-SEEN** for the vantage once the agent
