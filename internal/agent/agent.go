@@ -109,7 +109,10 @@ func (a *Agent) Run(ctx context.Context) error {
 	slog.Info("smoke-agent starting", "hub", a.opts.Hub, "vantage", a.opts.Vantage, "interval", a.opts.Interval)
 
 	if a.opts.SpoolDir != "" {
-		sp, head, live, err := openSpool(a.opts.SpoolDir)
+		// Bound recovery by the buffer's own budget so replaying a full spool can't OOM the agent
+		// on restart (CODE_REVIEW #1).
+		capRounds, maxBytes := a.buf.budget()
+		sp, head, live, err := openSpool(a.opts.SpoolDir, capRounds, maxBytes)
 		if err != nil {
 			return fmt.Errorf("spool: %w", err)
 		}

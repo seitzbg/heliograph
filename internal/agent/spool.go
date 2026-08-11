@@ -72,33 +72,29 @@ type record struct {
 	body []byte
 }
 
-// readSegment decodes every complete, checksum-valid frame from path, stopping at
-// the first short or corrupt frame (an expected crash-torn tail). When truncate is
-// true it shrinks the file to the last good frame so appends can resume cleanly.
-// A missing/unreadable file is a hard error.
-func readSegment(path string, truncate bool) ([]record, error) {
+// readSegment decodes every complete, checksum-valid frame from path, in order. It returns the
+// decoded records, the number of bytes it consumed (the offset of the first undecodable byte),
+// and whether the whole file decoded cleanly (complete == the decode reached EOF). It does NOT
+// modify the file: the caller decides whether an incomplete decode is an expected crash-torn tail
+// on the active segment (truncate to consumed) or corruption in a closed segment (fail). A
+// missing/unreadable file is a hard error.
+func readSegment(path string) (recs []record, consumed int64, complete bool, err error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, err
+		return nil, 0, false, err
 	}
-	var recs []record
 	off := 0
 	for off < len(data) {
 		seq, body, n, derr := decodeFrame(data[off:])
 		if derr != nil {
-			break // torn or corrupt tail
+			break // torn or corrupt frame; stop at the last good one
 		}
 		cp := make([]byte, len(body))
 		copy(cp, body)
 		recs = append(recs, record{seq: seq, body: cp})
 		off += n
 	}
-	if truncate && off < len(data) {
-		if err := os.Truncate(path, int64(off)); err != nil {
-			return nil, err
-		}
-	}
-	return recs, nil
+	return recs, int64(off), off == len(data), nil
 }
 
 // fsyncDir flushes a directory entry change (a rename or create) to disk, so it
@@ -229,11 +225,14 @@ type spool struct {
 }
 
 // openSpool replays the existing segments in dir to recover the live round set and head
-// watermark, truncates a crash-torn tail on the last segment, deletes fully-dead closed
-// segments, and opens the active segment for appending. It returns the recovered head and
-// the live rounds (contiguous, seq order) for the buffer to adopt. The background flusher
-// is NOT started here — the caller calls start().
-func openSpool(dir string) (*spool, int64, []agentwire.RoundReport, error) {
+// watermark, truncates a crash-torn tail on the last (active) segment, fails on corruption in a
+// closed segment, deletes fully-dead closed segments, and opens the active segment for appending.
+// Recovery is bounded by capRounds/maxBytes (the running buffer's budget): the oldest live rounds
+// are evicted while decoding, so a full spool cannot OOM a constrained vantage on restart, and the
+// returned head reflects any such eviction. It returns the (possibly advanced) head and the
+// bounded live rounds (contiguous, seq order) for the buffer to adopt. The background flusher is
+// NOT started here — the caller calls start().
+func openSpool(dir string, capRounds, maxBytes int) (*spool, int64, []agentwire.RoundReport, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, 0, nil, fmt.Errorf("create spool dir: %w", err)
 	}
@@ -255,47 +254,94 @@ func openSpool(dir string) (*spool, int64, []agentwire.RoundReport, error) {
 
 	s := &spool{dir: dir, segMax: segmentMaxBytes, lockFile: lock, head: head, headDurable: head, activeMax: -1}
 
-	type segRead struct {
+	// Decode every segment in seq order, retaining only per-segment metadata (path/maxSeq) plus a
+	// bounded live queue — never every segment's decoded bodies at once (CODE_REVIEW #1). The live
+	// queue is bounded by the same count/byte budget the running buffer enforces, evicting the
+	// oldest live rounds during decode so recovering a full spool cannot OOM a constrained vantage.
+	type segInfo struct {
 		path   string
-		recs   []record
 		maxSeq int64
 	}
-	var reads []segRead
+	var segs []segInfo
 	var live []agentwire.RoundReport
+	liveBytes, dropped := 0, 0
+	wantSeq := int64(-1) // -1 until the first record fixes the expected next sequence
 	for i, p := range segPaths {
-		recs, err := readSegment(p, i == len(segPaths)-1) // truncate only the last (active) segment
-		if err != nil {
+		isLast := i == len(segPaths)-1
+		recs, consumed, complete, rerr := readSegment(p)
+		if rerr != nil {
 			lock.Close()
-			return nil, 0, nil, fmt.Errorf("read segment %s: %w", p, err)
+			return nil, 0, nil, fmt.Errorf("read segment %s: %w", p, rerr)
+		}
+		if !complete {
+			if isLast {
+				// The active segment being appended when the process crashed can end in a torn
+				// tail; truncate to the last good frame so appends resume cleanly.
+				if terr := os.Truncate(p, consumed); terr != nil {
+					lock.Close()
+					return nil, 0, nil, fmt.Errorf("truncate torn segment %s: %w", p, terr)
+				}
+			} else {
+				// A closed segment was synced and closed before its successor was created, so a
+				// short/bad frame there is corruption, not a crash tail. Fail loudly instead of
+				// silently returning the valid prefix: dropping its (and every later segment's)
+				// records would break the buffer's contiguous-sequence assumption and reuse/replay
+				// sequence numbers (CODE_REVIEW #2).
+				lock.Close()
+				return nil, 0, nil, fmt.Errorf("spool: closed segment %s is corrupt at byte %d; clear the spool dir to recover (the buffered backlog is lost)", p, consumed)
+			}
 		}
 		maxSeq := int64(-1)
 		for _, rec := range recs {
+			if wantSeq >= 0 && rec.seq != wantSeq {
+				// Records must form one strictly-increasing contiguous run; a gap/duplicate that
+				// the per-frame CRC did not catch still breaks adoption, so fail (CODE_REVIEW #2).
+				lock.Close()
+				return nil, 0, nil, fmt.Errorf("spool: non-contiguous sequence in %s: got %d, want %d", p, rec.seq, wantSeq)
+			}
+			wantSeq = rec.seq + 1
 			if rec.seq > maxSeq {
 				maxSeq = rec.seq
 			}
 			if rec.seq >= head {
 				var r agentwire.RoundReport
-				if err := json.Unmarshal(rec.body, &r); err != nil {
-					slog.Warn("spool: skipping unparseable record", "seq", rec.seq, "err", err)
-					continue
+				if uerr := json.Unmarshal(rec.body, &r); uerr != nil {
+					// A CRC-valid frame that will not decode is corruption; skipping it would open
+					// the same silent-gap hole as a dropped frame, so fail (CODE_REVIEW #2).
+					lock.Close()
+					return nil, 0, nil, fmt.Errorf("spool: undecodable live record seq %d in %s: %w", rec.seq, p, uerr)
+				}
+				sz := estimatedJSONBytes(r)
+				for len(live) > 0 && (len(live) >= capRounds || liveBytes+sz > maxBytes) {
+					liveBytes -= estimatedJSONBytes(live[0])
+					live = live[1:]
+					dropped++
 				}
 				live = append(live, r)
+				liveBytes += sz
 			}
 		}
-		reads = append(reads, segRead{path: p, recs: recs, maxSeq: maxSeq})
+		segs = append(segs, segInfo{path: p, maxSeq: maxSeq})
 	}
+	// Rounds evicted above are dead; advance the in-memory watermark past them. headDurable stays
+	// at the persisted `head` until the next flush persists effectiveHead, so reclamation below
+	// (and any crash before that flush) still keys off the durable value.
+	effectiveHead := head + int64(dropped)
+	s.head = effectiveHead
 
-	// Delete fully-dead closed segments; keep the rest. The last segment is always kept as
-	// the active append target (even if dead — we continue appending to it).
-	for i, sr := range reads {
-		isLast := i == len(reads)-1
-		if !isLast && sr.maxSeq < head {
-			os.Remove(sr.path)
+	// Delete fully-dead closed segments per the DURABLE watermark (head); keep the rest. The last
+	// segment is always kept as the active append target (even if dead — we continue appending to
+	// it). Segments holding rounds evicted above (maxSeq >= head) are retained until effectiveHead
+	// is persisted, then reclaimed by a later flush.
+	for i, sg := range segs {
+		isLast := i == len(segs)-1
+		if !isLast && sg.maxSeq < head {
+			os.Remove(sg.path)
 			s.reclaimedN++
 			continue
 		}
 		if !isLast {
-			s.segments = append(s.segments, segMeta{path: sr.path, maxSeq: sr.maxSeq})
+			s.segments = append(s.segments, segMeta{path: sg.path, maxSeq: sg.maxSeq})
 		}
 	}
 
@@ -303,8 +349,8 @@ func openSpool(dir string) (*spool, int64, []agentwire.RoundReport, error) {
 	var activePath string
 	var activeMax int64 = -1
 	created := false
-	if len(reads) > 0 {
-		last := reads[len(reads)-1]
+	if len(segs) > 0 {
+		last := segs[len(segs)-1]
 		activePath = last.path
 		activeMax = last.maxSeq
 	} else {
@@ -340,7 +386,7 @@ func openSpool(dir string) (*spool, int64, []agentwire.RoundReport, error) {
 	s.activeBytes = fi.Size()
 	s.activeMax = activeMax
 	s.replayedN = len(live)
-	return s, head, live, nil
+	return s, effectiveHead, live, nil
 }
 
 func (s *spool) append(seq int64, r agentwire.RoundReport) {

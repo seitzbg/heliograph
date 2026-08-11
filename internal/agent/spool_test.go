@@ -3,8 +3,10 @@ package agent
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"syscall"
 	"testing"
 
@@ -72,12 +74,22 @@ func writeRaw(t *testing.T, path string, frames ...[]byte) {
 	}
 }
 
+// openSpoolT opens a spool with generous budgets, so tests that don't specifically exercise the
+// recovery bound see no eviction (the pre-CODE_REVIEW-#1 behavior).
+func openSpoolT(dir string) (*spool, int64, []agentwire.RoundReport, error) {
+	return openSpool(dir, 1_000_000, 1<<30)
+}
+
 func TestReadSegmentAllGood(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "seg.log")
-	writeRaw(t, p, encodeFrame(nil, 1, []byte("a")), encodeFrame(nil, 2, []byte("b")))
-	recs, err := readSegment(p, false)
+	all := append(encodeFrame(nil, 1, []byte("a")), encodeFrame(nil, 2, []byte("b"))...)
+	writeRaw(t, p, all)
+	recs, consumed, complete, err := readSegment(p)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !complete || consumed != int64(len(all)) {
+		t.Fatalf("complete=%v consumed=%d, want true %d", complete, consumed, len(all))
 	}
 	if len(recs) != 2 || recs[0].seq != 1 || recs[1].seq != 2 {
 		t.Fatalf("recs = %+v", recs)
@@ -87,21 +99,26 @@ func TestReadSegmentAllGood(t *testing.T) {
 	}
 }
 
-func TestReadSegmentTornTailTruncates(t *testing.T) {
+// readSegment reports an incomplete decode (a torn tail) via complete=false + the consumed
+// offset, but does NOT modify the file — truncation is openSpool's decision (only for the
+// active segment). See TestSpoolTornLastSegmentTruncates for the truncation behavior.
+func TestReadSegmentTornTailIsIncomplete(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "seg.log")
 	good := encodeFrame(nil, 1, []byte("a"))
 	torn := encodeFrame(nil, 2, []byte("bbbb"))[:5] // partial second frame
 	writeRaw(t, p, good, torn)
-	recs, err := readSegment(p, true)
+	recs, consumed, complete, err := readSegment(p)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if complete || consumed != int64(len(good)) {
+		t.Fatalf("complete=%v consumed=%d, want false %d (stop at last good frame)", complete, consumed, len(good))
 	}
 	if len(recs) != 1 || recs[0].seq != 1 {
 		t.Fatalf("recs = %+v, want just seq 1", recs)
 	}
-	fi, _ := os.Stat(p)
-	if fi.Size() != int64(len(good)) {
-		t.Fatalf("file size = %d, want %d (truncated to last good frame)", fi.Size(), len(good))
+	if fi, _ := os.Stat(p); fi.Size() != int64(len(good)+len(torn)) {
+		t.Fatalf("readSegment must not modify the file; size = %d, want %d", fi.Size(), len(good)+len(torn))
 	}
 }
 
@@ -112,9 +129,12 @@ func TestReadSegmentCorruptStopsThere(t *testing.T) {
 	f2[len(f2)-1] ^= 0xFF // corrupt second frame's payload
 	f3 := encodeFrame(nil, 3, []byte("c"))
 	writeRaw(t, p, f1, f2, f3)
-	recs, err := readSegment(p, false)
+	recs, consumed, complete, err := readSegment(p)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if complete || consumed != int64(len(f1)) {
+		t.Fatalf("complete=%v consumed=%d, want false %d (stop at corruption)", complete, consumed, len(f1))
 	}
 	if len(recs) != 1 || recs[0].seq != 1 {
 		t.Fatalf("recs = %+v, want to stop at corruption after seq 1", recs)
@@ -122,7 +142,7 @@ func TestReadSegmentCorruptStopsThere(t *testing.T) {
 }
 
 func TestReadSegmentMissingFileIsError(t *testing.T) {
-	if _, err := readSegment(filepath.Join(t.TempDir(), "nope.log"), false); err == nil {
+	if _, _, _, err := readSegment(filepath.Join(t.TempDir(), "nope.log")); err == nil {
 		t.Fatal("want error for missing file")
 	}
 }
@@ -148,7 +168,7 @@ func TestHeadFileRoundTrip(t *testing.T) {
 
 func TestSpoolAppendFlushReplay(t *testing.T) {
 	dir := t.TempDir()
-	sp, head, live, err := openSpool(dir)
+	sp, head, live, err := openSpoolT(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,7 +185,7 @@ func TestSpoolAppendFlushReplay(t *testing.T) {
 	}
 
 	// reopen == crash recovery
-	sp2, head2, live2, err := openSpool(dir)
+	sp2, head2, live2, err := openSpoolT(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +203,7 @@ func TestSpoolAppendFlushReplay(t *testing.T) {
 
 func TestSpoolHeadExcludesDead(t *testing.T) {
 	dir := t.TempDir()
-	sp, _, _, _ := openSpool(dir)
+	sp, _, _, _ := openSpoolT(dir)
 	sp.append(0, rr("a"))
 	sp.append(1, rr("b"))
 	sp.append(2, rr("c"))
@@ -193,7 +213,7 @@ func TestSpoolHeadExcludesDead(t *testing.T) {
 	}
 	sp.close()
 
-	sp2, head2, live2, _ := openSpool(dir)
+	sp2, head2, live2, _ := openSpoolT(dir)
 	defer sp2.close()
 	if head2 != 2 {
 		t.Fatalf("head2 = %d, want 2", head2)
@@ -205,7 +225,7 @@ func TestSpoolHeadExcludesDead(t *testing.T) {
 
 func TestSpoolSegmentRoll(t *testing.T) {
 	dir := t.TempDir()
-	sp, _, _, _ := openSpool(dir)
+	sp, _, _, _ := openSpoolT(dir)
 	// Force several rolls with a small cap override.
 	sp.segMax = 512
 	big := agentwire.RoundReport{Target: "x", TS: "2026-01-01T00:00:00Z", RTTs: make([]float64, 20)}
@@ -221,7 +241,7 @@ func TestSpoolSegmentRoll(t *testing.T) {
 	if len(segs) < 2 {
 		t.Fatalf("got %d segments, want >= 2 (rolls)", len(segs))
 	}
-	sp2, _, live2, _ := openSpool(dir)
+	sp2, _, live2, _ := openSpoolT(dir)
 	defer sp2.close()
 	if len(live2) != 50 {
 		t.Fatalf("live2 = %d, want 50 across segments", len(live2))
@@ -233,7 +253,7 @@ func TestSpoolSegmentRoll(t *testing.T) {
 // and actually removed from disk, while the active segment (never reclaimed) survives.
 func TestSpoolReclaimDeletesSegmentFile(t *testing.T) {
 	dir := t.TempDir()
-	sp, _, _, err := openSpool(dir)
+	sp, _, _, err := openSpoolT(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -276,7 +296,7 @@ func TestSpoolReclaimDeletesSegmentFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sp2, head2, live2, err := openSpool(dir)
+	sp2, head2, live2, err := openSpoolT(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -292,17 +312,17 @@ func TestSpoolReclaimDeletesSegmentFile(t *testing.T) {
 
 func TestSpoolFlockRejectsSecondOpener(t *testing.T) {
 	dir := t.TempDir()
-	sp1, _, _, err := openSpool(dir)
+	sp1, _, _, err := openSpoolT(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer sp1.close()
-	if _, _, _, err := openSpool(dir); err == nil {
+	if _, _, _, err := openSpoolT(dir); err == nil {
 		t.Fatal("second openSpool on the same dir must fail (lock contended)")
 	}
 	// After close, a new opener succeeds.
 	sp1.close()
-	sp3, _, _, err := openSpool(dir)
+	sp3, _, _, err := openSpoolT(dir)
 	if err != nil {
 		t.Fatalf("reopen after close: %v", err)
 	}
@@ -311,7 +331,7 @@ func TestSpoolFlockRejectsSecondOpener(t *testing.T) {
 
 func TestSpoolDegradesOnWriteError(t *testing.T) {
 	dir := t.TempDir()
-	sp, _, _, _ := openSpool(dir)
+	sp, _, _, _ := openSpoolT(dir)
 	defer sp.close()
 	sp.writeErr = errors.New("disk full")
 	sp.append(0, rr("a"))
@@ -333,7 +353,7 @@ func TestSpoolDegradesOnWriteError(t *testing.T) {
 // double-close panic: a second close() must be a safe, error-free no-op.
 func TestSpoolStartCloseLifecycleIsIdempotent(t *testing.T) {
 	dir := t.TempDir()
-	sp, _, _, err := openSpool(dir)
+	sp, _, _, err := openSpoolT(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -348,7 +368,7 @@ func TestSpoolStartCloseLifecycleIsIdempotent(t *testing.T) {
 		t.Fatalf("second close() = %v, want nil", err)
 	}
 
-	sp2, head2, live2, err := openSpool(dir)
+	sp2, head2, live2, err := openSpoolT(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -365,7 +385,7 @@ func TestBufferSpoolCrashReplay(t *testing.T) {
 	dir := t.TempDir()
 
 	// Run 1: buffer with a spool. Add 3 rounds, flush (fsync), commit the first, flush again.
-	sp, head, live, err := openSpool(dir)
+	sp, head, live, err := openSpoolT(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -396,7 +416,7 @@ func TestBufferSpoolCrashReplay(t *testing.T) {
 	b = nil
 
 	// Run 2: reopen; expect b and c live, a gone.
-	sp2, head2, live2, err := openSpool(dir)
+	sp2, head2, live2, err := openSpoolT(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -415,7 +435,7 @@ func TestBufferSpoolCrashReplay(t *testing.T) {
 
 func TestBufferSpoolCrashBeforeWatermarkReplaysDuplicate(t *testing.T) {
 	dir := t.TempDir()
-	sp, head, live, _ := openSpool(dir)
+	sp, head, live, _ := openSpoolT(dir)
 	b := newBuffer(100)
 	b.setPersister(sp)
 	b.reload(head, live)
@@ -433,11 +453,169 @@ func TestBufferSpoolCrashBeforeWatermarkReplaysDuplicate(t *testing.T) {
 	sp.lockFile.Close()
 	sp = nil
 
-	sp2, head2, live2, _ := openSpool(dir)
+	sp2, head2, live2, _ := openSpoolT(dir)
 	defer sp2.close()
 	// Bounded duplication: both rounds replay because the watermark wasn't fsynced.
 	// This is safe — the hub dedups on (target,vantage,ts).
 	if len(live2) != 2 || head2 != 0 {
 		t.Fatalf("live2=%d head2=%d, want 2 rounds re-presented (bounded dup)", len(live2), head2)
+	}
+}
+
+// Recovering a full spool must not exceed the running buffer's budget: openSpool evicts the
+// oldest live rounds while decoding (rather than building an unbounded slice and trimming later),
+// so a constrained vantage can't OOM on restart, and the returned head reflects the eviction
+// (CODE_REVIEW #1). This is also the "lower BufferCap before restart" case.
+func TestSpoolRecoveryEvictsToRoundBudget(t *testing.T) {
+	dir := t.TempDir()
+	sp, _, _, err := openSpoolT(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const n = 20
+	for i := 0; i < n; i++ {
+		sp.append(int64(i), rr(fmt.Sprintf("t%d", i)))
+	}
+	if err := sp.flush(); err != nil {
+		t.Fatal(err)
+	}
+	if err := sp.close(); err != nil {
+		t.Fatal(err)
+	}
+
+	const keep = 5 // lower round cap than what's on disk
+	sp2, head2, live2, err := openSpool(dir, keep, 1<<30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sp2.close()
+	if len(live2) != keep {
+		t.Fatalf("recovered %d live rounds, want cap %d (oldest evicted during decode)", len(live2), keep)
+	}
+	if head2 != int64(n-keep) {
+		t.Fatalf("effective head = %d, want %d (persisted head + dropped)", head2, n-keep)
+	}
+	if live2[0].Target != fmt.Sprintf("t%d", n-keep) || live2[keep-1].Target != fmt.Sprintf("t%d", n-1) {
+		t.Fatalf("recovered the wrong window: first=%s last=%s (want the newest %d)", live2[0].Target, live2[keep-1].Target, keep)
+	}
+}
+
+// The byte budget bounds recovery too (independent of the round cap): openSpool keeps only the
+// newest rounds that fit maxBytes (CODE_REVIEW #1).
+func TestSpoolRecoveryEvictsToByteBudget(t *testing.T) {
+	dir := t.TempDir()
+	sp, _, _, _ := openSpoolT(dir)
+	const n = 20
+	for i := 0; i < n; i++ {
+		sp.append(int64(i), rrN(50))
+	}
+	if err := sp.flush(); err != nil {
+		t.Fatal(err)
+	}
+	sp.close()
+
+	budget := 4 * estimatedJSONBytes(rrN(50)) // high round cap, so the byte budget is what bites
+	sp2, head2, live2, err := openSpool(dir, 1_000_000, budget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sp2.close()
+	if len(live2) != 4 {
+		t.Fatalf("recovered %d rounds, want 4 (byte budget)", len(live2))
+	}
+	if head2 != int64(n-len(live2)) {
+		t.Fatalf("effective head = %d, want %d", head2, n-len(live2))
+	}
+}
+
+// Corruption in a CLOSED (already-synced) segment is not a crash tail: openSpool must fail loudly
+// rather than silently returning its valid prefix, which would drop the corrupt-onward records and
+// break the buffer's contiguous-sequence adoption (seq reuse / double replay) (CODE_REVIEW #2).
+func TestSpoolClosedSegmentCorruptionFails(t *testing.T) {
+	dir := t.TempDir()
+	sp, _, _, _ := openSpoolT(dir)
+	sp.segMax = 200 // small cap -> several segments roll, so seg[0] is closed
+	for i := 0; i < 20; i++ {
+		sp.append(int64(i), rr(fmt.Sprintf("t%d", i)))
+	}
+	if err := sp.flush(); err != nil {
+		t.Fatal(err)
+	}
+	sp.close()
+
+	segs, _ := filepath.Glob(filepath.Join(dir, "seg-*.log"))
+	sort.Strings(segs)
+	if len(segs) < 2 {
+		t.Fatalf("need >= 2 segments to have a closed one, got %d", len(segs))
+	}
+	data, err := os.ReadFile(segs[0]) // the first (closed) segment
+	if err != nil {
+		t.Fatal(err)
+	}
+	data[len(data)/2] ^= 0xFF // corrupt a byte mid-segment
+	if err := os.WriteFile(segs[0], data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, _, err := openSpool(dir, 1_000_000, 1<<30); err == nil {
+		t.Fatal("openSpool must fail on corruption in a closed segment, not silently drop records")
+	}
+}
+
+// A torn tail on the LAST (active) segment IS an expected crash artifact: openSpool truncates it
+// and recovers the good rounds (CODE_REVIEW #2 — truncation is permitted only on the active
+// segment, and moved out of readSegment into openSpool).
+func TestSpoolTornLastSegmentTruncates(t *testing.T) {
+	dir := t.TempDir()
+	sp, _, _, _ := openSpoolT(dir)
+	for i := 0; i < 3; i++ {
+		sp.append(int64(i), rr(fmt.Sprintf("t%d", i)))
+	}
+	if err := sp.flush(); err != nil {
+		t.Fatal(err)
+	}
+	sp.close()
+
+	segs, _ := filepath.Glob(filepath.Join(dir, "seg-*.log"))
+	if len(segs) != 1 {
+		t.Fatalf("want 1 segment, got %d", len(segs))
+	}
+	fiBefore, _ := os.Stat(segs[0])
+	torn := encodeFrame(nil, 3, []byte("partial"))[:6] // a half-written frame, as a crash mid-append leaves
+	f, err := os.OpenFile(segs[0], os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Write(torn); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	sp2, head2, live2, err := openSpool(dir, 1_000_000, 1<<30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sp2.close()
+	if len(live2) != 3 || head2 != 0 {
+		t.Fatalf("recovered %d rounds head=%d, want 3 rounds head 0", len(live2), head2)
+	}
+	if fiAfter, _ := os.Stat(segs[0]); fiAfter.Size() != fiBefore.Size() {
+		t.Fatalf("torn tail not truncated back to the last good frame: size=%d, want %d", fiAfter.Size(), fiBefore.Size())
+	}
+}
+
+// A non-contiguous sequence (a gap the per-frame CRC can't catch) breaks the buffer's adoption,
+// so openSpool must reject it (CODE_REVIEW #2).
+func TestSpoolNonContiguousSequenceFails(t *testing.T) {
+	dir := t.TempDir()
+	sp, _, _, _ := openSpoolT(dir)
+	sp.append(0, rr("a"))
+	sp.append(2, rr("c")) // seq 1 missing
+	if err := sp.flush(); err != nil {
+		t.Fatal(err)
+	}
+	sp.close()
+	if _, _, _, err := openSpool(dir, 1_000_000, 1<<30); err == nil {
+		t.Fatal("openSpool must fail on a non-contiguous sequence")
 	}
 }
