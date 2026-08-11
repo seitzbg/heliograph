@@ -38,7 +38,7 @@ import (
 // version is the smoke-agent release version. Overridable at build time with
 //
 //	go build -ldflags "-X main.version=$(git describe --tags)"
-var version = "0.1.0"
+var version = "1.0.0"
 
 // agentConfig is the resolved smoke-agent configuration: the merge of an
 // optional YAML file and CLI flag overrides, plus defaults.
