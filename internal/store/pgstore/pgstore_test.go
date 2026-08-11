@@ -1049,11 +1049,19 @@ func TestAddResultsIdempotent(t *testing.T) {
 			Computed: sample.Compute(3, []float64{0.010, 0.011, 0.012}),
 		}}
 	}
-	if err := s.AddResults(ctx, mk()); err != nil {
+	ins1, err := s.AddResults(ctx, mk())
+	if err != nil {
 		t.Fatalf("AddResults #1: %v", err)
 	}
-	if err := s.AddResults(ctx, mk()); err != nil { // replay
+	if len(ins1) != 1 {
+		t.Fatalf("first AddResults should report 1 newly-inserted round, got %d", len(ins1))
+	}
+	ins2, err := s.AddResults(ctx, mk()) // replay
+	if err != nil {
 		t.Fatalf("AddResults #2 (replay): %v", err)
+	}
+	if len(ins2) != 0 {
+		t.Fatalf("replay must report 0 newly-inserted rounds (so alerts aren't re-evaluated), got %d", len(ins2))
 	}
 	var n int
 	if err := s.pool.QueryRow(ctx,
@@ -1081,7 +1089,7 @@ func TestVantageReadIsolation(t *testing.T) {
 			Target: tgt, ProbeName: "FPing", When: base.Add(time.Duration(i) * time.Minute),
 			Vantage: vant, Computed: sample.Compute(2, []float64{rtt, rtt}),
 		}
-		if err := s.AddResults(ctx, []scheduler.Outcome{o}); err != nil {
+		if _, err := s.AddResults(ctx, []scheduler.Outcome{o}); err != nil {
 			t.Fatalf("write %s/%d: %v", vant, i, err)
 		}
 	}
@@ -1159,7 +1167,7 @@ func TestEnableDownsamplingBackfillsHistory(t *testing.T) {
 			When:     old.Add(time.Duration(i) * time.Minute),
 		})
 	}
-	if err := s.AddResults(ctx, rounds); err != nil {
+	if _, err := s.AddResults(ctx, rounds); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	if err := s.EnableDownsampling(ctx); err != nil {

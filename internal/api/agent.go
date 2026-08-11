@@ -188,15 +188,19 @@ func (srv *Server) agentResults(w http.ResponseWriter, r *http.Request) {
 		outcomes = append(outcomes, o)
 	}
 	if len(outcomes) > 0 {
-		if err := ing.AddResults(r.Context(), outcomes); err != nil {
+		inserted, err := ing.AddResults(r.Context(), outcomes)
+		if err != nil {
 			slog.Error("agent ingest: write failed", "vantage", v, "err", err)
 			http.Error(w, `{"error":"store unavailable"}`, http.StatusServiceUnavailable)
 			return
 		}
-		// Evaluate alerts for the accepted remote rounds only AFTER they are durably stored,
-		// so a firing is backed by persisted data (P2-5). Each outcome carries its vantage.
-		if srv.OnIngest != nil {
-			srv.OnIngest(outcomes)
+		// Evaluate alerts only over the rounds that were NEWLY persisted, and only AFTER they
+		// are durably stored (P2-5). A replayed round — an HTTP retry, or the deliberate resend
+		// when a split batch's later half fails transiently — is deduplicated by the store and
+		// excluded here, so it can't re-advance alert hysteresis into a false FIRING or a
+		// duplicate notification (CODE_REVIEW #4/replay). Each outcome carries its vantage.
+		if srv.OnIngest != nil && len(inserted) > 0 {
+			srv.OnIngest(inserted)
 		}
 	}
 	if dropped > 0 {

@@ -360,22 +360,33 @@ func (s *PGStore) Add(outcomes []scheduler.Outcome) {
 // AddResults persists an agent-ingested batch, returning the first write error so
 // the ingest handler can answer 503 and the agent can retain + retry — the caller-
 // visible feedback the fire-and-forget Add deliberately does not give the local
-// collector. Idempotent via ON CONFLICT, so a replayed batch is a no-op.
-func (s *PGStore) AddResults(ctx context.Context, outcomes []scheduler.Outcome) error {
+// collector. Idempotent via ON CONFLICT (target,vantage,ts) DO NOTHING.
+//
+// It returns the subset of outcomes that were NEWLY inserted: each queued INSERT reports
+// RowsAffected 1 when it stored a row and 0 when it conflicted, so the caller can evaluate
+// alerts over only the fresh rounds. Without this, a replayed round (an HTTP retry, or the
+// deliberate resend when a split batch's later half fails transiently) would be a no-op in
+// the table yet still re-advance alert hysteresis — a false FIRING (CODE_REVIEW #4/replay).
+func (s *PGStore) AddResults(ctx context.Context, outcomes []scheduler.Outcome) ([]scheduler.Outcome, error) {
 	if len(outcomes) == 0 {
-		return nil
+		return nil, nil
 	}
 	wctx, cancel := context.WithTimeout(ctx, writeTimeout)
 	defer cancel()
 	br := s.pool.SendBatch(wctx, buildBatch(outcomes))
 	defer br.Close()
-	for range outcomes {
-		if _, err := br.Exec(); err != nil {
+	var inserted []scheduler.Outcome
+	for i := range outcomes {
+		tag, err := br.Exec()
+		if err != nil {
 			s.writeFails.Add(1)
-			return fmt.Errorf("pgstore: ingest insert: %w", err)
+			return nil, fmt.Errorf("pgstore: ingest insert: %w", err)
+		}
+		if tag.RowsAffected() == 1 { // 0 => ON CONFLICT DO NOTHING skipped a duplicate
+			inserted = append(inserted, outcomes[i])
 		}
 	}
-	return nil
+	return inserted, nil
 }
 
 // WriteMetrics appends the persistent-write health counter in Prometheus text format.
