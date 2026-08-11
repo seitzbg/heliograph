@@ -52,6 +52,7 @@ type agentConfig struct {
 	Workers  int
 	Buffer   int
 	FlushMax int
+	SpoolDir string
 }
 
 // fileConfig mirrors agentConfig for YAML decoding. Interval/Timeout are
@@ -67,6 +68,7 @@ type fileConfig struct {
 	Workers  int    `yaml:"workers"`
 	Buffer   int    `yaml:"buffer"`
 	FlushMax int    `yaml:"flush_max"`
+	SpoolDir string `yaml:"spool_dir"`
 }
 
 // cliFlags carries the CLI flag overrides for resolveConfig. A zero value for a field
@@ -80,6 +82,7 @@ type cliFlags struct {
 	insecure          *bool
 	workers, buffer   int
 	flushMax          int
+	spoolDir          string
 }
 
 // resolveConfig builds the effective agentConfig: it starts from the YAML file at path
@@ -121,6 +124,7 @@ func resolveConfig(path string, f cliFlags) (agentConfig, error) {
 		Workers:  fc.Workers,
 		Buffer:   fc.Buffer,
 		FlushMax: fc.FlushMax,
+		SpoolDir: fc.SpoolDir,
 	}
 	if fc.Interval != "" {
 		d, err := time.ParseDuration(fc.Interval)
@@ -164,6 +168,9 @@ func resolveConfig(path string, f cliFlags) (agentConfig, error) {
 	}
 	if f.flushMax != 0 {
 		cfg.FlushMax = f.flushMax
+	}
+	if f.spoolDir != "" {
+		cfg.SpoolDir = f.spoolDir
 	}
 
 	// Defaults for anything still unset (zero). A negative value is NOT zero, so it skips
@@ -221,6 +228,7 @@ func main() {
 	workers := flag.Int("workers", 0, "max concurrent probes (overrides config file; default 50)")
 	buffer := flag.Int("buffer", 0, "bounded store-and-forward buffer capacity in rounds (overrides config file; default 100000)")
 	flushMax := flag.Int("flush-max", 0, "max rounds per push to the hub (overrides config file; default 5000)")
+	spoolDir := flag.String("spool-dir", "", "on-disk store-and-forward directory (overrides config file; empty = in-memory only)")
 	logFormat := flag.String("log-format", "text", "operational log format: text or json")
 	logLevel := flag.String("log-level", "info", "operational log level: debug, info, warn, error")
 	showVersion := flag.Bool("version", false, "print version and exit")
@@ -245,7 +253,7 @@ func main() {
 	cfg, err := resolveConfig(*configPath, cliFlags{
 		hub: *hub, key: *key, vantage: *vantage,
 		interval: *interval, timeout: *timeout, insecure: insecureOverride,
-		workers: *workers, buffer: *buffer, flushMax: *flushMax,
+		workers: *workers, buffer: *buffer, flushMax: *flushMax, spoolDir: *spoolDir,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "smoke-agent: %v\n", err)
@@ -264,6 +272,7 @@ func main() {
 		Workers:   cfg.Workers,
 		BufferCap: cfg.Buffer,
 		FlushMax:  cfg.FlushMax,
+		SpoolDir:  cfg.SpoolDir,
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

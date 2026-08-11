@@ -69,6 +69,13 @@ type buffer struct {
 	curBytes int // running sum of estimatedJSONBytes(rounds[i])
 	dropCnt  atomic.Int64
 	rejCnt   atomic.Int64 // rounds discarded because the hub permanently rejected their batch
+	p        persister    // optional durable mirror of the live set; nil = in-memory only
+}
+
+// persister durably mirrors the buffer's live set. nil = in-memory only.
+type persister interface {
+	append(seq int64, r agentwire.RoundReport)
+	advanceHead(headSeq int64)
 }
 
 func newBuffer(capRounds int) *buffer {
@@ -78,21 +85,44 @@ func newBuffer(capRounds int) *buffer {
 	return &buffer{cap: capRounds, maxBytes: defaultBufferBytes}
 }
 
-func (b *buffer) add(r agentwire.RoundReport) {
-	sz := estimatedJSONBytes(r)
+// setPersister attaches (or clears, with nil) the buffer's durable mirror. Must be called
+// before the measure/flush loops start using the buffer to avoid a torn view of history.
+func (b *buffer) setPersister(p persister) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	// Evict oldest until this round fits within BOTH the round cap and the byte budget. Never
-	// evict below one round: a lone round bigger than the whole budget is kept and later handled
-	// by the flush 413-split/drop path (CODE_REVIEW #5).
+	b.p = p
+}
+
+// evictToFitLocked evicts oldest rounds until sz fits within BOTH the round cap and the byte
+// budget, advancing headSeq/dropCnt/curBytes as it goes. Never evicts below one round: a lone
+// round bigger than the whole budget is kept and later handled by the flush 413-split/drop path
+// (CODE_REVIEW #5). Callers must hold b.mu. It does NOT itself notify the persister — callers
+// that evicted (return value) are responsible for calling b.p.advanceHead(b.headSeq) once,
+// after this returns, so a single flush() call is used per add/reload step rather than one per
+// evicted round.
+func (b *buffer) evictToFitLocked(sz int) (evicted bool) {
 	for len(b.rounds) > 0 && (len(b.rounds) >= b.cap || b.curBytes+sz > b.maxBytes) {
 		b.curBytes -= estimatedJSONBytes(b.rounds[0])
 		b.rounds = b.rounds[1:]
 		b.headSeq++
 		b.dropCnt.Add(1)
+		evicted = true
+	}
+	return evicted
+}
+
+func (b *buffer) add(r agentwire.RoundReport) {
+	sz := estimatedJSONBytes(r)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.evictToFitLocked(sz) && b.p != nil {
+		b.p.advanceHead(b.headSeq)
 	}
 	b.rounds = append(b.rounds, r)
 	b.curBytes += sz
+	if b.p != nil {
+		b.p.append(b.headSeq+int64(len(b.rounds))-1, r)
+	}
 }
 
 // peekBatch returns a copy of the oldest rounds — up to maxRounds AND up to (but not exceeding)
@@ -150,6 +180,30 @@ func (b *buffer) commit(upto int64) {
 	// capped at ~cap entries either way.
 	b.rounds = b.rounds[remove:]
 	b.headSeq += remove
+	if b.p != nil {
+		b.p.advanceHead(b.headSeq)
+	}
+}
+
+// reload seeds the buffer from a persisted head watermark and its live rounds (already on
+// disk). It adopts the seq range (headSeq = head) so future appends stay consistent with disk,
+// and does NOT re-persist the rounds. If the persisted set exceeds the current bounds (e.g.
+// BufferCap was lowered), the oldest are evicted and the persister head is advanced so their
+// disk copies can be reclaimed.
+func (b *buffer) reload(head int64, rounds []agentwire.RoundReport) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.headSeq = head
+	b.rounds = nil
+	b.curBytes = 0
+	for _, r := range rounds {
+		sz := estimatedJSONBytes(r)
+		if b.evictToFitLocked(sz) && b.p != nil {
+			b.p.advanceHead(b.headSeq)
+		}
+		b.rounds = append(b.rounds, r)
+		b.curBytes += sz
+	}
 }
 
 func (b *buffer) len() int {

@@ -8,6 +8,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -670,5 +672,81 @@ func TestSendBatchTransientOnSecondSplitHalfRetriesWholeBatchWithoutLoss(t *test
 	// depend on how many times the hub actually saw it.
 	if len(received) < total {
 		t.Errorf("hub received %d round-delivery(ies) total, want at least %d (one per round)", len(received), total)
+	}
+}
+
+func TestAgentRunRecoversSpooledBacklog(t *testing.T) {
+	dir := t.TempDir()
+
+	// Phase 1: populate the spool as a previous agent would have, then close it (releases
+	// the flock) — simulating an agent that buffered a backlog while the hub was down.
+	sp, head, live, err := openSpool(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := newBuffer(1000)
+	b.setPersister(sp)
+	b.reload(head, live)
+	const backlog = 5
+	for i := 0; i < backlog; i++ {
+		b.add(agentwire.RoundReport{Target: "t1", TS: fmt.Sprintf("2026-08-10T00:00:0%dZ", i), Pings: 1, RTTs: []float64{0.01}})
+	}
+	if err := sp.flush(); err != nil {
+		t.Fatal(err)
+	}
+	if err := sp.close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Phase 2: a fresh agent over the same dir, hub UP, EMPTY assignment (no new rounds), so
+	// whatever the hub receives is the recovered backlog and only that.
+	const cv = "sha256:vspool"
+	var (
+		mu       sync.Mutex
+		received int
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/agent/v1/assignment":
+			w.Header().Set("ETag", cv)
+			_ = json.NewEncoder(w).Encode(agentwire.Assignment{Vantage: "nyc", ConfigVersion: cv})
+		case "/agent/v1/results":
+			var req agentwire.ResultsRequest
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			mu.Lock()
+			received += len(req.Results)
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode(agentwire.ResultsResponse{Accepted: len(req.Results)})
+		}
+	}))
+	defer srv.Close()
+
+	a := New(Options{Hub: srv.URL, Key: "smk_k_s", Vantage: "nyc", Interval: 50 * time.Millisecond,
+		Timeout: time.Second, Workers: 2, BufferCap: 1000, FlushMax: 100, SpoolDir: dir})
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
+	_ = a.Run(ctx)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if received != backlog {
+		t.Fatalf("hub received %d rounds, want exactly %d (the recovered backlog)", received, backlog)
+	}
+}
+
+func TestAgentSpoolDirUnusableIsFatal(t *testing.T) {
+	// A spool_dir that cannot be created (a path *under* a regular file) must fail Run before
+	// any goroutine starts.
+	f := filepath.Join(t.TempDir(), "afile")
+	if err := os.WriteFile(f, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	opts := Options{
+		Hub: "http://127.0.0.1:1", Key: "smk_k_s", Vantage: "nyc", Interval: time.Second,
+		Timeout: time.Second, Workers: 1, BufferCap: 10, FlushMax: 10,
+		SpoolDir: filepath.Join(f, "under-a-file"),
+	}
+	if err := New(opts).Run(context.Background()); err == nil {
+		t.Fatal("Run must fail when spool_dir is unusable")
 	}
 }
