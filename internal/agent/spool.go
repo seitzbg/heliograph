@@ -5,6 +5,7 @@ import (
 	"errors"
 	"hash/crc32"
 	"os"
+	"path/filepath"
 )
 
 var crcTable = crc32.MakeTable(crc32.Castagnoli)
@@ -15,6 +16,7 @@ var (
 )
 
 const frameHeader = 8 // u32 len + u32 crc
+const headFile = "head"
 
 // encodeFrame appends one framed record to dst and returns the extended slice.
 // frame = [u32 len][u32 crc32c(payload)][payload]; payload = [u64 seq][body].
@@ -88,4 +90,47 @@ func readSegment(path string, truncate bool) ([]record, error) {
 		}
 	}
 	return recs, nil
+}
+
+// writeHead atomically records the head watermark: write a temp file (with a CRC),
+// fsync it, then rename over dir/head. Rename is atomic on a single filesystem, so
+// a crash leaves either the old value or the new one, never a torn file.
+func writeHead(dir string, head int64) error {
+	var buf [12]byte // u64 head + u32 crc
+	binary.LittleEndian.PutUint64(buf[0:8], uint64(head))
+	binary.LittleEndian.PutUint32(buf[8:12], crc32.Checksum(buf[0:8], crcTable))
+	tmp, err := os.CreateTemp(dir, "head-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) // no-op after a successful rename
+	if _, err := tmp.Write(buf[:]); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, filepath.Join(dir, headFile))
+}
+
+// readHead returns the durable head watermark, or 0 when the file is absent (first
+// run). A present-but-corrupt file returns an error.
+func readHead(dir string) (int64, error) {
+	data, err := os.ReadFile(filepath.Join(dir, headFile))
+	if os.IsNotExist(err) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	if len(data) != 12 || binary.LittleEndian.Uint32(data[8:12]) != crc32.Checksum(data[0:8], crcTable) {
+		return 0, errBadFrame
+	}
+	return int64(binary.LittleEndian.Uint64(data[0:8])), nil
 }

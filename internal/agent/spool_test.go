@@ -123,3 +123,22 @@ func TestReadSegmentMissingFileIsError(t *testing.T) {
 		t.Fatal("want error for missing file")
 	}
 }
+
+func TestHeadFileRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	if h, err := readHead(dir); err != nil || h != 0 {
+		t.Fatalf("absent head: h=%d err=%v, want 0,nil", h, err)
+	}
+	if err := writeHead(dir, 123); err != nil {
+		t.Fatal(err)
+	}
+	if h, err := readHead(dir); err != nil || h != 123 {
+		t.Fatalf("h=%d err=%v, want 123", h, err)
+	}
+	if err := writeHead(dir, 456); err != nil {
+		t.Fatal(err)
+	}
+	if h, _ := readHead(dir); h != 456 {
+		t.Fatalf("h=%d, want 456 after rewrite", h)
+	}
+}
