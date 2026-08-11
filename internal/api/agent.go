@@ -177,6 +177,10 @@ func (srv *Server) agentResults(w http.ResponseWriter, r *http.Request) {
 			When:      ts.UTC(),
 			Duration:  time.Duration(rd.DurationMs * float64(time.Millisecond)),
 			Vantage:   v,
+			// Carry the validated fingerprint through to alert eval, so a remote round that
+			// crosses a config reload redefining its target is dropped there too, exactly like
+			// a local in-flight round (CODE_REVIEW #4). Empty (transitional agent) stays empty.
+			Fingerprint: rd.Fingerprint,
 		}
 		if rd.Err != "" {
 			o.Err = errors.New(rd.Err)

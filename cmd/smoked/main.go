@@ -169,6 +169,12 @@ func main() {
 	// leaving the live runtime out of sync with the persisted config (CODE_REVIEW #1).
 	// evalMu (inside swapRuntime) only guards the swap; applyMu is strictly outside it.
 	var applyMu sync.Mutex
+	// seedFn seeds a freshly built engine's alert windows from durable history on a reload,
+	// so a target that is newly alerted or redefined isn't left dark until X fresh samples
+	// arrive (CODE_REVIEW #4). Assigned once the store exists (below); the SIGHUP goroutine and
+	// the API apply both pass it into swapRuntime. It reads the store, so swapRuntime runs it
+	// before taking evalMu. nil until assigned — an early reload simply skips seeding.
+	var seedFn func(*runtime)
 	if *configPath != "" {
 		fmt.Printf("config: %d targets from %s\n", len(rt.jobs), *configPath)
 	}
@@ -176,33 +182,6 @@ func main() {
 	// Cancel in-flight probes and the HTTP server on SIGINT/SIGTERM.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-
-	// SIGHUP reloads the config; on error the running config is kept (a bad edit
-	// can't take the collector down). Alert firing state and sample windows carry
-	// over from the running engine so a reload doesn't re-fire alerts already
-	// firing or drop the history a hysteresis alert needs (see InheritStateFrom).
-	if *configPath != "" {
-		hup := make(chan os.Signal, 1)
-		signal.Notify(hup, syscall.SIGHUP)
-		go func() {
-			for range hup {
-				// Hold applyMu across the whole read/build/swap so a concurrent API apply
-				// can't complete (persist+swap) in the window between this reload's build
-				// and its swap and then be clobbered by this stale runtime (CODE_REVIEW #1).
-				func() {
-					applyMu.Lock()
-					defer applyMu.Unlock()
-					nrt, err := buildRuntime(*configPath, *pings, *step, *timeout, notifiers, dbFragment)
-					if err != nil {
-						slog.Error("reload failed, keeping running config", "err", err)
-						return
-					}
-					swapRuntime(&current, &evalMu, nrt)
-					slog.Info("config reloaded", "path", *configPath, "targets", len(nrt.jobs))
-				}()
-			}
-		}()
-	}
 
 	var st store.Store
 	var storeMetrics func(*strings.Builder) // persistent-write health, if the store exposes it
@@ -227,11 +206,46 @@ func main() {
 		fmt.Printf("store: in-memory (pass -dsn to persist to TimescaleDB)\n")
 	}
 
+	// Now that the store exists, wire the reload seed: on a config reload, swapRuntime seeds
+	// the new engine from durable history for targets it can't inherit (redefined or newly
+	// alerted), then InheritStateFrom overwrites the seed for same-identity targets (#4).
+	seedFn = func(nrt *runtime) {
+		warmStartAlerts(ctx, nrt.engine, nrt.monitors, st, time.Now())
+	}
+
+	// SIGHUP reloads the config; on error the running config is kept (a bad edit can't take the
+	// collector down). Alert firing state and sample windows carry over from the running engine
+	// (see InheritStateFrom) so a reload doesn't re-fire alerts already firing or drop hysteresis
+	// history. Registered only after seedFn is assigned, so the reload goroutine never races the
+	// assignment (its swapRuntime seeds through seedFn).
+	if *configPath != "" {
+		hup := make(chan os.Signal, 1)
+		signal.Notify(hup, syscall.SIGHUP)
+		go func() {
+			for range hup {
+				// Hold applyMu across the whole read/build/swap so a concurrent API apply
+				// can't complete (persist+swap) in the window between this reload's build
+				// and its swap and then be clobbered by this stale runtime (CODE_REVIEW #1).
+				func() {
+					applyMu.Lock()
+					defer applyMu.Unlock()
+					nrt, err := buildRuntime(*configPath, *pings, *step, *timeout, notifiers, dbFragment)
+					if err != nil {
+						slog.Error("reload failed, keeping running config", "err", err)
+						return
+					}
+					swapRuntime(&current, &evalMu, nrt, seedFn)
+					slog.Info("config reloaded", "path", *configPath, "targets", len(nrt.jobs))
+				}()
+			}
+		}()
+	}
+
 	// Warm-start each alerted target's sample window from durable history, so a target
 	// that is already breaching at startup fires on its first new round instead of
 	// waiting X fresh samples (the durable-store replacement for SmokePing's S sentinel).
-	// Boot-only: a SIGHUP reload carries windows via InheritStateFrom, and a fresh
-	// in-memory store has no history, so this is a no-op there.
+	// Boot uses this directly; a SIGHUP/API reload runs the same seed via seedFn inside
+	// swapRuntime and then carries unchanged windows/state via InheritStateFrom.
 	if rt := current.Load(); rt.engine != nil {
 		warmStartAlerts(ctx, rt.engine, rt.monitors, st, time.Now())
 	}
@@ -376,7 +390,7 @@ func main() {
 					build := func(getter func() ([]byte, error)) (*runtime, error) {
 						return buildRuntime(*configPath, *pings, *step, *timeout, notifiers, getter)
 					}
-					return applyConfig(cfgStore, &current, &evalMu, build, doc, expectedVersion)
+					return applyConfig(cfgStore, &current, &evalMu, build, doc, expectedVersion, seedFn)
 				}
 				// ConfigImport merges a YAML/JSON config's target branches into the current DB
 				// fragment (config.AppendImport; globals aren't imported) and, only if it actually
@@ -400,7 +414,7 @@ func main() {
 					build := func(getter func() ([]byte, error)) (*runtime, error) {
 						return buildRuntime(*configPath, *pings, *step, *timeout, notifiers, getter)
 					}
-					if aerr := applyConfig(cfgStore, &current, &evalMu, build, merged, ver); aerr != nil {
+					if aerr := applyConfig(cfgStore, &current, &evalMu, build, merged, ver, seedFn); aerr != nil {
 						return 0, 0, ver, aerr // applyConfig already returns api.ErrConfig* sentinels
 					}
 					return add, unch, ver + 1, nil
@@ -734,6 +748,10 @@ type runtime struct {
 	engine          *alert.Engine
 	alertsByTarget  map[string][]string
 	alerteeByTarget map[string][]string
+	// targetFP is each target's current measurement-identity fingerprint (federation.Fingerprint).
+	// eval drops an outcome whose fingerprint disagrees — a round measured under an obsolete
+	// definition that a reload has since redefined (CODE_REVIEW #4, in-flight completion).
+	targetFP map[string]string
 }
 
 // eval runs the alert engine over a round's outcomes and dispatches notifications.
@@ -748,6 +766,14 @@ func (rt *runtime) eval(out []scheduler.Outcome) {
 		if len(names) == 0 {
 			continue
 		}
+		// Drop an outcome measured under an obsolete target definition: if a reload redefined
+		// this target between when the round was measured and now, the round's stamped
+		// fingerprint won't match the live target's, and evaluating it would feed a stale
+		// measurement into the new alert identity (CODE_REVIEW #4). An empty fingerprint (a
+		// path that predates stamping) is accepted, matching the ingest side's transitional rule.
+		if o.Fingerprint != "" && rt.targetFP[o.Target.Name] != o.Fingerprint {
+			continue
+		}
 		events := rt.engine.Evaluate(o.Target.Name, store.VantageOf(o), names,
 			o.Computed.LossFraction()*100, o.Computed.Median, o.When)
 		rt.engine.Dispatch(events, rt.alerteeByTarget[o.Target.Name]...)
@@ -758,7 +784,17 @@ func (rt *runtime) eval(out []scheduler.Outcome) {
 // state + sample windows over from the running engine (so a reload/apply doesn't
 // re-fire alerts already firing or drop hysteresis history). Serialized against a
 // round's alert eval via evalMu. Shared by the SIGHUP reload and the config-apply API.
-func swapRuntime(current *atomic.Pointer[runtime], evalMu *sync.Mutex, nrt *runtime) {
+func swapRuntime(current *atomic.Pointer[runtime], evalMu *sync.Mutex, nrt *runtime, seed func(*runtime)) {
+	// Seed the new engine's windows from durable history BEFORE the swap and OUTSIDE evalMu.
+	// A target whose measurement identity changed, or one that just gained its first alert,
+	// won't inherit a window below — without seeding it would start dark and fire late
+	// (CODE_REVIEW #4). recentContiguous filters the seed to the current host/probe, so a
+	// redefined target pulls nothing stale. nrt.engine isn't live yet, so this needs no lock,
+	// keeping the store read off the evalMu critical path. Inherit then overwrites the seed for
+	// same-identity targets with their live window.
+	if seed != nil && nrt.engine != nil {
+		seed(nrt)
+	}
 	evalMu.Lock()
 	old := current.Load()
 	if nrt.engine != nil && old.engine != nil {
@@ -766,10 +802,26 @@ func swapRuntime(current *atomic.Pointer[runtime], evalMu *sync.Mutex, nrt *runt
 		for t := range nrt.alertsByTarget {
 			valid[t] = true
 		}
-		nrt.engine.InheritStateFrom(old.engine, valid)
+		nrt.engine.InheritStateFrom(old.engine, valid, sameTargetIdentity(old, nrt))
 	}
 	current.Store(nrt)
 	evalMu.Unlock()
+}
+
+// sameTargetIdentity maps target name -> whether its measurement identity is unchanged between
+// the old and new runtime, using the same federation.Fingerprint (probe/host/params/pings/
+// probe-config) the ingest and in-flight-drop paths key on — so the reload inherit-gate can't
+// disagree with them. A target that is new, removed, or redefined in ANY of those fields is
+// absent (false), so InheritStateFrom carries neither its window nor its firing/visible state;
+// it is seeded fresh from durable history instead (CODE_REVIEW #4).
+func sameTargetIdentity(old, nrt *runtime) map[string]bool {
+	same := make(map[string]bool, len(nrt.targetFP))
+	for name, fp := range nrt.targetFP {
+		if o, ok := old.targetFP[name]; ok && o == fp {
+			same[name] = true
+		}
+	}
+	return same
 }
 
 // applyConfig validates a candidate DB config fragment by building a runtime from it
@@ -777,7 +829,7 @@ func swapRuntime(current *atomic.Pointer[runtime], evalMu *sync.Mutex, nrt *runt
 // runtime in. Validate → persist → swap: an invalid doc never persists, a stale
 // version never swaps. Returns api.ErrConfigInvalid / api.ErrConfigConflict.
 func applyConfig(cfgStore *configstore.Store, current *atomic.Pointer[runtime], evalMu *sync.Mutex,
-	build func(dbFragment func() ([]byte, error)) (*runtime, error), doc json.RawMessage, expectedVersion int) error {
+	build func(dbFragment func() ([]byte, error)) (*runtime, error), doc json.RawMessage, expectedVersion int, seed func(*runtime)) error {
 	nrt, berr := build(func() ([]byte, error) { return doc, nil })
 	if berr != nil {
 		return fmt.Errorf("%w: %v", api.ErrConfigInvalid, berr)
@@ -788,7 +840,7 @@ func applyConfig(cfgStore *configstore.Store, current *atomic.Pointer[runtime], 
 		}
 		return serr
 	}
-	swapRuntime(current, evalMu, nrt)
+	swapRuntime(current, evalMu, nrt, seed)
 	slog.Info("config applied via API", "targets", len(nrt.jobs))
 	return nil
 }
@@ -953,6 +1005,10 @@ func buildRuntime(configPath string, demoPings int, demoStep, timeout time.Durat
 			Pings:   m.Pings,
 			Timeout: timeout,
 			Step:    m.Step,
+			// Stamp the local job with its measurement identity so eval can drop an in-flight
+			// round whose target a reload has since redefined (CODE_REVIEW #4). Same fingerprint
+			// the assignment endpoint stamps for remote agents, so both paths agree.
+			Fingerprint: federation.Fingerprint(m, probeCfgs[m.ProbeKind]),
 		})
 	}
 
@@ -975,7 +1031,14 @@ func buildRuntime(configPath string, demoPings int, demoStep, timeout time.Durat
 	if len(alertDefs) > 0 {
 		engine = alert.NewEngine(alertDefs, notifiers)
 	}
-	return &runtime{jobs: jobs, monitors: fullMonitors, probeCfgs: probeCfgs, engine: engine, alertsByTarget: alertsByTarget, alerteeByTarget: alerteeByTarget}, nil
+	// Per-target measurement fingerprint over the full monitor set (all vantages), so eval can
+	// verify a completing outcome still matches its target's current identity (CODE_REVIEW #4).
+	targetFP := make(map[string]string, len(fullMonitors))
+	for _, m := range fullMonitors {
+		targetFP[m.Name] = federation.Fingerprint(m, probeCfgs[m.ProbeKind])
+	}
+	return &runtime{jobs: jobs, monitors: fullMonitors, probeCfgs: probeCfgs, engine: engine,
+		alertsByTarget: alertsByTarget, alerteeByTarget: alerteeByTarget, targetFP: targetFP}, nil
 }
 
 func demoMonitors(pings int, step time.Duration) []model.Monitor {

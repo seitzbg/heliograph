@@ -109,10 +109,20 @@ func NewEngine(alerts map[string]*Alert, notifiers map[string]Notifier) *Engine 
 // loss/RTT history, so a currently-firing alert reads as not-firing until X new
 // samples re-accumulate — silently resolving mid-outage, then re-raising later.
 //
-// Only state for targets in validTargets and alerts still defined in this engine
-// is carried over, so removed targets/alerts don't leak across reloads. Pass a
-// nil validTargets to carry everything (used in tests). prev may be nil.
-func (e *Engine) InheritStateFrom(prev *Engine, validTargets map[string]bool) {
+// Inheritance is gated by identity so a reload that redefines a target or an alert can't
+// carry stale state into the new definition (CODE_REVIEW #4):
+//   - validTargets: a target's window/state is carried only if it is still present. nil
+//     carries every target (used in tests).
+//   - sameTarget: a target's window/state is carried only if its measurement identity
+//     (host/probe) is unchanged between the old and new runtime. nil treats every target as
+//     unchanged (used in tests and by the boot path). A target whose identity changed (or a
+//     newly-defined one) is left to be seeded from durable history instead.
+//   - matcher identity: firing/visible state for an alert is carried only if the alert is
+//     still defined AND its matcher's Key() is unchanged, so a redefined matcher under the
+//     same name starts fresh rather than inheriting hysteresis for different semantics.
+//
+// prev may be nil.
+func (e *Engine) InheritStateFrom(prev *Engine, validTargets, sameTarget map[string]bool) {
 	if prev == nil {
 		return
 	}
@@ -124,12 +134,27 @@ func (e *Engine) InheritStateFrom(prev *Engine, validTargets map[string]bool) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
+	// inheritTarget reports whether target T's window/state may carry across the reload:
+	// it must still exist (validTargets) and keep the same measurement identity (sameTarget).
+	inheritTarget := func(target string) bool {
+		if validTargets != nil && !validTargets[target] {
+			return false
+		}
+		if sameTarget != nil && !sameTarget[target] {
+			return false
+		}
+		return true
+	}
+	// sameAlert reports whether alert `name` means the same thing in both engines, so its
+	// firing/visible state is safe to inherit (defined in both + identical matcher semantics).
+	sameAlert := func(name string) bool {
+		ea, pa := e.alerts[name], prev.alerts[name]
+		return ea != nil && pa != nil && ea.Matcher.Key() == pa.Matcher.Key()
+	}
+
 	for key, w := range prev.win {
 		_, target, ok := strings.Cut(key, "\x00") // key is vantage\x00target
-		if !ok {
-			continue
-		}
-		if validTargets != nil && !validTargets[target] {
+		if !ok || !inheritTarget(target) {
 			continue
 		}
 		e.win[key] = &Window{
@@ -139,13 +164,7 @@ func (e *Engine) InheritStateFrom(prev *Engine, validTargets map[string]bool) {
 	}
 	for key, firing := range prev.state {
 		target, name, ok := splitStateKey(key) // key is vantage\x00target\x00name
-		if !ok {
-			continue
-		}
-		if _, defined := e.alerts[name]; !defined {
-			continue
-		}
-		if validTargets != nil && !validTargets[target] {
+		if !ok || !inheritTarget(target) || !sameAlert(name) {
 			continue
 		}
 		e.state[key] = firing
@@ -154,13 +173,7 @@ func (e *Engine) InheritStateFrom(prev *Engine, validTargets map[string]bool) {
 	// resurrects an orphan RESOLVED nor drops a real one.
 	for key, vis := range prev.visible {
 		target, name, ok := splitStateKey(key)
-		if !ok {
-			continue
-		}
-		if _, defined := e.alerts[name]; !defined {
-			continue
-		}
-		if validTargets != nil && !validTargets[target] {
+		if !ok || !inheritTarget(target) || !sameAlert(name) {
 			continue
 		}
 		e.visible[key] = vis
