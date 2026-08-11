@@ -305,6 +305,27 @@ func TestIngestReplayStoredAndEvaluatedOnce(t *testing.T) {
 	}
 }
 
+// An empty-fingerprint round (a pre-fingerprint agent) is accepted transitionally, but must be
+// counted per vantage on /metrics so an operator can watch a rolling agent upgrade complete —
+// the counter stops rising — rather than relying on a single process-wide log line (#2).
+func TestIngestMissingFingerprintMetric(t *testing.T) {
+	srv := ingestServer(&fakeIngester{})
+	body := fmt.Sprintf(`{"results":[{"target":"cf","ts":%q,"pings":1,"rtts":[0.01]}]}`, recentTS())
+	if w := postResults(t, srv, body); w.Code != 200 { // no "fingerprint" field
+		t.Fatalf("status=%d body=%s", w.Code, w.Body)
+	}
+	r := httptest.NewRequest("GET", "/metrics", nil)
+	w := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(w, r)
+	if w.Code != 200 {
+		t.Fatalf("/metrics status=%d", w.Code)
+	}
+	want := `smokeping_agent_missing_fingerprint_total{vantage="nyc"} 1`
+	if !strings.Contains(w.Body.String(), want) {
+		t.Fatalf("/metrics should expose %q, got:\n%s", want, w.Body.String())
+	}
+}
+
 // A failed durable write must return 503 and NOT evaluate alerts — a firing must be
 // backed by persisted data, and the agent will retry the batch (P2-5).
 func TestIngestSkipsAlertsOnStoreError(t *testing.T) {

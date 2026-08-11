@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
-	"sync"
 	"time"
 
 	"smokeping-modern/internal/agentwire"
@@ -209,13 +208,10 @@ func (srv *Server) agentResults(w http.ResponseWriter, r *http.Request) {
 		slog.Warn("agent ingest: dropped rounds", "vantage", v, "dropped", dropped, "fingerprint_mismatch", mismatched)
 	}
 	if noFP > 0 {
-		warnMissingFingerprint.Do(func() {
-			slog.Warn("agent ingest: accepting rounds with no fingerprint; result attribution is unverified until the agent is upgraded", "vantage", v)
-		})
+		// Count per vantage (scrapeable on /metrics) and warn once per vantage, so an operator
+		// can watch a rolling agent upgrade complete instead of relying on a single process-wide
+		// log that goes silent for later-affected vantages (CODE_REVIEW #2).
+		srv.recordMissingFingerprint(v, noFP)
 	}
 	writeJSON(w, agentwire.ResultsResponse{Accepted: len(outcomes), Dropped: dropped})
 }
-
-// warnMissingFingerprint bounds the "agent sent no fingerprint" notice to once per hub
-// process — it's a one-time migration nudge, not a per-batch alert.
-var warnMissingFingerprint sync.Once

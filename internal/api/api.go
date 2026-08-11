@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"smokeping-modern/internal/model"
@@ -95,6 +96,16 @@ type Server struct {
 	// vantage) — the post-ingest hook that closes CODE_REVIEW #5 / P2-5. nil = no alerting
 	// on ingest (e.g. pure API tests).
 	OnIngest func(outcomes []scheduler.Outcome)
+	// ingestMu guards the agent-ingest observability counters below.
+	ingestMu sync.Mutex
+	// missingFP counts, per vantage, agent rounds accepted with no measurement fingerprint —
+	// the transitional-compatibility path for a pre-fingerprint agent (CODE_REVIEW #2). Exposed
+	// on /metrics (smokeping_agent_missing_fingerprint_total) so an operator can watch a rolling
+	// agent upgrade complete — the counter stops rising — rather than relying on a single
+	// process-wide log line that goes silent for later-affected vantages.
+	missingFP map[string]int64
+	// warnedMissingFP debounces the missing-fingerprint warning to once per vantage.
+	warnedMissingFP map[string]bool
 	// ConfigGet/ConfigApply enable the DB config CRUD API (GET/PUT /api/admin/config),
 	// gated behind the admin password. Both nil ⇒ the routes are not registered.
 	// ConfigApply validates the candidate config, persists it, and hot-reloads —
@@ -930,10 +941,50 @@ func (srv *Server) metrics(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprintf(&b, "smokeping_probe_last_sample_timestamp_seconds%s %d\n", lbl, o.When.Unix())
 	}
 	srv.writeRoundMetrics(&b)
+	srv.writeIngestMetrics(&b)
 	if srv.ExtraMetrics != nil {
 		srv.ExtraMetrics(&b)
 	}
 	_, _ = w.Write([]byte(b.String()))
+}
+
+// recordMissingFingerprint counts n rounds accepted from `vantage` without a measurement
+// fingerprint (a pre-fingerprint agent) and warns once per vantage. The count is scrapeable so
+// an operator can tell when every vantage's agent has been upgraded (CODE_REVIEW #2).
+func (srv *Server) recordMissingFingerprint(vantage string, n int) {
+	srv.ingestMu.Lock()
+	if srv.missingFP == nil {
+		srv.missingFP = map[string]int64{}
+	}
+	if srv.warnedMissingFP == nil {
+		srv.warnedMissingFP = map[string]bool{}
+	}
+	first := !srv.warnedMissingFP[vantage]
+	srv.warnedMissingFP[vantage] = true
+	srv.missingFP[vantage] += int64(n)
+	srv.ingestMu.Unlock()
+	if first {
+		slog.Warn("agent ingest: accepting rounds with no fingerprint; result attribution is unverified until the agent is upgraded", "vantage", vantage)
+	}
+}
+
+// writeIngestMetrics renders the per-vantage agent-ingest observability counters.
+func (srv *Server) writeIngestMetrics(b *strings.Builder) {
+	srv.ingestMu.Lock()
+	defer srv.ingestMu.Unlock()
+	if len(srv.missingFP) == 0 {
+		return
+	}
+	vantages := make([]string, 0, len(srv.missingFP))
+	for v := range srv.missingFP {
+		vantages = append(vantages, v)
+	}
+	sort.Strings(vantages) // deterministic scrape output
+	b.WriteString("# HELP smokeping_agent_missing_fingerprint_total Agent rounds accepted with no measurement fingerprint (a pre-fingerprint agent); attribution is unverified until it is upgraded.\n")
+	b.WriteString("# TYPE smokeping_agent_missing_fingerprint_total counter\n")
+	for _, v := range vantages {
+		fmt.Fprintf(b, "smokeping_agent_missing_fingerprint_total{vantage=%q} %d\n", escapeLabel(v), srv.missingFP[v])
+	}
 }
 
 // writeRoundMetrics appends collector round-level operational metrics, if the
