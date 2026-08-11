@@ -183,9 +183,10 @@ type spool struct {
 	errN       int
 	reclaimedN int
 
-	started bool
-	stop    chan struct{}
-	done    chan struct{}
+	started   bool
+	stop      chan struct{}
+	done      chan struct{}
+	closeOnce sync.Once
 }
 
 // openSpool replays the existing segments in dir to recover the live round set and head
@@ -421,25 +422,32 @@ func (s *spool) flushLoop() {
 	}
 }
 
+// close stops the background flusher (if started), performs a final flush, and releases the
+// active file. It is safe to call any number of times, including concurrently: closeOnce
+// guarantees the stop/flush/release sequence below runs exactly once; every call after the
+// first is a no-op that returns nil without re-closing s.stop, re-flushing, or touching the
+// (already-nil) active file.
 func (s *spool) close() error {
-	s.mu.Lock()
-	started := s.started
-	s.mu.Unlock()
-	if started {
-		close(s.stop)
-		<-s.done
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	var ferr error
-	if !s.degraded && !s.closed {
-		ferr = s.flushLocked()
-	}
-	s.closed = true
-	if s.active != nil {
-		s.active.Close()
-		s.active = nil
-	}
+	s.closeOnce.Do(func() {
+		s.mu.Lock()
+		started := s.started
+		s.mu.Unlock()
+		if started {
+			close(s.stop)
+			<-s.done
+		}
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if !s.degraded {
+			ferr = s.flushLocked()
+		}
+		s.closed = true
+		if s.active != nil {
+			s.active.Close()
+			s.active = nil
+		}
+	})
 	return ferr
 }
 

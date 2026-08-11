@@ -226,3 +226,98 @@ func TestSpoolSegmentRoll(t *testing.T) {
 		t.Fatalf("live2 = %d, want 50 across segments", len(live2))
 	}
 }
+
+// TestSpoolReclaimDeletesSegmentFile exercises reclaimLocked's os.Remove path: once the head
+// advances past a closed segment's max seq, that segment must be both reported via reclaimed()
+// and actually removed from disk, while the active segment (never reclaimed) survives.
+func TestSpoolReclaimDeletesSegmentFile(t *testing.T) {
+	dir := t.TempDir()
+	sp, _, _, err := openSpool(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sp.segMax = 512
+	big := agentwire.RoundReport{Target: "x", TS: "2026-01-01T00:00:00Z", RTTs: make([]float64, 20)}
+	for i := 0; i < 50; i++ {
+		sp.append(int64(i), big)
+	}
+	if err := sp.flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	segsBefore, _ := filepath.Glob(filepath.Join(dir, "seg-*.log"))
+	if len(segsBefore) < 2 {
+		t.Fatalf("got %d segments before reclaim, want >= 2 (rolls)", len(segsBefore))
+	}
+	if len(sp.segments) == 0 {
+		t.Fatal("expected at least one closed (non-active) segment to reclaim")
+	}
+	firstClosedPath := sp.segments[0].path
+	firstClosedMax := sp.segments[0].maxSeq
+
+	sp.advanceHead(firstClosedMax + 1) // every record in the first closed segment is now dead
+	if err := sp.flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	if sp.reclaimed() == 0 {
+		t.Fatalf("reclaimed() = 0, want > 0")
+	}
+	if _, err := os.Stat(firstClosedPath); !os.IsNotExist(err) {
+		t.Fatalf("first closed segment %s should have been deleted, stat err=%v", firstClosedPath, err)
+	}
+	segsAfter, _ := filepath.Glob(filepath.Join(dir, "seg-*.log"))
+	if len(segsAfter) == 0 {
+		t.Fatal("active segment should still be present after reclaim")
+	}
+
+	if err := sp.close(); err != nil {
+		t.Fatal(err)
+	}
+
+	sp2, head2, live2, err := openSpool(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sp2.close()
+	if head2 != firstClosedMax+1 {
+		t.Fatalf("head2 = %d, want %d", head2, firstClosedMax+1)
+	}
+	wantLive := 50 - int(firstClosedMax+1)
+	if len(live2) != wantLive {
+		t.Fatalf("live2 = %d, want %d (seqs %d..49 alive)", len(live2), wantLive, firstClosedMax+1)
+	}
+}
+
+// TestSpoolStartCloseLifecycleIsIdempotent covers the background flusher goroutine
+// (start/flushLoop) end to end, and is the regression test for the close()-after-start()
+// double-close panic: a second close() must be a safe, error-free no-op.
+func TestSpoolStartCloseLifecycleIsIdempotent(t *testing.T) {
+	dir := t.TempDir()
+	sp, _, _, err := openSpool(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sp.start()
+	sp.append(0, rr("a"))
+	if err := sp.close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	// Regression for the close()-after-start() double-close-of-s.stop panic: calling close()
+	// again must not panic, and must return nil without re-flushing or re-closing anything.
+	if err := sp.close(); err != nil {
+		t.Fatalf("second close() = %v, want nil", err)
+	}
+
+	sp2, head2, live2, err := openSpool(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sp2.close()
+	if head2 != 0 {
+		t.Fatalf("head2 = %d, want 0", head2)
+	}
+	if len(live2) != 1 || live2[0].Target != "a" {
+		t.Fatalf("live2 = %+v, want [a]", live2)
+	}
+}
