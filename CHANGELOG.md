@@ -2,10 +2,21 @@
 
 All notable changes to **smokeping-modern** are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project aims to follow
-[Semantic Versioning](https://semver.org/). Pre-1.0, minor versions may carry
-breaking changes.
+[Semantic Versioning](https://semver.org/) — 1.0.0 is the first stable release.
 
 ## [Unreleased]
+
+## [1.0.0] - 2026-08-11
+
+First stable release — a modern, non-Perl reimplementation of SmokePing in Go on TimescaleDB:
+a fast, highly parallel poller with pluggable probes (FPing, native ICMP `Ping`, TCPConnect,
+DNS, HTTP, SSH, IRTT), client-side canvas smoke graphs, a hysteresis alert engine, multi-vantage
+**federation** (a hub that assigns work to `smoke-agent` remote collectors, with a crash-safe
+on-disk store-and-forward spool), config-in-a-database with an in-browser target manager, a
+SmokePing → TimescaleDB migrator (config + RRD history), and Prometheus `/metrics` + SLA
+reporting. Everything built to date ships in this single 1.0 line — the earlier plan to tag the
+single-node core **v1.0** and federation **v2.0** separately was collapsed, since nothing had
+been released yet. Full detail below.
 
 ### Added
 - **`-require-fingerprint` strict ingest mode.** Off by default (a pre-fingerprint agent's rounds

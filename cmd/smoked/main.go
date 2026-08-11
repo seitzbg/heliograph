@@ -49,7 +49,7 @@ import (
 // version is the smoked release version. Overridable at build time with
 //
 //	go build -ldflags "-X main.version=$(git describe --tags)"
-var version = "0.1.0"
+var version = "1.0.0"
 
 // validateRuntimeFlags checks the operational numeric flags the collector shares. A
 // non-positive -timeout is copied into every probe's context.WithTimeout, which would

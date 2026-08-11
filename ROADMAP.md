@@ -106,8 +106,8 @@ sketch; agents poll a versioned assignment (`304` when unchanged); keys are mana
   availability % over a window + dashboard "Availability" panel
 
 ## Phase 6 — Beyond parity 🚧
-Post-federation work, in build order (each an independent PR). Federation (Phase 4) shipped as the
-v2.0 line; these build on it.
+Post-federation work, in build order (each an independent PR). Federation (Phase 4) and these
+Phase-6 items all ship in the single **v1.0** line.
 
 - ✅ **Config in a database** — targets/probes/alerts were YAML-only; config now also lives in the
   store with an in-browser **target-management UI** (add / edit / remove), reusing the admin auth.
@@ -143,8 +143,10 @@ v2.0 line; these build on it.
   `FPing` rather than replacing it — the external binary and `setcap` dance stay for users who
   keep using `FPing`, but new deployments can drop both by using `Ping` instead. *(Small–medium.)*
 - ✅ **On-disk agent store-and-forward** — the agent persists its buffer to disk (opt-in `spool_dir`) so a vantage restart — including a hard crash — loses at most ~1s of unpushed rounds instead of the whole buffer; append-only CRC-framed segments mirror the in-memory buffer, crash-safe replay on startup, `flock` against shared dirs, degrade-to-memory on I/O error.
-- ⬜ **Cut the release** — bump the version off `0.1.0`; tag the single-node line **v1.0** and
-  federation **v2.0** with release notes. *(Small.)*
+- ✅ **Cut the release** — **v1.0.0** (2026-08-11): everything built to date ships under a single
+  1.0 line (the earlier "single-node v1.0 / federation v2.0" split was collapsed, since nothing had
+  been released yet). Version constants bumped off `0.1.0`, CHANGELOG `[Unreleased]` promoted to
+  `[1.0.0]`, and an annotated `v1.0.0` git tag + GitLab release carry the notes.
 
 ## Known limitations / follow-ups (from the 2026-08-04 code review)
 - ✅ **Per-target polling intervals** — while serving, each target fires on its own `step`
