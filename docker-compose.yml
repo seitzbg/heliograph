@@ -36,8 +36,16 @@ services:
       - NET_RAW          # fping ICMP (via fping's file capability, non-root)
     sysctls:
       # Lets the native Ping probe send ICMP via an unprivileged datagram socket
-      # (no capability needed). Falls back to CAP_NET_RAW (above) if unset.
-      net.ipv4.ping_group_range: "0 2147483647"
+      # (no capability needed) — the socket's GID must fall in this range. 10001 is
+      # the collector's GID (see Dockerfile: `adduser -u 10001`). FPing instead uses
+      # CAP_NET_RAW (above); the native Ping probe's raw fallback can't help here
+      # because the non-root process holds no effective capability, so this range is
+      # what makes `probe: Ping` work.
+      #
+      # Do NOT widen this to "0 2147483647": rootless Podman applies sysctls inside a
+      # user namespace that maps only the ~65k GIDs from /etc/subgid, so an out-of-range
+      # upper bound is rejected at container start with EINVAL (Docker rootful is fine).
+      net.ipv4.ping_group_range: "0 10001"
     environment:
       # Optional: enable the password-gated admin key-management API + Vantages
       # GUI panel. Empty (the default) leaves it fail-closed/disabled. Set it in
