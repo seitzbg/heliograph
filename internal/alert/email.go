@@ -2,8 +2,10 @@ package alert
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/smtp"
 	"strings"
 	"sync"
@@ -13,12 +15,13 @@ import (
 
 // EmailConfig configures the SMTP notifier.
 type EmailConfig struct {
-	Addr      string    // host:port; STARTTLS is negotiated when the server offers it
-	From      string    // envelope + header From
-	To        []string  // recipients
-	Auth      smtp.Auth // nil for an unauthenticated relay
-	QueueSize int       // bounded send queue (default 1024)
-	Workers   int       // concurrent senders (default 2)
+	Addr          string    // host:port; STARTTLS is negotiated when the server offers it
+	From          string    // envelope + header From
+	To            []string  // recipients
+	Auth          smtp.Auth // nil for an unauthenticated relay
+	TLSSkipVerify bool      // skip STARTTLS cert verification (for an internal relay with a self-signed cert)
+	QueueSize     int       // bounded send queue (default 1024)
+	Workers       int       // concurrent senders (default 2)
 }
 
 // EmailNotifier sends alerts by SMTP. Like the webhook pool it delivers asynchronously off a bounded
@@ -38,10 +41,61 @@ type EmailNotifier struct {
 	queued, delivered, dropped, failed atomic.Int64
 }
 
-// NewEmailNotifier builds an SMTP notifier that sends via net/smtp (STARTTLS when the server offers
-// it). Use an Auth for authenticated submission (typically port 587).
+// NewEmailNotifier builds an SMTP notifier. It negotiates STARTTLS when the server offers it (with
+// strict cert verification unless cfg.TLSSkipVerify), authenticates when cfg.Auth is set, and falls
+// back to a plaintext session for a relay that offers no STARTTLS.
 func NewEmailNotifier(cfg EmailConfig) *EmailNotifier {
-	return newEmailNotifier(cfg, smtp.SendMail)
+	return newEmailNotifier(cfg, smtpSender(cfg.TLSSkipVerify))
+}
+
+// smtpSender returns a net/smtp.SendMail-compatible send function. Unlike the stdlib SendMail it
+// exposes the STARTTLS tls.Config, so an internal relay with a self-signed cert works when the
+// operator opts in via TLSSkipVerify; it also tolerates a relay that advertises no STARTTLS.
+func smtpSender(skipVerify bool) func(addr string, a smtp.Auth, from string, to []string, msg []byte) error {
+	return func(addr string, a smtp.Auth, from string, to []string, msg []byte) error {
+		c, err := smtp.Dial(addr)
+		if err != nil {
+			return err
+		}
+		defer c.Close()
+		host, _, err := net.SplitHostPort(addr)
+		if err != nil {
+			host = addr
+		}
+		if ok, _ := c.Extension("STARTTLS"); ok {
+			// InsecureSkipVerify only when the operator opted in for an internal relay; the default
+			// is strict verification.
+			if err := c.StartTLS(&tls.Config{ServerName: host, InsecureSkipVerify: skipVerify}); err != nil {
+				return err
+			}
+		}
+		if a != nil {
+			if ok, _ := c.Extension("AUTH"); ok {
+				if err := c.Auth(a); err != nil {
+					return err
+				}
+			}
+		}
+		if err := c.Mail(from); err != nil {
+			return err
+		}
+		for _, r := range to {
+			if err := c.Rcpt(r); err != nil {
+				return err
+			}
+		}
+		w, err := c.Data()
+		if err != nil {
+			return err
+		}
+		if _, err := w.Write(msg); err != nil {
+			return err
+		}
+		if err := w.Close(); err != nil {
+			return err
+		}
+		return c.Quit()
+	}
 }
 
 // newEmailNotifier is the injectable-sender constructor used by tests.

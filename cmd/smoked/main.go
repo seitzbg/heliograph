@@ -111,6 +111,7 @@ func main() {
 	smtpTo := flag.String("smtp-to", os.Getenv("SMOKED_SMTP_TO"), "comma-separated email recipients (or set SMOKED_SMTP_TO)")
 	smtpUser := flag.String("smtp-user", os.Getenv("SMOKED_SMTP_USER"), "SMTP username (or set SMOKED_SMTP_USER); set with -smtp-pass for authenticated submission")
 	smtpPass := flag.String("smtp-pass", os.Getenv("SMOKED_SMTP_PASS"), "SMTP password (or set SMOKED_SMTP_PASS)")
+	smtpInsecure := flag.Bool("smtp-insecure", envBool("SMOKED_SMTP_INSECURE"), "skip STARTTLS cert verification (or set SMOKED_SMTP_INSECURE=1) — for an internal relay with a self-signed cert")
 	logFormat := flag.String("log-format", "text", "operational log format: text or json")
 	logLevel := flag.String("log-level", "info", "operational log level: debug, info, warn, error")
 	flag.Parse()
@@ -174,7 +175,7 @@ func main() {
 			}
 			auth = smtp.PlainAuth("", *smtpUser, *smtpPass, host)
 		}
-		emailN = alert.NewEmailNotifier(alert.EmailConfig{Addr: *smtpAddr, From: *smtpFrom, To: to, Auth: auth})
+		emailN = alert.NewEmailNotifier(alert.EmailConfig{Addr: *smtpAddr, From: *smtpFrom, To: to, Auth: auth, TLSSkipVerify: *smtpInsecure})
 		notifiers["email"] = emailN
 	}
 	// Drain queued deliveries on ANY exit path (serve shutdown, demo-mode return, early exit) through
