@@ -17,6 +17,10 @@ go.work.sum
 # never committed — see cmd/smoked/import.go and CHANGELOG "SmokePing config import")
 /import-test/
 
+# local review / agent tooling artifacts (not part of the project)
+/CODE_REVIEW.md
+/.playwright-mcp/
+
 # editor / OS
 .DS_Store
 *.swp
