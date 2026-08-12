@@ -1,7 +1,13 @@
 # CI: test → build → scan, publishing the collector image to GHCR
 # (ghcr.io/<owner>/heliograph) so the docker hosts can pull it. Migrated from
 # the former GitLab CI (.gitlab-ci.yml) — see docs/CHANGELOG for the git.fiber.house →
-# GitHub move. Runs on GitHub-hosted ubuntu-latest runners.
+# GitHub move.
+#
+# Runs on GitHub-hosted `ubuntu-latest`. That runner image drifts over time — an accepted
+# tradeoff for hosted CI, NOT a reproducibly-pinned job container like the old GitLab model.
+# The reproducibility-sensitive inputs are pinned instead: every action is pinned to a commit
+# SHA (comment shows the tag), and every image (base, TimescaleDB service, syft/trivy) is pinned
+# by digest; Renovate keeps them current.
 name: CI
 
 on:
@@ -11,10 +17,10 @@ on:
   pull_request:
     branches: [main]
 
-# Least-privilege token: read the repo, write packages (push the image to GHCR).
+# Least-privilege DEFAULT: read-only. Package-write is granted narrowly, at job scope, only to the
+# publishing job (build-image) — and only its non-PR runs actually push. The test jobs stay read-only.
 permissions:
   contents: read
-  packages: write
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -24,8 +30,8 @@ jobs:
   go-test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
       # rrdtool: the SmokePing RRD-extraction tests (internal/importer/smokeping)
@@ -53,8 +59,8 @@ jobs:
   frontend:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '22'
       - run: node web/dashboard.test.mjs
@@ -66,8 +72,8 @@ jobs:
   govulncheck:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
       - run: go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
@@ -95,8 +101,8 @@ jobs:
     env:
       SMOKE_TEST_DSN: postgres://smoke:smoke@localhost:5432/smoke?sslmode=disable
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
       # rrdtool: the `smoked import ... --history` end-to-end tests (cmd/smoked) need both a DB and
@@ -131,19 +137,24 @@ jobs:
   build-image:
     needs: [go-test, frontend, govulncheck, db-test]
     runs-on: ubuntu-latest
+    # The ONLY job granted package write — and only its non-PR runs actually push (see the login +
+    # build steps). PR runs build/scan without a token that can publish.
+    permissions:
+      contents: read
+      packages: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
       - name: Log in to GHCR
         if: github.event_name != 'pull_request'
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Image metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
@@ -153,7 +164,7 @@ jobs:
             type=sha,format=short
       - name: Build (+push on non-PR)
         id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           # single-arch amd64; provenance off keeps a plain single manifest (matches what the
@@ -163,14 +174,14 @@ jobs:
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-      # SBOM (SPDX JSON) of the built image -> artifact. Tools are version-pinned.
+      # SBOM (SPDX JSON) of the built image -> artifact. Scanner images are digest-pinned.
       - name: SBOM (syft)
         run: |
           docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
-            anchore/syft:v1.19.0 "docker:ghcr.io/${{ github.repository }}:${{ steps.meta.outputs.version }}" \
+            anchore/syft:v1.19.0@sha256:bc1ae555a43011d23bb011a4f50e175fc9a5984a008a3f8f2d692b211fcacd2a "docker:ghcr.io/${{ github.repository }}:${{ steps.meta.outputs.version }}" \
             -o spdx-json > sbom.spdx.json
       - name: Upload SBOM
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: sbom-spdx
           path: sbom.spdx.json
@@ -182,5 +193,5 @@ jobs:
         continue-on-error: true
         run: |
           docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
-            aquasec/trivy:0.58.1 image --scanners vuln --severity HIGH,CRITICAL \
+            aquasec/trivy:0.58.1@sha256:ab70a02200597efa04748f210f793936eb647cbcdb0ea69cc30b226d6f5a22c7 image --scanners vuln --severity HIGH,CRITICAL \
             --ignore-unfixed --exit-code 1 "ghcr.io/${{ github.repository }}:${{ steps.meta.outputs.version }}"
