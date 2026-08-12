@@ -30,6 +30,10 @@ All notable changes to **Heliograph** are recorded here. The format follows
   Compose example now do exactly that instead of carrying a `command:` list.
 
 ### Changed
+- **Graphs grid defaults to per-panel Y-axis auto-scaling.** The small-multiples grid previously shared
+  one Y-axis (unison) by default, which flattened low-latency panels against the tallest target. Each
+  panel now auto-scales to its own data by default; the **unison scale** toggle (top of the grid) still
+  turns on a shared axis for cross-target comparison.
 - **Renamed to Heliograph.** The project's outward identity is now **Heliograph** — the GitHub repo
   (`seitzbg/heliograph`), the container image (`ghcr.io/seitzbg/heliograph`), CI badges, and docs.
   The internal naming now follows suit: the Go module path is **`github.com/seitzbg/heliograph`** (was
@@ -67,6 +71,12 @@ All notable changes to **Heliograph** are recorded here. The format follows
   by the DB and the collector's DSN) and code-review acknowledgements. (CODE_REVIEW M1 + CodeRabbit.)
 
 ### Fixed
+- **Spurious "bulk series truncated" warning under many targets.** `pgstore.SeriesAll` logged
+  `bulk series truncated; oldest rounds omitted` (and reported `truncated=true`) on **every** Graphs-grid
+  refresh once there were ≥16 targets — because the fair-share per-target cap (`global_budget/targets`)
+  dropped below the 20k ceiling, which was mistaken for actual truncation even when no target exceeded
+  its cap and nothing was dropped. Truncation is now reported only when a target's rounds were actually
+  clipped. Regression-tested (`TestPGStoreSeriesAllNoFalseTruncation`).
 - **Rootless Podman no longer fails to start the collector (`ping_group_range` sysctl).** The Compose
   stack set `net.ipv4.ping_group_range: "0 2147483647"` to enable the native `Ping` probe's
   unprivileged datagram socket. Under **rootless** Podman the container runs in a user namespace that
