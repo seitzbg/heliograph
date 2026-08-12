@@ -9,6 +9,12 @@ All notable changes to **Heliograph** are recorded here. The format follows
 ### Added
 - **Project `LICENSE` (MIT).** The v1.0.0 source shipped with no license, leaving downstream use,
   modification, and redistribution rights unstated; MIT makes them explicit.
+- **`smoked -serve` reads `SMOKED_DSN` / `SMOKED_CONFIG` / `SMOKED_DOWNSAMPLE` from the environment.**
+  Only the `import`/`vantage` subcommands previously defaulted `-dsn` to `SMOKED_DSN`; the serve path
+  required the DSN — with its password — on the command line. These three flags now default to their
+  matching env vars (an explicit flag still wins), so Compose/K8s can supply them via `environment:`
+  and keep the DB password out of the command list. The bundled `docker-compose.yml` and the README
+  Compose example now do exactly that instead of carrying a `command:` list.
 
 ### Changed
 - **Renamed to Heliograph.** The project's outward identity is now **Heliograph** — the GitHub repo

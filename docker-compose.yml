@@ -43,17 +43,12 @@ services:
       # GUI panel. Empty (the default) leaves it fail-closed/disabled. Set it in
       # .env to provision vantages from the browser instead of the CLI.
       SMOKED_ADMIN_PASSWORD: ${SMOKED_ADMIN_PASSWORD:-}
-    command:
-      - "-serve"
-      - "-addr"
-      - ":8087"
-      - "-webdir"
-      - "/web"
-      - "-config"
-      - "/etc/smokeping/config.yaml"
-      - "-dsn"
-      - "postgres://smoke:smoke@timescaledb:5432/smoke?sslmode=disable"
-      - "-downsample"     # create the hourly continuous aggregate so the UI's Hourly mode works
+      # The image's default command runs `-serve -addr :8087 -webdir /web`; these env vars drive the
+      # rest (config / DSN / downsample), keeping the DB password out of the command list. Each
+      # mirrors a -flag on cmd/smoked, and the `vantage`/`import` subcommands already read SMOKED_DSN.
+      SMOKED_CONFIG: /etc/smokeping/config.yaml    # baked demo config (multi-probe targets)
+      SMOKED_DSN: "postgres://smoke:smoke@timescaledb:5432/smoke?sslmode=disable"
+      SMOKED_DOWNSAMPLE: "1"                        # hourly continuous aggregate for the UI's Hourly mode
     ports:
       # Published on localhost only: the API is unauthenticated and query-heavy, so it
       # must not be reachable on all host interfaces. For access beyond this host, run a

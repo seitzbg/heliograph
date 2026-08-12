@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/signal"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -68,6 +69,14 @@ func validateRuntimeFlags(pings int, step, timeout time.Duration) error {
 	return nil
 }
 
+// envBool reads a boolean flag default from the environment, so a Compose/K8s deployment can drive
+// it via `environment:` rather than the command list. Follows strconv.ParseBool; empty or
+// unparseable = false.
+func envBool(name string) bool {
+	b, _ := strconv.ParseBool(os.Getenv(name))
+	return b
+}
+
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "vantage" {
 		os.Exit(vantageCmd(os.Args[2:]))
@@ -88,10 +97,10 @@ func main() {
 	serve := flag.Bool("serve", false, "serve the JSON API + web UI after the rounds (runs forever)")
 	addr := flag.String("addr", ":8087", "API listen address when -serve")
 	webdir := flag.String("webdir", "web", "directory of static web assets to serve at /")
-	dsn := flag.String("dsn", "", "TimescaleDB/PostgreSQL DSN; if set, persist there instead of in-memory")
-	downsample := flag.Bool("downsample", false, "with -dsn: enable the hourly continuous aggregate + retention policies")
+	dsn := flag.String("dsn", os.Getenv("SMOKED_DSN"), "TimescaleDB/PostgreSQL DSN (or set SMOKED_DSN); if set, persist there instead of in-memory")
+	downsample := flag.Bool("downsample", envBool("SMOKED_DOWNSAMPLE"), "with -dsn: enable the hourly continuous aggregate + retention policies (or set SMOKED_DOWNSAMPLE=1)")
 	requireFingerprint := flag.Bool("require-fingerprint", false, "reject agent results that carry no measurement fingerprint (strict mode); default accepts them for pre-fingerprint agents. Flip on once every vantage's agent is upgraded (watch smokeping_agent_missing_fingerprint_total)")
-	configPath := flag.String("config", "", "path to a YAML config file, or a directory holding default.yaml + conf.d/*.yaml; replaces the built-in demo targets")
+	configPath := flag.String("config", os.Getenv("SMOKED_CONFIG"), "path to a YAML config file, or a directory holding default.yaml + conf.d/*.yaml (or set SMOKED_CONFIG); replaces the built-in demo targets")
 	webhook := flag.String("webhook", "", "webhook URL for alerts named 'to: [webhook]'")
 	logFormat := flag.String("log-format", "text", "operational log format: text or json")
 	logLevel := flag.String("log-level", "info", "operational log level: debug, info, warn, error")

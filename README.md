@@ -99,21 +99,16 @@ services:
     cap_add: [NET_RAW]                                  # fping ICMP (non-root, setcap'd binary)
     sysctls:
       net.ipv4.ping_group_range: "0 2147483647"        # native Ping via an unprivileged socket
-    command:
-      - "-serve"
-      - "-addr"
-      - ":8087"
-      - "-webdir"
-      - "/web"
-      - "-dsn"
-      - "postgres://smoke:${SMOKE_DB_PASSWORD:-smoke}@timescaledb:5432/smoke?sslmode=disable"
-      - "-downsample"                                   # hourly/daily aggregates for the UI
+    environment:
+      # The image's default command already runs `-serve -addr :8087 -webdir /web`; these env vars
+      # drive the rest, keeping the DB password out of the command list. Each mirrors a -flag.
+      SMOKED_DSN: postgres://smoke:${SMOKE_DB_PASSWORD:-smoke}@timescaledb:5432/smoke?sslmode=disable
+      SMOKED_DOWNSAMPLE: "1"                            # hourly/daily aggregates for the UI
+      # Runs a built-in demo target set. To measure your own, mount a YAML tree and point at it:
+      #   volumes: ["./config.yaml:/etc/smokeping/config.yaml:ro"]
+      #   SMOKED_CONFIG: /etc/smokeping/config.yaml
     ports:
       - "127.0.0.1:8087:8087"                           # loopback only — the read API is unauthenticated
-    # Ships a 10-target demo config baked in. To measure your own targets, mount a YAML tree and
-    # point `-config` at it:
-    #   volumes: ["./config.yaml:/etc/smokeping/config.yaml:ro"]
-    #   command: [..., "-config", "/etc/smokeping/config.yaml"]
 
 volumes:
   tsdata: {}
