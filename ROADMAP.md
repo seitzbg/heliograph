@@ -22,7 +22,7 @@ Legend: ✅ done · 🚧 in progress · ⬜ todo.
 ## Phase 2 — Persistence, config, alerting ✅
 - ✅ TimescaleDB store (raw per-round samples) behind a `store.Store` interface
 - ✅ YAML target tree with inheritance + per-probe schema validation
-- ✅ Alert engine (hysteresis matchers + pattern DSL, edge-trigger, log/webhook notifiers)
+- ✅ Alert engine (hysteresis matchers + pattern DSL, edge-trigger, log/webhook/Slack/Discord notifiers)
 
 ## Phase 3 — Production-readiness ✅
 - ✅ CI pipeline (GitLab CI: vet + build + test) — green on the `ubuntu-26.04-amd64` runner

@@ -101,7 +101,9 @@ func main() {
 	downsample := flag.Bool("downsample", envBool("SMOKED_DOWNSAMPLE"), "with -dsn: enable the hourly continuous aggregate + retention policies (or set SMOKED_DOWNSAMPLE=1)")
 	requireFingerprint := flag.Bool("require-fingerprint", false, "reject agent results that carry no measurement fingerprint (strict mode); default accepts them for pre-fingerprint agents. Flip on once every vantage's agent is upgraded (watch smokeping_agent_missing_fingerprint_total)")
 	configPath := flag.String("config", os.Getenv("SMOKED_CONFIG"), "path to a YAML config file, or a directory holding default.yaml + conf.d/*.yaml (or set SMOKED_CONFIG); replaces the built-in demo targets")
-	webhook := flag.String("webhook", "", "webhook URL for alerts named 'to: [webhook]'")
+	webhook := flag.String("webhook", "", "generic JSON webhook URL for alerts named 'to: [webhook]'")
+	slackWebhook := flag.String("slack-webhook", os.Getenv("SMOKED_SLACK_WEBHOOK"), "Slack incoming-webhook URL (or set SMOKED_SLACK_WEBHOOK) for alerts named 'to: [slack]'")
+	discordWebhook := flag.String("discord-webhook", os.Getenv("SMOKED_DISCORD_WEBHOOK"), "Discord webhook URL (or set SMOKED_DISCORD_WEBHOOK) for alerts named 'to: [discord]'")
 	logFormat := flag.String("log-format", "text", "operational log format: text or json")
 	logLevel := flag.String("log-level", "info", "operational log level: debug, info, warn, error")
 	flag.Parse()
@@ -120,24 +122,41 @@ func main() {
 	fmt.Printf("smoked %s — registered probe plugins: %s\n\n", version, strings.Join(probe.Registered(), ", "))
 
 	notifiers := map[string]alert.Notifier{"log": alert.LogNotifier{W: os.Stdout}}
-	var webhookN *alert.WebhookNotifier // concrete ref for /metrics + shutdown drain
-	if *webhook != "" {
-		// Validate the URL up front so a typo is a clear startup error, not a stream
-		// of per-event delivery failures at runtime.
-		if u, err := url.Parse(*webhook); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-			fatal("invalid -webhook URL", fmt.Errorf("must be an absolute http(s) URL, got %q", *webhook))
+	// Concrete refs for /metrics + shutdown drain. webhook, slack, and discord share the same
+	// WebhookNotifier delivery pool (bounded queue + retry/backoff + drain), differing only in body.
+	var webhookNs []*alert.WebhookNotifier
+	addWebhookish := func(name, flagName, rawURL string, ctor func(string, *http.Client) *alert.WebhookNotifier) {
+		if rawURL == "" {
+			return
 		}
-		webhookN = alert.NewWebhookNotifier(*webhook, nil) // bounded queue + retry/backoff + drain
-		notifiers["webhook"] = webhookN
-		// Drain queued deliveries on ANY exit path (serve shutdown, demo-mode return,
-		// early exit) through this one lifecycle point (CODE_REVIEW #6). By the time it
-		// runs the event producers have stopped — serve joins the poll goroutine
-		// (pollDone) before returning, and demo rounds are synchronous — so no Notify
-		// races the close.
+		// Validate the URL up front so a typo is a clear startup error, not a stream of per-event
+		// delivery failures at runtime.
+		if u, err := url.Parse(rawURL); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			fatal("invalid "+flagName+" URL", fmt.Errorf("must be an absolute http(s) URL, got %q", rawURL))
+		}
+		n := ctor(rawURL, nil)
+		n.Name = name
+		notifiers[name] = n
+		webhookNs = append(webhookNs, n)
+	}
+	addWebhookish("webhook", "-webhook", *webhook, alert.NewWebhookNotifier)
+	addWebhookish("slack", "-slack-webhook", *slackWebhook, func(u string, c *http.Client) *alert.WebhookNotifier {
+		return alert.NewSlackNotifier(u, c, alert.WebhookConfig{})
+	})
+	addWebhookish("discord", "-discord-webhook", *discordWebhook, func(u string, c *http.Client) *alert.WebhookNotifier {
+		return alert.NewDiscordNotifier(u, c, alert.WebhookConfig{})
+	})
+	// Drain queued deliveries on ANY exit path (serve shutdown, demo-mode return, early exit) through
+	// this one lifecycle point (CODE_REVIEW #6). By the time it runs the event producers have stopped
+	// — serve joins the poll goroutine (pollDone) before returning, and demo rounds are synchronous —
+	// so no Notify races the close.
+	if len(webhookNs) > 0 {
 		defer func() {
 			drainCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			webhookN.Close(drainCtx)
-			cancel()
+			defer cancel()
+			for _, n := range webhookNs {
+				n.Close(drainCtx)
+			}
 		}()
 	}
 
@@ -307,8 +326,8 @@ func main() {
 		if storeMetrics != nil {
 			extra = append(extra, storeMetrics)
 		}
-		if webhookN != nil {
-			extra = append(extra, webhookN.WriteMetrics)
+		if len(webhookNs) > 0 {
+			extra = append(extra, func(b *strings.Builder) { alert.WriteNotifierMetrics(b, webhookNs) })
 		}
 		if len(extra) > 0 {
 			srv.ExtraMetrics = func(b *strings.Builder) {
@@ -509,9 +528,11 @@ func main() {
 		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			// Drain queued webhook deliveries before the fatal os.Exit, which would otherwise
 			// skip the top-level deferred Close. Close is idempotent, so the defer stays a no-op.
-			if webhookN != nil {
+			if len(webhookNs) > 0 {
 				drainCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				webhookN.Close(drainCtx)
+				for _, n := range webhookNs {
+					n.Close(drainCtx)
+				}
 				cancel()
 			}
 			fatal("http server failed", err)

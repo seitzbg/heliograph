@@ -3,7 +3,6 @@ package alert
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -439,7 +438,9 @@ func (n LogNotifier) Notify(e Event) {
 // counts the remainder — nothing is ever dropped silently.
 type WebhookNotifier struct {
 	URL    string
+	Name   string // for metrics labels ("webhook"/"slack"/"discord"); set by the caller, optional
 	Client *http.Client
+	format func(Event) ([]byte, error) // Event -> request body; webhookBody by default, or slack/discord
 
 	queue       chan delivery
 	done        chan struct{}      // closed by Close to interrupt in-flight backoffs
@@ -505,7 +506,7 @@ func NewWebhookNotifierConfig(url string, client *http.Client, cfg WebhookConfig
 		cfg.Timeout = 8 * time.Second
 	}
 	n := &WebhookNotifier{
-		URL: url, Client: client,
+		URL: url, Client: client, format: webhookBody,
 		queue:       make(chan delivery, cfg.QueueSize),
 		done:        make(chan struct{}),
 		maxAttempts: cfg.MaxAttempts,
@@ -539,18 +540,10 @@ type webhookPayload struct {
 }
 
 func (n *WebhookNotifier) Notify(e Event) {
-	var rtt *float64
-	if !math.IsNaN(e.RTTms) && !math.IsInf(e.RTTms, 0) {
-		v := e.RTTms
-		rtt = &v
-	}
-	body, err := json.Marshal(webhookPayload{
-		Target: e.Target, Vantage: e.Vantage, Alert: e.Alert, Comment: e.Comment, Firing: e.Firing,
-		Status: strings.ToLower(e.Status()), LossPct: e.LossPct, RTTms: rtt, When: e.When,
-	})
+	body, err := n.format(e)
 	if err != nil {
 		// Never silently drop the delivery — surface it so an operator sees the gap.
-		slog.Error("webhook: marshal event failed", "alert", e.Alert, "target", e.Target, "err", err)
+		slog.Error("notifier: marshal event failed", "alert", e.Alert, "target", e.Target, "err", err)
 		return
 	}
 	d := delivery{body: body, idem: idemKey(e), alert: e.Alert, target: e.Target}
