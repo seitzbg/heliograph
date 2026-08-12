@@ -63,6 +63,15 @@ All notable changes to **Heliograph** are recorded here. The format follows
   by the DB and the collector's DSN) and code-review acknowledgements. (CODE_REVIEW M1 + CodeRabbit.)
 
 ### Fixed
+- **Rootless Podman no longer fails to start the collector (`ping_group_range` sysctl).** The Compose
+  stack set `net.ipv4.ping_group_range: "0 2147483647"` to enable the native `Ping` probe's
+  unprivileged datagram socket. Under **rootless** Podman the container runs in a user namespace that
+  maps only the ~65k GIDs from `/etc/subgid`, so the out-of-range upper bound was rejected at container
+  start with `write /proc/sys/net/ipv4/ping_group_range: invalid argument` (Docker rootful was
+  unaffected). The range is now scoped to the collector's GID (`"0 10001"`, matching the Dockerfile's
+  `smoked` user), which is valid inside a rootless userns and still enables the datagram socket.
+  Verified rootless: the container starts, and both `FPing` (via `CAP_NET_RAW`) and native `Ping` (via
+  the datagram socket, zero caps) return RTT as the non-root uid 10001.
 - **The MIT `LICENSE` is now included in the collector image (`/LICENSE`).** The source is MIT-licensed
   but the distributed image carried no license notice; the Dockerfile now copies it in.
 - **Minting the reserved vantage name `local` now returns a clear 409, not a generic 503.** It passed
