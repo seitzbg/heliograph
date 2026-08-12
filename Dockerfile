@@ -27,6 +27,9 @@ RUN apk add --no-cache fping ca-certificates tzdata \
 COPY --from=build /out/smoked /usr/local/bin/smoked
 COPY web /web
 COPY config.example.yaml /etc/smokeping/config.yaml
+# Ship the MIT license notice inside the image (the source is MIT; a distributed
+# binary artifact should carry it too). CODE_REVIEW carried-forward.
+COPY LICENSE /LICENSE
 USER smoked
 EXPOSE 8087
 ENTRYPOINT ["smoked"]

@@ -44,6 +44,8 @@ All notable changes to **Heliograph** are recorded here. The format follows
   by the DB and the collector's DSN) and code-review acknowledgements. (CODE_REVIEW M1 + CodeRabbit.)
 
 ### Fixed
+- **The MIT `LICENSE` is now included in the collector image (`/LICENSE`).** The source is MIT-licensed
+  but the distributed image carried no license notice; the Dockerfile now copies it in.
 - **Minting the reserved vantage name `local` now returns a clear 409, not a generic 503.** It passed
   the name-shape check (it is a valid name) and the store's reserved-name rejection was funneled into
   `store unavailable`, misrepresenting an operator mistake as an outage; the Vantages UI compounded it
