@@ -36,9 +36,16 @@ jobs:
           name: sbom-spdx-main
           path: sbom.spdx.json
           retention-days: 30
+      - name: Checkout (for .trivyignore)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      # Blocking: a newly-disclosed fixable HIGH/CRITICAL against the pinned (unchanged) base reds the
+      # scheduled run, which notifies — the whole point of re-scanning :main between merges. Suppress a
+      # known finding only with a time-bound entry in .trivyignore.
       - name: Trivy image scan
-        continue-on-error: true
         run: |
           docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$PWD/.trivyignore:/.trivyignore:ro" -e TRIVY_IGNOREFILE=/.trivyignore \
             aquasec/trivy:0.58.1@sha256:ab70a02200597efa04748f210f793936eb647cbcdb0ea69cc30b226d6f5a22c7 image --scanners vuln --severity HIGH,CRITICAL \
             --ignore-unfixed --exit-code 1 "ghcr.io/${{ github.repository }}:main"
