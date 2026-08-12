@@ -52,9 +52,9 @@ click a graph to zoom):
 - **JSON API** — `/api/probes`, `/api/probes/schema` (each probe's config as JSON Schema, generated from the same source as runtime validation), `/api/targets`, `/api/series?target=NAME`, `/api/charts?by=loss|median|stddev` (worst-N targets), `/api/sla?window=24h` (per-target availability). `series` returns the raw per-round sample array (the input a client-side smoke chart needs).
 - **Live web dashboard** (`web/index.html`) — fetches `/api/series` and renders each target with the shared canvas smoke renderer (`web/smoke.js`), auto-refreshing; light/dark theme-aware. Served same-origin by the collector.
 - **YAML config with inheritance** (`internal/config`, `config.example.yaml`) — a target tree where `probe`/`pings`/`step`/`params`/`alerts` set on a node apply to everything beneath it until overridden (SmokePing's key ergonomic). Each leaf is validated against its probe's `Schema()` — the modern stand-in for SmokePing's per-probe dynamic grammar. `-config file.yaml` replaces the built-in demo targets. `-config` also accepts a **directory** (`examples/config-dir/`): `default.yaml` holds `database`/`probes`/`alerts` + tree-wide defaults, and `conf.d/*.yaml` drop-in fragments each add top-level target branches (SmokePing `@include`-style concatenation, loaded in sorted filename order; a fragment may contain only `targets.children`).
-- **Alert engine** (`internal/alert`) — per-target windows of recent loss/latency samples, with hysteresis matchers (`CheckLoss`, `CheckLatency`: raise after X bad rounds, clear after X good) and a pattern DSL — right-anchored shape matches (`>50%,>50%`, `>200,>200`) with `*N*` skips, a bare `*` wildcard, and `==U`/`!=U` for a lost round's unknown rtt. Firing/resolved state with edge-triggering; per-alert `priority` inhibits noisier alerts on the same target, and a per-target `alertee` adds extra recipients. Notifiers = log, generic webhook (JSON POST), **Slack**, and **Discord** (each configured by URL via
-a flag or `SMOKED_*` env var, and referenced from an alert as `to: [slack]` / `to: [discord]`).
-Verified firing live on real loss and latency. Alerts are defined in config and attached to targets by name.
+- **Alert engine** (`internal/alert`) — per-target windows of recent loss/latency samples, with hysteresis matchers (`CheckLoss`, `CheckLatency`: raise after X bad rounds, clear after X good) and a pattern DSL — right-anchored shape matches (`>50%,>50%`, `>200,>200`) with `*N*` skips, a bare `*` wildcard, and `==U`/`!=U` for a lost round's unknown rtt. Firing/resolved state with edge-triggering; per-alert `priority` inhibits noisier alerts on the same target, and a per-target `alertee` adds extra recipients. Notifiers = log, generic webhook (JSON POST), **Slack**, **Discord**, and **email (SMTP)** (configured
+by flag or `SMOKED_*` env var, and referenced from an alert as `to: [slack]` / `to: [discord]` /
+`to: [email]`). Verified firing live on real loss and latency. Alerts are defined in config and attached to targets by name.
 - **Pluggable store** — a `store.Store` interface with two implementations:
   - `MemStore` — in-memory (default; for dev/tests).
   - `pgstore` — **TimescaleDB**: one row per round in a `samples` hypertable keeping the raw per-round sample array (loss gaps stored as SQL `NULL`), so smoke bands come from the real distribution. Verified end-to-end against a live TimescaleDB.
@@ -303,7 +303,7 @@ web/
 alongside YAML (additive, `conf.d`-style), edited from an in-browser **Config** tab, with a
 `smoked config import` / `smoked import smokeping` path to migrate an existing SmokePing install.
 
-Still planned: **email (SMTP)** and further notifier integrations (e.g. PagerDuty). See the
+Still planned: further notifier integrations (e.g. PagerDuty). See the
 [roadmap](ROADMAP.md).
 
 ## Acknowledgements

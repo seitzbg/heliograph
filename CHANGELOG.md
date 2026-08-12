@@ -11,7 +11,11 @@ All notable changes to **Heliograph** are recorded here. The format follows
   fan out to **Slack** (`-slack-webhook` / `SMOKED_SLACK_WEBHOOK`) and **Discord** (`-discord-webhook` /
   `SMOKED_DISCORD_WEBHOOK`), referenced from an alert as `to: [slack]` / `to: [discord]`. Both reuse the
   webhook delivery pool (bounded queue, retry/backoff, graceful drain) and post a human-readable
-  message; their delivery counters are exported under a `notifier` label. (Email/SMTP is next.)
+  message; their delivery counters are exported under a `notifier` label.
+- **Email (SMTP) alert notifier.** Alerts can fan out to email via `-smtp-addr` / `-smtp-from` /
+  `-smtp-to` (plus `-smtp-user` / `-smtp-pass` for authenticated submission — STARTTLS when the server
+  offers it), or the matching `SMOKED_SMTP_*` env vars, referenced from an alert as `to: [email]`.
+  Async bounded-queue delivery with a graceful drain and `smokeping_email_*` metrics.
 - **README screenshots.** Dashboard (Overview + per-target Graphs) and the smoke-graph renderer are
   now shown in the README (`docs/img/`).
 - **Project `LICENSE` (MIT).** The v1.0.0 source shipped with no license, leaving downstream use,
