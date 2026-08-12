@@ -15,7 +15,9 @@ All notable changes to **Heliograph** are recorded here. The format follows
 - **Email (SMTP) alert notifier.** Alerts can fan out to email via `-smtp-addr` / `-smtp-from` /
   `-smtp-to` (plus `-smtp-user` / `-smtp-pass` for authenticated submission — STARTTLS when the server
   offers it), or the matching `SMOKED_SMTP_*` env vars, referenced from an alert as `to: [email]`.
-  Async bounded-queue delivery with a graceful drain and `smokeping_email_*` metrics.
+  Async bounded-queue delivery with a graceful drain and `smokeping_email_*` metrics. `-smtp-insecure`
+  (or `SMOKED_SMTP_INSECURE=1`) skips STARTTLS cert verification for an internal relay with a
+  self-signed cert; a relay that advertises no STARTTLS is handled too. (Live-verified end to end.)
 - **README screenshots.** Dashboard (Overview + per-target Graphs) and the smoke-graph renderer are
   now shown in the README (`docs/img/`).
 - **Project `LICENSE` (MIT).** The v1.0.0 source shipped with no license, leaving downstream use,
