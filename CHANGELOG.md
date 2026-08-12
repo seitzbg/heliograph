@@ -36,9 +36,15 @@ All notable changes to **Heliograph** are recorded here. The format follows
   `packages: write` was narrowed from the workflow default to the single publishing job (`build-image`)
   — the default token is now read-only — and checkout no longer persists the `GITHUB_TOKEN` in
   `.git/config` (`persist-credentials: false`). The `ubuntu-latest` runner drift is documented as an
-  accepted hosted-CI tradeoff. Finished-image scans stay report-only until the base is CVE-clean;
-  blocking scans, Caddy-image coverage, image provenance attestations, and splitting PR builds from a
-  non-PR publish job remain tracked follow-ups. (CODE_REVIEW L1/M2/M3 + CodeRabbit.)
+  accepted hosted-CI tradeoff. (CODE_REVIEW L1/M2/M3 + CodeRabbit.)
+- **Supply-chain release gates completed.** The finished-image Trivy scan is now **blocking** (the base
+  is CVE-clean, so a newly-disclosed fixable HIGH/CRITICAL reds CI — suppress with a time-bound
+  `.trivyignore` entry, or bump the base pin). Publishing is split into a non-PR `publish-image` job
+  that holds the ONLY write scopes (`packages`/`attestations`/`id-token`), so PR builds can never
+  publish; it attaches a signed **build-provenance attestation** (a verifiable source-ref → image-digest
+  mapping) to the pushed image. CI also builds + scans the bundled **Caddy** reverse-proxy image
+  (`Caddy.Dockerfile`). Only enabling the Renovate bot (a repo GitHub-App install) remains. (CODE_REVIEW
+  M2 remainder + CodeRabbit.)
 - **README: prebuilt-image quick start binds loopback.** The Docker quick start published the
   unauthenticated dashboard/read API on all interfaces (`-p 8087:8087`); it now binds
   `127.0.0.1:8087:8087`, matching the Compose file and the README's own loopback-only guidance.

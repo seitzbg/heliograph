@@ -142,21 +142,84 @@ jobs:
   # non-PR events (push to main / tags) so PRs verify the Docker build without publishing. Also runs
   # the SBOM + finished-image vuln scan here against the locally loaded image (go-test's govulncheck
   # only covers the Go module graph, not the base image's OS packages).
+  # Build the collector image + scan it, with a READ-ONLY token (no registry/attestation write) — so
+  # PR builds verify the Docker build + finished-image scan but can NEVER publish. Publishing is the
+  # separate, non-PR `publish-image` job below. Runs only after every test job is green.
   build-image:
     needs: [go-test, frontend, govulncheck, db-test]
     runs-on: ubuntu-latest
-    # The ONLY job granted package write — and only its non-PR runs actually push (see the login +
-    # build steps). PR runs build/scan without a token that can publish.
     permissions:
       contents: read
-      packages: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
-          persist-credentials: false   # no job pushes via git; don't leave GITHUB_TOKEN in .git/config
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - name: Image metadata
+        id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=tag
+            type=ref,event=pr
+            type=sha,format=short
+      - name: Build (load locally; never push here)
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          # single-arch amd64; provenance off keeps a plain single manifest (matches what the docker
+          # hosts pull) and lets `load` import it locally for the scan. Cache is shared with publish.
+          provenance: false
+          load: true
+          push: false
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-to: type=gha,mode=max
+          cache-from: type=gha
+      # SBOM (SPDX JSON) of the built image -> artifact. Scanner images are digest-pinned.
+      - name: SBOM (syft)
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+            anchore/syft:v1.19.0@sha256:bc1ae555a43011d23bb011a4f50e175fc9a5984a008a3f8f2d692b211fcacd2a "docker:ghcr.io/${{ github.repository }}:${{ steps.meta.outputs.version }}" \
+            -o spdx-json > sbom.spdx.json
+      - name: Upload SBOM
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sbom-spdx
+          path: sbom.spdx.json
+          retention-days: 30
+      # BLOCKING finished-image scan: the base is CVE-clean as of this change, so a newly-disclosed
+      # fixable HIGH/CRITICAL against the pinned base now reds CI — bump the base pin, or add a
+      # time-bound exception to .trivyignore. The scheduled image-scan.yml re-runs this against :main.
+      - name: Trivy image scan (blocking)
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$PWD/.trivyignore:/.trivyignore:ro" -e TRIVY_IGNOREFILE=/.trivyignore \
+            aquasec/trivy:0.58.1@sha256:ab70a02200597efa04748f210f793936eb647cbcdb0ea69cc30b226d6f5a22c7 image --scanners vuln --severity HIGH,CRITICAL \
+            --ignore-unfixed --exit-code 1 "ghcr.io/${{ github.repository }}:${{ steps.meta.outputs.version }}"
+
+  # Publish the collector image to GHCR + attach a signed build-provenance attestation (a verifiable
+  # source-ref -> image-digest mapping). NON-PR ONLY, and the ONLY job with write scopes — so the PR
+  # build above never holds a token that can publish. Reuses build-image's gha layer cache, so this
+  # build is fast rather than a rebuild from scratch.
+  publish-image:
+    needs: [build-image]
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
       - name: Log in to GHCR
-        if: github.event_name != 'pull_request'
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ghcr.io
@@ -170,38 +233,63 @@ jobs:
           tags: |
             type=ref,event=branch
             type=ref,event=tag
-            type=ref,event=pr
             type=sha,format=short
-      - name: Build (+push on non-PR)
+      - name: Build + push
         id: build
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
-          # single-arch amd64; provenance off keeps a plain single manifest (matches what the
-          # docker hosts pull) and lets `load` import it locally for the scan below.
           provenance: false
-          load: true
-          push: ${{ github.event_name != 'pull_request' }}
+          push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-      # SBOM (SPDX JSON) of the built image -> artifact. Scanner images are digest-pinned.
+          cache-from: type=gha
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ghcr.io/${{ github.repository }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+  # Build the bundled Caddy reverse-proxy image (Caddy.Dockerfile: xcaddy + DNS-provider plugins), so
+  # a broken plugin pin or Dockerfile is caught in CI, and scan it. Not published (the federation
+  # profile builds it locally). Not a required check; the scan is report-only until the caddy base is
+  # vetted clean.
+  caddy-image:
+    needs: [go-test, frontend, govulncheck, db-test]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - name: Build Caddy image (load, no push)
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          file: Caddy.Dockerfile
+          provenance: false
+          load: true
+          push: false
+          tags: heliograph-caddy:ci
+          cache-to: type=gha,mode=max,scope=caddy
+          cache-from: type=gha,scope=caddy
       - name: SBOM (syft)
         run: |
           docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
-            anchore/syft:v1.19.0@sha256:bc1ae555a43011d23bb011a4f50e175fc9a5984a008a3f8f2d692b211fcacd2a "docker:ghcr.io/${{ github.repository }}:${{ steps.meta.outputs.version }}" \
-            -o spdx-json > sbom.spdx.json
-      - name: Upload SBOM
+            anchore/syft:v1.19.0@sha256:bc1ae555a43011d23bb011a4f50e175fc9a5984a008a3f8f2d692b211fcacd2a docker:heliograph-caddy:ci \
+            -o spdx-json > sbom-caddy.spdx.json
+      - name: Upload Caddy SBOM
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: sbom-spdx
-          path: sbom.spdx.json
+          name: sbom-caddy-spdx
+          path: sbom-caddy.spdx.json
           retention-days: 30
-      # Vulnerability scan of the finished image; reports fixable HIGH/CRITICAL. Report-only for now
-      # (continue-on-error) so a pre-existing base-image CVE can't red the pipeline — tighten to
-      # blocking once the base is clean. The scheduled image-scan.yml re-runs this against :main.
-      - name: Trivy image scan
+      - name: Trivy scan (report-only)
         continue-on-error: true
         run: |
           docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
             aquasec/trivy:0.58.1@sha256:ab70a02200597efa04748f210f793936eb647cbcdb0ea69cc30b226d6f5a22c7 image --scanners vuln --severity HIGH,CRITICAL \
-            --ignore-unfixed --exit-code 1 "ghcr.io/${{ github.repository }}:${{ steps.meta.outputs.version }}"
+            --ignore-unfixed heliograph-caddy:ci
