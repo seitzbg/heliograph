@@ -26,14 +26,16 @@ All notable changes to **Heliograph** are recorded here. The format follows
 - **Hardened the GitHub Actions supply chain.** Every action is pinned to a commit SHA (with a version
   comment; Renovate keeps them current), the syft/trivy scanner images are digest-pinned, and
   `packages: write` was narrowed from the workflow default to the single publishing job (`build-image`)
-  — the default token is now read-only. The `ubuntu-latest` runner drift is documented as an accepted
-  hosted-CI tradeoff. Finished-image scans stay report-only until the base is CVE-clean; blocking
-  scans, Caddy-image coverage, and image provenance attestations remain tracked follow-ups.
-  (CODE_REVIEW L1/M2/M3, corroborated by CodeRabbit.)
+  — the default token is now read-only — and checkout no longer persists the `GITHUB_TOKEN` in
+  `.git/config` (`persist-credentials: false`). The `ubuntu-latest` runner drift is documented as an
+  accepted hosted-CI tradeoff. Finished-image scans stay report-only until the base is CVE-clean;
+  blocking scans, Caddy-image coverage, image provenance attestations, and splitting PR builds from a
+  non-PR publish job remain tracked follow-ups. (CODE_REVIEW L1/M2/M3 + CodeRabbit.)
 - **README: prebuilt-image quick start binds loopback.** The Docker quick start published the
   unauthenticated dashboard/read API on all interfaces (`-p 8087:8087`); it now binds
   `127.0.0.1:8087:8087`, matching the Compose file and the README's own loopback-only guidance.
-  Also added a copy-pasteable Docker Compose example and code-review acknowledgements. (CODE_REVIEW M1.)
+  Also added a copy-pasteable Docker Compose example (with a single `SMOKE_DB_PASSWORD` variable shared
+  by the DB and the collector's DSN) and code-review acknowledgements. (CODE_REVIEW M1 + CodeRabbit.)
 
 ### Fixed
 - **Minting the reserved vantage name `local` now returns a clear 409, not a generic 503.** It passed

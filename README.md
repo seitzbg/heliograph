@@ -81,7 +81,7 @@ services:
     image: timescale/timescaledb:2.29.1-pg16
     environment:
       POSTGRES_USER: smoke
-      POSTGRES_PASSWORD: smoke        # change me
+      POSTGRES_PASSWORD: ${SMOKE_DB_PASSWORD:-smoke}   # override in a .env file (see note)
       POSTGRES_DB: smoke
     volumes:
       - tsdata:/var/lib/postgresql/data
@@ -106,7 +106,7 @@ services:
       - "-webdir"
       - "/web"
       - "-dsn"
-      - "postgres://smoke:smoke@timescaledb:5432/smoke?sslmode=disable"
+      - "postgres://smoke:${SMOKE_DB_PASSWORD:-smoke}@timescaledb:5432/smoke?sslmode=disable"
       - "-downsample"                                   # hourly/daily aggregates for the UI
     ports:
       - "127.0.0.1:8087:8087"                           # loopback only — the read API is unauthenticated
@@ -118,6 +118,11 @@ services:
 volumes:
   tsdata: {}
 ```
+
+Set `SMOKE_DB_PASSWORD` (e.g. in a `.env` file beside the compose file) to change the database
+password in **both** the DB and the collector's DSN at once. Note: the password is written into the
+`tsdata` volume on first init, so changing it later does **not** re-initialize an existing volume —
+recreate the volume (or `ALTER ROLE` inside the DB) to rotate it.
 
 This binds `127.0.0.1` because the dashboard + read API are unauthenticated; to reach it beyond
 localhost, front it with TLS + auth. The repo's own [`docker-compose.yml`](docker-compose.yml)
