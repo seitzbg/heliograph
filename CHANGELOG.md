@@ -197,7 +197,7 @@ been released yet. Full detail below.
   are still accepted so a rolling upgrade doesn't drop data). When enabled, the hub drops any agent
   round that carries no measurement fingerprint as a visible permanent drop, closing the residual
   misattribution path for not-yet-upgraded agents. An operator flips it on once
-  `smokeping_agent_missing_fingerprint_total` shows every vantage's agent upgraded.
+  `heliograph_agent_missing_fingerprint_total` shows every vantage's agent upgraded.
 - **Native ICMP `Ping` probe.** A new `Ping` probe kind sends and matches ICMP Echo itself via
   `golang.org/x/net/icmp` — no `fping` binary, no `setcap`. Per round it opens a socket
   **datagram-first** (an unprivileged `udp4`/`udp6` ICMP socket, gated by the kernel's
@@ -218,7 +218,7 @@ been released yet. Full detail below.
   aggregates over the imported range. Import is idempotent (`ON CONFLICT DO NOTHING`, so a re-run
   adds 0 rows) and config stays the source of truth: a target with no `.rrd` is skipped and
   reported (`config-only`), an `.rrd` with no matching target is reported as an `orphan` and never
-  imported. History from before smokeping-modern's own raw-sample retention window still renders
+  imported. History from before heliograph's own raw-sample retention window still renders
   on the dashboard, just from the aggregate (its smoke band collapses to the median line — there's
   no per-round distribution in an RRD's consolidated data to draw a band from) — which is why
   `--history` requires the continuous aggregates already enabled (`smoked -downsample`) and refuses
@@ -356,7 +356,7 @@ been released yet. Full detail below.
   newest event and counts it (rather than spawning unbounded goroutines); each delivery carries
   a stable `X-Idempotency-Key` so the receiver can dedupe retries and level-triggered repeats;
   failed deliveries are retried with exponential backoff; and shutdown drains the queue within a
-  deadline. Delivery counters (`smokeping_webhook_queued_total`, `_delivered_total`,
+  deadline. Delivery counters (`heliograph_webhook_queued_total`, `_delivered_total`,
   `_retried_total`, `_dropped_total`, `_failed_total`, `_queue_depth`) are exposed on `/metrics`.
 - **Per-probe value validation.** Probe params are validated at config load — bool/int/port
   kinds, enums (e.g. DNS `protocol`), and a valid-record-type check for DNS `recordtype` — so a
@@ -452,7 +452,7 @@ been released yet. Full detail below.
   misattributed. **Compatibility:** a round with *no* fingerprint (from a not-yet-upgraded,
   pre-fingerprint agent) is still accepted so a rolling upgrade doesn't drop data — meaning the
   original misattribution is still possible for such an agent until it is upgraded. Those rounds are
-  counted per vantage on `/metrics` (`smokeping_agent_missing_fingerprint_total`) and warned once per
+  counted per vantage on `/metrics` (`heliograph_agent_missing_fingerprint_total`) and warned once per
   vantage, so an operator can watch a rollout finish; a later release may require a fingerprint.
 - **`EnableDownsampling`'s one-time backfill could fail on ordinary refresh-policy contention.**
   `backfillAggregates` ran its two `CALL refresh_continuous_aggregate(...)` statements via a raw
@@ -692,7 +692,7 @@ Follow-up review pass:
   also clamps defensively.
 - `HTTP.insecure_ssl` and DNS `recordtype` now take effect per target, matching their
   advertised target scope (they were read only from probe-level config).
-- pgstore reads `duration_ms` back, so `smokeping_probe_duration_seconds` is no longer
+- pgstore reads `duration_ms` back, so `heliograph_probe_duration_seconds` is no longer
   always zero for TimescaleDB-persisted targets.
 - SIGHUP reload no longer loses a round's alert-state update on the reload boundary: the
   round's evaluation and the reload's state-inheritance+swap are serialized, and evaluation
@@ -731,8 +731,8 @@ Follow-up review pass:
   at parse time.
 - Structured logging (`log/slog`) with `-log-format` (text|json) and `-log-level`, plus a
   per-round `"round complete"` record.
-- Operational metrics on `/metrics`: per-probe timing (`smokeping_probe_duration_seconds`)
-  and round-level `smokeping_rounds_total`, `_round_duration_seconds`, `_round_targets`,
+- Operational metrics on `/metrics`: per-probe timing (`heliograph_probe_duration_seconds`)
+  and round-level `heliograph_rounds_total`, `_round_duration_seconds`, `_round_targets`,
   `_round_errors`, `_last_round_timestamp_seconds`.
 - SPA raw↔hourly resolution selector: the hourly view renders the downsampled min→max
   envelope with the avg median; degrades gracefully when the store has no rollup tier.
@@ -802,7 +802,7 @@ the smoke-graph look, a fast/parallel poller, and probes as plugins.
 - Graceful shutdown: `smoked` cancels in-flight probes and shuts the HTTP server down
   cleanly on SIGINT/SIGTERM (signal-aware context). Verified (clean exit 0 on SIGTERM).
 - Prometheus `/metrics` endpoint (dependency-free text exposition): per-target/probe
-  `smokeping_probe_median_seconds`, `smokeping_probe_loss_ratio`, `smokeping_probe_up`.
+  `heliograph_probe_median_seconds`, `heliograph_probe_loss_ratio`, `heliograph_probe_up`.
   Lets Grafana/Alertmanager-native setups scrape and alert. Unit-tested + live-verified.
 - Config reload on SIGHUP: the runtime (jobs + alert engine) is held behind an atomic
   pointer and rebuilt from the config on SIGHUP; a bad edit keeps the running config.
