@@ -13,7 +13,9 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"net"
 	"net/http"
+	"net/smtp"
 	"net/url"
 	"os"
 	"os/signal"
@@ -104,6 +106,11 @@ func main() {
 	webhook := flag.String("webhook", "", "generic JSON webhook URL for alerts named 'to: [webhook]'")
 	slackWebhook := flag.String("slack-webhook", os.Getenv("SMOKED_SLACK_WEBHOOK"), "Slack incoming-webhook URL (or set SMOKED_SLACK_WEBHOOK) for alerts named 'to: [slack]'")
 	discordWebhook := flag.String("discord-webhook", os.Getenv("SMOKED_DISCORD_WEBHOOK"), "Discord webhook URL (or set SMOKED_DISCORD_WEBHOOK) for alerts named 'to: [discord]'")
+	smtpAddr := flag.String("smtp-addr", os.Getenv("SMOKED_SMTP_ADDR"), "SMTP server host:port (or set SMOKED_SMTP_ADDR) to enable the email notifier ('to: [email]')")
+	smtpFrom := flag.String("smtp-from", os.Getenv("SMOKED_SMTP_FROM"), "email From address (or set SMOKED_SMTP_FROM)")
+	smtpTo := flag.String("smtp-to", os.Getenv("SMOKED_SMTP_TO"), "comma-separated email recipients (or set SMOKED_SMTP_TO)")
+	smtpUser := flag.String("smtp-user", os.Getenv("SMOKED_SMTP_USER"), "SMTP username (or set SMOKED_SMTP_USER); set with -smtp-pass for authenticated submission")
+	smtpPass := flag.String("smtp-pass", os.Getenv("SMOKED_SMTP_PASS"), "SMTP password (or set SMOKED_SMTP_PASS)")
 	logFormat := flag.String("log-format", "text", "operational log format: text or json")
 	logLevel := flag.String("log-level", "info", "operational log level: debug, info, warn, error")
 	flag.Parse()
@@ -146,16 +153,43 @@ func main() {
 	addWebhookish("discord", "-discord-webhook", *discordWebhook, func(u string, c *http.Client) *alert.WebhookNotifier {
 		return alert.NewDiscordNotifier(u, c, alert.WebhookConfig{})
 	})
+	// Email/SMTP notifier ('to: [email]'). Enabled when -smtp-addr/-smtp-from/-smtp-to are all set;
+	// -smtp-user/-smtp-pass add authenticated submission (STARTTLS when the server offers it).
+	var emailN *alert.EmailNotifier
+	if *smtpAddr != "" || *smtpFrom != "" || *smtpTo != "" {
+		var to []string
+		for _, r := range strings.Split(*smtpTo, ",") {
+			if r = strings.TrimSpace(r); r != "" {
+				to = append(to, r)
+			}
+		}
+		if *smtpAddr == "" || *smtpFrom == "" || len(to) == 0 {
+			fatal("invalid SMTP config", fmt.Errorf("-smtp-addr, -smtp-from and -smtp-to are all required to enable email"))
+		}
+		var auth smtp.Auth
+		if *smtpUser != "" || *smtpPass != "" {
+			host := *smtpAddr
+			if h, _, err := net.SplitHostPort(*smtpAddr); err == nil {
+				host = h
+			}
+			auth = smtp.PlainAuth("", *smtpUser, *smtpPass, host)
+		}
+		emailN = alert.NewEmailNotifier(alert.EmailConfig{Addr: *smtpAddr, From: *smtpFrom, To: to, Auth: auth})
+		notifiers["email"] = emailN
+	}
 	// Drain queued deliveries on ANY exit path (serve shutdown, demo-mode return, early exit) through
 	// this one lifecycle point (CODE_REVIEW #6). By the time it runs the event producers have stopped
 	// — serve joins the poll goroutine (pollDone) before returning, and demo rounds are synchronous —
 	// so no Notify races the close.
-	if len(webhookNs) > 0 {
+	if len(webhookNs) > 0 || emailN != nil {
 		defer func() {
 			drainCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			for _, n := range webhookNs {
 				n.Close(drainCtx)
+			}
+			if emailN != nil {
+				emailN.Close(drainCtx)
 			}
 		}()
 	}
@@ -328,6 +362,9 @@ func main() {
 		}
 		if len(webhookNs) > 0 {
 			extra = append(extra, func(b *strings.Builder) { alert.WriteNotifierMetrics(b, webhookNs) })
+		}
+		if emailN != nil {
+			extra = append(extra, emailN.WriteMetrics)
 		}
 		if len(extra) > 0 {
 			srv.ExtraMetrics = func(b *strings.Builder) {
@@ -528,10 +565,13 @@ func main() {
 		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			// Drain queued webhook deliveries before the fatal os.Exit, which would otherwise
 			// skip the top-level deferred Close. Close is idempotent, so the defer stays a no-op.
-			if len(webhookNs) > 0 {
+			if len(webhookNs) > 0 || emailN != nil {
 				drainCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 				for _, n := range webhookNs {
 					n.Close(drainCtx)
+				}
+				if emailN != nil {
+					emailN.Close(drainCtx)
 				}
 				cancel()
 			}
