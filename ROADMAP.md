@@ -97,6 +97,14 @@ sketch; agents poll a versioned assignment (`304` when unchanged); keys are mana
   and its unison Y-axis; a leaf opens the target drill-down). Other pivots (by-probe,
   by-status, flat A–Z) intentionally not built — the config tree is the workhorse and
   by-status would duplicate the Overview tab (see the decision log); revisit only if asked.
+- 🚧 **Author-defined menu order** (planned; deferred 2026-08-12) — today the target tree is
+  alphabetical by name at every level: `Node.Children` is a `map[string]*Node` (can't carry order),
+  and the config flatten (`sortedKeys`), `/api/targets`, and the dashboard menu (`buildTree`) all
+  sort by name. Add an optional per-node `weight` (int) and sort by `(weight, name)` — unset = 0
+  preserves today's A–Z default (backward-compatible). Ordering is per sibling group (a folder's
+  weight orders it among its siblings; its children are weighted independently), for both YAML and
+  DB-fragment configs, with a weight input in the Config tab. SmokePing ordered menus by file
+  position; this is the DB-config equivalent.
 - ✅ Drag-to-zoom time range — done: drag a range on the detail graph and it refetches
   that `[from,to]` at the resolution best for the span (raw/hourly/daily), not an image
   swap. In-app dark-mode toggle persistence done ✅ (localStorage, restored before first paint)
