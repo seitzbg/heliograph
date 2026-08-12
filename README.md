@@ -14,6 +14,24 @@ beyond parity with multi-vantage **federation** and database-sourced configurati
 
 Stable since **v1.0.0** — see [CHANGELOG.md](CHANGELOG.md) and the [roadmap](ROADMAP.md).
 
+## Screenshots
+
+The signature **smoke graph**, rebuilt on HTML canvas — nested percentile bands (the "smoke" = jitter)
+darkening toward the median, with an 8-bucket loss-colored median line, theme-aware. Four scenarios,
+from a steady fiber link to a flaky, lossy one:
+
+![Heliograph smoke graphs — congested / steady / jittery / flaky links](docs/img/smoke-graph.png)
+
+The **live dashboard** — the Overview ranks the worst targets by loss/latency/jitter and reports
+per-target availability:
+
+![Heliograph dashboard — worst targets and availability](docs/img/dashboard-overview.png)
+
+**Graphs** is the per-target grid (filter the tree, click a target for all four time ranges, then
+click a graph to zoom):
+
+![Heliograph per-target graph grid](docs/img/dashboard-graphs.png)
+
 ## What works today (verified)
 
 - **Smoke-graph renderer** (`web/smoke-poc.html`) — a self-contained canvas re-implementation of SmokePing's signature chart: nested percentile bands darkening toward the median + the 8-bucket loss-colored median line, light/dark theme-aware, across four latency scenarios. This de-risks the "keep the look & feel" requirement. Open it in a browser to explore.

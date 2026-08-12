@@ -7,6 +7,8 @@ All notable changes to **Heliograph** are recorded here. The format follows
 ## [Unreleased]
 
 ### Added
+- **README screenshots.** Dashboard (Overview + per-target Graphs) and the smoke-graph renderer are
+  now shown in the README (`docs/img/`).
 - **Project `LICENSE` (MIT).** The v1.0.0 source shipped with no license, leaving downstream use,
   modification, and redistribution rights unstated; MIT makes them explicit.
 - **`smoked -serve` reads `SMOKED_DSN` / `SMOKED_CONFIG` / `SMOKED_DOWNSAMPLE` from the environment.**
