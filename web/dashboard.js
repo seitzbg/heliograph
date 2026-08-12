@@ -564,7 +564,7 @@
     // Render every VISIBLE grid panel — those under the current subtree scope (gridScope).
     // In unison mode the visible set shares one Y-axis max (sharedYMax) so the small
     // multiples are comparable; scoping to a subtree rescales to just that subtree.
-    let unisonScale = true;
+    let unisonScale = false; // default: each panel auto-scales to its own data; the toggle shares a Y-axis
     function renderGridPanels() {
       const vis = [];
       for (const p of panels.values()) {

@@ -830,7 +830,6 @@ func (s *PGStore) SeriesAll(ctx context.Context, vantage string, cutoff time.Tim
 	// target count and the fetch are separate reads, so the split is approximate under concurrent
 	// writes — fine for a DoS bound.
 	perTarget := maxSeriesAllPerTarget
-	globalTruncated := false
 	if maxTotal > 0 {
 		var nTargets int
 		if err := s.pool.QueryRow(ctx,
@@ -844,7 +843,6 @@ func (s *PGStore) SeriesAll(ctx context.Context, vantage string, cutoff time.Tim
 				if perTarget < 1 {
 					perTarget = 1
 				}
-				globalTruncated = true
 			}
 		}
 	}
@@ -876,17 +874,21 @@ func (s *PGStore) SeriesAll(ctx context.Context, vantage string, cutoff time.Tim
 		s.onErr(err)
 		return nil, false, err
 	}
-	perTargetTruncated := false
+	// Truncation means a target's OLDEST rounds were actually dropped — i.e. it hit the
+	// per-target cap (rn <= perTarget, so len can only reach perTarget when clipped). The
+	// fair-share cap being lowered below the 20k ceiling is NOT truncation by itself: with
+	// many targets each under the cap, nothing is dropped, so this must not warn (it used to
+	// fire on every refresh once there were >=16 targets — a false alarm).
+	truncated := false
 	for _, hist := range out {
-		if len(hist) == perTarget {
-			perTargetTruncated = true
+		if len(hist) >= perTarget {
+			truncated = true
 			break
 		}
 	}
-	truncated := globalTruncated || perTargetTruncated
 	if truncated {
 		slog.Warn("pgstore: bulk series truncated; oldest rounds omitted — narrow the window or raise the step",
-			"per_target_cap", perTarget, "global_budget", maxTotal, "global_bound_hit", globalTruncated)
+			"per_target_cap", perTarget, "global_budget", maxTotal)
 	}
 	return out, truncated, nil
 }

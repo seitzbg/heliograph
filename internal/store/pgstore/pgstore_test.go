@@ -1006,6 +1006,56 @@ func TestPGStoreSeriesAllGlobalBound(t *testing.T) {
 	}
 }
 
+// Regression: the global budget lowering the per-target cap below the 20k ceiling is NOT
+// truncation by itself. With many targets each holding FEWER rounds than the fair share,
+// nothing is dropped, so SeriesAll must report truncated=false — it used to return true
+// (and log a "bulk series truncated" WARN) on every refresh once there were >=16 targets.
+func TestPGStoreSeriesAllNoFalseTruncation(t *testing.T) {
+	dsn := os.Getenv("SMOKE_TEST_DSN")
+	if dsn == "" {
+		t.Skip("set SMOKE_TEST_DSN to run the TimescaleDB integration test")
+	}
+	ctx := context.Background()
+	s, err := New(ctx, dsn, 100, func(e error) { t.Errorf("store error: %v", e) })
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.pool.Exec(ctx, "TRUNCATE samples"); err != nil {
+		t.Fatalf("truncate: %v", err)
+	}
+	base := time.Unix(1_700_700_000, 0).UTC()
+	mk := func(name string, i int) scheduler.Outcome {
+		return scheduler.Outcome{
+			Target: probe.Target{Name: name, Host: "h"}, ProbeName: "FPing",
+			When: base.Add(time.Duration(i) * time.Minute), Computed: sample.Compute(1, []float64{0.01}),
+		}
+	}
+	var outs []scheduler.Outcome
+	for _, tgt := range []string{"a", "b", "c", "d"} {
+		for i := 0; i < 2; i++ { // 4 targets x 2 rounds = 8 total
+			outs = append(outs, mk(tgt, i))
+		}
+	}
+	s.Add(outs)
+	// maxTotal=12 over 4 targets -> fair share = 3, which lowers the per-target cap below the
+	// 20k ceiling BUT each target has only 2 rounds (< 3), so nothing is actually dropped.
+	all, truncated, err := s.SeriesAll(ctx, "local", base.Add(-time.Second), 12)
+	if err != nil {
+		t.Fatalf("SeriesAll: %v", err)
+	}
+	if truncated {
+		t.Fatal("want truncated=false: the fair-share cap was lowered but no target exceeded it (no data dropped)")
+	}
+	total := 0
+	for _, h := range all {
+		total += len(h)
+	}
+	if total != 8 {
+		t.Fatalf("total = %d, want 8 (all rounds kept)", total)
+	}
+}
+
 func TestPGStoreWritesVantage(t *testing.T) {
 	dsn := os.Getenv("SMOKE_TEST_DSN")
 	if dsn == "" {
