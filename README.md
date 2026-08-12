@@ -62,13 +62,67 @@ by CI on every push to `main` (and tagged releases):
 
 ```sh
 docker pull ghcr.io/seitzbg/heliograph:main
-docker run --rm -p 8087:8087 ghcr.io/seitzbg/heliograph:main \
+# Bind loopback only: the dashboard + read API are UNAUTHENTICATED, so never publish them on a
+# reachable interface without a reverse proxy (TLS + auth) in front — see Federation deployment below.
+docker run --rm -p 127.0.0.1:8087:8087 ghcr.io/seitzbg/heliograph:main \
   -serve -addr :8087 -webdir /web
 #   -> open http://localhost:8087/
 ```
 
-For a full stack (collector + TimescaleDB, behind Traefik/Caddy) see
-[`docker-compose.yml`](docker-compose.yml).
+### Docker Compose
+
+A minimal two-service stack (collector + TimescaleDB) using the **prebuilt GHCR image** — no clone
+or build required. Save as `compose.yaml` and run `docker compose up -d`, then open
+<http://localhost:8087/>:
+
+```yaml
+services:
+  timescaledb:
+    image: timescale/timescaledb:2.29.1-pg16
+    environment:
+      POSTGRES_USER: smoke
+      POSTGRES_PASSWORD: smoke        # change me
+      POSTGRES_DB: smoke
+    volumes:
+      - tsdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U smoke -d smoke"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  smoked:
+    image: ghcr.io/seitzbg/heliograph:main
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    cap_add: [NET_RAW]                                  # fping ICMP (non-root, setcap'd binary)
+    sysctls:
+      net.ipv4.ping_group_range: "0 2147483647"        # native Ping via an unprivileged socket
+    command:
+      - "-serve"
+      - "-addr"
+      - ":8087"
+      - "-webdir"
+      - "/web"
+      - "-dsn"
+      - "postgres://smoke:smoke@timescaledb:5432/smoke?sslmode=disable"
+      - "-downsample"                                   # hourly/daily aggregates for the UI
+    ports:
+      - "127.0.0.1:8087:8087"                           # loopback only — the read API is unauthenticated
+    # Ships a 10-target demo config baked in. To measure your own targets, mount a YAML tree and
+    # point `-config` at it:
+    #   volumes: ["./config.yaml:/etc/smokeping/config.yaml:ro"]
+    #   command: [..., "-config", "/etc/smokeping/config.yaml"]
+
+volumes:
+  tsdata: {}
+```
+
+This binds `127.0.0.1` because the dashboard + read API are unauthenticated; to reach it beyond
+localhost, front it with TLS + auth. The repo's own [`docker-compose.yml`](docker-compose.yml)
+adds a `federation` profile with a bundled Caddy reverse proxy (auto Let's Encrypt, per-vantage
+API keys, Basic Auth) — see [Federation deployment](#federation-deployment-reverse-proxy).
 
 ### TimescaleDB (dev + integration test)
 
@@ -158,7 +212,7 @@ server {
         proxy_set_header Authorization $http_authorization;
     }
     location / {                               # dashboard + read API: Basic Auth
-        auth_basic "smokeping";
+        auth_basic "heliograph";
         auth_basic_user_file /etc/nginx/.htpasswd;
         proxy_pass http://127.0.0.1:8087;
     }
@@ -238,10 +292,11 @@ Still planned: richer notifier integrations beyond log + webhook (e.g. email, Pa
   made latency "smoke" graphs and the inherited target tree the way a generation of us learned to
   watch a network. This project is a ground-up Go reimagining of those ideas, not a fork; all credit
   for the original concept and its iconic visualization is Tobi's.
-- **Built with AI.** Heliograph was designed, implemented, tested, and reviewed
-  collaboratively with [Claude Code](https://www.anthropic.com/claude-code), Anthropic's agentic
-  coding tool — from the smoke-graph renderer and probe plugins through the TimescaleDB store,
-  federation, and CI.
+- **Built with AI.** Heliograph was designed, implemented, and tested collaboratively with
+  [Claude Code](https://www.anthropic.com/claude-code), Anthropic's agentic coding tool — from the
+  smoke-graph renderer and probe plugins through the TimescaleDB store, federation, and CI — and
+  code-reviewed with [OpenAI Codex](https://openai.com/codex/) and
+  [CodeRabbit](https://www.coderabbit.ai/).
 
 ## License
 

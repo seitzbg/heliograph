@@ -18,8 +18,22 @@ All notable changes to **Heliograph** are recorded here. The format follows
 - **CI and container registry moved to GitHub.** The project now lives on GitHub; CI runs as GitHub
   Actions workflows (`.github/workflows/ci.yml` for test → build → scan, `image-scan.yml` for the
   scheduled re-scan) replacing the former `.gitlab-ci.yml`, and the collector image is published to
-  GHCR (`ghcr.io/seitzbg/heliograph`) instead of the git.fiber.house registry. The jobs, their
-  blocking/report-only semantics, digest-pinned images, and tool versions are carried over unchanged.
+  GHCR (`ghcr.io/seitzbg/heliograph`) instead of the git.fiber.house registry. The main blocking test
+  jobs — Go tests, frontend, `govulncheck`, and the TimescaleDB integration suite — and their
+  blocking/report-only semantics were preserved. The runner model changed from GitLab's digest-pinned
+  job containers to GitHub-hosted `ubuntu-latest`; remaining image-scan/provenance/pinning gaps are
+  tracked in `CODE_REVIEW.md`.
+- **Hardened the GitHub Actions supply chain.** Every action is pinned to a commit SHA (with a version
+  comment; Renovate keeps them current), the syft/trivy scanner images are digest-pinned, and
+  `packages: write` was narrowed from the workflow default to the single publishing job (`build-image`)
+  — the default token is now read-only. The `ubuntu-latest` runner drift is documented as an accepted
+  hosted-CI tradeoff. Finished-image scans stay report-only until the base is CVE-clean; blocking
+  scans, Caddy-image coverage, and image provenance attestations remain tracked follow-ups.
+  (CODE_REVIEW L1/M2/M3, corroborated by CodeRabbit.)
+- **README: prebuilt-image quick start binds loopback.** The Docker quick start published the
+  unauthenticated dashboard/read API on all interfaces (`-p 8087:8087`); it now binds
+  `127.0.0.1:8087:8087`, matching the Compose file and the README's own loopback-only guidance.
+  Also added a copy-pasteable Docker Compose example and code-review acknowledgements. (CODE_REVIEW M1.)
 
 ### Fixed
 - **Minting the reserved vantage name `local` now returns a clear 409, not a generic 503.** It passed
