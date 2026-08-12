@@ -148,13 +148,13 @@ func TestWriteNotifierMetricsLabeled(t *testing.T) {
 	var b strings.Builder
 	WriteNotifierMetrics(&b, []*WebhookNotifier{s, d})
 	out := b.String()
-	if got := strings.Count(out, "# HELP smokeping_webhook_queued_total"); got != 1 {
+	if got := strings.Count(out, "# HELP heliograph_webhook_queued_total"); got != 1 {
 		t.Errorf("HELP for a family must appear exactly once, got %d\n%s", got, out)
 	}
 	for _, want := range []string{
-		`smokeping_webhook_queued_total{notifier="slack"}`,
-		`smokeping_webhook_queued_total{notifier="discord"}`,
-		`smokeping_webhook_queue_depth{notifier="slack"}`,
+		`heliograph_webhook_queued_total{notifier="slack"}`,
+		`heliograph_webhook_queued_total{notifier="discord"}`,
+		`heliograph_webhook_queue_depth{notifier="slack"}`,
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("metrics missing %q\n%s", want, out)

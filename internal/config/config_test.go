@@ -7,13 +7,13 @@ import (
 	"testing"
 	"time"
 
-	"smokeping-modern/internal/model"
+	"github.com/seitzbg/heliograph/internal/model"
 
 	// register the probe kinds used in the test tree
-	_ "smokeping-modern/internal/probe/dns"
-	_ "smokeping-modern/internal/probe/fping"
-	_ "smokeping-modern/internal/probe/httpprobe"
-	_ "smokeping-modern/internal/probe/tcpconnect"
+	_ "github.com/seitzbg/heliograph/internal/probe/dns"
+	_ "github.com/seitzbg/heliograph/internal/probe/fping"
+	_ "github.com/seitzbg/heliograph/internal/probe/httpprobe"
+	_ "github.com/seitzbg/heliograph/internal/probe/tcpconnect"
 )
 
 const sample = `

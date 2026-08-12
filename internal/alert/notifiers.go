@@ -85,12 +85,12 @@ func WriteNotifierMetrics(b *strings.Builder, ns []*WebhookNotifier) {
 		name, help, typ string
 		val             func(WebhookStats) int64
 	}{
-		{"smokeping_webhook_queued_total", "Notifier events accepted onto the delivery queue.", "counter", func(s WebhookStats) int64 { return s.Queued }},
-		{"smokeping_webhook_delivered_total", "Notifier events delivered (a 2xx response).", "counter", func(s WebhookStats) int64 { return s.Delivered }},
-		{"smokeping_webhook_retried_total", "Notifier delivery attempts retried after a failure.", "counter", func(s WebhookStats) int64 { return s.Retried }},
-		{"smokeping_webhook_dropped_total", "Notifier events dropped because the delivery queue was full.", "counter", func(s WebhookStats) int64 { return s.Dropped }},
-		{"smokeping_webhook_failed_total", "Notifier events abandoned after exhausting retries.", "counter", func(s WebhookStats) int64 { return s.Failed }},
-		{"smokeping_webhook_queue_depth", "Current notifier delivery queue depth.", "gauge", func(s WebhookStats) int64 { return int64(s.QueueDepth) }},
+		{"heliograph_webhook_queued_total", "Notifier events accepted onto the delivery queue.", "counter", func(s WebhookStats) int64 { return s.Queued }},
+		{"heliograph_webhook_delivered_total", "Notifier events delivered (a 2xx response).", "counter", func(s WebhookStats) int64 { return s.Delivered }},
+		{"heliograph_webhook_retried_total", "Notifier delivery attempts retried after a failure.", "counter", func(s WebhookStats) int64 { return s.Retried }},
+		{"heliograph_webhook_dropped_total", "Notifier events dropped because the delivery queue was full.", "counter", func(s WebhookStats) int64 { return s.Dropped }},
+		{"heliograph_webhook_failed_total", "Notifier events abandoned after exhausting retries.", "counter", func(s WebhookStats) int64 { return s.Failed }},
+		{"heliograph_webhook_queue_depth", "Current notifier delivery queue depth.", "gauge", func(s WebhookStats) int64 { return int64(s.QueueDepth) }},
 	}
 	stats := make([]WebhookStats, len(ns))
 	for i, n := range ns {

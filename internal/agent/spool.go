@@ -16,7 +16,7 @@ import (
 	"syscall"
 	"time"
 
-	"smokeping-modern/internal/agentwire"
+	"github.com/seitzbg/heliograph/internal/agentwire"
 )
 
 var crcTable = crc32.MakeTable(crc32.Castagnoli)

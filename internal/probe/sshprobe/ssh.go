@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"smokeping-modern/internal/probe"
+	"github.com/seitzbg/heliograph/internal/probe"
 )
 
 type sshProbe struct {

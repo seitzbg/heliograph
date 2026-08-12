@@ -22,10 +22,10 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"smokeping-modern/internal/config"
-	"smokeping-modern/internal/configstore"
-	"smokeping-modern/internal/importer/smokeping"
-	"smokeping-modern/internal/store/pgstore"
+	"github.com/seitzbg/heliograph/internal/config"
+	"github.com/seitzbg/heliograph/internal/configstore"
+	"github.com/seitzbg/heliograph/internal/importer/smokeping"
+	"github.com/seitzbg/heliograph/internal/store/pgstore"
 )
 
 // renderFragmentYAML marshals {targets: root} to tidy YAML: JSON first (Node's json

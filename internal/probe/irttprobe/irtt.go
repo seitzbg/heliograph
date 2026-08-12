@@ -15,7 +15,7 @@ import (
 	"syscall"
 	"time"
 
-	"smokeping-modern/internal/probe"
+	"github.com/seitzbg/heliograph/internal/probe"
 )
 
 type irttProbe struct {

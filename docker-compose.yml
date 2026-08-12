@@ -54,7 +54,7 @@ services:
       # The image's default command runs `-serve -addr :8087 -webdir /web`; these env vars drive the
       # rest (config / DSN / downsample), keeping the DB password out of the command list. Each
       # mirrors a -flag on cmd/smoked, and the `vantage`/`import` subcommands already read SMOKED_DSN.
-      SMOKED_CONFIG: /etc/smokeping/config.yaml    # baked demo config (multi-probe targets)
+      SMOKED_CONFIG: /etc/heliograph/config.yaml    # baked demo config (multi-probe targets)
       SMOKED_DSN: "postgres://smoke:smoke@timescaledb:5432/smoke?sslmode=disable"
       SMOKED_DOWNSAMPLE: "1"                        # hourly continuous aggregate for the UI's Hourly mode
     ports:

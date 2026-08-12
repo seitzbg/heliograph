@@ -678,12 +678,12 @@ func (n *WebhookNotifier) Stats() WebhookStats {
 // not merely logged.
 func (n *WebhookNotifier) WriteMetrics(b *strings.Builder) {
 	s := n.Stats()
-	fmt.Fprintf(b, "# HELP smokeping_webhook_queued_total Webhook events accepted onto the delivery queue.\n# TYPE smokeping_webhook_queued_total counter\nsmokeping_webhook_queued_total %d\n", s.Queued)
-	fmt.Fprintf(b, "# HELP smokeping_webhook_delivered_total Webhook events delivered (a 2xx response).\n# TYPE smokeping_webhook_delivered_total counter\nsmokeping_webhook_delivered_total %d\n", s.Delivered)
-	fmt.Fprintf(b, "# HELP smokeping_webhook_retried_total Webhook delivery attempts retried after a failure.\n# TYPE smokeping_webhook_retried_total counter\nsmokeping_webhook_retried_total %d\n", s.Retried)
-	fmt.Fprintf(b, "# HELP smokeping_webhook_dropped_total Webhook events dropped because the delivery queue was full.\n# TYPE smokeping_webhook_dropped_total counter\nsmokeping_webhook_dropped_total %d\n", s.Dropped)
-	fmt.Fprintf(b, "# HELP smokeping_webhook_failed_total Webhook events abandoned after exhausting retries.\n# TYPE smokeping_webhook_failed_total counter\nsmokeping_webhook_failed_total %d\n", s.Failed)
-	fmt.Fprintf(b, "# HELP smokeping_webhook_queue_depth Current webhook delivery queue depth.\n# TYPE smokeping_webhook_queue_depth gauge\nsmokeping_webhook_queue_depth %d\n", s.QueueDepth)
+	fmt.Fprintf(b, "# HELP heliograph_webhook_queued_total Webhook events accepted onto the delivery queue.\n# TYPE heliograph_webhook_queued_total counter\nheliograph_webhook_queued_total %d\n", s.Queued)
+	fmt.Fprintf(b, "# HELP heliograph_webhook_delivered_total Webhook events delivered (a 2xx response).\n# TYPE heliograph_webhook_delivered_total counter\nheliograph_webhook_delivered_total %d\n", s.Delivered)
+	fmt.Fprintf(b, "# HELP heliograph_webhook_retried_total Webhook delivery attempts retried after a failure.\n# TYPE heliograph_webhook_retried_total counter\nheliograph_webhook_retried_total %d\n", s.Retried)
+	fmt.Fprintf(b, "# HELP heliograph_webhook_dropped_total Webhook events dropped because the delivery queue was full.\n# TYPE heliograph_webhook_dropped_total counter\nheliograph_webhook_dropped_total %d\n", s.Dropped)
+	fmt.Fprintf(b, "# HELP heliograph_webhook_failed_total Webhook events abandoned after exhausting retries.\n# TYPE heliograph_webhook_failed_total counter\nheliograph_webhook_failed_total %d\n", s.Failed)
+	fmt.Fprintf(b, "# HELP heliograph_webhook_queue_depth Current webhook delivery queue depth.\n# TYPE heliograph_webhook_queue_depth gauge\nheliograph_webhook_queue_depth %d\n", s.QueueDepth)
 }
 
 // ---- matcher factory (for `type: matcher`) ----

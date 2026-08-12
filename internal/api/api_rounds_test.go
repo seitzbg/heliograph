@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
-	"smokeping-modern/internal/probe"
-	"smokeping-modern/internal/sample"
-	"smokeping-modern/internal/scheduler"
+	"github.com/seitzbg/heliograph/internal/probe"
+	"github.com/seitzbg/heliograph/internal/sample"
+	"github.com/seitzbg/heliograph/internal/scheduler"
 )
 
 // roundsDTO must serialize sub-second-distinct rounds to distinct timestamps: the grid uses

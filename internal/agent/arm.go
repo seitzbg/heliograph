@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"time"
 
-	"smokeping-modern/internal/agentwire"
-	"smokeping-modern/internal/config"
-	"smokeping-modern/internal/probe"
-	"smokeping-modern/internal/scheduler"
+	"github.com/seitzbg/heliograph/internal/agentwire"
+	"github.com/seitzbg/heliograph/internal/config"
+	"github.com/seitzbg/heliograph/internal/probe"
+	"github.com/seitzbg/heliograph/internal/scheduler"
 )
 
 // BuildJobs validates each assignment target against the local probe registry and

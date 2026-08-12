@@ -14,10 +14,10 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"smokeping-modern/internal/config"
-	"smokeping-modern/internal/configstore"
-	"smokeping-modern/internal/importer/smokeping"
-	"smokeping-modern/internal/store/pgstore"
+	"github.com/seitzbg/heliograph/internal/config"
+	"github.com/seitzbg/heliograph/internal/configstore"
+	"github.com/seitzbg/heliograph/internal/importer/smokeping"
+	"github.com/seitzbg/heliograph/internal/store/pgstore"
 )
 
 // renderFragmentYAML must marshal a tidy YAML fragment: target fields present,

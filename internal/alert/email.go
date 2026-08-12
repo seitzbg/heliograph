@@ -175,14 +175,14 @@ func (n *EmailNotifier) Stats() WebhookStats {
 }
 
 // WriteMetrics appends the email delivery counters in Prometheus text format. Its own metric family
-// (smokeping_email_*), so it never collides with the webhook/slack/discord family.
+// (heliograph_email_*), so it never collides with the webhook/slack/discord family.
 func (n *EmailNotifier) WriteMetrics(b *strings.Builder) {
 	s := n.Stats()
-	fmt.Fprintf(b, "# HELP smokeping_email_queued_total Email alerts accepted onto the delivery queue.\n# TYPE smokeping_email_queued_total counter\nsmokeping_email_queued_total %d\n", s.Queued)
-	fmt.Fprintf(b, "# HELP smokeping_email_delivered_total Email alerts handed to the SMTP server.\n# TYPE smokeping_email_delivered_total counter\nsmokeping_email_delivered_total %d\n", s.Delivered)
-	fmt.Fprintf(b, "# HELP smokeping_email_dropped_total Email alerts dropped because the delivery queue was full.\n# TYPE smokeping_email_dropped_total counter\nsmokeping_email_dropped_total %d\n", s.Dropped)
-	fmt.Fprintf(b, "# HELP smokeping_email_failed_total Email alerts that failed to send.\n# TYPE smokeping_email_failed_total counter\nsmokeping_email_failed_total %d\n", s.Failed)
-	fmt.Fprintf(b, "# HELP smokeping_email_queue_depth Current email delivery queue depth.\n# TYPE smokeping_email_queue_depth gauge\nsmokeping_email_queue_depth %d\n", s.QueueDepth)
+	fmt.Fprintf(b, "# HELP heliograph_email_queued_total Email alerts accepted onto the delivery queue.\n# TYPE heliograph_email_queued_total counter\nheliograph_email_queued_total %d\n", s.Queued)
+	fmt.Fprintf(b, "# HELP heliograph_email_delivered_total Email alerts handed to the SMTP server.\n# TYPE heliograph_email_delivered_total counter\nheliograph_email_delivered_total %d\n", s.Delivered)
+	fmt.Fprintf(b, "# HELP heliograph_email_dropped_total Email alerts dropped because the delivery queue was full.\n# TYPE heliograph_email_dropped_total counter\nheliograph_email_dropped_total %d\n", s.Dropped)
+	fmt.Fprintf(b, "# HELP heliograph_email_failed_total Email alerts that failed to send.\n# TYPE heliograph_email_failed_total counter\nheliograph_email_failed_total %d\n", s.Failed)
+	fmt.Fprintf(b, "# HELP heliograph_email_queue_depth Current email delivery queue depth.\n# TYPE heliograph_email_queue_depth gauge\nheliograph_email_queue_depth %d\n", s.QueueDepth)
 }
 
 // oneLine strips CR/LF so an operator-authored target/alert name can't inject extra SMTP headers.

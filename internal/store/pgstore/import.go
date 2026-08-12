@@ -9,7 +9,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
-	"smokeping-modern/internal/config"
+	"github.com/seitzbg/heliograph/internal/config"
 )
 
 // importBatchSize bounds how many rows a single pgx.Batch/SendBatch round-trip
@@ -166,7 +166,7 @@ func (s *PGStore) RefreshAggregates(ctx context.Context, from, until time.Time) 
 }
 
 // refreshRetryAttempts and refreshRetryDelay bound execWithRetry's backoff for
-// SQLSTATE 55P03 (lock_not_available): a smokeping-modern DB whose background
+// SQLSTATE 55P03 (lock_not_available): a heliograph DB whose background
 // continuous-aggregate refresh policy is active can hold the same cagg's refresh
 // lock when the importer's own CALL runs at the same moment, and TimescaleDB
 // aborts the loser rather than queuing it. This is expected contention on a live

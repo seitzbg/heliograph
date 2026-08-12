@@ -8,13 +8,13 @@ import (
 	"net/http"
 	"time"
 
-	"smokeping-modern/internal/agentwire"
-	"smokeping-modern/internal/federation"
-	"smokeping-modern/internal/model"
-	"smokeping-modern/internal/probe"
-	"smokeping-modern/internal/sample"
-	"smokeping-modern/internal/scheduler"
-	"smokeping-modern/internal/store"
+	"github.com/seitzbg/heliograph/internal/agentwire"
+	"github.com/seitzbg/heliograph/internal/federation"
+	"github.com/seitzbg/heliograph/internal/model"
+	"github.com/seitzbg/heliograph/internal/probe"
+	"github.com/seitzbg/heliograph/internal/sample"
+	"github.com/seitzbg/heliograph/internal/scheduler"
+	"github.com/seitzbg/heliograph/internal/store"
 )
 
 // agentAssignment serves the calling vantage its target list. The vantage identity

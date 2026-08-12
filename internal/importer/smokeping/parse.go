@@ -1,6 +1,6 @@
 // Package smokeping parses SmokePing's legacy `+`/`++` section-format config
 // files (Targets, Probes, Alerts, ...) as a first step toward importing a
-// SmokePing install into smokeping-modern. This file holds only the
+// SmokePing install into heliograph. This file holds only the
 // low-level tokenizer; building the target tree and CLI from these sections
 // is later work.
 package smokeping
@@ -11,7 +11,7 @@ import (
 	"strconv"
 	"strings"
 
-	"smokeping-modern/internal/config"
+	"github.com/seitzbg/heliograph/internal/config"
 )
 
 // Section is one `+`-delimited block of a SmokePing config file (or, for

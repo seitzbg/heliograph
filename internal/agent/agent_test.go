@@ -15,8 +15,8 @@ import (
 	"testing"
 	"time"
 
-	"smokeping-modern/internal/agentwire"
-	"smokeping-modern/internal/probe"
+	"github.com/seitzbg/heliograph/internal/agentwire"
+	"github.com/seitzbg/heliograph/internal/probe"
 )
 
 func init() {

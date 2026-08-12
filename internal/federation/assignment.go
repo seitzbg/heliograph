@@ -10,7 +10,7 @@ import (
 	"slices"
 	"sort"
 
-	"smokeping-modern/internal/model"
+	"github.com/seitzbg/heliograph/internal/model"
 )
 
 // AssignmentFor returns the monitors that vantage v is responsible for probing: every

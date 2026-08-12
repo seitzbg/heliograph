@@ -15,18 +15,18 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"smokeping-modern/internal/alert"
-	"smokeping-modern/internal/api"
-	"smokeping-modern/internal/config"
-	"smokeping-modern/internal/configstore"
-	"smokeping-modern/internal/federation"
-	"smokeping-modern/internal/model"
-	"smokeping-modern/internal/probe"
-	"smokeping-modern/internal/sample"
-	"smokeping-modern/internal/scheduler"
-	"smokeping-modern/internal/store"
+	"github.com/seitzbg/heliograph/internal/alert"
+	"github.com/seitzbg/heliograph/internal/api"
+	"github.com/seitzbg/heliograph/internal/config"
+	"github.com/seitzbg/heliograph/internal/configstore"
+	"github.com/seitzbg/heliograph/internal/federation"
+	"github.com/seitzbg/heliograph/internal/model"
+	"github.com/seitzbg/heliograph/internal/probe"
+	"github.com/seitzbg/heliograph/internal/sample"
+	"github.com/seitzbg/heliograph/internal/scheduler"
+	"github.com/seitzbg/heliograph/internal/store"
 
-	_ "smokeping-modern/internal/probe/tcpconnect" // register TCPConnect for the config
+	_ "github.com/seitzbg/heliograph/internal/probe/tcpconnect" // register TCPConnect for the config
 )
 
 // warm-start must seed only the recent, cadence-contiguous, same-host/probe suffix — never

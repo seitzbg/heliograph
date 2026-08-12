@@ -21,18 +21,18 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"smokeping-modern/internal/agent"
-	"smokeping-modern/internal/probe"
+	"github.com/seitzbg/heliograph/internal/agent"
+	"github.com/seitzbg/heliograph/internal/probe"
 
 	// Register probe plugins (blank imports run their init() -> probe.Register),
 	// so probe.New resolves every probe kind the hub might assign this agent.
-	_ "smokeping-modern/internal/probe/dns"
-	_ "smokeping-modern/internal/probe/fping"
-	_ "smokeping-modern/internal/probe/httpprobe"
-	_ "smokeping-modern/internal/probe/irttprobe"
-	_ "smokeping-modern/internal/probe/pingprobe"
-	_ "smokeping-modern/internal/probe/sshprobe"
-	_ "smokeping-modern/internal/probe/tcpconnect"
+	_ "github.com/seitzbg/heliograph/internal/probe/dns"
+	_ "github.com/seitzbg/heliograph/internal/probe/fping"
+	_ "github.com/seitzbg/heliograph/internal/probe/httpprobe"
+	_ "github.com/seitzbg/heliograph/internal/probe/irttprobe"
+	_ "github.com/seitzbg/heliograph/internal/probe/pingprobe"
+	_ "github.com/seitzbg/heliograph/internal/probe/sshprobe"
+	_ "github.com/seitzbg/heliograph/internal/probe/tcpconnect"
 )
 
 // version is the smoke-agent release version. Overridable at build time with

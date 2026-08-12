@@ -18,7 +18,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"smokeping-modern/internal/store"
+	"github.com/seitzbg/heliograph/internal/store"
 )
 
 const schema = `

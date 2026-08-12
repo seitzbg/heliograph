@@ -20,11 +20,11 @@ import (
 	"sync"
 	"time"
 
-	"smokeping-modern/internal/model"
-	"smokeping-modern/internal/probe"
-	"smokeping-modern/internal/scheduler"
-	"smokeping-modern/internal/store"
-	"smokeping-modern/internal/vantage"
+	"github.com/seitzbg/heliograph/internal/model"
+	"github.com/seitzbg/heliograph/internal/probe"
+	"github.com/seitzbg/heliograph/internal/scheduler"
+	"github.com/seitzbg/heliograph/internal/store"
+	"github.com/seitzbg/heliograph/internal/vantage"
 )
 
 // VantageAdmin is the subset of the vantage key store the admin API uses. Kept an
@@ -107,7 +107,7 @@ type Server struct {
 	// missingFP counts, per vantage, agent rounds received with no measurement fingerprint (a
 	// pre-fingerprint agent) — accepted-unverified in the lenient default, or dropped in strict
 	// mode (-require-fingerprint) (CODE_REVIEW #2). Exposed on /metrics
-	// (smokeping_agent_missing_fingerprint_total) so an operator can watch a rolling agent
+	// (heliograph_agent_missing_fingerprint_total) so an operator can watch a rolling agent
 	// upgrade complete — the counter stops rising — rather than relying on a single
 	// process-wide log line that goes silent for later-affected vantages.
 	missingFP map[string]int64
@@ -964,32 +964,32 @@ func (srv *Server) metrics(w http.ResponseWriter, _ *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	var b strings.Builder
-	b.WriteString("# HELP smokeping_probe_median_seconds Median round-trip time of the most recent round.\n")
-	b.WriteString("# TYPE smokeping_probe_median_seconds gauge\n")
-	b.WriteString("# HELP smokeping_probe_loss_ratio Fraction of pings lost in the most recent round (0..1).\n")
-	b.WriteString("# TYPE smokeping_probe_loss_ratio gauge\n")
-	b.WriteString("# HELP smokeping_probe_up 1 if the most recent round got at least one reply, else 0.\n")
-	b.WriteString("# TYPE smokeping_probe_up gauge\n")
-	b.WriteString("# HELP smokeping_probe_duration_seconds Wall-clock the most recent measurement of this target took.\n")
-	b.WriteString("# TYPE smokeping_probe_duration_seconds gauge\n")
-	b.WriteString("# HELP smokeping_probe_last_sample_timestamp_seconds Unix time of this target's most recent round (alert on staleness).\n")
-	b.WriteString("# TYPE smokeping_probe_last_sample_timestamp_seconds gauge\n")
+	b.WriteString("# HELP heliograph_probe_median_seconds Median round-trip time of the most recent round.\n")
+	b.WriteString("# TYPE heliograph_probe_median_seconds gauge\n")
+	b.WriteString("# HELP heliograph_probe_loss_ratio Fraction of pings lost in the most recent round (0..1).\n")
+	b.WriteString("# TYPE heliograph_probe_loss_ratio gauge\n")
+	b.WriteString("# HELP heliograph_probe_up 1 if the most recent round got at least one reply, else 0.\n")
+	b.WriteString("# TYPE heliograph_probe_up gauge\n")
+	b.WriteString("# HELP heliograph_probe_duration_seconds Wall-clock the most recent measurement of this target took.\n")
+	b.WriteString("# TYPE heliograph_probe_duration_seconds gauge\n")
+	b.WriteString("# HELP heliograph_probe_last_sample_timestamp_seconds Unix time of this target's most recent round (alert on staleness).\n")
+	b.WriteString("# TYPE heliograph_probe_last_sample_timestamp_seconds gauge\n")
 	for _, o := range latest {
 		lbl := fmt.Sprintf(`{target=%q,probe=%q}`, escapeLabel(o.Target.Name), escapeLabel(o.ProbeName))
 		median := o.Computed.Median
 		if math.IsNaN(median) {
-			fmt.Fprintf(&b, "smokeping_probe_median_seconds%s NaN\n", lbl)
+			fmt.Fprintf(&b, "heliograph_probe_median_seconds%s NaN\n", lbl)
 		} else {
-			fmt.Fprintf(&b, "smokeping_probe_median_seconds%s %g\n", lbl, median)
+			fmt.Fprintf(&b, "heliograph_probe_median_seconds%s %g\n", lbl, median)
 		}
-		fmt.Fprintf(&b, "smokeping_probe_loss_ratio%s %g\n", lbl, o.Computed.LossFraction())
+		fmt.Fprintf(&b, "heliograph_probe_loss_ratio%s %g\n", lbl, o.Computed.LossFraction())
 		up := 0
 		if o.Computed.Loss < o.Computed.Pings {
 			up = 1
 		}
-		fmt.Fprintf(&b, "smokeping_probe_up%s %d\n", lbl, up)
-		fmt.Fprintf(&b, "smokeping_probe_duration_seconds%s %g\n", lbl, o.Duration.Seconds())
-		fmt.Fprintf(&b, "smokeping_probe_last_sample_timestamp_seconds%s %d\n", lbl, o.When.Unix())
+		fmt.Fprintf(&b, "heliograph_probe_up%s %d\n", lbl, up)
+		fmt.Fprintf(&b, "heliograph_probe_duration_seconds%s %g\n", lbl, o.Duration.Seconds())
+		fmt.Fprintf(&b, "heliograph_probe_last_sample_timestamp_seconds%s %d\n", lbl, o.When.Unix())
 	}
 	srv.writeRoundMetrics(&b)
 	srv.writeIngestMetrics(&b)
@@ -1001,7 +1001,7 @@ func (srv *Server) metrics(w http.ResponseWriter, _ *http.Request) {
 
 // recordMissingFingerprint counts n rounds from `vantage` that carried no measurement
 // fingerprint (a pre-fingerprint agent) and warns once per vantage. The count is scrapeable
-// (smokeping_agent_missing_fingerprint_total) so an operator can tell when every vantage's agent
+// (heliograph_agent_missing_fingerprint_total) so an operator can tell when every vantage's agent
 // has been upgraded; the warning's wording reflects whether those rounds were dropped (strict
 // mode) or accepted-unverified (lenient default) (CODE_REVIEW #2).
 func (srv *Server) recordMissingFingerprint(vantage string, n int) {
@@ -1037,10 +1037,10 @@ func (srv *Server) writeIngestMetrics(b *strings.Builder) {
 		vantages = append(vantages, v)
 	}
 	sort.Strings(vantages) // deterministic scrape output
-	b.WriteString("# HELP smokeping_agent_missing_fingerprint_total Agent rounds received with no measurement fingerprint (a pre-fingerprint agent): accepted-unverified in the lenient default, or dropped in strict mode (-require-fingerprint).\n")
-	b.WriteString("# TYPE smokeping_agent_missing_fingerprint_total counter\n")
+	b.WriteString("# HELP heliograph_agent_missing_fingerprint_total Agent rounds received with no measurement fingerprint (a pre-fingerprint agent): accepted-unverified in the lenient default, or dropped in strict mode (-require-fingerprint).\n")
+	b.WriteString("# TYPE heliograph_agent_missing_fingerprint_total counter\n")
 	for _, v := range vantages {
-		fmt.Fprintf(b, "smokeping_agent_missing_fingerprint_total{vantage=%q} %d\n", escapeLabel(v), srv.missingFP[v])
+		fmt.Fprintf(b, "heliograph_agent_missing_fingerprint_total{vantage=%q} %d\n", escapeLabel(v), srv.missingFP[v])
 	}
 }
 
@@ -1051,21 +1051,21 @@ func (srv *Server) writeRoundMetrics(b *strings.Builder) {
 	if !ok {
 		return
 	}
-	b.WriteString("# HELP smokeping_rounds_total Measurement rounds completed since start.\n")
-	b.WriteString("# TYPE smokeping_rounds_total counter\n")
-	fmt.Fprintf(b, "smokeping_rounds_total %d\n", rs.total)
-	b.WriteString("# HELP smokeping_round_duration_seconds Wall-clock of the most recent round.\n")
-	b.WriteString("# TYPE smokeping_round_duration_seconds gauge\n")
-	fmt.Fprintf(b, "smokeping_round_duration_seconds %g\n", rs.duration.Seconds())
-	b.WriteString("# HELP smokeping_round_targets Targets measured in the most recent round.\n")
-	b.WriteString("# TYPE smokeping_round_targets gauge\n")
-	fmt.Fprintf(b, "smokeping_round_targets %d\n", rs.targets)
-	b.WriteString("# HELP smokeping_round_errors Targets that errored in the most recent round.\n")
-	b.WriteString("# TYPE smokeping_round_errors gauge\n")
-	fmt.Fprintf(b, "smokeping_round_errors %d\n", rs.errs)
-	b.WriteString("# HELP smokeping_last_round_timestamp_seconds Start time of the most recent round.\n")
-	b.WriteString("# TYPE smokeping_last_round_timestamp_seconds gauge\n")
-	fmt.Fprintf(b, "smokeping_last_round_timestamp_seconds %d\n", rs.lastUnix)
+	b.WriteString("# HELP heliograph_rounds_total Measurement rounds completed since start.\n")
+	b.WriteString("# TYPE heliograph_rounds_total counter\n")
+	fmt.Fprintf(b, "heliograph_rounds_total %d\n", rs.total)
+	b.WriteString("# HELP heliograph_round_duration_seconds Wall-clock of the most recent round.\n")
+	b.WriteString("# TYPE heliograph_round_duration_seconds gauge\n")
+	fmt.Fprintf(b, "heliograph_round_duration_seconds %g\n", rs.duration.Seconds())
+	b.WriteString("# HELP heliograph_round_targets Targets measured in the most recent round.\n")
+	b.WriteString("# TYPE heliograph_round_targets gauge\n")
+	fmt.Fprintf(b, "heliograph_round_targets %d\n", rs.targets)
+	b.WriteString("# HELP heliograph_round_errors Targets that errored in the most recent round.\n")
+	b.WriteString("# TYPE heliograph_round_errors gauge\n")
+	fmt.Fprintf(b, "heliograph_round_errors %d\n", rs.errs)
+	b.WriteString("# HELP heliograph_last_round_timestamp_seconds Start time of the most recent round.\n")
+	b.WriteString("# TYPE heliograph_last_round_timestamp_seconds gauge\n")
+	fmt.Fprintf(b, "heliograph_last_round_timestamp_seconds %d\n", rs.lastUnix)
 }
 
 // escapeLabel escapes a Prometheus label value (backslash, double-quote, newline).

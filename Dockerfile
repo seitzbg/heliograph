@@ -26,7 +26,7 @@ RUN apk add --no-cache fping ca-certificates tzdata \
  && adduser -D -H -u 10001 smoked
 COPY --from=build /out/smoked /usr/local/bin/smoked
 COPY web /web
-COPY config.example.yaml /etc/smokeping/config.yaml
+COPY config.example.yaml /etc/heliograph/config.yaml
 # Ship the MIT license notice inside the image (the source is MIT; a distributed
 # binary artifact should carry it too). CODE_REVIEW carried-forward.
 COPY LICENSE /LICENSE

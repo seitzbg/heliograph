@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"smokeping-modern/internal/probe"
-	_ "smokeping-modern/internal/probe/tcpconnect"
+	"github.com/seitzbg/heliograph/internal/probe"
+	_ "github.com/seitzbg/heliograph/internal/probe/tcpconnect"
 )
 
 // The configured inter-attempt delay must apply after a failed connect too — a probe

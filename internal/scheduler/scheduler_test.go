@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"smokeping-modern/internal/probe"
+	"github.com/seitzbg/heliograph/internal/probe"
 )
 
 // fakeProbe sleeps `delay` per ping, then reports `rtt` seconds. It honors ctx

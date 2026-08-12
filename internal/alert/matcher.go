@@ -320,10 +320,10 @@ func parseToken(field, tok string) (step, error) {
 	switch rest {
 	case "S":
 		// The startup sentinel exists in SmokePing only because alert state was
-		// in-memory and lost on restart. smokeping-modern keeps a durable store, so
+		// in-memory and lost on restart. heliograph keeps a durable store, so
 		// "already bad at startup" is answered from real history — the sentinel is
 		// dropped by design (blueprint §07) rather than reintroduced as a dead token.
-		return step{}, fmt.Errorf("pattern token %q: the S startup sentinel is not supported in smokeping-modern", tok)
+		return step{}, fmt.Errorf("pattern token %q: the S startup sentinel is not supported in heliograph", tok)
 	case "U":
 		if op != "==" && op != "!=" {
 			return step{}, fmt.Errorf("pattern token %q: U is only valid with == or !=", tok)

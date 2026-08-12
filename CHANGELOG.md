@@ -15,7 +15,7 @@ All notable changes to **Heliograph** are recorded here. The format follows
 - **Email (SMTP) alert notifier.** Alerts can fan out to email via `-smtp-addr` / `-smtp-from` /
   `-smtp-to` (plus `-smtp-user` / `-smtp-pass` for authenticated submission — STARTTLS when the server
   offers it), or the matching `SMOKED_SMTP_*` env vars, referenced from an alert as `to: [email]`.
-  Async bounded-queue delivery with a graceful drain and `smokeping_email_*` metrics. `-smtp-insecure`
+  Async bounded-queue delivery with a graceful drain and `heliograph_email_*` metrics. `-smtp-insecure`
   (or `SMOKED_SMTP_INSECURE=1`) skips STARTTLS cert verification for an internal relay with a
   self-signed cert; a relay that advertises no STARTTLS is handled too. (Live-verified end to end.)
 - **README screenshots.** Dashboard (Overview + per-target Graphs) and the smoke-graph renderer are
@@ -32,8 +32,12 @@ All notable changes to **Heliograph** are recorded here. The format follows
 ### Changed
 - **Renamed to Heliograph.** The project's outward identity is now **Heliograph** — the GitHub repo
   (`seitzbg/heliograph`), the container image (`ghcr.io/seitzbg/heliograph`), CI badges, and docs.
-  The Go module path (`smokeping-modern`) and the daemon binary (`smoked`) are unchanged, so imports
-  and command-line usage are unaffected; this is a branding rename, not a code change.
+  The internal naming now follows suit: the Go module path is **`github.com/seitzbg/heliograph`** (was
+  `smokeping-modern`), the Prometheus `/metrics` are exported under the **`heliograph_*`** prefix (was
+  `smokeping_*` — **breaking** for any dashboard/alert scraping the old names), and the image's baked
+  config lives at **`/etc/heliograph/config.yaml`** (was `/etc/smokeping/`). The daemon binary stays
+  **`smoked`**, and the `smoked import smokeping` subcommand keeps its name — it reads data from the
+  original SmokePing tool, so that reference is deliberate.
 - **CI and container registry moved to GitHub.** The project now lives on GitHub; CI runs as GitHub
   Actions workflows (`.github/workflows/ci.yml` for test → build → scan, `image-scan.yml` for the
   scheduled re-scan) replacing the former `.gitlab-ci.yml`, and the collector image is published to

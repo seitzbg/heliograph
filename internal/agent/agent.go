@@ -9,8 +9,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"smokeping-modern/internal/agentwire"
-	"smokeping-modern/internal/scheduler"
+	"github.com/seitzbg/heliograph/internal/agentwire"
+	"github.com/seitzbg/heliograph/internal/scheduler"
 )
 
 // Options configures an Agent: which hub to talk to, which vantage it measures
