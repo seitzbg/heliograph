@@ -14,8 +14,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"smokeping-modern/internal/probe"
-	"smokeping-modern/internal/sample"
+	"github.com/seitzbg/heliograph/internal/probe"
+	"github.com/seitzbg/heliograph/internal/sample"
 )
 
 // Job is one probe/target measurement to run this round.

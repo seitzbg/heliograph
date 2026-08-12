@@ -5,10 +5,10 @@ import (
 	"testing"
 	"time"
 
-	"smokeping-modern/internal/agentwire"
-	"smokeping-modern/internal/probe"
+	"github.com/seitzbg/heliograph/internal/agentwire"
+	"github.com/seitzbg/heliograph/internal/probe"
 
-	_ "smokeping-modern/internal/probe/tcpconnect" // register a real, binary-free probe
+	_ "github.com/seitzbg/heliograph/internal/probe/tcpconnect" // register a real, binary-free probe
 )
 
 // captureProbe records the config it was constructed with, so a test can assert

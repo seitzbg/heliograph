@@ -13,9 +13,9 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
-	"smokeping-modern/internal/probe"
-	"smokeping-modern/internal/sample"
-	"smokeping-modern/internal/scheduler"
+	"github.com/seitzbg/heliograph/internal/probe"
+	"github.com/seitzbg/heliograph/internal/sample"
+	"github.com/seitzbg/heliograph/internal/scheduler"
 )
 
 // fakeBatch is a minimal pgx.BatchResults for exercising drainBatch's finalization handling
@@ -347,7 +347,7 @@ func TestPGStoreWriteFailureMetric(t *testing.T) {
 	}
 	var b strings.Builder
 	s.WriteMetrics(&b)
-	if !strings.Contains(b.String(), "smokeping_store_write_failures_total 1") {
+	if !strings.Contains(b.String(), "heliograph_store_write_failures_total 1") {
 		t.Errorf("metrics missing the failure counter:\n%s", b.String())
 	}
 }

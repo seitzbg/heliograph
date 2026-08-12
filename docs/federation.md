@@ -217,7 +217,7 @@ never drops data — but until that agent is upgraded, one of its buffered round
 Watch the rollout with the per-vantage counter on `/metrics`:
 
 ```
-smokeping_agent_missing_fingerprint_total{vantage="nyc"} 0
+heliograph_agent_missing_fingerprint_total{vantage="nyc"} 0
 ```
 
 Once it stops rising for every vantage (all agents upgraded), start `smoked` with

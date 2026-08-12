@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"smokeping-modern/internal/probe"
+	"github.com/seitzbg/heliograph/internal/probe"
 )
 
 // insecure_ssl is declared TargetVar; a per-target value must actually take

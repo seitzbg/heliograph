@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	"smokeping-modern/internal/agentwire"
+	"github.com/seitzbg/heliograph/internal/agentwire"
 )
 
 // Client talks to one hub with one vantage's API key.

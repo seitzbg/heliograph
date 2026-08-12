@@ -11,7 +11,7 @@ import (
 
 	"github.com/miekg/dns"
 
-	"smokeping-modern/internal/probe"
+	"github.com/seitzbg/heliograph/internal/probe"
 )
 
 type dnsProbe struct {

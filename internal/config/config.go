@@ -21,10 +21,10 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"smokeping-modern/internal/alert"
-	"smokeping-modern/internal/model"
-	"smokeping-modern/internal/probe"
-	"smokeping-modern/internal/store"
+	"github.com/seitzbg/heliograph/internal/alert"
+	"github.com/seitzbg/heliograph/internal/model"
+	"github.com/seitzbg/heliograph/internal/probe"
+	"github.com/seitzbg/heliograph/internal/store"
 )
 
 // Duration is a time.Duration that unmarshals from a string like "60s".

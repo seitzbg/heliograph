@@ -10,7 +10,7 @@ import (
 	"syscall"
 	"testing"
 
-	"smokeping-modern/internal/agentwire"
+	"github.com/seitzbg/heliograph/internal/agentwire"
 )
 
 func TestFrameRoundTrip(t *testing.T) {

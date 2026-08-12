@@ -12,10 +12,10 @@ import (
 	"testing"
 	"time"
 
-	"smokeping-modern/internal/federation"
-	"smokeping-modern/internal/model"
-	"smokeping-modern/internal/scheduler"
-	"smokeping-modern/internal/store"
+	"github.com/seitzbg/heliograph/internal/federation"
+	"github.com/seitzbg/heliograph/internal/model"
+	"github.com/seitzbg/heliograph/internal/scheduler"
+	"github.com/seitzbg/heliograph/internal/store"
 )
 
 // recentTS returns an RFC3339Nano timestamp inside the ingest skew window, so ingest
@@ -346,7 +346,7 @@ func TestIngestMissingFingerprintMetric(t *testing.T) {
 	if w.Code != 200 {
 		t.Fatalf("/metrics status=%d", w.Code)
 	}
-	want := `smokeping_agent_missing_fingerprint_total{vantage="nyc"} 1`
+	want := `heliograph_agent_missing_fingerprint_total{vantage="nyc"} 1`
 	if !strings.Contains(w.Body.String(), want) {
 		t.Fatalf("/metrics should expose %q, got:\n%s", want, w.Body.String())
 	}
@@ -381,14 +381,14 @@ func TestIngestStrictFingerprintDropsEmpty(t *testing.T) {
 	mr := httptest.NewRequest("GET", "/metrics", nil)
 	mw := httptest.NewRecorder()
 	srv.Routes().ServeHTTP(mw, mr)
-	if !strings.Contains(mw.Body.String(), `smokeping_agent_missing_fingerprint_total{vantage="nyc"} 1`) {
+	if !strings.Contains(mw.Body.String(), `heliograph_agent_missing_fingerprint_total{vantage="nyc"} 1`) {
 		t.Fatalf("strict drop should still be counted on /metrics, got:\n%s", mw.Body.String())
 	}
 	// The HELP text must not claim these rounds were "accepted": in strict mode they were
 	// DROPPED. The counter is rounds RECEIVED without a fingerprint, whether accepted (lenient)
 	// or dropped (strict), so dashboards/alerts don't misstate rejected traffic (CODE_REVIEW #4).
 	help := mw.Body.String()
-	if !strings.Contains(help, "# HELP smokeping_agent_missing_fingerprint_total") ||
+	if !strings.Contains(help, "# HELP heliograph_agent_missing_fingerprint_total") ||
 		!strings.Contains(help, "received with no measurement fingerprint") {
 		t.Fatalf("HELP text should describe rounds RECEIVED (not accepted) without a fingerprint, got:\n%s", help)
 	}

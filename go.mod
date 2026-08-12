@@ -1,4 +1,4 @@
-module smokeping-modern
+module github.com/seitzbg/heliograph
 
 go 1.26.5
 

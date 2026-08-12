@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"smokeping-modern/internal/agentwire"
+	"github.com/seitzbg/heliograph/internal/agentwire"
 )
 
 func TestPullAssignment200And304(t *testing.T) {

@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"smokeping-modern/internal/agentwire"
+	"github.com/seitzbg/heliograph/internal/agentwire"
 )
 
 // The estimator must never UNDERcount the real json.Marshal size, or a batch packed under the

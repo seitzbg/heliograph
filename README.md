@@ -125,8 +125,8 @@ services:
       SMOKED_DSN: postgres://smoke:${SMOKE_DB_PASSWORD:-smoke}@timescaledb:5432/smoke?sslmode=disable
       SMOKED_DOWNSAMPLE: "1"                            # hourly/daily aggregates for the UI
       # Runs a built-in demo target set. To measure your own, mount a YAML tree and point at it:
-      #   volumes: ["./config.yaml:/etc/smokeping/config.yaml:ro"]
-      #   SMOKED_CONFIG: /etc/smokeping/config.yaml
+      #   volumes: ["./config.yaml:/etc/heliograph/config.yaml:ro"]
+      #   SMOKED_CONFIG: /etc/heliograph/config.yaml
     ports:
       - "127.0.0.1:8087:8087"                           # loopback only — the read API is unauthenticated
 

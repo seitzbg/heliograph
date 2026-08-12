@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"smokeping-modern/internal/scheduler"
+	"github.com/seitzbg/heliograph/internal/scheduler"
 )
 
 // vantageNameRe bounds a vantage identifier: an alphanumeric start, then up to 63 more of

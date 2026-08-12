@@ -27,26 +27,26 @@ import (
 	"syscall"
 	"time"
 
-	"smokeping-modern/internal/alert"
-	"smokeping-modern/internal/api"
-	"smokeping-modern/internal/config"
-	"smokeping-modern/internal/configstore"
-	"smokeping-modern/internal/federation"
-	"smokeping-modern/internal/model"
-	"smokeping-modern/internal/probe"
-	"smokeping-modern/internal/scheduler"
-	"smokeping-modern/internal/store"
-	"smokeping-modern/internal/store/pgstore"
-	"smokeping-modern/internal/vantage"
+	"github.com/seitzbg/heliograph/internal/alert"
+	"github.com/seitzbg/heliograph/internal/api"
+	"github.com/seitzbg/heliograph/internal/config"
+	"github.com/seitzbg/heliograph/internal/configstore"
+	"github.com/seitzbg/heliograph/internal/federation"
+	"github.com/seitzbg/heliograph/internal/model"
+	"github.com/seitzbg/heliograph/internal/probe"
+	"github.com/seitzbg/heliograph/internal/scheduler"
+	"github.com/seitzbg/heliograph/internal/store"
+	"github.com/seitzbg/heliograph/internal/store/pgstore"
+	"github.com/seitzbg/heliograph/internal/vantage"
 
 	// Register probe plugins (blank imports run their init() -> probe.Register).
-	_ "smokeping-modern/internal/probe/dns"
-	_ "smokeping-modern/internal/probe/fping"
-	_ "smokeping-modern/internal/probe/httpprobe"
-	_ "smokeping-modern/internal/probe/irttprobe"
-	_ "smokeping-modern/internal/probe/pingprobe"
-	_ "smokeping-modern/internal/probe/sshprobe"
-	_ "smokeping-modern/internal/probe/tcpconnect"
+	_ "github.com/seitzbg/heliograph/internal/probe/dns"
+	_ "github.com/seitzbg/heliograph/internal/probe/fping"
+	_ "github.com/seitzbg/heliograph/internal/probe/httpprobe"
+	_ "github.com/seitzbg/heliograph/internal/probe/irttprobe"
+	_ "github.com/seitzbg/heliograph/internal/probe/pingprobe"
+	_ "github.com/seitzbg/heliograph/internal/probe/sshprobe"
+	_ "github.com/seitzbg/heliograph/internal/probe/tcpconnect"
 )
 
 // version is the smoked release version. Overridable at build time with
@@ -101,7 +101,7 @@ func main() {
 	webdir := flag.String("webdir", "web", "directory of static web assets to serve at /")
 	dsn := flag.String("dsn", os.Getenv("SMOKED_DSN"), "TimescaleDB/PostgreSQL DSN (or set SMOKED_DSN); if set, persist there instead of in-memory")
 	downsample := flag.Bool("downsample", envBool("SMOKED_DOWNSAMPLE"), "with -dsn: enable the hourly continuous aggregate + retention policies (or set SMOKED_DOWNSAMPLE=1)")
-	requireFingerprint := flag.Bool("require-fingerprint", false, "reject agent results that carry no measurement fingerprint (strict mode); default accepts them for pre-fingerprint agents. Flip on once every vantage's agent is upgraded (watch smokeping_agent_missing_fingerprint_total)")
+	requireFingerprint := flag.Bool("require-fingerprint", false, "reject agent results that carry no measurement fingerprint (strict mode); default accepts them for pre-fingerprint agents. Flip on once every vantage's agent is upgraded (watch heliograph_agent_missing_fingerprint_total)")
 	configPath := flag.String("config", os.Getenv("SMOKED_CONFIG"), "path to a YAML config file, or a directory holding default.yaml + conf.d/*.yaml (or set SMOKED_CONFIG); replaces the built-in demo targets")
 	webhook := flag.String("webhook", "", "generic JSON webhook URL for alerts named 'to: [webhook]'")
 	slackWebhook := flag.String("slack-webhook", os.Getenv("SMOKED_SLACK_WEBHOOK"), "Slack incoming-webhook URL (or set SMOKED_SLACK_WEBHOOK) for alerts named 'to: [slack]'")

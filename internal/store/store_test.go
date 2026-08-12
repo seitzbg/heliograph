@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
-	"smokeping-modern/internal/probe"
-	"smokeping-modern/internal/sample"
-	"smokeping-modern/internal/scheduler"
+	"github.com/seitzbg/heliograph/internal/probe"
+	"github.com/seitzbg/heliograph/internal/sample"
+	"github.com/seitzbg/heliograph/internal/scheduler"
 )
 
 // TestMemStoreAvailability covers the aggregate math: measured/up counts, the

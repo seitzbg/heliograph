@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"smokeping-modern/internal/vantage"
+	"github.com/seitzbg/heliograph/internal/vantage"
 )
 
 type fakeKeys struct {

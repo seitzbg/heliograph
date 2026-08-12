@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"time"
 
-	"smokeping-modern/internal/probe"
+	"github.com/seitzbg/heliograph/internal/probe"
 )
 
 type tcpProbe struct {

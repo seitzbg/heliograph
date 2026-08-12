@@ -3,16 +3,16 @@ package probe_test
 import (
 	"testing"
 
-	"smokeping-modern/internal/probe"
+	"github.com/seitzbg/heliograph/internal/probe"
 
 	// register the real probe kinds so their schemas can be inspected
-	_ "smokeping-modern/internal/probe/dns"
-	_ "smokeping-modern/internal/probe/fping"
-	_ "smokeping-modern/internal/probe/httpprobe"
-	_ "smokeping-modern/internal/probe/irttprobe"
-	_ "smokeping-modern/internal/probe/pingprobe"
-	_ "smokeping-modern/internal/probe/sshprobe"
-	_ "smokeping-modern/internal/probe/tcpconnect"
+	_ "github.com/seitzbg/heliograph/internal/probe/dns"
+	_ "github.com/seitzbg/heliograph/internal/probe/fping"
+	_ "github.com/seitzbg/heliograph/internal/probe/httpprobe"
+	_ "github.com/seitzbg/heliograph/internal/probe/irttprobe"
+	_ "github.com/seitzbg/heliograph/internal/probe/pingprobe"
+	_ "github.com/seitzbg/heliograph/internal/probe/sshprobe"
+	_ "github.com/seitzbg/heliograph/internal/probe/tcpconnect"
 )
 
 // Every probe's own default value must satisfy its own constraint — otherwise a

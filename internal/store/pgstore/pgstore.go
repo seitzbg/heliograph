@@ -20,8 +20,8 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"smokeping-modern/internal/scheduler"
-	"smokeping-modern/internal/store"
+	"github.com/seitzbg/heliograph/internal/scheduler"
+	"github.com/seitzbg/heliograph/internal/store"
 )
 
 // writeTimeout bounds a single sample-batch write. The collector writes on a
@@ -426,7 +426,7 @@ func (s *PGStore) AddResults(ctx context.Context, outcomes []scheduler.Outcome) 
 // Wired into /metrics via api.Server.ExtraMetrics so a database that is rejecting or
 // timing out writes is scrapeable, not merely logged (CODE_REVIEW #5).
 func (s *PGStore) WriteMetrics(b *strings.Builder) {
-	fmt.Fprintf(b, "# HELP smokeping_store_write_failures_total Sample-batch writes that failed (a persistent store error or write deadline).\n# TYPE smokeping_store_write_failures_total counter\nsmokeping_store_write_failures_total %d\n", s.writeFails.Load())
+	fmt.Fprintf(b, "# HELP heliograph_store_write_failures_total Sample-batch writes that failed (a persistent store error or write deadline).\n# TYPE heliograph_store_write_failures_total counter\nheliograph_store_write_failures_total %d\n", s.writeFails.Load())
 }
 
 func (s *PGStore) Keys() ([]string, error) {

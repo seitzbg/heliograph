@@ -29,7 +29,7 @@ import (
 
 	"golang.org/x/net/icmp"
 
-	"smokeping-modern/internal/probe"
+	"github.com/seitzbg/heliograph/internal/probe"
 )
 
 // pingProbe is the "Ping" kind: a native (no fping binary) ICMP echo prober.

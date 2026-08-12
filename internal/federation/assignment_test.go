@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"smokeping-modern/internal/model"
+	"github.com/seitzbg/heliograph/internal/model"
 )
 
 func mon(name string, vantages ...string) model.Monitor {

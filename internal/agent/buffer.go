@@ -4,7 +4,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"smokeping-modern/internal/agentwire"
+	"github.com/seitzbg/heliograph/internal/agentwire"
 )
 
 // Byte accounting for the buffer and its flush batches. A round is bounded in COUNT (up to

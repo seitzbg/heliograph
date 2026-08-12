@@ -213,9 +213,9 @@ func TestWebhookWriteMetrics(t *testing.T) {
 	n.WriteMetrics(&b)
 	out := b.String()
 	for _, want := range []string{
-		"smokeping_webhook_queued_total", "smokeping_webhook_delivered_total",
-		"smokeping_webhook_retried_total", "smokeping_webhook_dropped_total",
-		"smokeping_webhook_failed_total", "smokeping_webhook_queue_depth",
+		"heliograph_webhook_queued_total", "heliograph_webhook_delivered_total",
+		"heliograph_webhook_retried_total", "heliograph_webhook_dropped_total",
+		"heliograph_webhook_failed_total", "heliograph_webhook_queue_depth",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("WriteMetrics missing %q\n--- got ---\n%s", want, out)

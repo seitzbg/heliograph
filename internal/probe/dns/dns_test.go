@@ -9,7 +9,7 @@ import (
 
 	"github.com/miekg/dns"
 
-	"smokeping-modern/internal/probe"
+	"github.com/seitzbg/heliograph/internal/probe"
 )
 
 // captureServer starts an in-process UDP DNS server that records the query type

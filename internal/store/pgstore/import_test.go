@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"smokeping-modern/internal/config"
+	"github.com/seitzbg/heliograph/internal/config"
 )
 
 // TestValidateImportRowRejectsInvalidPingsAndLoss covers ImportSamples' defense-in-depth

@@ -4,7 +4,7 @@ import (
 	"math"
 	"testing"
 
-	"smokeping-modern/internal/probe"
+	"github.com/seitzbg/heliograph/internal/probe"
 )
 
 // interval_ms is a send interval and must be positive: 0 (silently ignored by the

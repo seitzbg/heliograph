@@ -17,7 +17,7 @@ import (
 	"strings"
 	"syscall"
 
-	"smokeping-modern/internal/probe"
+	"github.com/seitzbg/heliograph/internal/probe"
 )
 
 type fpingProbe struct {
