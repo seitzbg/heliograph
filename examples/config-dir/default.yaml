@@ -8,7 +8,7 @@ database:
   pings: 20          # samples per round
 
 probes:              # probe-instance (probe-level) settings
-  FPing: { period_ms: "50" }
+  FPing: {}
   TCPConnect: {}
   DNS: {}
   HTTP: {}

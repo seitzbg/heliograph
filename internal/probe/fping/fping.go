@@ -16,26 +16,85 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/seitzbg/heliograph/internal/probe"
 )
 
+const (
+	fpingReplyTimeout = time.Second            // default -t: how long to wait for each reply
+	fpingMaxPeriod    = 500 * time.Millisecond // default -p cap: spread enough to avoid burst loss without over-spreading a fast link
+	fpingMinPeriod    = time.Millisecond
+)
+
+// fpingArgs builds the fping command line for `pings` counts against host, SPREADING
+// the sends across the round `budget` (the scheduler's per-target deadline) instead of
+// bursting them. A tight burst inflates loss on a marginal link — a 50ms burst measured
+// ~4x SmokePing's loss on a lossy 2.4GHz link, where SmokePing's spread-out pings match
+// the real ~17%. The send interval (-p) and per-reply timeout (-t) are sized to fit N
+// pings in the budget; periodOverride/timeoutOverride (0 = derive) tune them, still
+// capped to fit so a short step never truncates the fping run into false loss.
+func fpingArgs(host string, pings int, budget time.Duration, packetsize string, periodOverride, timeoutOverride time.Duration) []string {
+	if pings < 1 {
+		pings = 1
+	}
+	if budget <= 0 {
+		budget = time.Duration(pings) * time.Second
+	}
+	// Per-reply timeout (-t), bounded so it can't consume the whole budget.
+	reply := timeoutOverride
+	if reply <= 0 {
+		reply = fpingReplyTimeout
+	}
+	if half := budget / 2; reply > half {
+		reply = half
+	}
+	// Send interval (-p): spread the sends across the time left after the reply wait,
+	// capped so a fast link's round stays short. An override is honored but still capped
+	// to the fair per-ping slot, so a short step can't push the run past the budget.
+	slot := (budget - reply) / time.Duration(pings)
+	period := fpingMaxPeriod
+	if periodOverride > 0 {
+		period = periodOverride
+	}
+	if period > slot {
+		period = slot
+	}
+	if period < fpingMinPeriod {
+		period = fpingMinPeriod
+	}
+	ms := func(d time.Duration) string { return strconv.FormatInt(d.Milliseconds(), 10) }
+	args := []string{"-C", strconv.Itoa(pings), "-q", "-B1", "-r1", "-p", ms(period), "-t", ms(reply)}
+	if packetsize != "" {
+		args = append(args, "-b", packetsize)
+	}
+	return append(args, host)
+}
+
+// parseDurationMs parses a millisecond count into a Duration; "" or invalid/non-positive
+// yields 0 ("derive").
+func parseDurationMs(s string) time.Duration {
+	if ms, err := strconv.Atoi(s); err == nil && ms > 0 {
+		return time.Duration(ms) * time.Millisecond
+	}
+	return 0
+}
+
 type fpingProbe struct {
 	binary     string
 	packetsize string
-	periodMs   string // -p: milliseconds between successive probes to a host
+	periodMs   string // -p override (ms); "" spreads the N pings across the round
+	timeoutMs  string // -t override (ms); "" = 1000, auto-reduced to fit the round
 }
 
 func init() {
 	probe.Register("FPing", "ICMP Echo Pings", map[string]probe.VarSpec{
 		"binary":     {Doc: "path to the fping binary", Default: "fping", Scope: probe.ProbeVar},
 		"packetsize": {Doc: "ICMP payload size in bytes", Scope: probe.TargetVar, Kind: probe.KindInt},
-		"period_ms":  {Doc: "milliseconds between successive probes to a host (fping -p)", Default: "50", Scope: probe.ProbeVar, Kind: probe.KindPositiveInt},
+		"period_ms":  {Doc: "override the send interval in ms (fping -p); by default the N pings are spread across the round so a tight burst doesn't inflate loss on marginal links", Scope: probe.ProbeVar, Kind: probe.KindPositiveInt},
+		"timeout_ms": {Doc: "override the per-reply timeout in ms (fping -t); default 1000, auto-reduced to fit the round", Scope: probe.ProbeVar, Kind: probe.KindPositiveInt},
 	}, func(cfg map[string]string) (probe.Probe, error) {
-		// Default period 50ms so N probes finish quickly (fping's own default is
-		// ~1000ms, which would make pings=10 take ~10s). SmokePing exposes this
-		// as mininterval; here it is period_ms.
-		p := &fpingProbe{binary: "fping", periodMs: "50"}
+		p := &fpingProbe{binary: "fping"}
 		if v, ok := cfg["binary"]; ok && v != "" {
 			p.binary = v
 		}
@@ -44,6 +103,9 @@ func init() {
 		}
 		if v, ok := cfg["period_ms"]; ok && v != "" {
 			p.periodMs = v
+		}
+		if v, ok := cfg["timeout_ms"]; ok && v != "" {
+			p.timeoutMs = v
 		}
 		if _, err := exec.LookPath(p.binary); err != nil {
 			return nil, fmt.Errorf("fping: binary %q not found in PATH: %w", p.binary, err)
@@ -55,14 +117,17 @@ func init() {
 func (p *fpingProbe) Name() string { return "FPing" }
 
 func (p *fpingProbe) Measure(ctx context.Context, t probe.Target, pings int) (probe.Result, error) {
-	args := []string{"-C", strconv.Itoa(pings), "-q", "-B1", "-r1"}
-	if p.periodMs != "" {
-		args = append(args, "-p", p.periodMs)
+	// The scheduler's per-target deadline is the round budget (timeout*pings, capped
+	// by step); spread the N sends across it instead of bursting them.
+	var budget time.Duration
+	if dl, ok := ctx.Deadline(); ok {
+		budget = time.Until(dl)
 	}
-	if ps := t.Param("packetsize", p.packetsize); ps != "" {
-		args = append(args, "-b", ps)
-	}
-	args = append(args, t.Host)
+	args := fpingArgs(t.Host, pings, budget,
+		t.Param("packetsize", p.packetsize),
+		parseDurationMs(t.Param("period_ms", p.periodMs)),
+		parseDurationMs(t.Param("timeout_ms", p.timeoutMs)),
+	)
 
 	cmd := exec.CommandContext(ctx, p.binary, args...)
 	// Own process group so a timeout kill takes the whole subtree (matches
