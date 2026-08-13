@@ -55,9 +55,9 @@ import (
 var version = "1.0.0"
 
 // validateRuntimeFlags checks the operational numeric flags the collector shares. A
-// non-positive -timeout is copied into every probe's context.WithTimeout, which would
-// cancel every probe immediately (a started-but-dead collector) — so reject it at the
-// CLI boundary alongside -pings and -step.
+// non-positive -timeout is the per-ping budget the scheduler multiplies by pings for
+// each round; non-positive would cancel every probe immediately (a started-but-dead
+// collector) — so reject it at the CLI boundary alongside -pings and -step.
 func validateRuntimeFlags(pings int, step, timeout time.Duration) error {
 	if pings < 1 || pings > config.MaxPings {
 		return fmt.Errorf("-pings must be between 1 and %d, got %d", config.MaxPings, pings)
@@ -95,7 +95,7 @@ func main() {
 	pings := flag.Int("pings", 10, "pings per round (N)")
 	workers := flag.Int("workers", 50, "max concurrent probes")
 	step := flag.Duration("step", 5*time.Second, "interval between rounds")
-	timeout := flag.Duration("timeout", 4*time.Second, "per-target timeout")
+	timeout := flag.Duration("timeout", 4*time.Second, "per-ping timeout; a target's round budget is this × pings, capped by its step (so N sequential pings each get ~this long, and a slow endpoint reports latency, not loss)")
 	serve := flag.Bool("serve", false, "serve the JSON API + web UI after the rounds (runs forever)")
 	addr := flag.String("addr", ":8087", "API listen address when -serve")
 	webdir := flag.String("webdir", "web", "directory of static web assets to serve at /")

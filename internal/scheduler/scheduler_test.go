@@ -34,6 +34,49 @@ func (f *fakeProbe) Measure(ctx context.Context, t probe.Target, pings int) (pro
 	return probe.Result{Samples: samples}, nil
 }
 
+// deadlineProbe records the ctx budget (time until deadline) it was handed, then
+// returns immediately — for asserting how the scheduler sizes the round timeout.
+type deadlineProbe struct {
+	budget time.Duration
+	ok     bool
+}
+
+func (d *deadlineProbe) Name() string { return "deadline" }
+func (d *deadlineProbe) Measure(ctx context.Context, _ probe.Target, _ int) (probe.Result, error) {
+	if dl, ok := ctx.Deadline(); ok {
+		d.budget = time.Until(dl)
+		d.ok = true
+	}
+	return probe.Result{Samples: []float64{0.01}}, nil
+}
+
+// TestRoundBudgetScalesWithPings: a probe measures N pings sequentially, so the
+// round budget must be Timeout*Pings (each ping gets ~Timeout) rather than a flat
+// per-round Timeout — otherwise a slow-but-responding endpoint has its later pings
+// guillotined into false loss. Step caps it so a round never overruns its own
+// polling interval.
+func TestRoundBudgetScalesWithPings(t *testing.T) {
+	// 100ms/ping x 5 pings = ~500ms; Step (10s) does not cap.
+	p := &deadlineProbe{}
+	RunRound(context.Background(), []Job{{Probe: p, Target: probe.Target{Name: "x"}, Pings: 5, Timeout: 100 * time.Millisecond, Step: 10 * time.Second}}, 1)
+	if !p.ok {
+		t.Fatal("probe got no ctx deadline")
+	}
+	if p.budget < 400*time.Millisecond || p.budget > 600*time.Millisecond {
+		t.Fatalf("round budget = %v, want ~500ms (100ms x 5 pings)", p.budget)
+	}
+
+	// Step caps it: 100ms x 100 pings = 10s, but Step=1s caps to ~1s.
+	c := &deadlineProbe{}
+	RunRound(context.Background(), []Job{{Probe: c, Target: probe.Target{Name: "y"}, Pings: 100, Timeout: 100 * time.Millisecond, Step: time.Second}}, 1)
+	if !c.ok {
+		t.Fatal("capped probe got no ctx deadline")
+	}
+	if c.budget < 800*time.Millisecond || c.budget > 1100*time.Millisecond {
+		t.Fatalf("capped round budget = %v, want ~1s (Step cap)", c.budget)
+	}
+}
+
 // TestParallelism: 8 jobs that each take ~200ms complete in well under the
 // 8*200ms=1.6s a serial run would need, when 8 workers run concurrently.
 func TestParallelism(t *testing.T) {

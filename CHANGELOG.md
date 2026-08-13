@@ -71,6 +71,15 @@ All notable changes to **Heliograph** are recorded here. The format follows
   by the DB and the collector's DSN) and code-review acknowledgements. (CODE_REVIEW M1 + CodeRabbit.)
 
 ### Fixed
+- **HTTP/DNS/TCP/SSH probes no longer report a slow endpoint as packet loss.** These probes measure
+  their N pings sequentially, but the scheduler applied a single flat `-timeout` (default 4s) to the
+  whole round, so an endpoint that responds slowly had its later pings guillotined by the shared
+  deadline and counted as loss. This showed up starkly against **www.cloudflare.com**, which
+  Cloudflare's bot management tarpits to 200–1000 ms for any Go HTTP client (regardless of
+  User-Agent — it's a TLS/client fingerprint, not the UA): the probe reported ~65% "loss" on a target
+  that is 30 ms / 0% loss for `curl`. `-timeout` is now a **per-ping** budget — a target's round
+  budget is `timeout × pings`, capped by its `step` — so N sequential slow-but-responding pings all
+  fit and the endpoint reports honest latency instead of false loss. `pings=1` targets are unaffected.
 - **Spurious "bulk series truncated" warning under many targets.** `pgstore.SeriesAll` logged
   `bulk series truncated; oldest rounds omitted` (and reported `truncated=true`) on **every** Graphs-grid
   refresh once there were ≥16 targets — because the fair-share per-target cap (`global_budget/targets`)
