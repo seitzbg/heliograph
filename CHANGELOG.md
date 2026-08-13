@@ -78,7 +78,25 @@ All notable changes to **Heliograph** are recorded here. The format follows
   Also added a copy-pasteable Docker Compose example (with a single `SMOKE_DB_PASSWORD` variable shared
   by the DB and the collector's DSN) and code-review acknowledgements. (CODE_REVIEW M1 + CodeRabbit.)
 
+### Security
+- **Go toolchain bumped 1.26.5 → 1.26.6** for the standard-library fixes in GO-2026-6089 (`net/http`),
+  GO-2026-6090 (`crypto/tls`), and GO-2026-6218 (`net/url`), which govulncheck flagged as reachable from
+  the collector's HTTP server, the HTTP/DNS probes, and the agent client. No source changes; `govulncheck
+  ./...` is clean on 1.26.6.
+
 ### Fixed
+- **Native `Ping` probe no longer freezes for the whole round budget on a lost ping.** The probe had no
+  per-reply timeout: its receiver waited until all N replies arrived *or* the read deadline, which was set
+  to `ctx.Deadline()` — the entire round budget (60s at the default step). A single genuinely-lost ping can
+  never let the round see all N replies, so it blocked for the full budget. Live docker5 data made it stark:
+  every native round with any loss took **exactly 60s**, versus FPing's ~10s (fping bounds each reply with
+  `-t`), and each 60s round overran its 60s step so the scheduler skipped the next slot — native collected
+  ~14% fewer rounds than FPing to the same host, visible as gaps in its series precisely when there was loss.
+  The receiver now bounds the trailing wait to **one reply window after the actual last send** (the native
+  analog of fping `-t`, default 1s, capped by the round budget — measured from the real last-send time so
+  send jitter can't close the window before the last echo is out), so a lossy round finishes ~10s like FPing
+  and never skips a slot. A new `timeout_ms` probe var overrides it. (Loss *accuracy* was already correct — native and FPing agree to within
+  noise; this fixes round cadence and worker-hold time, not the loss count.)
 - **HTTP/DNS/TCP/SSH probes bound each ping to a fair share of the round budget.** The per-ping round
   budget (below) is `min(timeout × pings, step)`, but the four sequential probes still ran all N pings
   under that one shared deadline. Against a hung or blackholed host the *first* connect/query consumed
