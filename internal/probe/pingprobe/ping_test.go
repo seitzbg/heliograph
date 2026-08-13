@@ -229,3 +229,27 @@ func TestPingLoopbackRTTMagnitude(t *testing.T) {
 		}
 	}
 }
+
+// TestSpreadInterval: the N echo sends must be SPREAD across the round budget (the
+// scheduler's ctx deadline), not crammed into a ~50ms burst — a burst inflates loss on
+// a marginal link and spikes the instantaneous send rate to a single destination.
+func TestSpreadInterval(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if iv := spreadInterval(ctx, 20, 0); iv < 200*time.Millisecond {
+		t.Errorf("interval = %v, want spread out (>=200ms), not a ~50ms burst", iv)
+	}
+	// An explicit interval_ms override is honored (still capped to fit the budget).
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel2()
+	if iv := spreadInterval(ctx2, 20, 100*time.Millisecond); iv != 100*time.Millisecond {
+		t.Errorf("override interval = %v, want 100ms honored", iv)
+	}
+	// A short budget shrinks the interval so the whole send span fits inside it.
+	ctx3, cancel3 := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel3()
+	iv3 := spreadInterval(ctx3, 20, 0)
+	if span := time.Duration(19) * iv3; span >= 2*time.Second {
+		t.Errorf("send span %v exceeds the 2s budget (interval=%v)", span, iv3)
+	}
+}

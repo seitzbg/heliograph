@@ -79,6 +79,12 @@ All notable changes to **Heliograph** are recorded here. The format follows
   by the DB and the collector's DSN) and code-review acknowledgements. (CODE_REVIEW M1 + CodeRabbit.)
 
 ### Fixed
+- **Native `Ping` probe spreads its sends like `FPing` (was a 50 ms burst).** The `Ping` probe sent its
+  N echoes 50 ms apart — a ~1 s burst per round — the same pattern fixed for `FPing`: it inflates loss on
+  a marginal link and spikes the instantaneous ICMP rate to a single destination (noticeable with two
+  compare targets pointed at the same host, e.g. 1.1.1.1). The sends are now spread across the round
+  budget (`min(timeout × pings, step)`), capped so a fast link's round stays short; `interval_ms` remains
+  an optional override. Peak rate to a destination drops from ~20 pings/s (for 1 s) to ~2 pings/s.
 - **Smoke graphs no longer draw past the plot frame, and the median line is lighter.** A value above the
   graph's auto Y-max is clamped to the top, but the *width* of the line/tick drawn there spilled ~1px
   past the top frame; the plot is now clipped to its rect. The median line is also thinner (previously a
