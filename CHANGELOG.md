@@ -30,6 +30,8 @@ All notable changes to **Heliograph** are recorded here. The format follows
   Compose example now do exactly that instead of carrying a `command:` list.
 
 ### Changed
+- **Probe badge now precedes the graph title** — e.g. `[HTTP] cloudflare.com (HTTP TTFB)` instead of
+  the badge trailing the name — in the per-target grid and the detail/zoom titles.
 - **Graphs grid defaults to per-panel Y-axis auto-scaling.** The small-multiples grid previously shared
   one Y-axis (unison) by default, which flattened low-latency panels against the tallest target. Each
   panel now auto-scales to its own data by default; the **unison scale** toggle (top of the grid) still
@@ -71,6 +73,10 @@ All notable changes to **Heliograph** are recorded here. The format follows
   by the DB and the collector's DSN) and code-review acknowledgements. (CODE_REVIEW M1 + CodeRabbit.)
 
 ### Fixed
+- **Smoke graphs no longer draw past the plot frame, and the median line is lighter.** A value above the
+  graph's auto Y-max is clamped to the top, but the *width* of the line/tick drawn there spilled ~1px
+  past the top frame; the plot is now clipped to its rect. The median line is also thinner (previously a
+  1.4px neutral base with a 2.2px loss-coloured line stacked on top → 1.0px + 1.5px).
 - **FPing over-reported loss on marginal links (ping burst).** The FPing probe sent all N pings in a
   ~1 s burst (`fping -p 50`), which correlated-drops on a lossy link: measured **~85% loss** on a flaky
   2.4 GHz Wi-Fi link where SmokePing (spread-out pings) and fping's own default spacing both see

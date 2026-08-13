@@ -188,6 +188,15 @@ window.Smoke = (function () {
       }
     };
 
+    // Clip the data (bands + median lines + ticks) to the plot rect. A value above yMax
+    // is clamped to the top by Y(), but the WIDTH of the line/tick drawn there would still
+    // spill ~1px past the top frame; clipping keeps everything inside the box. The grid,
+    // axis labels and frame are drawn outside this save/restore so they aren't clipped.
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(mL, mT, pw, ph);
+    ctx.clip();
+
     if (opts.band) {
       // Aggregated tiers (hourly/daily) have no per-round distribution — only a
       // min/avg/max per bucket. Draw one soft translucent min->max range-area
@@ -248,7 +257,7 @@ window.Smoke = (function () {
     }
 
     // median base line
-    ctx.lineWidth = 1.4; ctx.strokeStyle = V.medianBase; ctx.beginPath();
+    ctx.lineWidth = 1; ctx.strokeStyle = V.medianBase; ctx.beginPath();
     let started = false;
     for (let i = 0; i < n; i++) {
       const m = s.buckets[i].median;
@@ -258,8 +267,8 @@ window.Smoke = (function () {
     }
     ctx.stroke();
 
-    // median coloured by loss (incl. green for zero-loss), 2px segments
-    ctx.lineWidth = 2.2;
+    // median coloured by loss (incl. green for zero-loss)
+    ctx.lineWidth = 1.5;
     for (let i = 1; i < n; i++) {
       const a = s.buckets[i - 1], b = s.buckets[i];
       if (isNaN(a.median) || isNaN(b.median) || isGap(i)) continue; // no coloured segment across a gap
@@ -271,6 +280,8 @@ window.Smoke = (function () {
     // 100%-loss ticks at baseline
     ctx.fillStyle = '#a00000';
     for (let i = 0; i < n; i++) if (s.buckets[i].lost >= bucketPings(s.buckets[i])) ctx.fillRect(Math.round(X(i)) - 1, mT + ph - 3, 2, 3);
+
+    ctx.restore(); // end plot-rect clip
 
     ctx.strokeStyle = V.frame; ctx.lineWidth = 1; ctx.strokeRect(mL + 0.5, mT + 0.5, pw - 1, ph - 1);
 

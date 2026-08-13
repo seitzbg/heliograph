@@ -481,7 +481,7 @@
       let p = panels.get(t.name); if (p) return p;
       const grid = $('graphGrid'); if (panels.size === 0) grid.innerHTML = '';
       const el = document.createElement('div'); el.className = 'panel gpanel'; el.dataset.target = t.name;
-      el.innerHTML = '<h2>' + esc(t.name) + ' <span class="probe">' + esc(t.probe) + '</span></h2><div class="meta"></div><canvas></canvas>';
+      el.innerHTML = '<h2><span class="probe">' + esc(t.probe) + '</span> ' + esc(t.name) + '</h2><div class="meta"></div><canvas></canvas>';
       grid.appendChild(el);
       p = { el, canvas: el.querySelector('canvas'), meta: el.querySelector('.meta'), series: null };
       panels.set(t.name, p); return p;
@@ -727,7 +727,7 @@
         return { key, R, el, canvas: el.querySelector('canvas'), meta: el.querySelector('.meta') };
       });
       // probe label from the grid cache if we have it
-      const gp = panels.get(name); if (gp) { const probe = gp.el.querySelector('.probe'); if (probe) $('stackTitle').innerHTML = esc(name) + ' <span class="probe">' + esc(probe.textContent) + '</span>'; }
+      const gp = panels.get(name); if (gp) { const probe = gp.el.querySelector('.probe'); if (probe) $('stackTitle').innerHTML = '<span class="probe">' + esc(probe.textContent) + '</span> ' + esc(name); }
 
       if (vs.length <= 1) {
         // Single-vantage: no fetch fan-out, no overlays, no chips (renderStackChips() clears

@@ -25,7 +25,7 @@ function recordingCanvas() {
     setTransform() {}, clearRect() {}, fillRect() { log.fillRects++; },
     beginPath() { cur = []; }, moveTo(x, y) { cur.push({ op: 'M', x, y }); }, lineTo(x, y) { cur.push({ op: 'L', x, y }); }, closePath() {},
     fill() { log.fills++; log.fillPaths.push(cur.slice()); }, stroke() { log.strokes++; log.strokePaths.push(cur.slice()); },
-    save() {}, restore() {}, translate() {}, rotate() {}, fillText() {}, strokeRect() {},
+    save() {}, restore() {}, translate() {}, rotate() {}, fillText() {}, strokeRect() {}, rect() {}, clip() {},
     set globalAlpha(v) { log.alphas.push(v); }, get globalAlpha() { return 1; },
     set fillStyle(v) {}, get fillStyle() { return ''; },
     set strokeStyle(v) {}, get strokeStyle() { return ''; },
