@@ -79,6 +79,17 @@ All notable changes to **Heliograph** are recorded here. The format follows
   by the DB and the collector's DSN) and code-review acknowledgements. (CODE_REVIEW M1 + CodeRabbit.)
 
 ### Fixed
+- **HTTP/DNS/TCP/SSH probes bound each ping to a fair share of the round budget.** The per-ping round
+  budget (below) is `min(timeout × pings, step)`, but the four sequential probes still ran all N pings
+  under that one shared deadline. Against a hung or blackholed host the *first* connect/query consumed
+  the whole budget and the loop then bailed — so the round made **one** real attempt instead of N and
+  tied up a worker for the entire `step`. This is the demo's `Unreachable/blackhole` target (TCPConnect
+  to `192.0.2.1:9`): with `step=60s, pings=20` a round held a worker ~60 s for a single dropped SYN.
+  Each ping now gets its own context bounded to `remaining_budget / remaining_pings` (a fair share,
+  ≤ `-timeout`), so a dead host is probed all N times (correct loss) and each attempt fails fast, while a
+  slow-but-responding endpoint still answers within its share. Behavioral tests cover the SSH, HTTP, and
+  DNS probes against in-process hung endpoints; the shared `probe.AttemptContext` helper is unit-tested;
+  `pings=1` and no-deadline callers are unchanged. Builds on the per-ping round budget below.
 - **Native `Ping` probe spreads its sends like `FPing` (was a 50 ms burst).** The `Ping` probe sent its
   N echoes 50 ms apart — a ~1 s burst per round — the same pattern fixed for `FPing`: it inflates loss on
   a marginal link and spikes the instantaneous ICMP rate to a single destination (noticeable with two

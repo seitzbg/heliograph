@@ -79,6 +79,65 @@ func TestDNSPerTargetRecordType(t *testing.T) {
 	}
 }
 
+// TestDNSHungResolverMakesBoundedAttempts pins the per-attempt-timeout behavior for
+// the DNS probe: against a resolver that receives queries but never answers, the probe
+// must send `pings` bounded queries within the round budget rather than let the first
+// query burn the whole budget and record only one.
+func TestDNSHungResolverMakesBoundedAttempts(t *testing.T) {
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer pc.Close()
+
+	var mu sync.Mutex
+	var queries int
+	go func() {
+		buf := make([]byte, 512)
+		for {
+			if _, _, err := pc.ReadFrom(buf); err != nil {
+				return // socket closed at teardown
+			}
+			mu.Lock()
+			queries++
+			mu.Unlock()
+			// Never reply — the query blocks until its attempt deadline cancels it.
+		}
+	}()
+
+	addr := pc.LocalAddr().(*net.UDPAddr)
+	p, err := probe.New("DNS", nil)
+	if err != nil {
+		t.Fatalf("probe.New: %v", err)
+	}
+	target := probe.Target{Name: "hung", Host: "127.0.0.1", Params: map[string]string{
+		"port": itoa(addr.Port), "lookup": "example.com",
+	}}
+
+	const pings = 3
+	const budget = 900 * time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+
+	start := time.Now()
+	res, _ := p.Measure(ctx, target, pings)
+	elapsed := time.Since(start)
+
+	if len(res.Samples) != 0 {
+		t.Fatalf("hung resolver should record no samples, got %d", len(res.Samples))
+	}
+	mu.Lock()
+	got := queries
+	mu.Unlock()
+	if got < pings {
+		t.Fatalf("want %d bounded queries against the hung resolver, got %d "+
+			"(probe burned the whole round budget on one query and bailed)", pings, got)
+	}
+	if elapsed > budget+400*time.Millisecond {
+		t.Fatalf("overran round budget: elapsed %s > budget %s", elapsed, budget)
+	}
+}
+
 func itoa(n int) string {
 	if n == 0 {
 		return "0"

@@ -84,7 +84,12 @@ func (p *dnsProbe) Measure(ctx context.Context, t probe.Target, pings int) (prob
 		c := &dns.Client{Net: p.proto}
 		m := new(dns.Msg)
 		m.SetQuestion(dns.Fqdn(lookup), recordType)
-		_, rtt, err := c.ExchangeContext(ctx, m, server)
+		// Bound this query to a fair share of the round budget so a hung/unresponsive
+		// resolver is queried all `pings` times instead of the first query eating the
+		// whole round (correct loss, no worker held for the full step).
+		actx, cancel := probe.AttemptContext(ctx, pings-i)
+		_, rtt, err := c.ExchangeContext(actx, m, server)
+		cancel()
 		if err != nil {
 			continue // query failed/timed out => lost
 		}

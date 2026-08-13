@@ -47,8 +47,15 @@ func (p *tcpProbe) Measure(ctx context.Context, t probe.Target, pings int) (prob
 		if err := ctx.Err(); err != nil {
 			return probe.Result{Samples: samples}, err
 		}
+		// Bound this connect to a fair share of the round budget so a hung/blackholed
+		// host is probed all `pings` times instead of the first connect eating the whole
+		// round (correct loss, no worker held for the full step). This is the demo's
+		// Unreachable/blackhole case: a dropped SYN otherwise holds one connect for the
+		// entire round budget.
+		actx, cancel := probe.AttemptContext(ctx, pings-i)
 		start := time.Now()
-		conn, err := d.DialContext(ctx, "tcp", addr)
+		conn, err := d.DialContext(actx, "tcp", addr)
+		cancel()
 		if err == nil {
 			samples = append(samples, time.Since(start).Seconds())
 			_ = conn.Close()

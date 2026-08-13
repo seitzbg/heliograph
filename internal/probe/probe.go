@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Target is one thing to measure.
@@ -238,6 +239,30 @@ func AllSchemas() []map[string]any {
 		out = append(out, JSONSchema(kind, r.describe, r.schema))
 	}
 	return out
+}
+
+// AttemptContext derives a per-attempt context for one ping of a sequential probe
+// (TCPConnect/HTTP/DNS/SSH), giving it a fair share of the round budget: the time
+// left until the parent's deadline divided by `remaining` (this attempt plus the
+// ones after it). Without this, all pings share the one round deadline, so a hung
+// or blackholed target lets the first connect consume the whole budget and the loop
+// bails after a single attempt — reporting one lost ping instead of N and tying up
+// a worker for the entire round. A fair share instead bounds every attempt, so a
+// dead host is probed N times and fails fast, while a slow-but-responding endpoint
+// still answers within its share.
+//
+// When the parent carries no deadline (e.g. Pings==1 callers, or tests), the attempt
+// simply inherits the parent unbounded. The caller must always cancel the returned
+// context (defer cancel()).
+func AttemptContext(parent context.Context, remaining int) (context.Context, context.CancelFunc) {
+	if remaining < 1 {
+		remaining = 1
+	}
+	dl, ok := parent.Deadline()
+	if !ok {
+		return context.WithCancel(parent)
+	}
+	return context.WithTimeout(parent, time.Until(dl)/time.Duration(remaining))
 }
 
 // Param returns a per-target param with a fallback default.

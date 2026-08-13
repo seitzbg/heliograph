@@ -5,10 +5,52 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/seitzbg/heliograph/internal/probe"
 )
+
+// TestHTTPHungEndpointMakesBoundedAttempts pins the per-attempt-timeout behavior for
+// the HTTP probe: against an endpoint that accepts the request but never responds,
+// the probe must make `pings` bounded attempts within the round budget rather than
+// let the first request burn the whole budget and record only one.
+func TestHTTPHungEndpointMakesBoundedAttempts(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		<-r.Context().Done() // never respond; unblock when the attempt's deadline cancels it
+	}))
+	defer srv.Close()
+	host := strings.TrimPrefix(srv.URL, "http://") // 127.0.0.1:PORT
+
+	p, err := probe.New("HTTP", nil)
+	if err != nil {
+		t.Fatalf("probe.New: %v", err)
+	}
+	target := probe.Target{Name: "hung", Host: host, Params: map[string]string{"urlformat": "http://%host%/"}}
+
+	const pings = 3
+	const budget = 900 * time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+
+	start := time.Now()
+	res, _ := p.Measure(ctx, target, pings)
+	elapsed := time.Since(start)
+
+	if len(res.Samples) != 0 {
+		t.Fatalf("hung endpoint should record no samples, got %d", len(res.Samples))
+	}
+	if got := hits.Load(); got < pings {
+		t.Fatalf("want %d bounded attempts against the hung endpoint, got %d "+
+			"(probe burned the whole round budget on one request and bailed)", pings, got)
+	}
+	if elapsed > budget+400*time.Millisecond {
+		t.Fatalf("overran round budget: elapsed %s > budget %s", elapsed, budget)
+	}
+}
 
 // insecure_ssl is declared TargetVar; a per-target value must actually take
 // effect. Against a self-signed TLS server the default (verify) yields a lost

@@ -102,7 +102,13 @@ func (p *httpProbe) Measure(ctx context.Context, t probe.Target, pings int) (pro
 		if err := ctx.Err(); err != nil {
 			return probe.Result{Samples: samples}, err
 		}
-		if d, ok := p.once(ctx, client, url); ok {
+		// Bound this attempt to a fair share of the round budget so a hung/unresponsive
+		// endpoint is probed all `pings` times instead of the first request eating the
+		// whole round (correct loss, no worker held for the full step).
+		actx, cancel := probe.AttemptContext(ctx, pings-i)
+		d, ok := p.once(actx, client, url)
+		cancel()
+		if ok {
 			samples = append(samples, d)
 		}
 	}

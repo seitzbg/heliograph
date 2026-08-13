@@ -41,7 +41,13 @@ func (p *sshProbe) Measure(ctx context.Context, t probe.Target, pings int) (prob
 		if err := ctx.Err(); err != nil {
 			return probe.Result{Samples: samples}, err
 		}
-		if rtt, ok := p.once(ctx, &d, addr); ok {
+		// Bound this attempt to a fair share of the round budget so a hung/blackholed
+		// host is probed all `pings` times (correct loss) instead of the first read
+		// eating the whole round.
+		actx, cancel := probe.AttemptContext(ctx, pings-i)
+		rtt, ok := p.once(actx, &d, addr)
+		cancel()
+		if ok {
 			samples = append(samples, rtt)
 		}
 		if p.interval > 0 && i < pings-1 {
