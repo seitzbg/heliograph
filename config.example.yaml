@@ -8,8 +8,7 @@ database:
   pings: 20        # samples per round
 
 probes:            # probe-instance (probe-level) settings
-  FPing:
-    period_ms: "50"
+  FPing: {}          # pings are auto-spread across the round (override with period_ms / timeout_ms)
   TCPConnect: {}
   DNS: {}
   HTTP: {}

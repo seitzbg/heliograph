@@ -71,6 +71,14 @@ All notable changes to **Heliograph** are recorded here. The format follows
   by the DB and the collector's DSN) and code-review acknowledgements. (CODE_REVIEW M1 + CodeRabbit.)
 
 ### Fixed
+- **FPing over-reported loss on marginal links (ping burst).** The FPing probe sent all N pings in a
+  ~1 s burst (`fping -p 50`), which correlated-drops on a lossy link: measured **~85% loss** on a flaky
+  2.4 GHz Wi-Fi link where SmokePing (spread-out pings) and fping's own default spacing both see
+  ~17–20%. The pings are now **spread across the round budget** (SmokePing-style) with an explicit
+  per-reply timeout (`fping -t`), both sized to fit N pings in the target's `step`. `period_ms` /
+  `timeout_ms` remain as optional overrides. A good link's loss/latency is unchanged; a round now takes
+  the spread time (e.g. ~10 s for 20 pings at a 60 s step) instead of ~1 s. Builds on the per-ping
+  round budget below.
 - **HTTP/DNS/TCP/SSH probes no longer report a slow endpoint as packet loss.** These probes measure
   their N pings sequentially, but the scheduler applied a single flat `-timeout` (default 4s) to the
   whole round, so an endpoint that responds slowly had its later pings guillotined by the shared
