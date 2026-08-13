@@ -37,11 +37,17 @@ func (p *sshProbe) Measure(ctx context.Context, t probe.Target, pings int) (prob
 	addr := net.JoinHostPort(t.Host, t.Param("port", p.port))
 	var samples []float64
 	var d net.Dialer
+	// Fair per-ping share of the round budget, so a hung/blackholed host is probed all
+	// `pings` times (correct loss) instead of the first read eating the whole round.
+	perPing := probe.PerPingBudget(ctx, pings)
 	for i := 0; i < pings; i++ {
 		if err := ctx.Err(); err != nil {
 			return probe.Result{Samples: samples}, err
 		}
-		if rtt, ok := p.once(ctx, &d, addr); ok {
+		actx, cancel := probe.AttemptContext(ctx, perPing)
+		rtt, ok := p.once(actx, &d, addr)
+		cancel()
+		if ok {
 			samples = append(samples, rtt)
 		}
 		if p.interval > 0 && i < pings-1 {

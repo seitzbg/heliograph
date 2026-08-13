@@ -98,11 +98,18 @@ func (p *httpProbe) Measure(ctx context.Context, t probe.Target, pings int) (pro
 	client := &http.Client{Transport: tr}
 
 	var samples []float64
+	// Fair per-ping share of the round budget so a hung/unresponsive endpoint is probed
+	// all `pings` times instead of the first request eating the whole round (correct
+	// loss, no worker held for the full step).
+	perPing := probe.PerPingBudget(ctx, pings)
 	for i := 0; i < pings; i++ {
 		if err := ctx.Err(); err != nil {
 			return probe.Result{Samples: samples}, err
 		}
-		if d, ok := p.once(ctx, client, url); ok {
+		actx, cancel := probe.AttemptContext(ctx, perPing)
+		d, ok := p.once(actx, client, url)
+		cancel()
+		if ok {
 			samples = append(samples, d)
 		}
 	}

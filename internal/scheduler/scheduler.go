@@ -50,6 +50,10 @@ type Outcome struct {
 // endpoint's later pings into false loss. It is capped by Step so a round can never
 // overrun its own polling interval (and pile up). -timeout is therefore a per-ping
 // budget. Pings==1 (or Step<=0) preserves the old behavior.
+//
+// This sizes the whole-round deadline; the sequential probes (TCPConnect/HTTP/DNS/SSH)
+// further subdivide it per ping via probe.AttemptContext so one hung attempt can't
+// consume the entire round.
 func roundBudget(j Job) time.Duration {
 	pings := j.Pings
 	if pings < 1 {

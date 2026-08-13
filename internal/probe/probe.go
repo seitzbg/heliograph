@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Target is one thing to measure.
@@ -238,6 +239,39 @@ func AllSchemas() []map[string]any {
 		out = append(out, JSONSchema(kind, r.describe, r.schema))
 	}
 	return out
+}
+
+// PerPingBudget returns the per-ping timeout a sequential probe (TCPConnect/HTTP/DNS/
+// SSH) should give each of its `pings` attempts: an even slice of the round budget
+// left on ctx. The scheduler sets ctx's deadline to min(timeout*pings, step), so this
+// is min(timeout, step/pings) — never more than the configured -timeout. Callers
+// compute it ONCE before the ping loop so every attempt gets the same fixed cap: a
+// fast early attempt must not hand its unused time to a later one (which would let a
+// later ping run past -timeout). Returns 0 when ctx has no deadline (Pings==1 callers,
+// tests), meaning "no per-ping bound".
+func PerPingBudget(ctx context.Context, pings int) time.Duration {
+	if pings < 1 {
+		pings = 1
+	}
+	dl, ok := ctx.Deadline()
+	if !ok {
+		return 0
+	}
+	return time.Until(dl) / time.Duration(pings)
+}
+
+// AttemptContext derives the context for one ping of a sequential probe, bounded to
+// perPing (from PerPingBudget). Without it, all pings share the one round deadline, so
+// a hung or blackholed target lets the first connect consume the whole budget and the
+// loop bails after a single attempt — reporting one lost ping instead of N and tying
+// up a worker for the entire round. The parent's deadline still caps the total, so the
+// last attempt can't overrun the round. perPing<=0 inherits the parent unbounded. The
+// caller must always cancel the returned context (defer cancel()).
+func AttemptContext(parent context.Context, perPing time.Duration) (context.Context, context.CancelFunc) {
+	if perPing <= 0 {
+		return context.WithCancel(parent)
+	}
+	return context.WithTimeout(parent, perPing)
 }
 
 // Param returns a per-target param with a fallback default.

@@ -1,8 +1,54 @@
 package probe
 
 import (
+	"context"
 	"testing"
+	"time"
 )
+
+// PerPingBudget must hand each ping an even, FIXED share of the round budget
+// (budget/pings) — never more than the configured -timeout — so a hung target is
+// probed all N times and no single ping runs past its share. It is the shared bound
+// every sequential probe (TCPConnect/HTTP/DNS/SSH) applies uniformly across the loop.
+func TestPerPingBudgetFixedEvenShare(t *testing.T) {
+	const budget = 900 * time.Millisecond
+	parent, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+
+	// 3 pings -> ~1/3 of the budget each, and it must not depend on which ping it is:
+	// a fast early ping cannot inflate a later ping's share (that is the whole point).
+	share := PerPingBudget(parent, 3)
+	if share < 250*time.Millisecond || share > 300*time.Millisecond {
+		t.Fatalf("per-ping share = %s, want ~300ms (budget/pings)", share)
+	}
+
+	// The attempt context carries that fixed cap, never past the parent deadline.
+	actx, ac := AttemptContext(parent, share)
+	defer ac()
+	dl, ok := actx.Deadline()
+	if !ok {
+		t.Fatal("attempt context should carry a deadline when perPing > 0")
+	}
+	if d := time.Until(dl); d > share+20*time.Millisecond {
+		t.Fatalf("attempt deadline %s exceeds the per-ping cap %s", d, share)
+	}
+	if pdl, _ := parent.Deadline(); dl.After(pdl) {
+		t.Fatalf("attempt deadline %s is past the parent deadline %s", dl, pdl)
+	}
+}
+
+// Without a parent deadline (Pings==1 callers, tests) there is no per-ping bound and
+// an attempt inherits the parent unbounded, preserving those call sites' behavior.
+func TestPerPingBudgetNoParentDeadline(t *testing.T) {
+	if d := PerPingBudget(context.Background(), 3); d != 0 {
+		t.Fatalf("no parent deadline should yield a 0 (unbounded) per-ping budget, got %s", d)
+	}
+	actx, cancel := AttemptContext(context.Background(), 0)
+	defer cancel()
+	if _, ok := actx.Deadline(); ok {
+		t.Fatal("attempt context must not invent a deadline when perPing <= 0")
+	}
+}
 
 // stubSchema exercises JSONSchema with a mix of scopes, defaults, and a mandatory var.
 var stubSchema = map[string]VarSpec{
