@@ -118,7 +118,7 @@ services:
         condition: service_healthy
     cap_add: [NET_RAW]                                  # fping ICMP (non-root, setcap'd binary)
     sysctls:
-      net.ipv4.ping_group_range: "0 2147483647"        # native Ping via an unprivileged socket
+      net.ipv4.ping_group_range: "0 10001"             # native Ping via an unprivileged socket (the collector's GID; a wider range like "0 2147483647" fails to start under rootless Podman)
     environment:
       # The image's default command already runs `-serve -addr :8087 -webdir /web`; these env vars
       # drive the rest, keeping the DB password out of the command list. Each mirrors a -flag.
