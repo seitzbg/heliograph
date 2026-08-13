@@ -16,7 +16,7 @@ func TestPingRegisteredWithSchema(t *testing.T) {
 		t.Fatal("Ping not registered")
 	}
 	sc, _ := probe.SchemaOf("Ping")
-	for _, k := range []string{"packetsize", "interval_ms", "mode"} {
+	for _, k := range []string{"packetsize", "interval_ms", "mode", "timeout_ms"} {
 		if _, ok := sc[k]; !ok {
 			t.Errorf("missing schema var %q", k)
 		}
@@ -89,6 +89,56 @@ func TestMeasureRejectsOversizedPerTargetPacketsize(t *testing.T) {
 	}
 	if len(res.Samples) != 0 {
 		t.Errorf("expected no samples on a rejected packetsize, got %d", len(res.Samples))
+	}
+}
+
+// TestNewPingProbeTimeoutMs: the timeout_ms knob (fping -t analog) must parse into
+// replyTimeout and reject non-positive/invalid values, like interval_ms.
+func TestNewPingProbeTimeoutMs(t *testing.T) {
+	p, err := newPingProbe(map[string]string{"timeout_ms": "250"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := p.(*pingProbe).replyTimeout; got != 250*time.Millisecond {
+		t.Errorf("timeout_ms=250 -> replyTimeout %v, want 250ms", got)
+	}
+	if _, err := newPingProbe(map[string]string{"timeout_ms": "0"}); err == nil {
+		t.Error("timeout_ms=0 should be rejected")
+	}
+	if _, err := newPingProbe(map[string]string{"timeout_ms": "abc"}); err == nil {
+		t.Error("non-integer timeout_ms should be rejected")
+	}
+	// Unset leaves replyTimeout at 0 (receiveDeadline falls back to the default).
+	def, _ := newPingProbe(nil)
+	if got := def.(*pingProbe).replyTimeout; got != 0 {
+		t.Errorf("unset timeout_ms -> replyTimeout %v, want 0 (default applied later)", got)
+	}
+}
+
+// TestPingLossReturnsBeforeLargeRoundBudget is the end-to-end regression for the freeze
+// bug through the real socket path: against an unroutable target with a LARGE round
+// budget (like production's 60s step), a lost ping must end the round shortly after the
+// sends finish (bounded by the per-reply timeout), not block for the whole budget. The
+// old code set the read deadline to ctx.Deadline() and blocked the full budget.
+func TestPingLossReturnsBeforeLargeRoundBudget(t *testing.T) {
+	p, err := newPingProbe(map[string]string{"interval_ms": "5", "timeout_ms": "500"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	start := time.Now()
+	res, err := p.Measure(ctx, probe.Target{Host: "192.0.2.1"}, 3)
+	if err != nil {
+		t.Skipf("cannot open ICMP socket here: %v", err)
+	}
+	if len(res.Samples) != 0 {
+		t.Errorf("expected 0 samples for unroutable, got %d", len(res.Samples))
+	}
+	// lastSend ~10ms + 500ms reply window ~= 0.5s; must be far below the 20s budget.
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Errorf("lossy round took %v with a 20s budget — it waited out the round budget "+
+			"instead of the per-reply timeout", elapsed)
 	}
 }
 
@@ -227,6 +277,52 @@ func TestPingLoopbackRTTMagnitude(t *testing.T) {
 			t.Errorf("sample[%d] = %v, want < %v (loopback RTT is sub-millisecond; a sample this large "+
 				"means Measure is timing the send schedule, not the network)", i, d, bound)
 		}
+	}
+}
+
+// TestReceiveDeadlineBoundedByReplyTimeout is the regression test for the "lossy
+// round freezes for the whole round budget" bug: the receiver's read deadline was
+// set to ctx.Deadline() (the full round budget, e.g. 60s), so a single unanswered
+// ping — which can never let `seen` reach `pings` — blocked the round for the entire
+// budget instead of a short trailing wait. Live docker5 data: every native round with
+// any loss took exactly 60s, vs FPing's ~10s (fping bounds each reply with -t). The
+// deadline must instead bound the trailing wait to lastSend + replyTimeout, capped by
+// (never exceeding) the round budget.
+func TestReceiveDeadlineBoundedByReplyTimeout(t *testing.T) {
+	const budget = 60 * time.Second
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+
+	start := time.Now()
+	const pings = 20
+	const interval = 500 * time.Millisecond // last send at 19*500ms = 9.5s
+	const reply = time.Second
+
+	dl := receiveDeadline(ctx, start, pings, interval, reply)
+	wait := dl.Sub(start)
+
+	lastSend := time.Duration(pings-1) * interval // 9.5s
+	// Must give every ping its reply window (>= lastSend + reply)...
+	if wait < lastSend+reply-100*time.Millisecond {
+		t.Errorf("receive deadline waits %v; the last send is at %v and each reply needs ~%v", wait, lastSend, reply)
+	}
+	// ...but must NOT wait out the whole 60s round budget on loss.
+	if wait > lastSend+reply+2*time.Second {
+		t.Errorf("receive deadline waits %v; it should bound the trailing wait to ~lastSend+reply (~%v), "+
+			"not the whole round budget (%v)", wait, lastSend+reply, budget)
+	}
+}
+
+// TestReceiveDeadlineNeverExceedsRoundBudget: when the send span itself nearly fills a
+// short round budget, the trailing wait must be clamped to the budget, never past it.
+func TestReceiveDeadlineNeverExceedsRoundBudget(t *testing.T) {
+	const budget = 2 * time.Second
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+	start := time.Now()
+	dl := receiveDeadline(ctx, start, 20, 100*time.Millisecond, time.Second)
+	if dl.After(start.Add(budget + 50*time.Millisecond)) {
+		t.Errorf("receive deadline %v exceeds the round budget %v", dl.Sub(start), budget)
 	}
 }
 

@@ -79,6 +79,17 @@ All notable changes to **Heliograph** are recorded here. The format follows
   by the DB and the collector's DSN) and code-review acknowledgements. (CODE_REVIEW M1 + CodeRabbit.)
 
 ### Fixed
+- **Native `Ping` probe no longer freezes for the whole round budget on a lost ping.** The probe had no
+  per-reply timeout: its receiver waited until all N replies arrived *or* the read deadline, which was set
+  to `ctx.Deadline()` — the entire round budget (60s at the default step). A single genuinely-lost ping can
+  never let the round see all N replies, so it blocked for the full budget. Live docker5 data made it stark:
+  every native round with any loss took **exactly 60s**, versus FPing's ~10s (fping bounds each reply with
+  `-t`), and each 60s round overran its 60s step so the scheduler skipped the next slot — native collected
+  ~14% fewer rounds than FPing to the same host, visible as gaps in its series precisely when there was loss.
+  The receiver now bounds the trailing wait to `lastSend + timeout` (the native analog of fping `-t`, default
+  1s, capped by the round budget), so a lossy round finishes ~10s like FPing and never skips a slot. A new
+  `timeout_ms` probe var overrides it. (Loss *accuracy* was already correct — native and FPing agree to within
+  noise; this fixes round cadence and worker-hold time, not the loss count.)
 - **HTTP/DNS/TCP/SSH probes bound each ping to a fair share of the round budget.** The per-ping round
   budget (below) is `min(timeout × pings, step)`, but the four sequential probes still ran all N pings
   under that one shared deadline. Against a hung or blackholed host the *first* connect/query consumed
