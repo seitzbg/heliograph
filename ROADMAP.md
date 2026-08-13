@@ -105,6 +105,10 @@ sketch; agents poll a versioned assignment (`304` when unchanged); keys are mana
   weight orders it among its siblings; its children are weighted independently), for both YAML and
   DB-fragment configs, with a weight input in the Config tab. SmokePing ordered menus by file
   position; this is the DB-config equivalent.
+- 🚧 **Show the resolved IP in the graph title** (planned; 2026-08-12) — targets are addressed by
+  hostname and the title shows the name only. Resolve the host at config-load and render
+  `hostname (1.2.3.4)` so it's clear which address is being probed and a DNS change is visible.
+  Opt-in / configurable; refresh on reload.
 - ✅ Drag-to-zoom time range — done: drag a range on the detail graph and it refetches
   that `[from,to]` at the resolution best for the span (raw/hourly/daily), not an image
   swap. In-app dark-mode toggle persistence done ✅ (localStorage, restored before first paint)
@@ -149,6 +153,9 @@ Phase-6 items all ship in the single **v1.0** line.
   `net.ipv4.ping_group_range` sysctl), raw-socket fallback (`CAP_NET_RAW`). Ships alongside
   `FPing` rather than replacing it — the external binary and `setcap` dance stay for users who
   keep using `FPing`, but new deployments can drop both by using `Ping` instead. *(Small–medium.)*
+- 🚧 **NTP probe** (planned; 2026-08-12) — a new probe kind measuring NTP server responsiveness: an
+  SNTP request/response round-trip (and optionally clock offset / stratum), self-registering like the
+  other native probes, no external binary. *(Small.)*
 - ✅ **On-disk agent store-and-forward** — the agent persists its buffer to disk (opt-in `spool_dir`) so a vantage restart — including a hard crash — loses at most ~1s of unpushed rounds instead of the whole buffer; append-only CRC-framed segments mirror the in-memory buffer, crash-safe replay on startup, `flock` against shared dirs, degrade-to-memory on I/O error.
 - ✅ **Cut the release** — **v1.0.0** (2026-08-11): everything built to date ships under a single
   1.0 line (the earlier "single-node v1.0 / federation v2.0" split was collapsed, since nothing had
