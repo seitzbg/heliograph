@@ -203,6 +203,21 @@ func main() {
 	var dbFragment func() ([]byte, error)
 	var cfgStore *configstore.Store
 	if *dsn != "" {
+		// The database may still be coming up on a fresh bring-up — notably TimescaleDB's
+		// first-run init, where the container's socket-based healthcheck can report healthy
+		// before the TCP listener is up, so depends_on releases the collector too early.
+		// Wait for the database to accept a connection instead of crashing on the first
+		// refused one (bounded, so a genuinely-down/misconfigured DB still fails visibly).
+		const dbReadyTimeout = 60 * time.Second
+		wctx, wcancel := context.WithTimeout(context.Background(), dbReadyTimeout)
+		werr := pgstore.WaitReady(wctx, *dsn, func(e error) {
+			slog.Warn("waiting for database to become ready", "err", e)
+		})
+		wcancel()
+		if werr != nil {
+			fatal("database not ready", werr)
+		}
+
 		var cerr error
 		cfgStore, cerr = configstore.New(context.Background(), *dsn)
 		if cerr != nil {

@@ -85,6 +85,18 @@ All notable changes to **Heliograph** are recorded here. The format follows
   ./...` is clean on 1.26.6.
 
 ### Fixed
+- **First-start no longer crashes when the database is still coming up.** On a fresh `docker compose up`
+  the collector could exit immediately with `configstore: migrate: ... connect: connection refused`,
+  leaving TimescaleDB running but the app dead until a `down`/`up` — because TimescaleDB's first-run init
+  brings up a temporary socket-only server (TCP `listen_addresses=''`) while it initializes, so the
+  compose healthcheck's socket `pg_isready` reports **healthy before TCP 5432 is up**, and
+  `depends_on: service_healthy` then released `smoked` into a refused connection it treated as fatal.
+  Fixed at two layers: the collector now **waits for the database to accept a connection** at startup
+  (bounded retry with backoff via `pgstore.WaitReady`, logging progress) instead of crashing on the first
+  refused connection — robust under any orchestration, not just the bundled compose; and the compose
+  healthcheck now checks **TCP** (`pg_isready -h 127.0.0.1`), which stays unhealthy until the real listener
+  is up. Reproduced on a real host (forcing the healthcheck into the init window made `smoked` exit 1) and
+  verified fixed. Regression-tested (`retryUntilReady` / `WaitReady`).
 - **Native `Ping` probe no longer freezes for the whole round budget on a lost ping.** The probe had no
   per-reply timeout: its receiver waited until all N replies arrived *or* the read deadline, which was set
   to `ctx.Deadline()` — the entire round budget (60s at the default step). A single genuinely-lost ping can

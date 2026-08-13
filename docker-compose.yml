@@ -19,7 +19,12 @@ services:
     volumes:
       - tsdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U smoke -d smoke"]
+      # Check TCP (-h 127.0.0.1), not the default local socket: during TimescaleDB's
+      # first-run init a temporary socket-only server is up (listen_addresses='') while
+      # the real TCP listener is not, so a socket pg_isready reports healthy before
+      # smoked can actually connect — depends_on:service_healthy would then release smoked
+      # into a refused connection. The TCP check stays unhealthy until 5432 is really up.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U smoke -d smoke"]
       interval: 5s
       timeout: 3s
       retries: 10
