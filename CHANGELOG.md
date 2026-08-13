@@ -7,6 +7,9 @@ All notable changes to **Heliograph** are recorded here. The format follows
 ## [Unreleased]
 
 ### Added
+- **Native-`Ping` compare targets in the demo config.** The demo (`config.example.yaml` and the built-in
+  target set) now probes Cloudflare/Google DNS with **both** `FPing` and the native `Ping` probe against
+  the same host, so the two ICMP probes render side by side for comparison.
 - **Slack and Discord alert notifiers.** Alongside the log + generic-webhook notifiers, alerts can now
   fan out to **Slack** (`-slack-webhook` / `SMOKED_SLACK_WEBHOOK`) and **Discord** (`-discord-webhook` /
   `SMOKED_DISCORD_WEBHOOK`), referenced from an alert as `to: [slack]` / `to: [discord]`. Both reuse the

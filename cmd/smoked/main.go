@@ -1238,7 +1238,9 @@ func buildRuntime(configPath string, demoPings int, demoStep, timeout time.Durat
 func demoMonitors(pings int, step time.Duration) []model.Monitor {
 	return []model.Monitor{
 		{Name: "Cloudflare DNS (ICMP)", ProbeKind: "FPing", Host: "1.1.1.1", Pings: pings, Step: step},
+		{Name: "Cloudflare DNS (native Ping)", ProbeKind: "Ping", Host: "1.1.1.1", Pings: pings, Step: step},
 		{Name: "Google DNS (ICMP)", ProbeKind: "FPing", Host: "8.8.8.8", Pings: pings, Step: step},
+		{Name: "Google DNS (native Ping)", ProbeKind: "Ping", Host: "8.8.8.8", Pings: pings, Step: step},
 		{Name: "localhost (ICMP)", ProbeKind: "FPing", Host: "127.0.0.1", Pings: pings, Step: step},
 		{Name: "Cloudflare 443 (TCP)", ProbeKind: "TCPConnect", Host: "1.1.1.1", Pings: pings, Step: step, Params: map[string]string{"port": "443"}},
 		{Name: "Google 443 (TCP)", ProbeKind: "TCPConnect", Host: "www.google.com", Pings: pings, Step: step, Params: map[string]string{"port": "443"}},
