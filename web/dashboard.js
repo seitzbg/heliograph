@@ -465,6 +465,11 @@
     // a per-render fetch. vantagesFor defaults to ['local'] before the first grid refresh.
     const vantagesByTarget = new Map();
     function vantagesFor(name) { return vantagesByTarget.get(name) || ['local']; }
+    // probeByName: each target's probe kind, fed from the same /api/targets responses as the
+    // maps above, so the detail (stack) and zoom titles can show the probe badge reliably —
+    // not just when the grid DOM panel happens to be cached (which a deep link doesn't have).
+    const probeByName = new Map();
+    function probeBadge(name) { const pk = probeByName.get(name); return pk ? '<span class="probe">' + esc(pk) + '</span> ' : ''; }
     // ensureVantages backfills vantagesByTarget for a detail view reached before
     // refreshGrid has populated it (e.g. a deep link to #target=...): a no-op once the
     // grid has run, otherwise one /api/targets fetch to seed the map. `name` is accepted
@@ -474,7 +479,7 @@
       if (vantagesByTarget.size) return;
       try {
         const targets = (await fetchJSON('/api/targets')).targets || [];
-        for (const t of targets) vantagesByTarget.set(t.name, vantageList(t));
+        for (const t of targets) { vantagesByTarget.set(t.name, vantageList(t)); probeByName.set(t.name, t.probe); }
       } catch (e) { /* transient: vantagesFor falls back to ['local'] */ }
     }
     function ensurePanel(t) {
@@ -517,7 +522,7 @@
         // forever. It stays reachable via the tree; its real series shows in the detail view,
         // which focuses the target's own vantage (CODE_REVIEW #3 / P1-3).
         statusByTarget.clear(); vantagesByTarget.clear();
-        for (const t of targets) { statusByTarget.set(t.name, targetStatus(t)); vantagesByTarget.set(t.name, vantageList(t)); }
+        for (const t of targets) { statusByTarget.set(t.name, targetStatus(t)); vantagesByTarget.set(t.name, vantageList(t)); probeByName.set(t.name, t.probe); }
         treeNames = targets.map((t) => t.name);
         const gridTargets = targets.filter((t) => !t.no_data);
         // Reconcile ONLY against an authoritative target list (the fetch above succeeded):
@@ -710,7 +715,7 @@
     async function renderStack(name) {
       const gen = ++stackGen; // captured before any await — invalidates any earlier in-flight renderStack, same name or not
       curTarget = name; stackCanvases.length = 0;
-      $('stackTitle').innerHTML = esc(name);
+      $('stackTitle').innerHTML = probeBadge(name) + esc(name);
       const grid = $('stackGrid'); grid.innerHTML = '';
 
       await ensureVantages(name);
@@ -726,8 +731,9 @@
         grid.appendChild(el);
         return { key, R, el, canvas: el.querySelector('canvas'), meta: el.querySelector('.meta') };
       });
-      // probe label from the grid cache if we have it
-      const gp = panels.get(name); if (gp) { const probe = gp.el.querySelector('.probe'); if (probe) $('stackTitle').innerHTML = '<span class="probe">' + esc(probe.textContent) + '</span> ' + esc(name); }
+      // Re-set with the probe badge now that ensureVantages() has seeded probeByName (covers a
+      // deep link, where the grid panel isn't cached yet at the first title paint above).
+      $('stackTitle').innerHTML = probeBadge(name) + esc(name);
 
       if (vs.length <= 1) {
         // Single-vantage: no fetch fan-out, no overlays, no chips (renderStackChips() clears
@@ -794,7 +800,7 @@
     async function renderZoom(name, range) {
       const gen = ++zoomGen; // captured before any await — invalidates any earlier in-flight zoom call (renderZoom or zoomTo), same name/range or not
       curTarget = name; curRange = range; const R = RANGES[range];
-      $('zoomTitle').innerHTML = esc(name) + ' <span class="reslabel">· ' + R.label + '</span>';
+      $('zoomTitle').innerHTML = probeBadge(name) + esc(name) + ' <span class="reslabel">· ' + R.label + '</span>';
       $('zoomMeta').innerHTML = ''; $('zoomReset').hidden = true;
       $('zoomRes').textContent = 'drag on the graph to zoom into a time range';
       const canvas = $('zoomCanvas');
