@@ -16,13 +16,25 @@ func TestPingRegisteredWithSchema(t *testing.T) {
 		t.Fatal("Ping not registered")
 	}
 	sc, _ := probe.SchemaOf("Ping")
-	for _, k := range []string{"packetsize", "interval_ms", "mode"} {
+	for _, k := range []string{"packetsize", "interval_ms", "mode", "timeout_ms"} {
 		if _, ok := sc[k]; !ok {
 			t.Errorf("missing schema var %q", k)
 		}
 	}
 	if err := sc["mode"].ValidateValue("mode", "bogus"); err == nil {
 		t.Error("bad mode accepted")
+	}
+	// timeout_ms publishes its 1s default so schema clients get the full contract, and is
+	// a probe-level positive-integer var (the fping -t analog).
+	tm := sc["timeout_ms"]
+	if tm.Default != "1000" {
+		t.Errorf("timeout_ms default = %q, want \"1000\"", tm.Default)
+	}
+	if tm.Scope != probe.ProbeVar {
+		t.Errorf("timeout_ms scope = %v, want ProbeVar", tm.Scope)
+	}
+	if err := tm.ValidateValue("timeout_ms", "0"); err == nil {
+		t.Error("timeout_ms=0 should be rejected (positive integer)")
 	}
 }
 
@@ -89,6 +101,56 @@ func TestMeasureRejectsOversizedPerTargetPacketsize(t *testing.T) {
 	}
 	if len(res.Samples) != 0 {
 		t.Errorf("expected no samples on a rejected packetsize, got %d", len(res.Samples))
+	}
+}
+
+// TestNewPingProbeTimeoutMs: the timeout_ms knob (fping -t analog) must parse into
+// replyTimeout and reject non-positive/invalid values, like interval_ms.
+func TestNewPingProbeTimeoutMs(t *testing.T) {
+	p, err := newPingProbe(map[string]string{"timeout_ms": "250"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := p.(*pingProbe).replyTimeout; got != 250*time.Millisecond {
+		t.Errorf("timeout_ms=250 -> replyTimeout %v, want 250ms", got)
+	}
+	if _, err := newPingProbe(map[string]string{"timeout_ms": "0"}); err == nil {
+		t.Error("timeout_ms=0 should be rejected")
+	}
+	if _, err := newPingProbe(map[string]string{"timeout_ms": "abc"}); err == nil {
+		t.Error("non-integer timeout_ms should be rejected")
+	}
+	// Unset leaves replyTimeout at 0 (receiveDeadline falls back to the default).
+	def, _ := newPingProbe(nil)
+	if got := def.(*pingProbe).replyTimeout; got != 0 {
+		t.Errorf("unset timeout_ms -> replyTimeout %v, want 0 (default applied later)", got)
+	}
+}
+
+// TestPingLossReturnsBeforeLargeRoundBudget is the end-to-end regression for the freeze
+// bug through the real socket path: against an unroutable target with a LARGE round
+// budget (like production's 60s step), a lost ping must end the round shortly after the
+// sends finish (bounded by the per-reply timeout), not block for the whole budget. The
+// old code set the read deadline to ctx.Deadline() and blocked the full budget.
+func TestPingLossReturnsBeforeLargeRoundBudget(t *testing.T) {
+	p, err := newPingProbe(map[string]string{"interval_ms": "5", "timeout_ms": "500"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	start := time.Now()
+	res, err := p.Measure(ctx, probe.Target{Host: "192.0.2.1"}, 3)
+	if err != nil {
+		t.Skipf("cannot open ICMP socket here: %v", err)
+	}
+	if len(res.Samples) != 0 {
+		t.Errorf("expected 0 samples for unroutable, got %d", len(res.Samples))
+	}
+	// lastSend ~10ms + 500ms reply window ~= 0.5s; must be far below the 20s budget.
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Errorf("lossy round took %v with a 20s budget — it waited out the round budget "+
+			"instead of the per-reply timeout", elapsed)
 	}
 }
 
@@ -227,6 +289,60 @@ func TestPingLoopbackRTTMagnitude(t *testing.T) {
 			t.Errorf("sample[%d] = %v, want < %v (loopback RTT is sub-millisecond; a sample this large "+
 				"means Measure is timing the send schedule, not the network)", i, d, bound)
 		}
+	}
+}
+
+// TestReplyDeadlineIsOneWindowFromActualSend is the regression test for the "lossy round
+// freezes for the whole round budget" bug: after the sends finish, the read deadline is
+// one reply window from the ACTUAL last send (the time passed in), not the full round
+// budget and not a nominal start+(pings-1)*interval. Live docker5 data: every native
+// round with any loss took exactly 60s, vs FPing's ~10s (fping bounds each reply with
+// -t). Measuring from the real last-send time is what lets send jitter not close the
+// window before the last echo is out.
+func TestReplyDeadlineIsOneWindowFromActualSend(t *testing.T) {
+	const budget = 60 * time.Second
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+
+	// A reply window measured from `lastSend` (well past `start`) — not from `start`,
+	// and not the whole budget.
+	lastSend := time.Now().Add(9500 * time.Millisecond) // where the sends actually ended
+	const reply = time.Second
+	dl := replyDeadline(ctx, lastSend, reply)
+	if wait := dl.Sub(lastSend); wait < reply-50*time.Millisecond || wait > reply+50*time.Millisecond {
+		t.Errorf("reply window = %v from the actual last send, want ~%v", wait, reply)
+	}
+}
+
+// TestReplyDeadlineNeverExceedsRoundBudget: the reply window is clamped to the round
+// budget, so a short step still caps the round.
+func TestReplyDeadlineNeverExceedsRoundBudget(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	budgetDL, _ := ctx.Deadline()
+	dl := replyDeadline(ctx, time.Now(), time.Second) // 1s window would overrun the 200ms budget
+	if dl.After(budgetDL.Add(20 * time.Millisecond)) {
+		t.Errorf("reply deadline %v exceeds the round budget deadline %v", dl, budgetDL)
+	}
+}
+
+// TestSendPhaseDeadlineUsesRoundBudget: while echoes are still going out the read is
+// bounded by the round budget (ctx's deadline), not a tight nominal window — so a slow
+// send can't fire the deadline before a later echo is even out.
+func TestSendPhaseDeadlineUsesRoundBudget(t *testing.T) {
+	const budget = 60 * time.Second
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+	budgetDL, _ := ctx.Deadline()
+	if dl := sendPhaseDeadline(ctx, time.Now(), 20, 500*time.Millisecond, time.Second); !dl.Equal(budgetDL) {
+		t.Errorf("send-phase deadline = %v, want the round budget deadline %v", dl, budgetDL)
+	}
+	// With no ctx deadline (uncommon), it falls back to a bounded estimate (span + reply).
+	start := time.Now()
+	dl := sendPhaseDeadline(context.Background(), start, 20, 100*time.Millisecond, time.Second)
+	span := 19 * 100 * time.Millisecond
+	if got := dl.Sub(start); got < span || got > span+2*time.Second {
+		t.Errorf("no-deadline fallback = %v, want ~span+reply (~%v)", got, span+time.Second)
 	}
 }
 

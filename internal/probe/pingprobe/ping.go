@@ -38,6 +38,7 @@ import (
 // own socket and keeps its own local state).
 type pingProbe struct {
 	interval          time.Duration // gap between successive sends within one Measure round
+	replyTimeout      time.Duration // per-reply wait (fping -t analog); 0 = pingReplyTimeout default
 	mode              string        // "auto" | "unprivileged" | "privileged" — passed to openListener
 	defaultPacketsize string        // per-target override via t.Param("packetsize", ...)
 }
@@ -85,6 +86,10 @@ func init() {
 			Doc:   "override the gap between successive echo sends in ms; by default the N sends are spread across the round so a tight burst doesn't inflate loss or spike the send rate to one destination",
 			Scope: probe.ProbeVar, Kind: probe.KindPositiveInt,
 		},
+		"timeout_ms": {
+			Doc:     "override the per-reply timeout in ms (the native analog of fping -t). Bounds how long a reply is awaited after its echo, so one lost ping ends the round shortly after the sends finish instead of blocking for the whole round budget",
+			Default: "1000", Scope: probe.ProbeVar, Kind: probe.KindPositiveInt,
+		},
 		"mode": {
 			Doc: "socket mode: auto (try unprivileged, fall back to raw), " +
 				"unprivileged (datagram only), privileged (raw only)",
@@ -111,6 +116,13 @@ func newPingProbe(cfg map[string]string) (probe.Probe, error) {
 			return nil, fmt.Errorf("pingprobe: interval_ms must be a positive integer, got %q", v)
 		}
 		p.interval = time.Duration(ms) * time.Millisecond
+	}
+	if v, ok := cfg["timeout_ms"]; ok && v != "" {
+		ms, err := strconv.Atoi(v)
+		if err != nil || ms < 1 {
+			return nil, fmt.Errorf("pingprobe: timeout_ms must be a positive integer, got %q", v)
+		}
+		p.replyTimeout = time.Duration(ms) * time.Millisecond
 	}
 	if v, ok := cfg["mode"]; ok && v != "" {
 		p.mode = v
@@ -190,14 +202,20 @@ func (p *pingProbe) Measure(ctx context.Context, t probe.Target, pings int) (pro
 		dst = &net.IPAddr{IP: ip}
 	}
 
-	// The read deadline bounds the whole round (send phase + wait for
-	// trailing replies), set once up front — before either the sender or the
-	// receiver starts — since the receiver is now running throughout the
-	// send phase rather than being set up only after it.
+	// While echoes are still going out, bound the read only by the round budget (ctx's
+	// deadline): a slow send — write cost or scheduler delay — must not let the deadline
+	// fire before a later echo is even out, which would count its reply as loss. After the
+	// ACTUAL final send the deadline is tightened to one reply window (below), so a lost
+	// ping still ends the round promptly instead of waiting out the whole budget. Without
+	// that per-reply bound, a single lost ping (which can never let `seen` reach pings)
+	// froze the round for the entire budget.
 	// Spread the N sends across the round budget instead of bursting at a fixed gap.
 	iv := spreadInterval(ctx, pings, p.interval)
-	deadline := receiveDeadline(ctx, time.Now(), pings, iv)
-	_ = conn.SetReadDeadline(deadline)
+	reply := p.replyTimeout
+	if reply <= 0 {
+		reply = pingReplyTimeout
+	}
+	_ = conn.SetReadDeadline(sendPhaseDeadline(ctx, time.Now(), pings, iv, reply))
 
 	// conn.ReadFrom blocks the receiver goroutine until a reply arrives or
 	// the deadline above is hit — it does NOT wake up when ctx is merely
@@ -232,6 +250,15 @@ func (p *pingProbe) Measure(ctx context.Context, t probe.Target, pings int) (pro
 	}()
 
 	buildErr := sendEchoes(ctx, conn, dst, isV6, id, packetsize, token, pings, iv, st)
+
+	// Sends are done: bound the remaining wait to one reply window measured from the
+	// ACTUAL last send (now), capped by the round budget — the fping -t analog. Measuring
+	// from the real last send, not a nominal start+(pings-1)*interval, means send jitter
+	// can't close the window before the last echo is out. Skip on cancellation (the
+	// watcher already yanked the deadline to now) or a build error (nothing more arrives).
+	if buildErr == nil && ctx.Err() == nil {
+		_ = conn.SetReadDeadline(replyDeadline(ctx, time.Now(), reply))
+	}
 
 	recvWG.Wait()
 	close(watchDone)
@@ -360,7 +387,12 @@ func receiveLoop(ctx context.Context, conn *icmp.PacketConn, isV6 bool, token []
 // with no deadline at all. Computed once, up front — before either the
 // sender or receiver starts — since sends now happen concurrently with
 // receives rather than all finishing before the deadline is set.
-func receiveDeadline(ctx context.Context, start time.Time, pings int, interval time.Duration) time.Time {
+// sendPhaseDeadline bounds the read while echoes are still going out. The round budget
+// (ctx's deadline) is the natural bound and the common case; with no ctx deadline
+// (uncommon — the scheduler always sets one) it falls back to a generous estimate, the
+// nominal send span plus a reply window, so the receiver is never unbounded before the
+// post-send tighten (replyDeadline) resets it from the actual last send.
+func sendPhaseDeadline(ctx context.Context, start time.Time, pings int, interval, replyTimeout time.Duration) time.Time {
 	if dl, ok := ctx.Deadline(); ok {
 		return dl
 	}
@@ -368,15 +400,36 @@ func receiveDeadline(ctx context.Context, start time.Time, pings int, interval t
 	if n < 1 {
 		n = 1
 	}
-	lastSend := start.Add(time.Duration(n-1) * interval)
-	fallback := 4 * interval
-	if fallback < time.Second {
-		fallback = time.Second
+	if replyTimeout <= 0 {
+		replyTimeout = pingReplyTimeout
 	}
-	return lastSend.Add(fallback)
+	return start.Add(time.Duration(n-1)*interval + replyTimeout)
+}
+
+// replyDeadline is the deadline to apply after the final send: one reply window from
+// `now` (the actual last-send time), never past the round budget (ctx's deadline). A
+// lost ping — which can never let `seen` reach pings — then ends the round one window
+// after the sends finish instead of blocking for the whole budget. Measuring from the
+// real last send, not a nominal start+(pings-1)*interval, means send jitter can't close
+// the window before the last echo is even out (which would record its reply as loss).
+func replyDeadline(ctx context.Context, now time.Time, replyTimeout time.Duration) time.Time {
+	if replyTimeout <= 0 {
+		replyTimeout = pingReplyTimeout
+	}
+	d := now.Add(replyTimeout)
+	if dl, ok := ctx.Deadline(); ok && dl.Before(d) {
+		return dl
+	}
+	return d
 }
 
 const pingMaxInterval = 500 * time.Millisecond // cap so a fast link's round stays short
+
+// pingReplyTimeout is the default trailing wait for a reply after its echo was sent —
+// the native analog of fping's -t. Without it the receiver waited out the whole round
+// budget (ctx deadline) whenever any ping was lost, so a single dropped reply froze the
+// round for the full step (60s in prod) and made the scheduler skip the next slot.
+const pingReplyTimeout = time.Second
 
 // spreadInterval returns the gap between successive echo sends, spreading the N sends
 // across the round budget (the scheduler's ctx deadline) instead of bursting them — a
