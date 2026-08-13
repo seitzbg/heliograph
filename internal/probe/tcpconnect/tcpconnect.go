@@ -43,16 +43,16 @@ func (p *tcpProbe) Measure(ctx context.Context, t probe.Target, pings int) (prob
 
 	var samples []float64
 	var d net.Dialer
+	// Fair per-ping share of the round budget so a hung/blackholed host is probed all
+	// `pings` times instead of the first connect eating the whole round (correct loss,
+	// no worker held for the full step). This is the demo's Unreachable/blackhole case:
+	// a dropped SYN otherwise holds one connect for the entire round budget.
+	perPing := probe.PerPingBudget(ctx, pings)
 	for i := 0; i < pings; i++ {
 		if err := ctx.Err(); err != nil {
 			return probe.Result{Samples: samples}, err
 		}
-		// Bound this connect to a fair share of the round budget so a hung/blackholed
-		// host is probed all `pings` times instead of the first connect eating the whole
-		// round (correct loss, no worker held for the full step). This is the demo's
-		// Unreachable/blackhole case: a dropped SYN otherwise holds one connect for the
-		// entire round budget.
-		actx, cancel := probe.AttemptContext(ctx, pings-i)
+		actx, cancel := probe.AttemptContext(ctx, perPing)
 		start := time.Now()
 		conn, err := d.DialContext(actx, "tcp", addr)
 		cancel()

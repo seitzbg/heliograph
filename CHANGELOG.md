@@ -85,11 +85,13 @@ All notable changes to **Heliograph** are recorded here. The format follows
   the whole budget and the loop then bailed — so the round made **one** real attempt instead of N and
   tied up a worker for the entire `step`. This is the demo's `Unreachable/blackhole` target (TCPConnect
   to `192.0.2.1:9`): with `step=60s, pings=20` a round held a worker ~60 s for a single dropped SYN.
-  Each ping now gets its own context bounded to `remaining_budget / remaining_pings` (a fair share,
-  ≤ `-timeout`), so a dead host is probed all N times (correct loss) and each attempt fails fast, while a
-  slow-but-responding endpoint still answers within its share. Behavioral tests cover the SSH, HTTP, and
-  DNS probes against in-process hung endpoints; the shared `probe.AttemptContext` helper is unit-tested;
-  `pings=1` and no-deadline callers are unchanged. Builds on the per-ping round budget below.
+  Each ping now runs under an **even, fixed share** of the round budget (`budget/pings`, always
+  ≤ the configured `-timeout`), computed once and applied uniformly — a fast early ping can't hand its
+  unused time to a later one and push it past `-timeout`. So a dead host is probed all N times (correct
+  loss) with each attempt failing fast, while a slow-but-responding endpoint still answers within its
+  share. Behavioral tests cover the SSH, HTTP, and DNS probes against in-process hung endpoints (plus a
+  fast-early/hung-later cap regression); the shared `probe.PerPingBudget` / `probe.AttemptContext` helpers
+  are unit-tested; `pings=1` and no-deadline callers are unchanged. Builds on the per-ping round budget below.
 - **Native `Ping` probe spreads its sends like `FPing` (was a 50 ms burst).** The `Ping` probe sent its
   N echoes 50 ms apart — a ~1 s burst per round — the same pattern fixed for `FPing`: it inflates loss on
   a marginal link and spikes the instantaneous ICMP rate to a single destination (noticeable with two
