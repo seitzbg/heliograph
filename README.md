@@ -40,8 +40,9 @@ click a graph to zoom):
   - `Ping` — native ICMP echo via `golang.org/x/net/icmp`, no `fping` binary/`setcap`: an
     unprivileged datagram socket first (needs the `net.ipv4.ping_group_range` sysctl), falling
     back to a raw socket (needs `CAP_NET_RAW`) — `mode: auto|unprivileged|privileged` can pin
-    one path. Params: `packetsize` (default `56`), `interval_ms` (default `50`). Coexists with
-    `FPing`.
+    one path. Params: `packetsize` (default `56`), `interval_ms` (optional — by default the N sends
+    are spread across the round so a tight burst doesn't inflate loss or spike the send rate to one
+    destination, like `FPing`). Coexists with `FPing`.
   - `TCPConnect` — native TCP-connect timing, no external binary.
   - `DNS` — native resolver query timing via `miekg/dns` (no external `dig`).
   - `HTTP` — native HTTP(S) time-to-first-byte (minus DNS) via `net/http` + `httptrace` (no external `curl`).

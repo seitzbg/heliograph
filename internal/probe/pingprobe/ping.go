@@ -82,7 +82,7 @@ func init() {
 			},
 		},
 		"interval_ms": {
-			Doc: "milliseconds between successive echo sends within one round", Default: "50",
+			Doc:   "override the gap between successive echo sends in ms; by default the N sends are spread across the round so a tight burst doesn't inflate loss or spike the send rate to one destination",
 			Scope: probe.ProbeVar, Kind: probe.KindPositiveInt,
 		},
 		"mode": {
@@ -101,7 +101,7 @@ func init() {
 // loading, but keeps the factory safe if called directly, e.g. from tests).
 func newPingProbe(cfg map[string]string) (probe.Probe, error) {
 	p := &pingProbe{
-		interval:          50 * time.Millisecond,
+		interval:          0, // 0 = spread the sends across the round budget (spreadInterval); interval_ms overrides
 		mode:              "auto",
 		defaultPacketsize: "56",
 	}
@@ -194,7 +194,9 @@ func (p *pingProbe) Measure(ctx context.Context, t probe.Target, pings int) (pro
 	// trailing replies), set once up front — before either the sender or the
 	// receiver starts — since the receiver is now running throughout the
 	// send phase rather than being set up only after it.
-	deadline := receiveDeadline(ctx, time.Now(), pings, p.interval)
+	// Spread the N sends across the round budget instead of bursting at a fixed gap.
+	iv := spreadInterval(ctx, pings, p.interval)
+	deadline := receiveDeadline(ctx, time.Now(), pings, iv)
 	_ = conn.SetReadDeadline(deadline)
 
 	// conn.ReadFrom blocks the receiver goroutine until a reply arrives or
@@ -229,7 +231,7 @@ func (p *pingProbe) Measure(ctx context.Context, t probe.Target, pings int) (pro
 		receiveLoop(ctx, conn, isV6, token, pings, st)
 	}()
 
-	buildErr := sendEchoes(ctx, conn, dst, isV6, id, packetsize, token, pings, p.interval, st)
+	buildErr := sendEchoes(ctx, conn, dst, isV6, id, packetsize, token, pings, iv, st)
 
 	recvWG.Wait()
 	close(watchDone)
@@ -372,4 +374,45 @@ func receiveDeadline(ctx context.Context, start time.Time, pings int, interval t
 		fallback = time.Second
 	}
 	return lastSend.Add(fallback)
+}
+
+const pingMaxInterval = 500 * time.Millisecond // cap so a fast link's round stays short
+
+// spreadInterval returns the gap between successive echo sends, spreading the N sends
+// across the round budget (the scheduler's ctx deadline) instead of bursting them — a
+// tight burst inflates loss on a marginal link and spikes the instantaneous send rate to
+// a single destination. override (>0, from interval_ms) is honored but capped to fit the
+// budget. With no ctx deadline (uncommon), it keeps a modest fixed gap.
+func spreadInterval(ctx context.Context, pings int, override time.Duration) time.Duration {
+	if pings < 2 {
+		return 0
+	}
+	dl, ok := ctx.Deadline()
+	if !ok {
+		if override > 0 {
+			return override
+		}
+		return 50 * time.Millisecond
+	}
+	budget := time.Until(dl)
+	if budget <= 0 {
+		return 0
+	}
+	// Reserve a tail so a trailing reply still arrives before the read deadline; spread
+	// the sends across the rest of the budget.
+	tail := budget / 2
+	if tail > time.Second {
+		tail = time.Second
+	}
+	iv := pingMaxInterval
+	if override > 0 {
+		iv = override
+	}
+	if slot := (budget - tail) / time.Duration(pings); iv > slot {
+		iv = slot
+	}
+	if iv < 0 {
+		iv = 0
+	}
+	return iv
 }
