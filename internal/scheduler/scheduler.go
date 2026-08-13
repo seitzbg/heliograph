@@ -44,10 +44,28 @@ type Outcome struct {
 	Fingerprint string // opaque tag copied from the Job (empty for local hub jobs)
 }
 
+// roundBudget sizes a target's round timeout. A probe measures Pings samples
+// sequentially, so the budget is Timeout*Pings — each ping gets ~Timeout — rather
+// than a flat per-round Timeout, which would guillotine a slow-but-responding
+// endpoint's later pings into false loss. It is capped by Step so a round can never
+// overrun its own polling interval (and pile up). -timeout is therefore a per-ping
+// budget. Pings==1 (or Step<=0) preserves the old behavior.
+func roundBudget(j Job) time.Duration {
+	pings := j.Pings
+	if pings < 1 {
+		pings = 1
+	}
+	budget := j.Timeout * time.Duration(pings)
+	if j.Step > 0 && j.Step < budget {
+		budget = j.Step
+	}
+	return budget
+}
+
 // runOne measures a single job under its own timeout derived from ctx and derives
 // its Outcome. Shared by RunRound and the Dispatcher.
 func runOne(ctx context.Context, j Job) Outcome {
-	jctx, cancel := context.WithTimeout(ctx, j.Timeout)
+	jctx, cancel := context.WithTimeout(ctx, roundBudget(j))
 	defer cancel()
 	start := time.Now()
 	res, err := safeMeasure(jctx, j)
