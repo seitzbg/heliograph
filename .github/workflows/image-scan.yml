@@ -1,6 +1,7 @@
 # Scheduled re-scan of the published :main image, so a CVE newly disclosed against the pinned
-# (unchanged) base images is still caught between merges. Report-only (continue-on-error) — it
-# surfaces findings without failing on a pre-existing base-image CVE. Can also be run on demand.
+# (unchanged) base images is still caught between merges. BLOCKING: a fixable HIGH/CRITICAL reds the
+# scheduled run (which notifies) rather than being surfaced silently — suppress a known finding only
+# with a time-bound entry in .trivyignore.yaml. Can also be run on demand.
 name: image-scan
 
 on:
@@ -36,16 +37,16 @@ jobs:
           name: sbom-spdx-main
           path: sbom.spdx.json
           retention-days: 30
-      - name: Checkout (for .trivyignore)
+      - name: Checkout (for .trivyignore.yaml)
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
       # Blocking: a newly-disclosed fixable HIGH/CRITICAL against the pinned (unchanged) base reds the
       # scheduled run, which notifies — the whole point of re-scanning :main between merges. Suppress a
-      # known finding only with a time-bound entry in .trivyignore.
+      # known finding only with a time-bound entry in .trivyignore.yaml.
       - name: Trivy image scan
         run: |
           docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
-            -v "$PWD/.trivyignore:/.trivyignore:ro" -e TRIVY_IGNOREFILE=/.trivyignore \
+            -v "$PWD/.trivyignore.yaml:/.trivyignore.yaml:ro" -e TRIVY_IGNOREFILE=/.trivyignore.yaml \
             aquasec/trivy:0.58.1@sha256:ab70a02200597efa04748f210f793936eb647cbcdb0ea69cc30b226d6f5a22c7 image --scanners vuln --severity HIGH,CRITICAL \
             --ignore-unfixed --exit-code 1 "ghcr.io/${{ github.repository }}:main"

@@ -1,0 +1,19 @@
+# Time-bound allowlist for the BLOCKING finished-image Trivy scans (see .github/workflows/ci.yml
+# and .github/workflows/image-scan.yml). All three scans mount this file via TRIVY_IGNOREFILE, so an
+# entry here applies to the collector image (build-image), the bundled Caddy image (caddy-image), and
+# the scheduled :main re-scan alike.
+#
+# The scans fail CI on any fixable HIGH/CRITICAL. To accept a specific known finding, add it under
+# `vulnerabilities:` — ALWAYS with `expired_at:`, so a suppression can't linger silently. Trivy drops
+# the suppression once the date passes and the finding reds CI again. This is Trivy's documented
+# expiring-exception format (https://trivy.dev/docs/configuration/filtering/); the older flat
+# `.trivyignore` had no real expiry field, so a documented `exp:` date was silently ignored.
+#
+# Example (delete the leading '#'; keep an empty list otherwise):
+# vulnerabilities:
+#   - id: CVE-2025-12345
+#     statement: "Not reachable in our usage; upstream fix pending — revisit at expiry."
+#     expired_at: 2026-12-31
+#
+# Empty = no exceptions. Prefer bumping the base-image pin over adding an entry.
+vulnerabilities: []

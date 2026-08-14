@@ -57,6 +57,20 @@ All notable changes to **Heliograph** are recorded here. The format follows
   Compose example now do exactly that instead of carrying a `command:` list.
 
 ### Changed
+- **CI publishes the exact image it scanned (build-once-promote).** The collector image was built
+  twice — once in `build-image` (scanned + SBOM'd, read-only) and again in `publish-image` (pushed +
+  attested) — so the blocking Trivy scan gated a *different* build than the one released, and a cache
+  miss or moving `apk` repo could make them differ. `build-image` now builds **one** OCI archive,
+  scans and SBOMs that exact artifact, and hands it to `publish-image`, which pushes the same bytes
+  verbatim with `skopeo` (digest-preserving) and **asserts the published digest equals the scanned
+  digest** before attaching the provenance attestation. The read-only PR build / write-only non-PR
+  publish split is unchanged. (CODE_REVIEW M1.)
+- **Trivy vulnerability suppressions use `.trivyignore.yaml` with real expiry.** The allowlist was a
+  flat `.trivyignore` documenting a `CVE-… exp:<date>` syntax that Trivy silently ignores — a
+  suppression a maintainer added would never actually expire (or, for the pseudo-syntax, never apply).
+  It is now `.trivyignore.yaml` in Trivy's documented format (`vulnerabilities: [{id, statement,
+  expired_at}]`), wired via `--ignorefile` into all three scans (collector, Caddy, scheduled `:main`),
+  and a CI lint rejects any entry missing `expired_at` (no silent forever-suppressions). (CODE_REVIEW L4.)
 - **Hardened the email/SMTP alert notifier.** Each delivery attempt now runs under a bounded
   per-transaction deadline (dial + STARTTLS + auth + data, default 10s) instead of risking an
   indefinite stall on an unresponsive relay, and failed sends are retried with exponential
@@ -102,13 +116,13 @@ All notable changes to **Heliograph** are recorded here. The format follows
   tracked in `CODE_REVIEW.md`.
 - **Hardened the GitHub Actions supply chain.** Every action is pinned to a commit SHA (with a version
   comment; Renovate keeps them current), the syft/trivy scanner images are digest-pinned, and
-  `packages: write` was narrowed from the workflow default to the single publishing job (`build-image`)
+  `packages: write` was narrowed from the workflow default to the single publishing job (`publish-image`)
   — the default token is now read-only — and checkout no longer persists the `GITHUB_TOKEN` in
   `.git/config` (`persist-credentials: false`). The `ubuntu-latest` runner drift is documented as an
   accepted hosted-CI tradeoff. (CODE_REVIEW L1/M2/M3 + CodeRabbit.)
 - **Supply-chain release gates completed.** The finished-image Trivy scan is now **blocking** (the base
   is CVE-clean, so a newly-disclosed fixable HIGH/CRITICAL reds CI — suppress with a time-bound
-  `.trivyignore` entry, or bump the base pin). Publishing is split into a non-PR `publish-image` job
+  `.trivyignore.yaml` entry, or bump the base pin). Publishing is split into a non-PR `publish-image` job
   that holds the ONLY write scopes (`packages`/`attestations`/`id-token`), so PR builds can never
   publish; it attaches a signed **build-provenance attestation** (a verifiable source-ref → image-digest
   mapping) to the pushed image. CI also builds + scans the bundled **Caddy** reverse-proxy image
