@@ -196,19 +196,30 @@ func (srv *Server) agentResults(w http.ResponseWriter, r *http.Request) {
 		outcomes = append(outcomes, o)
 	}
 	if len(outcomes) > 0 {
-		inserted, err := ing.AddResults(r.Context(), outcomes)
+		// Persist + alert-evaluate the validated batch. When IngestCommit is wired (production
+		// federation), it does both atomically under the runtime reload lock and re-validates each
+		// outcome's target identity against the live assignment, so a reload landing between the
+		// snapshot validation above and the write can't store a round under a since-redefined target
+		// (CODE_REVIEW M4). Without it (pure API tests) fall back to a plain store write + OnIngest.
+		// Either way alerts run only over the NEWLY persisted rounds: a replayed round — an HTTP retry
+		// or the deliberate resend when a split batch's later half fails transiently — is deduplicated
+		// by the store and excluded, so it can't re-advance alert hysteresis into a false FIRING or a
+		// duplicate notification (CODE_REVIEW #4/replay). Each outcome carries its vantage (P2-5).
+		var err error
+		if srv.IngestCommit != nil {
+			_, err = srv.IngestCommit(r.Context(), outcomes)
+		} else {
+			var inserted []scheduler.Outcome
+			if inserted, err = ing.AddResults(r.Context(), outcomes); err == nil {
+				if srv.OnIngest != nil && len(inserted) > 0 {
+					srv.OnIngest(inserted)
+				}
+			}
+		}
 		if err != nil {
 			slog.Error("agent ingest: write failed", "vantage", v, "err", err)
 			http.Error(w, `{"error":"store unavailable"}`, http.StatusServiceUnavailable)
 			return
-		}
-		// Evaluate alerts only over the rounds that were NEWLY persisted, and only AFTER they
-		// are durably stored (P2-5). A replayed round — an HTTP retry, or the deliberate resend
-		// when a split batch's later half fails transiently — is deduplicated by the store and
-		// excluded here, so it can't re-advance alert hysteresis into a false FIRING or a
-		// duplicate notification (CODE_REVIEW #4/replay). Each outcome carries its vantage.
-		if srv.OnIngest != nil && len(inserted) > 0 {
-			srv.OnIngest(inserted)
 		}
 	}
 	if dropped > 0 {
