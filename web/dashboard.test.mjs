@@ -432,5 +432,157 @@ check('removeNodeAtPath: deletes a nested node, leaves siblings', () => {
   assert.ok('b' in out.targets.children.Web.children);
 });
 
+// --- Config-tree follow-ups (#37): add-into-folder, cross-folder move, keyboard nav/reorder ---
+// addNodeAtPath: the path-aware add. Top-level '' is exactly the old addTarget; a nested parent
+// path inserts INTO that folder; adding into a leaf turns it into a folder-with-target.
+check('addNodeAtPath: inserts into a nested folder, input untouched', () => {
+  const doc = cfgDoc();
+  const out = D.addNodeAtPath(doc, 'Web', 'c', { probe: 'HTTP', host: 'c' });
+  assert.deepEqual(Object.keys(out.targets.children.Web.children).sort(), ['a', 'b', 'c']);
+  assert.deepEqual(Object.keys(doc.targets.children.Web.children).sort(), ['a', 'b']); // input untouched
+});
+check('addNodeAtPath: top level equals addTarget; rejects dup in the same group', () => {
+  const doc = { targets: { children: { a: { probe: 'HTTP', host: 'a' } } } };
+  const out = D.addNodeAtPath(doc, '', 'b', { probe: 'HTTP', host: 'b' });
+  assert.deepEqual(Object.keys(out.targets.children).sort(), ['a', 'b']);
+  assert.throws(() => D.addNodeAtPath(out, '', 'a', {}), /already exists/);
+  assert.throws(() => D.addNodeAtPath(out, 'nope', 'x', {}), /no folder/); // parent must exist
+});
+check('addNodeAtPath: a same-named node in a DIFFERENT folder is allowed (path-scoped dup check)', () => {
+  const doc = cfgDoc(); // Web has {a,b}; there is a top-level DNS but no top-level "a"
+  const out = D.addNodeAtPath(doc, '', 'a', { probe: 'HTTP', host: 'topA' }); // top-level "a" is distinct from Web/a
+  assert.ok('a' in out.targets.children);
+  assert.ok('a' in out.targets.children.Web.children);
+});
+check('addNodeAtPath: adding into a leaf turns it into a folder-with-target', () => {
+  const doc = { targets: { children: { host: { probe: 'HTTP', host: 'h' } } } };
+  const out = D.addNodeAtPath(doc, 'host', 'sub', { probe: 'HTTP', host: 's' });
+  assert.equal(out.targets.children.host.probe, 'HTTP');              // still a target
+  assert.deepEqual(Object.keys(out.targets.children.host.children), ['sub']); // and now a folder
+  const t = D.cfgTree(out);
+  assert.equal(t[0].isFolder, true);
+});
+check('addNodeAtPath: "__proto__" is a real own property, not lost to the prototype', () => {
+  const out = D.addNodeAtPath({ targets: { children: {} } }, '', '__proto__', { probe: 'HTTP', host: 'x' });
+  assert.ok(D.listTargets(out).some((r) => r.name === '__proto__'));
+});
+
+// moveNode: relocate a subtree between parents, reweighting BOTH sibling sets so the
+// (weight,name) sort reproduces the requested order; also the same-parent reorder path.
+const mvDoc = () => ({ targets: { children: {
+  Web: { weight: 0, children: {
+    a: { probe: 'HTTP', host: 'a', weight: 0 },
+    b: { probe: 'HTTP', host: 'b', weight: 1 },
+    c: { probe: 'HTTP', host: 'c', weight: 2 },
+  } },
+  DNS: { weight: 1, children: {
+    x: { probe: 'DNS', host: 'x', weight: 0 },
+  } },
+} } });
+check('moveNode: cross-folder move relocates the subtree and reweights both groups', () => {
+  const doc = mvDoc();
+  const out = D.moveNode(doc, 'Web/b', 'DNS', 0); // Web/b -> DNS at index 0
+  const web = out.targets.children.Web.children;
+  const dns = out.targets.children.DNS.children;
+  assert.deepEqual(Object.keys(web).sort(), ['a', 'c']);            // b left Web
+  assert.ok('b' in dns);                                            // b now in DNS
+  // Source group re-sequenced 0..n-1 in its surviving (weight,name) order.
+  assert.deepEqual(D.cfgTree(out).find((n) => n.name === 'Web').children.map((n) => n.name), ['a', 'c']);
+  assert.equal(web.a.weight, 0); assert.equal(web.c.weight, 1);
+  // Destination group ordered with b spliced at index 0, resequenced.
+  assert.deepEqual(D.cfgTree(out).find((n) => n.name === 'DNS').children.map((n) => n.name), ['b', 'x']);
+  assert.equal(dns.b.weight, 0); assert.equal(dns.x.weight, 1);
+  assert.deepEqual(Object.keys(doc.targets.children.Web.children).sort(), ['a', 'b', 'c']); // input untouched
+});
+check('moveNode: append (index omitted / out of range) lands last in the destination', () => {
+  const out = D.moveNode(mvDoc(), 'Web/a', 'DNS'); // no index -> append
+  assert.deepEqual(D.cfgTree(out).find((n) => n.name === 'DNS').children.map((n) => n.name), ['x', 'a']);
+});
+check('moveNode: move up to the top level', () => {
+  const out = D.moveNode(mvDoc(), 'Web/c', '', 0); // Web/c -> top level, first
+  assert.deepEqual(D.cfgTree(out).map((n) => n.name), ['c', 'Web', 'DNS']);
+  assert.deepEqual(D.cfgTree(out).find((n) => n.name === 'Web').children.map((n) => n.name), ['a', 'b']);
+});
+check('moveNode: same-parent move is a pure reorder', () => {
+  const out = D.moveNode(mvDoc(), 'Web/c', 'Web', 0); // c to the front of Web
+  assert.deepEqual(D.cfgTree(out).find((n) => n.name === 'Web').children.map((n) => n.name), ['c', 'a', 'b']);
+});
+check('moveNode: GUARD — cannot move a folder into itself or its own descendant', () => {
+  assert.throws(() => D.moveNode(mvDoc(), 'Web', 'Web'), /own subtree/);       // into itself
+  assert.throws(() => D.moveNode(mvDoc(), 'Web', 'Web/a'), /own subtree/);     // into a descendant
+});
+check('moveNode: name collision in the destination throws (does not clobber)', () => {
+  const doc = { targets: { children: {
+    G1: { children: { dup: { probe: 'HTTP', host: '1' } } },
+    G2: { children: { dup: { probe: 'HTTP', host: '2' } } },
+  } } };
+  assert.throws(() => D.moveNode(doc, 'G1/dup', 'G2', 0), /already exists/);
+});
+check('moveNode: a stale srcPath is a harmless no-op', () => {
+  const out = D.moveNode(mvDoc(), 'Web/zzz', 'DNS', 0);
+  assert.deepEqual(D.cfgTree(out).find((n) => n.name === 'DNS').children.map((n) => n.name), ['x']);
+});
+
+// moveInList: the pure Alt+Up / Alt+Down reorder core (clamped, returns a new array).
+check('moveInList: shifts by delta, clamps at the ends, no-op returns equal order', () => {
+  assert.deepEqual(D.moveInList(['a', 'b', 'c'], 'a', 1), ['b', 'a', 'c']);   // down one
+  assert.deepEqual(D.moveInList(['a', 'b', 'c'], 'c', -1), ['a', 'c', 'b']);  // up one
+  assert.deepEqual(D.moveInList(['a', 'b', 'c'], 'a', -1), ['a', 'b', 'c']);  // clamp at top
+  assert.deepEqual(D.moveInList(['a', 'b', 'c'], 'c', 1), ['a', 'b', 'c']);   // clamp at bottom
+  assert.deepEqual(D.moveInList(['a', 'b', 'c'], 'zzz', 1), ['a', 'b', 'c']); // absent -> unchanged
+  const src = ['a', 'b']; D.moveInList(src, 'a', 1); assert.deepEqual(src, ['a', 'b']); // input untouched
+});
+
+// cfgVisibleRows: flatten a cfgTree into the arrow-navigable order, honouring collapsed folders.
+const vrDoc = () => ({ targets: { children: {
+  Web: { weight: 0, children: { a: { host: 'a', weight: 0 }, b: { host: 'b', weight: 1 } } },
+  DNS: { weight: 1, host: 'd' },
+} } });
+check('cfgVisibleRows: expanded folder exposes its children; collapsed hides them', () => {
+  const tree = D.cfgTree(vrDoc());
+  const all = D.cfgVisibleRows(tree, new Set());
+  assert.deepEqual(all.map((r) => r.path), ['Web', 'Web/a', 'Web/b', 'DNS']);
+  const web = all.find((r) => r.path === 'Web');
+  assert.equal(web.isFolder, true); assert.equal(web.expanded, true);
+  assert.equal(all.find((r) => r.path === 'Web/a').parentPath, 'Web');
+  const collapsed = D.cfgVisibleRows(tree, new Set(['Web']));
+  assert.deepEqual(collapsed.map((r) => r.path), ['Web', 'DNS']);   // Web's children hidden
+  assert.equal(collapsed.find((r) => r.path === 'Web').expanded, false);
+});
+
+// cfgTreeKey: the pure keyboard decision. Rows come from cfgVisibleRows.
+const vrRows = (collapsedPaths) => D.cfgVisibleRows(D.cfgTree(vrDoc()), new Set(collapsedPaths || []));
+check('cfgTreeKey: Up/Down move focus, clamped at the ends', () => {
+  const rows = vrRows();
+  assert.deepEqual(D.cfgTreeKey(rows, 'Web', 'ArrowDown', false), { type: 'focus', path: 'Web/a' });
+  assert.deepEqual(D.cfgTreeKey(rows, 'Web/a', 'ArrowUp', false), { type: 'focus', path: 'Web' });
+  assert.equal(D.cfgTreeKey(rows, 'Web', 'ArrowUp', false), null);      // already at top
+  assert.equal(D.cfgTreeKey(rows, 'DNS', 'ArrowDown', false), null);    // already at bottom
+  assert.deepEqual(D.cfgTreeKey(rows, 'Web/b', 'Home', false), { type: 'focus', path: 'Web' });
+  assert.deepEqual(D.cfgTreeKey(rows, 'Web', 'End', false), { type: 'focus', path: 'DNS' });
+});
+check('cfgTreeKey: null focus defaults to the first row', () => {
+  assert.deepEqual(D.cfgTreeKey(vrRows(), null, 'ArrowDown', false), { type: 'focus', path: 'Web/a' });
+});
+check('cfgTreeKey: Right expands a collapsed folder, then steps into it', () => {
+  assert.deepEqual(D.cfgTreeKey(vrRows(['Web']), 'Web', 'ArrowRight', false), { type: 'expand', path: 'Web' });
+  assert.deepEqual(D.cfgTreeKey(vrRows(), 'Web', 'ArrowRight', false), { type: 'focus', path: 'Web/a' }); // expanded -> first child
+  assert.equal(D.cfgTreeKey(vrRows(), 'Web/a', 'ArrowRight', false), null); // leaf: nothing
+  assert.equal(D.cfgTreeKey(vrRows(), 'DNS', 'ArrowRight', false), null);   // leaf: nothing
+});
+check('cfgTreeKey: Left collapses an expanded folder, else moves to the parent', () => {
+  assert.deepEqual(D.cfgTreeKey(vrRows(), 'Web', 'ArrowLeft', false), { type: 'collapse', path: 'Web' });
+  assert.deepEqual(D.cfgTreeKey(vrRows(), 'Web/a', 'ArrowLeft', false), { type: 'focus', path: 'Web' }); // leaf -> parent
+  assert.equal(D.cfgTreeKey(vrRows(['Web']), 'Web', 'ArrowLeft', false), null); // collapsed top-level folder, no parent
+});
+check('cfgTreeKey: Alt+Up / Alt+Down request a sibling reorder of the focused node', () => {
+  assert.deepEqual(D.cfgTreeKey(vrRows(), 'Web/b', 'ArrowUp', true), { type: 'reorder', parentPath: 'Web', name: 'b', delta: -1, path: 'Web/b' });
+  assert.deepEqual(D.cfgTreeKey(vrRows(), 'Web', 'ArrowDown', true), { type: 'reorder', parentPath: '', name: 'Web', delta: 1, path: 'Web' });
+});
+check('cfgTreeKey: ignores unrelated keys and empty rows', () => {
+  assert.equal(D.cfgTreeKey(vrRows(), 'Web', 'Enter', false), null);
+  assert.equal(D.cfgTreeKey([], 'Web', 'ArrowDown', false), null);
+});
+
 if (failed) { console.error(`\n${failed} test(s) failed`); process.exit(1); }
 console.log('\nall dashboard tests passed');

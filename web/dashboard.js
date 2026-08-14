@@ -280,12 +280,10 @@
   // the next add. defineProperty always creates a real own data property, __proto__
   // included, so listTargets/JSON.stringify see it like any other name (parked review
   // finding from Task 1).
-  function addTarget(doc, name, node) {
-    const d = cfgWithChildren(doc);
-    if (Object.prototype.hasOwnProperty.call(d.targets.children, name)) throw new Error('a target named "' + name + '" already exists');
-    Object.defineProperty(d.targets.children, name, { value: node, enumerable: true, writable: true, configurable: true });
-    return d;
-  }
+  // addTarget is the top-level add — a thin alias for addNodeAtPath at parentPath '' (defined
+  // in the config-tree helpers below), which keeps the defineProperty '__proto__' handling and
+  // the dup guard in one place.
+  function addTarget(doc, name, node) { return addNodeAtPath(doc, '', name, node); }
   function editTarget(doc, name, node) {
     const d = cfgWithChildren(doc);
     if (!Object.prototype.hasOwnProperty.call(d.targets.children, name)) throw new Error('no target named "' + name + '"');
@@ -369,6 +367,138 @@
     if (loc) delete loc.parent[loc.key];
     return d;
   }
+  // cfgEnsureChildrenAt is like cfgChildrenAt but CREATES the `children` map on any existing
+  // node along `parentPath` that lacks one — so adding/moving a node INTO a leaf turns that
+  // leaf into a folder-with-target (SmokePing allows a node to be both). Still returns null if
+  // an intermediate segment names a node that doesn't exist (the parent must already be there).
+  function cfgEnsureChildrenAt(d, parentPath) {
+    let ch = (d.targets = d.targets || {}, d.targets.children = d.targets.children || {});
+    if (!parentPath) return ch;
+    for (const seg of parentPath.split('/')) {
+      if (!Object.prototype.hasOwnProperty.call(ch, seg)) return null;
+      const node = ch[seg];
+      if (!node.children) node.children = {};
+      ch = node.children;
+    }
+    return ch;
+  }
+  // addNodeAtPath is the path-aware add: it inserts `node` under `parentPath` ('' = top level,
+  // the plain addTarget case). Throws on a duplicate name in that group, or if `parentPath`
+  // names a node that doesn't exist. Like addTarget it stores via defineProperty so a name of
+  // '__proto__' round-trips as a real own property instead of vanishing into the prototype.
+  function addNodeAtPath(doc, parentPath, name, node) {
+    const d = cfgWithChildren(doc);
+    const ch = cfgEnsureChildrenAt(d, parentPath || '');
+    if (!ch) throw new Error('no folder at "' + parentPath + '"');
+    if (Object.prototype.hasOwnProperty.call(ch, name)) {
+      throw new Error('a target named "' + name + '" already exists' + (parentPath ? ' in "' + parentPath + '"' : ''));
+    }
+    Object.defineProperty(ch, name, { value: node, enumerable: true, writable: true, configurable: true });
+    return d;
+  }
+  // moveNode relocates the node subtree at `srcPath` into `destParentPath` ('' = top level) at
+  // position `index` among that group, and REWEIGHTS both sibling sets to sequential weights so
+  // the (weight,name) sort in cfgTree reproduces the new order exactly. A same-parent move is a
+  // pure reorder (the drag/keyboard reorder path). Throws when the destination already holds a
+  // node of the same name (a real collision), or — the guard the tree DnD relies on — when the
+  // destination is the node itself or one of its own descendants (which would orphan the subtree
+  // and form a cycle). A `srcPath` that no longer resolves is a no-op (stale UI), returning the
+  // clone unchanged. `index` is clamped into range; null/omitted appends.
+  function moveNode(doc, srcPath, destParentPath, index) {
+    const d = cfgClone(doc);
+    const dest = destParentPath || '';
+    if (dest === srcPath || dest.startsWith(srcPath + '/')) {
+      throw new Error('cannot move "' + srcPath + '" into its own subtree');
+    }
+    const src = cfgNodeAt(d, srcPath);
+    if (!src || !Object.prototype.hasOwnProperty.call(src.parent, src.key)) return d;
+    const name = src.key;
+    const node = src.parent[name];
+    const destCh = cfgEnsureChildrenAt(d, dest);
+    if (!destCh) throw new Error('no folder at "' + dest + '"');
+    const srcParent = src.parent;
+    const sameParent = destCh === srcParent; // same children map => this is a reorder
+    if (!sameParent && Object.prototype.hasOwnProperty.call(destCh, name)) {
+      throw new Error('a target named "' + name + '" already exists' + (dest ? ' in "' + dest + '"' : ' at the top level'));
+    }
+    delete srcParent[name]; // detach from the source group (== dest group when sameParent)
+    // With the node removed, build the destination order and splice it into the requested slot.
+    const destOrder = cfgSortSiblings(destCh);
+    const at = Math.max(0, Math.min(index == null ? destOrder.length : index, destOrder.length));
+    destOrder.splice(at, 0, name);
+    Object.defineProperty(destCh, name, { value: node, enumerable: true, writable: true, configurable: true });
+    const dw = reweightSiblings(destOrder);
+    for (const n of destOrder) if (destCh[n]) destCh[n].weight = dw[n];
+    if (!sameParent) { // re-sequence what's left of the source group too
+      const srcOrder = cfgSortSiblings(srcParent);
+      const sw = reweightSiblings(srcOrder);
+      for (const n of srcOrder) if (srcParent[n]) srcParent[n].weight = sw[n];
+    }
+    return d;
+  }
+  // moveInList returns a NEW array with `name` shifted by `delta` slots (clamped to the ends) —
+  // the pure core of the Alt+Up / Alt+Down keyboard reorder. The caller feeds the result to
+  // reorderSiblings. A `name` not in the list, or a no-op shift, returns an equal-order copy.
+  function moveInList(names, name, delta) {
+    const out = (names || []).slice();
+    const i = out.indexOf(name);
+    if (i < 0) return out;
+    const j = Math.max(0, Math.min(i + (delta || 0), out.length - 1));
+    if (i === j) return out;
+    out.splice(i, 1); out.splice(j, 0, name);
+    return out;
+  }
+  // cfgVisibleRows flattens a cfgTree into the ordered list of rows a user can actually see
+  // and arrow between, honouring collapsed folders (`collapsed` is a Set of collapsed paths, or
+  // anything with a .has()). Each row carries what the keyboard decision needs: whether it is a
+  // folder, whether it is currently expanded, and its parent path. Pure — the DOM keyboard
+  // handler builds its Set from local collapse state and passes it straight through.
+  function cfgVisibleRows(tree, collapsed) {
+    const has = (p) => !!(collapsed && collapsed.has && collapsed.has(p));
+    const out = [];
+    (function walk(nodes) {
+      for (const n of nodes) {
+        const isCollapsed = n.isFolder && has(n.path);
+        out.push({
+          path: n.path, name: n.name, isFolder: n.isFolder,
+          parentPath: n.path.split('/').slice(0, -1).join('/'),
+          expanded: n.isFolder ? !isCollapsed : null,
+        });
+        if (n.isFolder && !isCollapsed) walk(n.children);
+      }
+    })(tree || []);
+    return out;
+  }
+  // cfgTreeKey is the pure WAI-ARIA tree keyboard decision: given the visible rows, the focused
+  // path, the pressed key and whether Alt is held, it returns the action the DOM layer should
+  // apply — or null to ignore the key. Up/Down move focus; Home/End jump to the ends; Right
+  // expands a collapsed folder then steps into it, Left collapses an expanded folder then steps
+  // to the parent (the standard tree pattern); Alt+Up / Alt+Down reorder the focused node among
+  // its siblings. Keeping every branch here (not in the handler) is what keeps the DOM thin.
+  function cfgTreeKey(rows, focusPath, key, alt) {
+    if (!rows || !rows.length) return null;
+    let i = rows.findIndex((r) => r.path === focusPath);
+    if (i < 0) i = 0;
+    const row = rows[i];
+    const parentOf = (p) => p.split('/').slice(0, -1).join('/');
+    if (alt && (key === 'ArrowUp' || key === 'ArrowDown')) {
+      return { type: 'reorder', parentPath: parentOf(row.path), name: row.path.split('/').pop(), delta: key === 'ArrowUp' ? -1 : 1, path: row.path };
+    }
+    switch (key) {
+      case 'ArrowDown': return i < rows.length - 1 ? { type: 'focus', path: rows[i + 1].path } : null;
+      case 'ArrowUp':   return i > 0 ? { type: 'focus', path: rows[i - 1].path } : null;
+      case 'Home':      return { type: 'focus', path: rows[0].path };
+      case 'End':       return { type: 'focus', path: rows[rows.length - 1].path };
+      case 'ArrowRight':
+        if (row.isFolder && row.expanded === false) return { type: 'expand', path: row.path };
+        if (row.isFolder && row.expanded === true && i < rows.length - 1 && rows[i + 1].path.startsWith(row.path + '/')) return { type: 'focus', path: rows[i + 1].path };
+        return null;
+      case 'ArrowLeft':
+        if (row.isFolder && row.expanded === true) return { type: 'collapse', path: row.path };
+        { const pp = parentOf(row.path); return pp ? { type: 'focus', path: pp } : null; }
+      default: return null;
+    }
+  }
 
   const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   // labelHTML renders a target's graph-title label: the title (falling back to the target
@@ -435,7 +565,7 @@
     ].join('\n');
   }
 
-  window.Dash = { RANGES, RANGE_ORDER, parseRoute, mergeSeries, gridSince, fetchJSON, zoomResolution, pixelToTime, sharedYMax, buildTree, underPath, targetStatus, pickSeries, vantageList, orderVantages, defaultFocus, keepFocus, vantageColorVar, adminMode, relTime, listTargets, addTarget, editTarget, removeTarget, buildTargetNode, labelHTML, collectingNote, agentYaml, agentCompose, cfgTree, reweightSiblings, reorderSiblings, editNodeAtPath, removeNodeAtPath };
+  window.Dash = { RANGES, RANGE_ORDER, parseRoute, mergeSeries, gridSince, fetchJSON, zoomResolution, pixelToTime, sharedYMax, buildTree, underPath, targetStatus, pickSeries, vantageList, orderVantages, defaultFocus, keepFocus, vantageColorVar, adminMode, relTime, listTargets, addTarget, editTarget, removeTarget, buildTargetNode, labelHTML, collectingNote, agentYaml, agentCompose, cfgTree, reweightSiblings, reorderSiblings, editNodeAtPath, removeNodeAtPath, addNodeAtPath, moveNode, moveInList, cfgVisibleRows, cfgTreeKey };
 
   // ---------------------------------------------------------------- init (DOM) --
   function init() {
@@ -1237,6 +1367,16 @@
     // The full node path being edited (e.g. "Web/b"), set by openCfgModal('edit', path) and
     // read back on submit — the Name field only ever shows/edits the leaf segment.
     let cfgEditPath = null;
+    // The destination parent path for an ADD ('' = top level); set by openCfgModal('add', parent)
+    // so "+ Add target" adds at the top and a folder's "+" adds INTO that folder (Dash.addNodeAtPath).
+    let cfgAddParent = '';
+    // Config-tree interaction state (the WAI-ARIA tree pattern layered on #cfgTree):
+    //   cfgCollapsed — set of collapsed folder paths (Left/Right + the twist chevron toggle it).
+    //   cfgFocusPath — the single roving-tabindex / aria-selected node; Up/Down/Home/End move it.
+    // Both are pure view state; every structural decision is delegated to the tested Dash.* helpers
+    // (cfgVisibleRows / cfgTreeKey / moveInList / moveNode), keeping this DOM layer thin.
+    const cfgCollapsed = new Set();
+    let cfgFocusPath = null;
     function cShow(id) {
       for (const s of ['cfgDisabled', 'cfgLogin', 'cfgList', 'cfgError']) $(s).classList.toggle('hidden', s !== id);
     }
@@ -1252,11 +1392,15 @@
       };
       return walk(Dash.cfgTree(cfg.doc));
     }
-    // cfgRowHtml renders one node of Dash.cfgTree(cfg.doc) recursively: a drag handle, the
-    // name (folders get a trailing "/"), a probe/host meta line for leaves, and path-aware
-    // Edit/Remove buttons. `--d` drives the CSS indent; folders nest their kids in `.kids`.
+    // cfgRowHtml renders one node of Dash.cfgTree(cfg.doc) recursively as a WAI-ARIA treeitem:
+    // a collapse twist (folders) + drag handle, the name (folders get a trailing "/"), a
+    // probe/host meta line for leaves, a folder-only "+" (add INTO this folder), and path-aware
+    // Edit/Remove. `--d` drives the CSS indent; a folder nests its kids in a role="group" .kids
+    // box, omitted when collapsed. Exactly the cfgFocusPath row gets tabindex 0 + aria-selected
+    // (roving tabindex); folders carry aria-expanded reflecting cfgCollapsed.
     function cfgRowHtml(n, depth) {
       const d = depth || 0;
+      const collapsed = n.isFolder && cfgCollapsed.has(n.path);
       let meta = '';
       if (!n.isFolder) {
         const nd = n.node;
@@ -1264,11 +1408,21 @@
         const vantStr = (nd.vantages && nd.vantages.length) ? '@' + nd.vantages.join(',') : '';
         meta = esc([nd.probe || '', nd.host || '', paramsStr, vantStr].filter(Boolean).join(' · '));
       }
-      const kids = n.isFolder ? '<div class="kids">' + n.children.map((c) => cfgRowHtml(c, d + 1)).join('') + '</div>' : '';
-      return '<div class="crow' + (n.isFolder ? ' folder' : '') + '" draggable="true" data-path="' + esc(n.path) + '" style="--d:' + d + '" role="treeitem">' +
+      const kids = (n.isFolder && !collapsed)
+        ? '<div class="kids" role="group">' + n.children.map((c) => cfgRowHtml(c, d + 1)).join('') + '</div>' : '';
+      const roving = n.path === cfgFocusPath ? '0' : '-1';
+      const selected = n.path === cfgFocusPath ? 'true' : 'false';
+      const expanded = n.isFolder ? ' aria-expanded="' + (!collapsed) + '"' : '';
+      const twist = n.isFolder ? '<span class="ctwist" data-twist="1" aria-hidden="true">▾</span>' : '<span class="ctwist" aria-hidden="true"></span>';
+      const addChild = n.isFolder
+        ? '<button type="button" class="vadmin-btn cfg-addchild" data-add-child="' + esc(n.path) + '" aria-label="Add a target into ' + esc(n.path) + '" title="Add into this folder">+</button>' : '';
+      return '<div class="crow' + (n.isFolder ? ' folder' : '') + (collapsed ? ' collapsed' : '') + '" draggable="true" data-path="' + esc(n.path) +
+        '" style="--d:' + d + '" role="treeitem" tabindex="' + roving + '" aria-selected="' + selected + '"' + expanded + '>' +
+        twist +
         '<span class="chandle" aria-hidden="true">⠿</span>' +
         '<span class="cname">' + esc(n.name) + (n.isFolder ? '/' : '') + '</span>' +
         '<span class="cmeta">' + meta + '</span>' +
+        addChild +
         '<button type="button" class="vadmin-btn" data-edit="' + esc(n.path) + '">Edit</button>' +
         '<button type="button" class="vadmin-btn" data-remove="' + esc(n.path) + '">Remove</button>' +
       '</div>' + kids;
@@ -1276,8 +1430,39 @@
     function renderCfgTree() {
       const tree = Dash.cfgTree(cfg.doc);
       $('cfgVersion').textContent = 'v' + cfg.version;
-      if (!tree.length) { $('cfgTree').innerHTML = '<div class="tree-empty">No DB targets yet — add one.</div>'; return; }
+      if (!tree.length) { cfgFocusPath = null; $('cfgTree').innerHTML = '<div class="tree-empty">No DB targets yet — add one.</div>'; return; }
+      // Keep the roving-focus anchor on a still-visible row; a save/collapse can retire the old
+      // one (removed node, or hidden under a now-collapsed parent) — fall back to the first row.
+      const rows = Dash.cfgVisibleRows(tree, cfgCollapsed);
+      const visible = new Set(rows.map((r) => r.path));
+      if (!cfgFocusPath || !visible.has(cfgFocusPath)) cfgFocusPath = rows[0].path;
       $('cfgTree').innerHTML = tree.map((n) => cfgRowHtml(n, 0)).join('');
+    }
+    // parentOf / cfgSiblingNames: the (weight,name)-sorted sibling order of a parent path
+    // ('' = top level), read fresh from Dash.cfgTree each time — shared by keyboard reorder,
+    // the twist toggle, and drag-and-drop below.
+    const cfgParentOf = (p) => p.split('/').slice(0, -1).join('/');
+    function cfgSiblingNames(parent) {
+      const top = Dash.cfgTree(cfg.doc);
+      if (!parent) return top.map((n) => n.name);
+      const grp = findCfgNode(parent);
+      return grp ? grp.children.map((n) => n.name) : [];
+    }
+    // applyRoving updates the roving tabindex + aria-selected in place (no re-render) — used
+    // when focus moves between existing rows (Up/Down, click) without a structural change.
+    function applyRoving(path) {
+      for (const el of $('cfgTree').querySelectorAll('.crow')) {
+        const on = el.getAttribute('data-path') === path;
+        el.tabIndex = on ? 0 : -1;
+        el.setAttribute('aria-selected', on ? 'true' : 'false');
+      }
+    }
+    // focusCfgRow moves DOM focus (and thus roving state, via focusin) to a row by path.
+    function focusCfgRow(path) {
+      cfgFocusPath = path;
+      for (const el of $('cfgTree').querySelectorAll('.crow')) {
+        if (el.getAttribute('data-path') === path) { el.focus(); return; }
+      }
     }
     async function renderConfig(opts) {
       const afterLogin = !!(opts && opts.afterLogin);
@@ -1340,12 +1525,17 @@
       row.querySelector('.cfg-pdel').addEventListener('click', () => row.remove());
       return row;
     }
+    // openCfgModal('edit', fullPath) prefills the node at that path; openCfgModal('add', parent)
+    // opens a blank form whose Save inserts a NEW child under `parent` ('' / omitted = top level).
     async function openCfgModal(mode, path) {
       const kinds = await ensureProbeKinds();
       $('cfgMode').value = mode;
       cfgEditPath = mode === 'edit' ? path : null;
+      cfgAddParent = mode === 'add' ? (path || '') : '';
       const leaf = mode === 'edit' ? path.split('/').pop() : '';
-      $('cfgModalTitle').textContent = mode === 'edit' ? ('Edit ' + path) : 'Add target';
+      $('cfgModalTitle').textContent = mode === 'edit'
+        ? ('Edit ' + path)
+        : (cfgAddParent ? ('Add target into ' + cfgAddParent) : 'Add target');
       $('cfgFormErr').textContent = '';
       const found = mode === 'edit' ? findCfgNode(path) : null;
       const node = found ? found.node : {};
@@ -1363,7 +1553,7 @@
       $('cfgModal').classList.remove('hidden');
       $('cfgName').disabled ? $('cfgProbe').focus() : $('cfgName').focus();
     }
-    function closeCfgModal() { $('cfgModal').classList.add('hidden'); $('cfgFormErr').textContent = ''; cfgEditPath = null; }
+    function closeCfgModal() { $('cfgModal').classList.add('hidden'); $('cfgFormErr').textContent = ''; cfgEditPath = null; cfgAddParent = ''; }
     function readCfgForm() {
       const params = {};
       for (const row of $('cfgParams').querySelectorAll('.vadmin-row')) {
@@ -1431,12 +1621,23 @@
       if (!isEdit && name.includes('/')) { $('cfgFormErr').textContent = 'Names can\'t contain "/".'; return; }
       let mutated;
       try {
-        // Edit is path-aware (any depth); Add stays top-level only, unchanged.
-        mutated = isEdit ? Dash.editNodeAtPath(cfg.doc, cfgEditPath, node) : Dash.addTarget(cfg.doc, name, node);
+        // Edit is path-aware (any depth); Add inserts under cfgAddParent ('' = top level, else the
+        // folder whose "+" opened the modal) via the path-aware Dash.addNodeAtPath.
+        mutated = isEdit ? Dash.editNodeAtPath(cfg.doc, cfgEditPath, node) : Dash.addNodeAtPath(cfg.doc, cfgAddParent, name, node);
       } catch (err) { $('cfgFormErr').textContent = err.message; return; }
       saveDoc(mutated, closeCfgModal);
     });
     $('cfgTree').addEventListener('click', (e) => {
+      // Twist chevron toggles a folder's collapse (mouse counterpart of Left/Right); keep focus
+      // on that folder so the roving anchor stays put.
+      const tw = e.target.closest('[data-twist]');
+      if (tw) {
+        const row = e.target.closest('.crow'); const path = row && row.getAttribute('data-path');
+        if (path) { cfgCollapsed.has(path) ? cfgCollapsed.delete(path) : cfgCollapsed.add(path); renderCfgTree(); focusCfgRow(path); }
+        return;
+      }
+      const ac = e.target.closest('[data-add-child]');
+      if (ac) { openCfgModal('add', ac.getAttribute('data-add-child')); return; }
       const ed = e.target.closest('[data-edit]');
       if (ed) { openCfgModal('edit', ed.getAttribute('data-edit')); return; }
       const rm = e.target.closest('[data-remove]');
@@ -1450,56 +1651,108 @@
         saveDoc(Dash.removeNodeAtPath(cfg.doc, path));
       }
     });
-    // Drag-to-reorder: HTML5 DnD on #cfgTree, scoped to one sibling group at a time (same
-    // parent path). Dropping onto a row from a different parent is a no-op — cross-folder
-    // move is a follow-up. Reorder writes sequential weights via Dash.reorderSiblings, then
-    // saves through the same optimistic-version saveDoc PUT used everywhere else.
+    // Roving focus follows real DOM focus: focusing a treeitem (Tab in, click, .focus()) makes
+    // it the single tabbable + aria-selected row. Only .crow itself counts — focusing an inner
+    // button must not move the tree's selection.
+    $('cfgTree').addEventListener('focusin', (e) => {
+      const t = e.target;
+      if (!t.classList || !t.classList.contains('crow')) return;
+      cfgFocusPath = t.getAttribute('data-path');
+      applyRoving(cfgFocusPath);
+    });
+    // Keyboard (WAI-ARIA tree): every decision comes from the pure Dash.cfgTreeKey over the
+    // pure Dash.cfgVisibleRows; this handler only APPLIES the returned action (move focus,
+    // toggle collapse, or reorder siblings via moveInList + reorderSiblings, keeping focus on
+    // the moved node). Alt+Up / Alt+Down is the documented reorder chord.
+    $('cfgTree').addEventListener('keydown', (e) => {
+      const NAVKEYS = ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End'];
+      if (!NAVKEYS.includes(e.key)) return;
+      const row = e.target.closest && e.target.closest('.crow');
+      if (!row || !row.classList.contains('crow')) return; // ignore keys while focus is on a button
+      const rows = Dash.cfgVisibleRows(Dash.cfgTree(cfg.doc), cfgCollapsed);
+      const action = Dash.cfgTreeKey(rows, row.getAttribute('data-path'), e.key, e.altKey);
+      if (!action) return;
+      e.preventDefault();
+      if (action.type === 'focus') { focusCfgRow(action.path); return; }
+      if (action.type === 'expand') { cfgCollapsed.delete(action.path); renderCfgTree(); focusCfgRow(action.path); return; }
+      if (action.type === 'collapse') { cfgCollapsed.add(action.path); renderCfgTree(); focusCfgRow(action.path); return; }
+      if (action.type === 'reorder') {
+        const order = cfgSiblingNames(action.parentPath);
+        const next = Dash.moveInList(order, action.name, action.delta);
+        if (JSON.stringify(next) === JSON.stringify(order)) { focusCfgRow(action.path); return; } // clamped at an end
+        cfgFocusPath = action.path; // re-establish focus on the moved node after the save re-renders
+        saveDoc(Dash.reorderSiblings(cfg.doc, action.parentPath, next), () => focusCfgRow(action.path));
+      }
+    });
+    // Drag-and-drop on #cfgTree — now cross-folder capable. dropPlan (pure-ish glue over the
+    // tested Dash.cfgTree ordering) turns a (drag, target-row) pair into a destination parent +
+    // index, then the mutation itself goes through the tested Dash.moveNode, which reweights
+    // BOTH affected sibling groups and refuses to drop a folder into its own subtree. Rules:
+    //   • target in the SAME group  -> reorder before the target row (the original behaviour,
+    //     now also covering folder targets at that level),
+    //   • target is a folder in ANOTHER group -> move INTO it (appended),
+    //   • target is a leaf in another group    -> move into the leaf's parent, before the leaf.
+    // Saves through the same optimistic-version saveDoc PUT used everywhere else.
     (function cfgDnd() {
       const host = $('cfgTree');
-      let dragPath = null, dragParent = null;
-      const parentOf = (p) => p.split('/').slice(0, -1).join('/');
-      // siblingNames returns the current (weight,name)-sorted names of `parent`'s children
-      // ('' = top level), read fresh from Dash.cfgTree(cfg.doc) each time.
-      const siblingNames = (parent) => {
-        const top = Dash.cfgTree(cfg.doc);
-        if (!parent) return top.map((n) => n.name);
-        const find = (nodes) => {
-          for (const n of nodes) {
-            if (n.path === parent) return n;
-            if (n.children.length) { const f = find(n.children); if (f) return f; }
+      let dragPath = null;
+      function dropPlan(from, targetPath, targetIsFolder) {
+        if (!from || targetPath === from) return null;
+        const dragParent = cfgParentOf(from);
+        const dragName = from.split('/').pop();
+        let destParent, kind;
+        if (cfgParentOf(targetPath) === dragParent) { destParent = dragParent; kind = 'before'; }
+        else if (targetIsFolder) { destParent = targetPath; kind = 'into'; }
+        else { destParent = cfgParentOf(targetPath); kind = 'before'; }
+        // Descendant/self guard (mirrors Dash.moveNode) so an invalid drop shows no drop cue.
+        if (destParent === from || destParent.startsWith(from + '/')) return null;
+        let index, noop = false;
+        if (kind === 'into') {
+          index = cfgSiblingNames(destParent).length; // append into the folder
+        } else {
+          let order = cfgSiblingNames(destParent);
+          if (destParent === dragParent) order = order.filter((n) => n !== dragName);
+          const ti = order.indexOf(targetPath.split('/').pop());
+          index = ti < 0 ? order.length : ti;
+          if (destParent === dragParent) { // detect a drop that changes nothing
+            const after = order.slice(); after.splice(index, 0, dragName);
+            noop = JSON.stringify(after) === JSON.stringify(cfgSiblingNames(destParent));
           }
-          return null;
-        };
-        const grp = find(top);
-        return grp ? grp.children.map((n) => n.name) : [];
-      };
-      const clearDropMarks = () => { for (const el of host.querySelectorAll('.cfg-drop')) el.classList.remove('cfg-drop'); };
+        }
+        const newPath = destParent ? destParent + '/' + dragName : dragName;
+        return { destParent, index, kind, newPath, noop };
+      }
+      const clearDropMarks = () => { for (const el of host.querySelectorAll('.cfg-drop, .cfg-drop-into')) el.classList.remove('cfg-drop', 'cfg-drop-into'); };
       host.addEventListener('dragstart', (e) => {
         const row = e.target.closest('.crow'); if (!row) return;
-        dragPath = row.getAttribute('data-path'); dragParent = parentOf(dragPath);
+        dragPath = row.getAttribute('data-path');
         e.dataTransfer.effectAllowed = 'move';
         // Firefox refuses to start a drag at all without data on the DataTransfer (Chromium/
-        // WebKit don't require it) — the payload itself is unused; dragPath/dragParent above
-        // already carry what drop needs.
+        // WebKit don't require it) — the payload itself is unused; dragPath above carries it.
         e.dataTransfer.setData('text/plain', dragPath);
       });
       host.addEventListener('dragover', (e) => {
         const row = e.target.closest('.crow'); if (!row || dragPath == null) return;
-        if (parentOf(row.getAttribute('data-path')) === dragParent) { e.preventDefault(); row.classList.add('cfg-drop'); }
+        const plan = dropPlan(dragPath, row.getAttribute('data-path'), row.classList.contains('folder'));
+        if (!plan) return;
+        e.preventDefault();
+        clearDropMarks();
+        row.classList.add(plan.kind === 'into' ? 'cfg-drop-into' : 'cfg-drop');
       });
-      host.addEventListener('dragleave', (e) => { const row = e.target.closest('.crow'); if (row) row.classList.remove('cfg-drop'); });
+      host.addEventListener('dragleave', (e) => { const row = e.target.closest('.crow'); if (row) row.classList.remove('cfg-drop', 'cfg-drop-into'); });
       host.addEventListener('drop', (e) => {
-        const row = e.target.closest('.crow'); if (!row || dragPath == null) { dragPath = null; return; }
-        e.preventDefault(); clearDropMarks();
-        const targetPath = row.getAttribute('data-path');
-        if (parentOf(targetPath) !== dragParent || targetPath === dragPath) { dragPath = null; return; }
-        const dragName = dragPath.split('/').pop(), targetName = targetPath.split('/').pop();
-        const before = siblingNames(dragParent);
-        const order = before.slice();
-        order.splice(order.indexOf(dragName), 1);
-        order.splice(order.indexOf(targetName), 0, dragName);
-        const parent = dragParent; dragPath = null;
-        if (JSON.stringify(order) !== JSON.stringify(before)) saveDoc(Dash.reorderSiblings(cfg.doc, parent, order));
+        const row = e.target.closest('.crow'); const from = dragPath; dragPath = null;
+        clearDropMarks();
+        if (!row || from == null) return;
+        e.preventDefault();
+        const plan = dropPlan(from, row.getAttribute('data-path'), row.classList.contains('folder'));
+        if (!plan || plan.noop) return;
+        let mutated;
+        try { mutated = Dash.moveNode(cfg.doc, from, plan.destParent, plan.index); }
+        catch (err) { window.alert(err.message); return; }
+        if (plan.kind === 'into') cfgCollapsed.delete(plan.destParent); // reveal the node we just moved in
+        cfgFocusPath = plan.newPath; // the node's path changes on a cross-folder move
+        saveDoc(mutated, () => focusCfgRow(plan.newPath));
       });
       host.addEventListener('dragend', () => { dragPath = null; clearDropMarks(); });
     })();
