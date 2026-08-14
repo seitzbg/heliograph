@@ -209,12 +209,17 @@ func (p *pingProbe) Measure(ctx context.Context, t probe.Target, pings int) (pro
 	// ping still ends the round promptly instead of waiting out the whole budget. Without
 	// that per-reply bound, a single lost ping (which can never let `seen` reach pings)
 	// froze the round for the entire budget.
-	// Spread the N sends across the round budget instead of bursting at a fixed gap.
-	iv := spreadInterval(ctx, pings, p.interval)
+	// The effective per-reply timeout (timeout_ms, the fping -t analog) is both the tail
+	// spreadInterval reserves before the deadline AND the window replyDeadline applies
+	// after the last send — compute it once, up front, so the send schedule reserves the
+	// SAME duration the last echo will be given to answer.
 	reply := p.replyTimeout
 	if reply <= 0 {
 		reply = pingReplyTimeout
 	}
+	// Spread the N sends across the round budget instead of bursting at a fixed gap,
+	// reserving the reply window so the last echo keeps its full timeout.
+	iv := spreadInterval(ctx, pings, p.interval, reply)
 	_ = conn.SetReadDeadline(sendPhaseDeadline(ctx, time.Now(), pings, iv, reply))
 
 	// conn.ReadFrom blocks the receiver goroutine until a reply arrives or
@@ -435,8 +440,10 @@ const pingReplyTimeout = time.Second
 // across the round budget (the scheduler's ctx deadline) instead of bursting them — a
 // tight burst inflates loss on a marginal link and spikes the instantaneous send rate to
 // a single destination. override (>0, from interval_ms) is honored but capped to fit the
-// budget. With no ctx deadline (uncommon), it keeps a modest fixed gap.
-func spreadInterval(ctx context.Context, pings int, override time.Duration) time.Duration {
+// budget. replyTail is the effective per-reply timeout (timeout_ms): it is held back from
+// the budget so the last echo keeps its full configured window before the read deadline
+// (capped at half the budget). With no ctx deadline (uncommon), it keeps a modest fixed gap.
+func spreadInterval(ctx context.Context, pings int, override, replyTail time.Duration) time.Duration {
 	if pings < 2 {
 		return 0
 	}
@@ -452,10 +459,15 @@ func spreadInterval(ctx context.Context, pings int, override time.Duration) time
 		return 0
 	}
 	// Reserve a tail so a trailing reply still arrives before the read deadline; spread
-	// the sends across the rest of the budget.
+	// the sends across the rest of the budget. The tail is the effective per-reply timeout
+	// (replyTail, from timeout_ms) so the last echo keeps its FULL configured window —
+	// reserving a hardcoded 1s here would let a timeout_ms > 1s be silently clamped once
+	// the send schedule pushed the last echo too late. Capped at half the round budget so
+	// a short step still leaves room for the sends themselves (default replyTail is 1s, so
+	// this keeps the historical behavior for the common case).
 	tail := budget / 2
-	if tail > time.Second {
-		tail = time.Second
+	if tail > replyTail {
+		tail = replyTail
 	}
 	iv := pingMaxInterval
 	if override > 0 {
