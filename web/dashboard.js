@@ -312,6 +312,64 @@
     return node;
   }
 
+  // --- Config-tree helpers (pure; the Config tab's read-modify-write tree core) ---
+  function cfgSortSiblings(ch) {
+    return Object.keys(ch).sort((a, b) => {
+      const wa = (ch[a] && ch[a].weight) || 0, wb = (ch[b] && ch[b].weight) || 0;
+      return wa !== wb ? wa - wb : (a < b ? -1 : a > b ? 1 : 0);
+    });
+  }
+  function cfgTree(doc) {
+    const walk = (ch, prefix) => cfgSortSiblings(ch).map((name) => {
+      const node = ch[name] || {};
+      const path = prefix ? prefix + '/' + name : name;
+      const kids = node.children && Object.keys(node.children).length ? walk(node.children, path) : [];
+      return { name, node, path, isFolder: kids.length > 0, weight: node.weight || 0, children: kids };
+    });
+    const ch = (doc && doc.targets && doc.targets.children) || {};
+    return walk(ch, '');
+  }
+  function reweightSiblings(orderedNames) {
+    const out = {}; orderedNames.forEach((n, i) => { out[n] = i; }); return out;
+  }
+  // childrenAtPath returns the children map that holds `parentPath`'s members ('' = top level),
+  // in a cloned doc; returns null if the path doesn't resolve.
+  function cfgChildrenAt(d, parentPath) {
+    let ch = (d.targets = d.targets || {}, d.targets.children = d.targets.children || {});
+    if (!parentPath) return ch;
+    for (const seg of parentPath.split('/')) {
+      if (!ch[seg] || !ch[seg].children) return null;
+      ch = ch[seg].children;
+    }
+    return ch;
+  }
+  function reorderSiblings(doc, parentPath, orderedNames) {
+    const d = cfgClone(doc); const ch = cfgChildrenAt(d, parentPath);
+    if (ch) { const w = reweightSiblings(orderedNames); for (const n of orderedNames) if (ch[n]) ch[n].weight = w[n]; }
+    return d;
+  }
+  function cfgNodeAt(d, path) { // returns {parent: childrenMap, key} for a full node path
+    const segs = path.split('/'); const key = segs.pop();
+    const parent = cfgChildrenAt(d, segs.join('/'));
+    return parent ? { parent, key } : null;
+  }
+  function editNodeAtPath(doc, path, node) {
+    const d = cfgClone(doc); const loc = cfgNodeAt(d, path);
+    if (loc && Object.prototype.hasOwnProperty.call(loc.parent, loc.key)) {
+      const old = loc.parent[loc.key] || {};
+      const merged = Object.assign({}, node);
+      if ('weight' in old) merged.weight = old.weight;          // preserve order
+      if (old.children) merged.children = old.children;         // preserve subtree
+      loc.parent[loc.key] = merged;
+    }
+    return d;
+  }
+  function removeNodeAtPath(doc, path) {
+    const d = cfgClone(doc); const loc = cfgNodeAt(d, path);
+    if (loc) delete loc.parent[loc.key];
+    return d;
+  }
+
   const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   // labelHTML renders a target's graph-title label: the title (falling back to the target
   // name) plus, when present, its IP in parentheses. Pure; exported for tests and reused by
@@ -377,7 +435,7 @@
     ].join('\n');
   }
 
-  window.Dash = { RANGES, RANGE_ORDER, parseRoute, mergeSeries, gridSince, fetchJSON, zoomResolution, pixelToTime, sharedYMax, buildTree, underPath, targetStatus, pickSeries, vantageList, orderVantages, defaultFocus, keepFocus, vantageColorVar, adminMode, relTime, listTargets, addTarget, editTarget, removeTarget, buildTargetNode, labelHTML, collectingNote, agentYaml, agentCompose };
+  window.Dash = { RANGES, RANGE_ORDER, parseRoute, mergeSeries, gridSince, fetchJSON, zoomResolution, pixelToTime, sharedYMax, buildTree, underPath, targetStatus, pickSeries, vantageList, orderVantages, defaultFocus, keepFocus, vantageColorVar, adminMode, relTime, listTargets, addTarget, editTarget, removeTarget, buildTargetNode, labelHTML, collectingNote, agentYaml, agentCompose, cfgTree, reweightSiblings, reorderSiblings, editNodeAtPath, removeNodeAtPath };
 
   // ---------------------------------------------------------------- init (DOM) --
   function init() {
@@ -1176,26 +1234,50 @@
     // Mirrors the Vantages panel above — the first GET decides the mode (disabled /
     // login / list / error) via Dash.adminMode. ----
     let cfg = { version: 0, doc: { targets: { children: {} } } };
+    // The full node path being edited (e.g. "Web/b"), set by openCfgModal('edit', path) and
+    // read back on submit — the Name field only ever shows/edits the leaf segment.
+    let cfgEditPath = null;
     function cShow(id) {
       for (const s of ['cfgDisabled', 'cfgLogin', 'cfgList', 'cfgError']) $(s).classList.toggle('hidden', s !== id);
     }
-    function renderConfigRows() {
-      const rows = Dash.listTargets(cfg.doc);
-      $('cfgVersion').textContent = 'v' + cfg.version;
-      if (!rows.length) { $('cfgRows').innerHTML = '<tr><td colspan="5" class="vadmin-empty">No DB targets yet — add one.</td></tr>'; return; }
-      $('cfgRows').innerHTML = rows.map((r) => {
-        const nm = esc(r.name);
-        if (r.isFolder) {
-          return '<tr><td>' + nm + '</td><td colspan="3" style="color:var(--ink-faint)">folder — managed via files</td><td></td></tr>';
+    // findCfgNode looks up a Dash.cfgTree(cfg.doc) entry by its full path, for prefilling the
+    // edit modal (folders included — depth-first search of the already-built tree).
+    function findCfgNode(path) {
+      const walk = (nodes) => {
+        for (const n of nodes) {
+          if (n.path === path) return n;
+          if (n.children.length) { const f = walk(n.children); if (f) return f; }
         }
-        const n = r.node || {};
-        const details = esc([n.params ? Object.entries(n.params).map(([k, v]) => k + '=' + v).join(' ') : '',
-          (n.vantages && n.vantages.length) ? '@' + n.vantages.join(',') : ''].filter(Boolean).join('  '));
-        return '<tr><td>' + nm + '</td><td>' + esc(n.probe || '') + '</td><td>' + esc(n.host || '') + '</td><td style="color:var(--ink-soft)">' + details +
-          '</td><td style="text-align:right; white-space:nowrap">' +
-          '<button class="vadmin-btn" data-edit="' + nm + '">Edit</button>' +
-          '<button class="vadmin-btn" data-remove="' + nm + '">Remove</button></td></tr>';
-      }).join('');
+        return null;
+      };
+      return walk(Dash.cfgTree(cfg.doc));
+    }
+    // cfgRowHtml renders one node of Dash.cfgTree(cfg.doc) recursively: a drag handle, the
+    // name (folders get a trailing "/"), a probe/host meta line for leaves, and path-aware
+    // Edit/Remove buttons. `--d` drives the CSS indent; folders nest their kids in `.kids`.
+    function cfgRowHtml(n, depth) {
+      const d = depth || 0;
+      let meta = '';
+      if (!n.isFolder) {
+        const nd = n.node;
+        const paramsStr = nd.params ? Object.entries(nd.params).map(([k, v]) => k + '=' + v).join(' ') : '';
+        const vantStr = (nd.vantages && nd.vantages.length) ? '@' + nd.vantages.join(',') : '';
+        meta = esc([nd.probe || '', nd.host || '', paramsStr, vantStr].filter(Boolean).join(' · '));
+      }
+      const kids = n.isFolder ? '<div class="kids">' + n.children.map((c) => cfgRowHtml(c, d + 1)).join('') + '</div>' : '';
+      return '<div class="crow' + (n.isFolder ? ' folder' : '') + '" draggable="true" data-path="' + esc(n.path) + '" style="--d:' + d + '" role="treeitem">' +
+        '<span class="chandle" aria-hidden="true">⠿</span>' +
+        '<span class="cname">' + esc(n.name) + (n.isFolder ? '/' : '') + '</span>' +
+        '<span class="cmeta">' + meta + '</span>' +
+        '<button type="button" class="vadmin-btn" data-edit="' + esc(n.path) + '">Edit</button>' +
+        '<button type="button" class="vadmin-btn" data-remove="' + esc(n.path) + '">Remove</button>' +
+      '</div>' + kids;
+    }
+    function renderCfgTree() {
+      const tree = Dash.cfgTree(cfg.doc);
+      $('cfgVersion').textContent = 'v' + cfg.version;
+      if (!tree.length) { $('cfgTree').innerHTML = '<div class="tree-empty">No DB targets yet — add one.</div>'; return; }
+      $('cfgTree').innerHTML = tree.map((n) => cfgRowHtml(n, 0)).join('');
     }
     async function renderConfig(opts) {
       const afterLogin = !!(opts && opts.afterLogin);
@@ -1217,7 +1299,7 @@
       try { data = await r.json(); } catch (e) { cShow('cfgError'); return; }
       cfg.version = data.version || 0;
       cfg.doc = (data.doc && typeof data.doc === 'object') ? data.doc : { targets: { children: {} } };
-      renderConfigRows();
+      renderCfgTree();
       cShow('cfgList');
     }
     $('cfgRetry').addEventListener('click', () => renderConfig());
@@ -1258,13 +1340,16 @@
       row.querySelector('.cfg-pdel').addEventListener('click', () => row.remove());
       return row;
     }
-    async function openCfgModal(mode, name) {
+    async function openCfgModal(mode, path) {
       const kinds = await ensureProbeKinds();
       $('cfgMode').value = mode;
-      $('cfgModalTitle').textContent = mode === 'edit' ? ('Edit ' + name) : 'Add target';
+      cfgEditPath = mode === 'edit' ? path : null;
+      const leaf = mode === 'edit' ? path.split('/').pop() : '';
+      $('cfgModalTitle').textContent = mode === 'edit' ? ('Edit ' + path) : 'Add target';
       $('cfgFormErr').textContent = '';
-      const node = mode === 'edit' ? ((cfg.doc.targets.children || {})[name] || {}) : {};
-      $('cfgName').value = mode === 'edit' ? name : '';
+      const found = mode === 'edit' ? findCfgNode(path) : null;
+      const node = found ? found.node : {};
+      $('cfgName').value = mode === 'edit' ? leaf : '';
       $('cfgName').disabled = mode === 'edit'; // rename = remove + add (v1)
       $('cfgProbe').innerHTML = kinds.map((k) => '<option value="' + esc(k) + '"' + (k === node.probe ? ' selected' : '') + '>' + esc(k) + '</option>').join('');
       $('cfgHost').value = node.host || '';
@@ -1278,7 +1363,7 @@
       $('cfgModal').classList.remove('hidden');
       $('cfgName').disabled ? $('cfgProbe').focus() : $('cfgName').focus();
     }
-    function closeCfgModal() { $('cfgModal').classList.add('hidden'); $('cfgFormErr').textContent = ''; }
+    function closeCfgModal() { $('cfgModal').classList.add('hidden'); $('cfgFormErr').textContent = ''; cfgEditPath = null; }
     function readCfgForm() {
       const params = {};
       for (const row of $('cfgParams').querySelectorAll('.vadmin-row')) {
@@ -1312,7 +1397,7 @@
         let body = {}; try { body = await r.json(); } catch (e) { /* ignore */ }
         cfg.version = body.version || (cfg.version + 1);
         cfg.doc = mutated;
-        renderConfigRows();
+        renderCfgTree();
         if (onOk) onOk();
         return;
       }
@@ -1337,22 +1422,87 @@
       // a target literally named '__proto__'/'constructor'/'prototype' is still a footgun
       // (e.g. downstream JSON tooling, YAML export) worth rejecting up front in the UI.
       if (['__proto__', 'constructor', 'prototype'].includes(name)) { $('cfgFormErr').textContent = '"' + name + '" is a reserved name.'; return; }
+      const isEdit = $('cfgMode').value === 'edit';
+      // "/" is the structural path separator (cfgTree joins segments with it) — a node name
+      // is a single segment. Without this guard, a top-level target named e.g. "Web/a" would
+      // collide with the cfgTree path of an existing nested "a" under a "Web" folder, and
+      // findCfgNode's depth-first search would silently resolve Edit/Remove/drag to the wrong
+      // node. Only the add path can introduce a new name; edit reuses an existing path.
+      if (!isEdit && name.includes('/')) { $('cfgFormErr').textContent = 'Names can\'t contain "/".'; return; }
       let mutated;
       try {
-        mutated = ($('cfgMode').value === 'edit') ? Dash.editTarget(cfg.doc, name, node) : Dash.addTarget(cfg.doc, name, node);
+        // Edit is path-aware (any depth); Add stays top-level only, unchanged.
+        mutated = isEdit ? Dash.editNodeAtPath(cfg.doc, cfgEditPath, node) : Dash.addTarget(cfg.doc, name, node);
       } catch (err) { $('cfgFormErr').textContent = err.message; return; }
       saveDoc(mutated, closeCfgModal);
     });
-    $('cfgRows').addEventListener('click', (e) => {
+    $('cfgTree').addEventListener('click', (e) => {
       const ed = e.target.closest('[data-edit]');
       if (ed) { openCfgModal('edit', ed.getAttribute('data-edit')); return; }
       const rm = e.target.closest('[data-remove]');
       if (rm) {
-        const name = rm.getAttribute('data-remove');
-        if (!window.confirm('Remove target "' + name + '"?')) return;
-        saveDoc(Dash.removeTarget(cfg.doc, name));
+        const path = rm.getAttribute('data-remove');
+        const found = findCfgNode(path);
+        const prompt = (found && found.isFolder)
+          ? 'Remove folder "' + path + '" and everything under it?'
+          : 'Remove "' + path + '"?';
+        if (!window.confirm(prompt)) return;
+        saveDoc(Dash.removeNodeAtPath(cfg.doc, path));
       }
     });
+    // Drag-to-reorder: HTML5 DnD on #cfgTree, scoped to one sibling group at a time (same
+    // parent path). Dropping onto a row from a different parent is a no-op — cross-folder
+    // move is a follow-up. Reorder writes sequential weights via Dash.reorderSiblings, then
+    // saves through the same optimistic-version saveDoc PUT used everywhere else.
+    (function cfgDnd() {
+      const host = $('cfgTree');
+      let dragPath = null, dragParent = null;
+      const parentOf = (p) => p.split('/').slice(0, -1).join('/');
+      // siblingNames returns the current (weight,name)-sorted names of `parent`'s children
+      // ('' = top level), read fresh from Dash.cfgTree(cfg.doc) each time.
+      const siblingNames = (parent) => {
+        const top = Dash.cfgTree(cfg.doc);
+        if (!parent) return top.map((n) => n.name);
+        const find = (nodes) => {
+          for (const n of nodes) {
+            if (n.path === parent) return n;
+            if (n.children.length) { const f = find(n.children); if (f) return f; }
+          }
+          return null;
+        };
+        const grp = find(top);
+        return grp ? grp.children.map((n) => n.name) : [];
+      };
+      const clearDropMarks = () => { for (const el of host.querySelectorAll('.cfg-drop')) el.classList.remove('cfg-drop'); };
+      host.addEventListener('dragstart', (e) => {
+        const row = e.target.closest('.crow'); if (!row) return;
+        dragPath = row.getAttribute('data-path'); dragParent = parentOf(dragPath);
+        e.dataTransfer.effectAllowed = 'move';
+        // Firefox refuses to start a drag at all without data on the DataTransfer (Chromium/
+        // WebKit don't require it) — the payload itself is unused; dragPath/dragParent above
+        // already carry what drop needs.
+        e.dataTransfer.setData('text/plain', dragPath);
+      });
+      host.addEventListener('dragover', (e) => {
+        const row = e.target.closest('.crow'); if (!row || dragPath == null) return;
+        if (parentOf(row.getAttribute('data-path')) === dragParent) { e.preventDefault(); row.classList.add('cfg-drop'); }
+      });
+      host.addEventListener('dragleave', (e) => { const row = e.target.closest('.crow'); if (row) row.classList.remove('cfg-drop'); });
+      host.addEventListener('drop', (e) => {
+        const row = e.target.closest('.crow'); if (!row || dragPath == null) { dragPath = null; return; }
+        e.preventDefault(); clearDropMarks();
+        const targetPath = row.getAttribute('data-path');
+        if (parentOf(targetPath) !== dragParent || targetPath === dragPath) { dragPath = null; return; }
+        const dragName = dragPath.split('/').pop(), targetName = targetPath.split('/').pop();
+        const before = siblingNames(dragParent);
+        const order = before.slice();
+        order.splice(order.indexOf(dragName), 1);
+        order.splice(order.indexOf(targetName), 0, dragName);
+        const parent = dragParent; dragPath = null;
+        if (JSON.stringify(order) !== JSON.stringify(before)) saveDoc(Dash.reorderSiblings(cfg.doc, parent, order));
+      });
+      host.addEventListener('dragend', () => { dragPath = null; clearDropMarks(); });
+    })();
     $('cfgImportBtn').addEventListener('click', () => {
       $('cfgImportText').value = '';
       $('cfgImportErr').textContent = '';

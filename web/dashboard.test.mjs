@@ -394,5 +394,43 @@ check('buildTree preserves input (server) order of siblings, does not re-sort Aâ
   assert.deepEqual(cf.children.map((c) => c.name), ['DNS', 'ICMP']); // sibling order preserved
 });
 
+const cfgDoc = () => ({ targets: { children: {
+  Web:  { weight: 1, children: { a: { probe:'HTTP', host:'a' }, b: { probe:'HTTP', host:'b', weight:-1 } } },
+  DNS:  { probe:'DNS', host:'d', weight:-5 },
+} } });
+check('cfgTree: nests, sorts siblings by (weight,name), carries path', () => {
+  const t = D.cfgTree(cfgDoc());
+  assert.deepEqual(t.map((n) => n.name), ['DNS', 'Web']);         // DNS weight -5 first, then Web weight 1
+  assert.equal(t[0].isFolder, false); assert.equal(t[1].isFolder, true);
+  const web = t[1];
+  assert.deepEqual(web.children.map((c) => c.name), ['b', 'a']);  // b weight -1 before a (0)
+  assert.equal(web.children[0].path, 'Web/b');
+});
+check('reweightSiblings: sequential indices by given order', () => {
+  assert.deepEqual(D.reweightSiblings(['x', 'y', 'z']), { x: 0, y: 1, z: 2 });
+});
+check('reorderSiblings: writes weights to the named parent group only', () => {
+  const out = D.reorderSiblings(cfgDoc(), 'Web', ['a', 'b']);      // flip Web's children to a,b
+  const web = out.targets.children.Web.children;
+  assert.equal(web.a.weight, 0); assert.equal(web.b.weight, 1);
+  assert.equal(out.targets.children.DNS.weight, -5);              // untouched group unchanged
+});
+check('reorderSiblings: top level via empty parentPath', () => {
+  const out = D.reorderSiblings(cfgDoc(), '', ['Web', 'DNS']);
+  assert.equal(out.targets.children.Web.weight, 0);
+  assert.equal(out.targets.children.DNS.weight, 1);
+});
+check('editNodeAtPath: replaces fields but preserves weight and children', () => {
+  const out = D.editNodeAtPath(cfgDoc(), 'Web/b', { probe:'FPing', host:'b2' });
+  const b = out.targets.children.Web.children.b;
+  assert.equal(b.probe, 'FPing'); assert.equal(b.host, 'b2');
+  assert.equal(b.weight, -1);                                     // preserved
+});
+check('removeNodeAtPath: deletes a nested node, leaves siblings', () => {
+  const out = D.removeNodeAtPath(cfgDoc(), 'Web/a');
+  assert.ok(!('a' in out.targets.children.Web.children));
+  assert.ok('b' in out.targets.children.Web.children);
+});
+
 if (failed) { console.error(`\n${failed} test(s) failed`); process.exit(1); }
 console.log('\nall dashboard tests passed');

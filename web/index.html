@@ -188,6 +188,17 @@
   .vadmin-table td { padding:8px 10px; border-bottom:1px solid var(--border); color:var(--ink); vertical-align:middle; }
   .vadmin-table td.vadmin-empty { color:var(--ink-faint); text-align:center; }
   .vadmin-table td .vadmin-btn { padding:4px 9px; font-size:11.5px; margin-left:6px; }
+  /* Config tree (DB targets): reuses the --d depth var + .kids nesting from .tree above */
+  .cfg-tree { display:flex; flex-direction:column; gap:1px; margin-top:4px; }
+  .cfg-tree .kids { display:flex; flex-direction:column; gap:1px; }
+  .cfg-tree .crow { display:flex; align-items:center; gap:8px; padding:6px 8px; padding-left:calc(8px + var(--d,0) * 18px); border-radius:7px; border:1px solid transparent; font-family:ui-monospace,Menlo,monospace; font-size:12.5px; color:var(--ink); }
+  .cfg-tree .crow:hover { background:var(--bg); }
+  .cfg-tree .crow.cfg-drop { box-shadow:inset 0 2px 0 var(--accent); }
+  .cfg-tree .crow.folder .cname { font-weight:600; }
+  .cfg-tree .chandle { cursor:grab; color:var(--ink-faint); flex:0 0 auto; }
+  .cfg-tree .cname { flex:0 0 auto; }
+  .cfg-tree .cmeta { flex:1 1 auto; color:var(--ink-soft); font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .cfg-tree .crow .vadmin-btn { padding:4px 9px; font-size:11.5px; }
   .vadmin-reveal-backdrop { position:fixed; inset:0; background:rgba(0,0,0,.45); display:flex; align-items:center; justify-content:center; padding:20px; z-index:50; }
   .vadmin-reveal { max-width:640px; width:100%; box-shadow:var(--shadow); }
   .vadmin-warn { color:var(--warn); font-weight:600; font-size:13px; }
@@ -369,10 +380,7 @@
             <button id="cfgImportBtn" class="vadmin-btn" type="button">Import YAML</button>
           </span>
         </div>
-        <table class="vadmin-table" aria-label="DB targets">
-          <thead><tr><th>Name</th><th>Probe</th><th>Host</th><th>Details</th><th></th></tr></thead>
-          <tbody id="cfgRows"></tbody>
-        </table>
+        <div id="cfgTree" class="cfg-tree" role="tree" aria-label="DB targets"></div>
       </div>
     </div>
 

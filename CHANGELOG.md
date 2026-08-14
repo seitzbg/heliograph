@@ -7,6 +7,7 @@ All notable changes to **Heliograph** are recorded here. The format follows
 ## [Unreleased]
 
 ### Added
+- **Config-tab tree UI for database targets, with drag-to-reorder.** The Config tab now renders database-managed targets as a nested tree (YAML targets are not shown here; they remain file-managed). Each target can be dragged to reorder among siblings (a reorder updates `weight` via the admin API, persisted without SIGHUP), edited, or removed at any depth with a path-aware form showing probe/host/params/vantages. Top-level add is unchanged. Cross-folder move and keyboard-accessible reorder are explicit follow-ups.
 - **Author-defined menu order (`weight`).** Any config node (YAML or DB fragment) can carry an
   optional `weight:` (int); siblings sort by `(weight, name)` instead of strict A–Z — a negative
   weight pins a node to the top of its group, unset/`0` preserves the alphabetical default. Honored

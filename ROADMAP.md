@@ -101,8 +101,7 @@ sketch; agents poll a versioned assignment (`304` when unchanged); keys are mana
   `weight:` (int); siblings sort by `(weight, name)` instead of strict A–Z — a negative weight pins
   a node to the top of its group, unset/`0` preserves today's alphabetical default (backward-compatible).
   Honored by the config flatten, `/api/targets`, the dashboard menu, and the grid. SmokePing ordered
-  menus by file position; this is the DB-config equivalent. **Config-tab drag-to-reorder UI is a
-  follow-up (PR B).**
+  menus by file position; this is the DB-config equivalent. The Config-tab **tree UI with drag-to-reorder among siblings** now ships (PR B); follow-ups: keyboard-accessible reorder, cross-folder move.
 - ✅ **Show the resolved IP in the graph title** — done: a target carries an optional `title:`
   (display-name override) and, with `-resolve-ips` / `SMOKED_RESOLVE_IPS`, its IP in the graph header —
   a pinned `ip:`, a literal-IP host, or the hostname resolved at config-load (best-effort, concurrent,
