@@ -176,39 +176,42 @@ Phase-6 items all ship in the single **v1.0** line.
 
 ## Hardening & UI backlog (from the 2026-08-14 code review + session)
 
-Merged this session: #34 vantage docker-compose generator · #35 band-panel "collecting…" message ·
+Earlier merges: #34 vantage docker-compose generator · #35 band-panel "collecting…" message ·
 #36 author-defined menu order (weight) · #37 Config-tab tree + drag-reorder · #38 hardening
 (M6 spool-alloc bound, M2 now-blocking Caddy scan, M8 build-time version injection).
 
-### Next up
-- 🚧 **M3 — SMTP notifier hardening** — IN PROGRESS: committed + `-race`-tested on branch
-  `worktree-m3-smtp-hardening` (per-transaction deadline, bounded retry/backoff, and an explicit
-  error when AUTH is configured but the relay doesn't advertise it — was silently unauthenticated).
-  Next: confirm the in-flight review → open PR → merge.
+All remaining 2026-08-14 code-review items are **done**, shipped in **v1.0.2** (2026-08-14):
+- ✅ **M3** — SMTP notifier hardening: per-transaction deadline, bounded retry/backoff, explicit
+  AUTH-not-offered error, in-flight cancel on drain (#40); permanent-failure no-retry — 5xx /
+  AUTH-not-offered (#42).
+- ✅ **M4** — remote ingest validates + persists under the reload lock, so a reload can't straddle
+  validate and write (#41).
+- ✅ **M5 + L3** — `/api/series/all` bounded via an indexed per-target `LATERAL` top-N (work bound to
+  rows returned, EXPLAIN-verified), exact-cap truncation flag fixed (#44).
+- ✅ **M7** — aggregate-migration validates BOTH view shapes (`samples_hourly` + `samples_daily`) (#45).
+- ✅ **M1 + L4 + L5** — build-once-promote the collector image (scan the exact OCI archive, skopeo-push
+  it, assert published == scanned digest, attest), expiring `.trivyignore.yaml`, doc drift (#46).
+- ✅ **L1 + L2** — probe timing: per-ping budget reserves inter-attempt delays; native Ping honors
+  `timeout_ms` > 1s (#43).
+- ✅ **Config-tab tree #37 follow-ups** — keyboard-accessible reorder + WAI-ARIA tree semantics
+  (`role`/`aria-owns`/roving `tabindex`), cross-folder drag, add-into-folder (#48).
+- ✅ **README** — dark-mode screenshots incl. admin Config-tree + Vantages (#47).
+- ✅ CI db-test flake fixed — TimescaleDB run with background workers disabled (#49); this unblocked
+  the **v1.0.2** publish (the `v1.0.1` tag was superseded — see CHANGELOG).
 
-### CODE_REVIEW.md items still open (triaged 2026-08-14; none critical/high)
-- **M5** — `/api/series/all` still `row_number()`-ranks the whole window per target though the rows
-  are capped, and the read API is unauthenticated. Fix: lateral per-target `LIMIT N`. *(Needs a
-  TimescaleDB to validate with `EXPLAIN (ANALYZE, BUFFERS)`.)*
-- **M1** — CI builds the collector image twice, so the scanned/SBOM'd digest isn't the one pushed +
-  attested. Fix: build-once → scan → promote the same digest. *(Do before cutting a release; L.)*
-- **M4** — remote-ingest validates a config snapshot then writes with no reload lock; a reload
-  between validate and insert can store a round under a redefined target. *(Opportunistic — can't
-  cause a false alert, only pollutes stored history/rollups.)*
-- **M7** — the aggregate-migration check validates only `samples_hourly`; a stale `samples_daily`
-  is never rebuilt. *(Narrow trigger; needs a DB.)*
-- **L1/L2/L3/L4** (small): probe per-ping budget ignores the `(pings-1)×interval` sleeps + unbounded
-  `interval_ms`; native-Ping reply-window tail capped at 1s even when `timeout_ms`>1s; false
-  "truncated" warning at an exact-cap dataset; `.trivyignore` expiry token isn't valid for the flat
-  file (move to `.trivyignore.yaml` `expired_at`).
-
-### Follow-ups from merged work
-- **Config-tab tree (#37):** keyboard-accessible reorder + real tree ARIA (tabindex/aria-expanded),
-  cross-folder drag, add-into-folder.
+### Remaining follow-ups (non-blocking; none critical/high)
+- **Webhook notifier — permanent-failure classification:** the webhook/Slack/Discord delivery pool
+  retries every failure; it should abandon permanent ones (HTTP 4xx) the way the email notifier now
+  abandons 5xx / AUTH-not-offered, instead of burning the retry budget.
+- **Generic `webhook` notifier — env parity:** enabled only by the `-webhook` flag, while `slack` /
+  `discord` / `email` all have `SMOKED_*` env fallbacks. Add `SMOKED_WEBHOOK_URL` for consistency.
+- **Config-tab tree nits:** prune stale `cfgCollapsed` paths after a node is removed/renamed; a drop
+  onto a node's own parent should no-op; an emptied folder still renders as a folder, not a leaf.
 - **Caddy image (#38):** the runtime `apk --upgrade c-ares/curl` + the three `xcaddy --with
   golang.org/x/net|x/text|grpc` floors are interim patches over a stale pinned base — drop them once
   `caddy:2.11-alpine` (or a newer Caddy release) ships the fixes natively, and bump the digest instead.
-- **README:** refresh the screenshots in dark mode.
+
+The next planned **feature** is the NTP probe (Phase 6, above).
 
 ## Notes / decisions
 - Stack: Go collector · TimescaleDB (raw samples; bands via SQL quantiles) · REST+JSON API ·

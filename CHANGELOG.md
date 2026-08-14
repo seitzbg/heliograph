@@ -6,6 +6,16 @@ All notable changes to **Heliograph** are recorded here. The format follows
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-08-14
+
+First **published** 1.0.x release. It gathers all the post-1.0.0 hardening and UI work (#34–#49):
+the Config-tab tree with drag/keyboard reorder and WAI-ARIA semantics, author-defined menu order
+(`weight`), display-name + resolved-IP graph titles, one-click vantage deployment, Slack/Discord
+notifiers, SMTP-notifier hardening, the build-once-promote supply-chain pipeline, and a batch of
+data-path and probe-timing fixes. The `v1.0.1` tag was cut from the same tree but never published
+— its release pipeline hit a TimescaleDB test-timing flake; **v1.0.2 fixes that flake (#49) and
+supersedes v1.0.1** with no functional difference. Detail below.
+
 ### Added
 - **Config-tab tree: keyboard control, ARIA semantics, cross-folder drag, and add-into-folder (#37 follow-ups).** The Config tab's target tree now implements the WAI-ARIA `tree` pattern — `role="tree"`/`treeitem`/`group`, `aria-expanded` on folders, `aria-selected` on the active node, and a single roving `tabindex`. It is fully keyboard-operable: Up/Down move between visible rows, Left collapses a folder (or steps to its parent), Right expands (or steps into the first child), Home/End jump to the ends, and **Alt+Up / Alt+Down reorder the focused node among its siblings** (persisting via the same weight path as drag). Folders can now be **collapsed/expanded** (a twist chevron, or the arrow keys). A node can be **dragged into a different folder**, not just reordered within its current one — dropping onto a folder moves it inside, onto a row moves it beside — and both affected sibling groups are re-sequenced; dropping a folder into its own descendant is refused. Each folder gains a **"+"** affordance that adds a new target **into** that folder (a nested path), alongside the unchanged top-level add. The move/add/reorder/guard logic lives in pure, unit-tested helpers (`moveNode`, `addNodeAtPath`, `moveInList`, `cfgVisibleRows`, `cfgTreeKey`).
 - **Config-tab tree UI for database targets, with drag-to-reorder.** The Config tab now renders database-managed targets as a nested tree (YAML targets are not shown here; they remain file-managed). Each target can be dragged to reorder among siblings (a reorder updates `weight` via the admin API, persisted without SIGHUP), edited, or removed at any depth with a path-aware form showing probe/host/params/vantages. Top-level add is unchanged. Cross-folder move and keyboard-accessible reorder are explicit follow-ups.
@@ -1025,6 +1035,7 @@ the smoke-graph look, a fast/parallel poller, and probes as plugins.
 - Full re-implementation reference / code map maintained outside the repo at
   `~/.claude/plans/smokeping-codemap/`.
 
-[Unreleased]: https://github.com/seitzbg/heliograph/compare/v1.0.0...main
+[Unreleased]: https://github.com/seitzbg/heliograph/compare/v1.0.2...main
+[1.0.2]: https://github.com/seitzbg/heliograph/compare/v1.0.0...v1.0.2
 [1.0.0]: https://github.com/seitzbg/heliograph/releases/tag/v1.0.0
 [0.1.0]: https://github.com/seitzbg/heliograph/releases/tag/v0.1.0
