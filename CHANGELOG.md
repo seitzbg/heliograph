@@ -92,6 +92,45 @@ All notable changes to **Heliograph** are recorded here. The format follows
   `127.0.0.1:8087:8087`, matching the Compose file and the README's own loopback-only guidance.
   Also added a copy-pasteable Docker Compose example (with a single `SMOKE_DB_PASSWORD` variable shared
   by the DB and the collector's DSN) and code-review acknowledgements. (CODE_REVIEW M1 + CodeRabbit.)
+- **Container supply chain hardened: all images digest-pinned, plugins version-pinned, SBOM + image
+  scanning, and a refresh config.** Every base image (Go build, Alpine runtime, Caddy builder/runtime,
+  TimescaleDB, and the CI `golang`/`node`/`docker` images) is now pinned by digest, and every bundled
+  Caddy DNS-provider plugin is pinned to a version — so builds are reproducible and a moving upstream
+  can't change a credential-bearing binary without a reviewed change. A new `image-scan` CI stage
+  generates an SPDX SBOM (artifact) and runs a finished-image vulnerability scan (Trivy) on top of the
+  existing Go-module `govulncheck`; it also re-scans the current `:main` on scheduled pipelines to
+  catch newly-disclosed CVEs against pinned images. A `renovate.json` keeps the digests and plugin
+  versions current so the pins don't go stale. (The image scan is report-only for now — tighten to
+  blocking once the base image is clean.) CODE_REVIEW M4/L7.
+- **Spool recovery streams each segment instead of loading it whole and copying every body.** On
+  agent restart, recovery read each segment fully into memory and copied every decoded body before
+  deciding which to keep, so a segment full of dead or budget-evicted rounds still cost a full copy
+  of every body — pushing the transient footprint well above the live budget on constrained vantages.
+  It now streams frame-by-frame and unmarshals only the records it retains; torn-tail/corruption/
+  contiguity/eviction behavior is unchanged.
+- **`/api/series/all` is now bounded in the query, not only the response.** The store previously
+  materialized up to (targets × 20k) rounds — and the database sorted that whole windowed set —
+  before the handler could trim it. `SeriesAll` now takes a global budget and caps each target at
+  `min(perTarget, budget/targets)`, so the server never sorts and the client never builds an
+  unbounded result for a many-target bulk read, while every target keeps its newest rounds; the
+  response carries `truncated` when the bound bit.
+- **Startup and reload now warn about alert recipients with no enabled notifier.** An alert `to` or a
+  target `alertee` referencing an unknown notifier (a typo, or `webhook` without `-webhook`) was only
+  noticed when an event was dispatched — invisible until the incident whose notification got silently
+  dropped. `buildRuntime` now logs the unresolved recipients at startup and on every reload.
+- **Runtime container image moved off end-of-support Alpine 3.20 to a digest-pinned Alpine 3.22.**
+  Alpine 3.20 left normal security support on 2026-04-01; the runtime stage now pins a supported
+  branch by digest (bump the tag + digest together on a refresh). CODE_REVIEW M4.
+- **CI: the TimescaleDB integration (`db-test`) and vulnerability scan (`govulncheck`) are now
+  blocking**, so "green CI" proves the database-backed paths and the vuln scan actually passed
+  rather than skipped. `db-test` waits for the database with an explicit readiness loop (two
+  consecutive `pg_isready` successes) instead of a fixed sleep, so making it blocking doesn't add
+  startup flakiness. CODE_REVIEW M6.
+- **CI now installs `rrdtool`, so the SmokePing RRD-extraction path is actually exercised.** The
+  `rrd`-extraction and `import … --history` tests skip without the binary, and neither CI image
+  installed it — the most bug-prone importer code (RRA stitching / tier selection) ran in no job.
+  `rrdtool` is now installed in the blocking `go-test` job (RRA stitching) and the `db-test` job
+  (the `--history` end-to-end path).
 
 ### Security
 - **Go toolchain bumped 1.26.5 → 1.26.6** for the standard-library fixes in GO-2026-6089 (`net/http`),
@@ -248,47 +287,6 @@ All notable changes to **Heliograph** are recorded here. The format follows
   packages/commands (federation, agent, importer, configstore, vantage, `smoke-agent`) in the layout;
   and removed local-only planning-path references. The bundled reverse proxy's docs no longer claim
   rate limiting it does not configure.
-
-### Changed
-- **Container supply chain hardened: all images digest-pinned, plugins version-pinned, SBOM + image
-  scanning, and a refresh config.** Every base image (Go build, Alpine runtime, Caddy builder/runtime,
-  TimescaleDB, and the CI `golang`/`node`/`docker` images) is now pinned by digest, and every bundled
-  Caddy DNS-provider plugin is pinned to a version — so builds are reproducible and a moving upstream
-  can't change a credential-bearing binary without a reviewed change. A new `image-scan` CI stage
-  generates an SPDX SBOM (artifact) and runs a finished-image vulnerability scan (Trivy) on top of the
-  existing Go-module `govulncheck`; it also re-scans the current `:main` on scheduled pipelines to
-  catch newly-disclosed CVEs against pinned images. A `renovate.json` keeps the digests and plugin
-  versions current so the pins don't go stale. (The image scan is report-only for now — tighten to
-  blocking once the base image is clean.) CODE_REVIEW M4/L7.
-- **Spool recovery streams each segment instead of loading it whole and copying every body.** On
-  agent restart, recovery read each segment fully into memory and copied every decoded body before
-  deciding which to keep, so a segment full of dead or budget-evicted rounds still cost a full copy
-  of every body — pushing the transient footprint well above the live budget on constrained vantages.
-  It now streams frame-by-frame and unmarshals only the records it retains; torn-tail/corruption/
-  contiguity/eviction behavior is unchanged.
-- **`/api/series/all` is now bounded in the query, not only the response.** The store previously
-  materialized up to (targets × 20k) rounds — and the database sorted that whole windowed set —
-  before the handler could trim it. `SeriesAll` now takes a global budget and caps each target at
-  `min(perTarget, budget/targets)`, so the server never sorts and the client never builds an
-  unbounded result for a many-target bulk read, while every target keeps its newest rounds; the
-  response carries `truncated` when the bound bit.
-- **Startup and reload now warn about alert recipients with no enabled notifier.** An alert `to` or a
-  target `alertee` referencing an unknown notifier (a typo, or `webhook` without `-webhook`) was only
-  noticed when an event was dispatched — invisible until the incident whose notification got silently
-  dropped. `buildRuntime` now logs the unresolved recipients at startup and on every reload.
-- **Runtime container image moved off end-of-support Alpine 3.20 to a digest-pinned Alpine 3.22.**
-  Alpine 3.20 left normal security support on 2026-04-01; the runtime stage now pins a supported
-  branch by digest (bump the tag + digest together on a refresh). CODE_REVIEW M4.
-- **CI: the TimescaleDB integration (`db-test`) and vulnerability scan (`govulncheck`) are now
-  blocking**, so "green CI" proves the database-backed paths and the vuln scan actually passed
-  rather than skipped. `db-test` waits for the database with an explicit readiness loop (two
-  consecutive `pg_isready` successes) instead of a fixed sleep, so making it blocking doesn't add
-  startup flakiness. CODE_REVIEW M6.
-- **CI now installs `rrdtool`, so the SmokePing RRD-extraction path is actually exercised.** The
-  `rrd`-extraction and `import … --history` tests skip without the binary, and neither CI image
-  installed it — the most bug-prone importer code (RRA stitching / tier selection) ran in no job.
-  `rrdtool` is now installed in the blocking `go-test` job (RRA stitching) and the `db-test` job
-  (the `--history` end-to-end path).
 
 ## [1.0.0] - 2026-08-11
 

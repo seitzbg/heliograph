@@ -105,10 +105,12 @@ sketch; agents poll a versioned assignment (`304` when unchanged); keys are mana
   weight orders it among its siblings; its children are weighted independently), for both YAML and
   DB-fragment configs, with a weight input in the Config tab. SmokePing ordered menus by file
   position; this is the DB-config equivalent.
-- 🚧 **Show the resolved IP in the graph title** (planned; 2026-08-12) — targets are addressed by
-  hostname and the title shows the name only. Resolve the host at config-load and render
-  `hostname (1.2.3.4)` so it's clear which address is being probed and a DNS change is visible.
-  Opt-in / configurable; refresh on reload.
+- ✅ **Show the resolved IP in the graph title** — done: a target carries an optional `title:`
+  (display-name override) and, with `-resolve-ips` / `SMOKED_RESOLVE_IPS`, its IP in the graph header —
+  a pinned `ip:`, a literal-IP host, or the hostname resolved at config-load (best-effort, concurrent,
+  refreshed on SIGHUP reload). The header reads `<probe> <title-or-name> (<ip>)`. Both fields are
+  display-only (kept out of the measurement fingerprint, so a label/IP edit never resets a series).
+  Opt-in (default off); the bundled Compose demo enables it.
 - ✅ Drag-to-zoom time range — done: drag a range on the detail graph and it refetches
   that `[from,to]` at the resolution best for the span (raw/hourly/daily), not an image
   swap. In-app dark-mode toggle persistence done ✅ (localStorage, restored before first paint)
