@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/smtp"
+	"net/textproto"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -128,6 +129,103 @@ func TestEmailNotifierGivesUpAfterMaxAttempts(t *testing.T) {
 	}
 }
 
+// A permanent 5xx SMTP rejection (net/smtp surfaces server replies as *textproto.Error; Code >= 500
+// is permanent — unknown recipient, relay denied) must be abandoned on the FIRST attempt: retrying
+// it only burns the worker on a send that can never succeed. The attempt counter — not timing —
+// catches a regression that retries, so a tiny BaseBackoff keeps the test fast either way.
+func TestEmailNotifierPermanent5xxNoRetry(t *testing.T) {
+	var attempts atomic.Int32
+	send := func(ctx context.Context, addr string, a smtp.Auth, from string, to []string, msg []byte) error {
+		attempts.Add(1)
+		return &textproto.Error{Code: 550, Msg: "5.1.1 <a@x>: recipient address rejected: user unknown"}
+	}
+	n := newEmailNotifier(EmailConfig{
+		Addr: "mail.example.com:587", From: "s@x", To: []string{"a@x"}, QueueSize: 4, Workers: 1,
+		MaxAttempts: 4, BaseBackoff: time.Millisecond,
+	}, send)
+	n.Notify(Event{Target: "T", Alert: "loss", Firing: true, When: testWhen})
+	n.Close(context.Background())
+
+	st := n.Stats()
+	if st.Failed != 1 {
+		t.Errorf("Failed = %d, want 1", st.Failed)
+	}
+	if st.Retried != 0 {
+		t.Errorf("Retried = %d, want 0 (a 5xx rejection is permanent — never retried)", st.Retried)
+	}
+	if st.Delivered != 0 {
+		t.Errorf("Delivered = %d, want 0", st.Delivered)
+	}
+	if got := attempts.Load(); got != 1 {
+		t.Errorf("attempts = %d, want 1 (permanent 5xx must not be retried)", got)
+	}
+}
+
+// The AUTH-not-advertised misconfiguration (errAuthNotOffered, wrapped by the real smtpSender) is
+// permanent — no relay round-trip fixes it — so the notifier must give up on the first attempt,
+// exactly like the 5xx case. Mirrors the sender-level TestSMTPSenderAuthNotOffered but at the
+// deliver/retry layer.
+func TestEmailNotifierAuthNotOfferedNoRetry(t *testing.T) {
+	var attempts atomic.Int32
+	send := func(ctx context.Context, addr string, a smtp.Auth, from string, to []string, msg []byte) error {
+		attempts.Add(1)
+		// The same wrapped sentinel the real smtpSender returns for this misconfiguration.
+		return fmt.Errorf("smtp: authentication configured but server %q does not advertise AUTH (STARTTLS may be required): %w", addr, errAuthNotOffered)
+	}
+	n := newEmailNotifier(EmailConfig{
+		Addr: "mail.example.com:587", From: "s@x", To: []string{"a@x"}, QueueSize: 4, Workers: 1,
+		Auth: smtp.PlainAuth("", "u", "p", "mail.example.com"), MaxAttempts: 4, BaseBackoff: time.Millisecond,
+	}, send)
+	n.Notify(Event{Target: "T", Alert: "loss", Firing: true, When: testWhen})
+	n.Close(context.Background())
+
+	st := n.Stats()
+	if st.Failed != 1 {
+		t.Errorf("Failed = %d, want 1", st.Failed)
+	}
+	if st.Retried != 0 {
+		t.Errorf("Retried = %d, want 0 (the AUTH misconfiguration is permanent — never retried)", st.Retried)
+	}
+	if st.Delivered != 0 {
+		t.Errorf("Delivered = %d, want 0", st.Delivered)
+	}
+	if got := attempts.Load(); got != 1 {
+		t.Errorf("attempts = %d, want 1 (permanent AUTH error must not be retried)", got)
+	}
+}
+
+// A 4xx SMTP reply is transient (greylisting, temporary local error), so it MUST still be retried
+// and can deliver once the relay recovers — the complement of the 5xx no-retry case.
+func TestEmailNotifier4xxRetriesThenDelivers(t *testing.T) {
+	var attempts atomic.Int32
+	send := func(ctx context.Context, addr string, a smtp.Auth, from string, to []string, msg []byte) error {
+		if attempts.Add(1) <= 2 { // two transient 4xx rejections, then the relay accepts
+			return &textproto.Error{Code: 451, Msg: "4.7.1 greylisted, please retry"}
+		}
+		return nil
+	}
+	n := newEmailNotifier(EmailConfig{
+		Addr: "mail.example.com:587", From: "s@x", To: []string{"a@x"}, QueueSize: 4, Workers: 1,
+		MaxAttempts: 4, BaseBackoff: time.Millisecond,
+	}, send)
+	n.Notify(Event{Target: "T", Alert: "loss", Firing: true, When: testWhen})
+	n.Close(context.Background())
+
+	st := n.Stats()
+	if st.Delivered != 1 {
+		t.Errorf("Delivered = %d, want 1", st.Delivered)
+	}
+	if st.Retried != 2 {
+		t.Errorf("Retried = %d, want 2 (a 4xx reply is transient — retried)", st.Retried)
+	}
+	if st.Failed != 0 {
+		t.Errorf("Failed = %d, want 0", st.Failed)
+	}
+	if got := attempts.Load(); got != 3 {
+		t.Errorf("attempts = %d, want 3 (two transient 4xx failures then success)", got)
+	}
+}
+
 // Close must not wait out a per-attempt timeout on a send that is stuck mid-transaction: once its
 // deadline hits it force-cancels the in-flight send (via baseCtx) and counts it failed. Mirrors
 // TestWebhookCloseCancelsInflightAtDeadline.
@@ -169,6 +267,34 @@ func TestEmailCloseCancelsInflightAtDeadline(t *testing.T) {
 	}
 	if f := n.Stats().Failed; f != 1 {
 		t.Errorf("Failed = %d, want 1 (the in-flight delivery must be cancelled + counted, not left hanging)", f)
+	}
+}
+
+// permanentSendError classifies the two non-retryable error classes (5xx *textproto.Error, wrapped
+// or bare, and the errAuthNotOffered sentinel) and leaves transient ones (4xx, plain errors) to be
+// retried — the decision deliver keys off.
+func TestPermanentSendError(t *testing.T) {
+	authErr := fmt.Errorf("smtp: server %q does not advertise AUTH: %w", "mail:587", errAuthNotOffered)
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"5xx textproto", &textproto.Error{Code: 550, Msg: "user unknown"}, true},
+		{"wrapped 5xx textproto", fmt.Errorf("rcpt: %w", &textproto.Error{Code: 552, Msg: "mailbox full"}), true},
+		{"auth sentinel", authErr, true},
+		{"4xx textproto", &textproto.Error{Code: 451, Msg: "greylisted"}, false},
+		{"4xx boundary 499", &textproto.Error{Code: 499, Msg: "odd"}, false},
+		{"plain transient", errors.New("dial tcp: connection refused"), false},
+		{"nil", nil, false},
+	}
+	for _, c := range cases {
+		if got := permanentSendError(c.err); got != c.want {
+			t.Errorf("%s: permanentSendError = %v, want %v", c.name, got, c.want)
+		}
+	}
+	if !errors.Is(authErr, errAuthNotOffered) {
+		t.Errorf("AUTH error must satisfy errors.Is(errAuthNotOffered)")
 	}
 }
 
@@ -311,6 +437,11 @@ func TestSMTPSenderAuthNotOffered(t *testing.T) {
 	err = send(ctx, l.Addr().String(), auth, "f@x", []string{"t@x"}, []byte("msg"))
 	if err == nil || !strings.Contains(err.Error(), "does not advertise AUTH") {
 		t.Fatalf("err = %v, want the \"does not advertise AUTH\" error", err)
+	}
+	// The operator-facing message is intact, and the error also carries the sentinel so deliver
+	// can classify it as a permanent (non-retryable) failure.
+	if !errors.Is(err, errAuthNotOffered) {
+		t.Errorf("AUTH-not-offered error must satisfy errors.Is(errAuthNotOffered): %v", err)
 	}
 
 	select {
