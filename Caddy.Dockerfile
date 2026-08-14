@@ -10,14 +10,35 @@
 # credential-bearing reverse proxy builds reproducibly — the exact binary can't drift between two
 # builds of the same source. Bump tags + digests + plugin versions together on a refresh (Renovate
 # tracks them — see renovate.json). caddy:2.11-builder / caddy:2.11-alpine. CODE_REVIEW M4/L7.
-FROM caddy:2.11-builder@sha256:198d47eaee306d4d0c38a9960c89ff2c959aa29ad51d3e2dafa3e93ac961782a AS build
+#
+# The builder digest below (refreshed 2026-08) carries Go 1.26.6, clearing the stdlib
+# net/http+x/net/idna and x/net/dns/dnsmessage CVEs (CVE-2026-39821, CVE-2026-46600) that the
+# prior pin's Go 1.26.5 toolchain had. Caddy 2.11.4's own go.sum still pins vulnerable
+# golang.org/x/net, golang.org/x/text and google.golang.org/grpc versions (they're Caddy's compiled-in
+# deps, not something a base-image bump alone fixes — no 2.12 release exists yet to pick up a bump
+# upstream), so three extra --with lines below force Go's minimal-version-selection to the patched
+# versions (CVE-2026-46600, CVE-2026-56852, GHSA-hrxh-6v49-42gf). Re-check these floors whenever
+# Caddy releases a version that bundles the fix natively, and drop them then.
+FROM caddy:2.11-builder@sha256:c7ae80243a530d532d20062d56d6198b3ab161eb6971d28716ef7ec55599fea4 AS build
 RUN xcaddy build \
 	--with github.com/caddy-dns/cloudflare@v0.2.4 \
 	--with github.com/caddy-dns/route53@v1.6.2 \
 	--with github.com/caddy-dns/digitalocean@v0.0.0-20250606074528-04bde2867106 \
 	--with github.com/caddy-dns/duckdns@v0.5.0 \
 	--with github.com/caddy-dns/namecheap@v1.0.0 \
-	--with github.com/caddy-dns/gandi@v1.1.0
+	--with github.com/caddy-dns/gandi@v1.1.0 \
+	--with golang.org/x/net/http2@v0.56.0 \
+	--with golang.org/x/text/language@v0.39.0 \
+	--with google.golang.org/grpc@v1.82.1
 
+# Same digest as before (caddy:2.11-alpine hasn't been rebuilt upstream since 2026-06-24), so the
+# c-ares/curl/libcurl packages it ships are stale relative to the Alpine 3.23 apk repo. The
+# apk step below pins them forward to the patched versions already published on that same v3.23/main
+# branch (CVE-2026-33630, CVE-2026-5773, CVE-2026-6276). Drop this RUN once caddy:2.11-alpine (or a
+# later minor) is rebuilt with these fixed already, and update the digest instead.
 FROM caddy:2.11-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
+RUN apk update && apk add --no-cache --upgrade \
+	c-ares=1.34.8-r0 \
+	curl=8.20.0-r0 \
+	libcurl=8.20.0-r0
 COPY --from=build /usr/bin/caddy /usr/bin/caddy
