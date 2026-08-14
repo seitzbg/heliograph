@@ -857,16 +857,31 @@ func (s *PGStore) SeriesAll(ctx context.Context, vantage string, cutoff time.Tim
 			}
 		}
 	}
-	// row_number() per target keeps the newest N of each (so no target is dropped whole,
-	// as a bare LIMIT would); the outer query then returns them oldest->newest.
+	// Read each target's newest rounds through an indexed per-target LIMIT — a CROSS JOIN LATERAL
+	// over the distinct targets — so the database walks at most perTarget+1 rows per target on the
+	// (target, vantage, ts) index instead of scanning and row_number()-ranking the ENTIRE windowed
+	// set as before. The old window query touched every row matching (vantage, cutoff) and sorted
+	// them all just to keep the newest N of each; the lateral makes the work proportional to what is
+	// actually returned, so a wide 48-hour bulk request can't force an unbounded scan/sort on this
+	// unauthenticated read (CODE_REVIEW M5). The outer ORDER BY returns each target oldest->newest.
+	//
+	// Fetch perTarget+1: the extra "sentinel" row, when it comes back, is proof the target has MORE
+	// than perTarget rounds and was therefore genuinely clipped. That is how truncation is detected
+	// exactly now, replacing the old len>=perTarget heuristic, which also fired for a target holding
+	// exactly perTarget rounds with nothing dropped — a false "truncated" flag at the cap boundary
+	// (CODE_REVIEW L3).
+	fetch := perTarget + 1
 	rows, err := s.pool.Query(ctx,
-		`SELECT ts, target, probe, host, vantage, pings, loss, median_seconds, rtts_seconds, err, duration_ms
-		   FROM (
-		     SELECT *, row_number() OVER (PARTITION BY target ORDER BY ts DESC) AS rn
-		       FROM samples WHERE vantage=$1 AND ts > $2
-		   ) q
-		   WHERE rn <= $3
-		   ORDER BY target, ts`, v, cutoff.UTC(), perTarget)
+		`SELECT s.ts, s.target, s.probe, s.host, s.vantage, s.pings, s.loss, s.median_seconds, s.rtts_seconds, s.err, s.duration_ms
+		   FROM (SELECT DISTINCT target FROM samples WHERE vantage=$1 AND ts > $2) t
+		   CROSS JOIN LATERAL (
+		         SELECT ts, target, probe, host, vantage, pings, loss, median_seconds, rtts_seconds, err, duration_ms
+		           FROM samples
+		          WHERE target = t.target AND vantage = $1 AND ts > $2
+		          ORDER BY ts DESC
+		          LIMIT $3
+		   ) s
+		   ORDER BY s.target, s.ts`, v, cutoff.UTC(), fetch)
 	if err != nil {
 		s.onErr(err)
 		return nil, false, err
@@ -885,16 +900,16 @@ func (s *PGStore) SeriesAll(ctx context.Context, vantage string, cutoff time.Tim
 		s.onErr(err)
 		return nil, false, err
 	}
-	// Truncation means a target's OLDEST rounds were actually dropped — i.e. it hit the
-	// per-target cap (rn <= perTarget, so len can only reach perTarget when clipped). The
-	// fair-share cap being lowered below the 20k ceiling is NOT truncation by itself: with
-	// many targets each under the cap, nothing is dropped, so this must not warn (it used to
-	// fire on every refresh once there were >=16 targets — a false alarm).
+	// A target that came back with the sentinel (perTarget+1 rows) truly had its OLDEST rounds
+	// dropped: trim it to the newest perTarget (rows are ascending by ts, so keep the tail) and flag
+	// truncation. A target with exactly perTarget rows and no sentinel is NOT truncated — nor is the
+	// fair-share cap merely being lowered below the 20k ceiling, which with many small targets drops
+	// nothing (the old heuristic falsely warned on every refresh once there were >=16 targets).
 	truncated := false
-	for _, hist := range out {
-		if len(hist) >= perTarget {
+	for name, hist := range out {
+		if len(hist) > perTarget {
+			out[name] = hist[len(hist)-perTarget:]
 			truncated = true
-			break
 		}
 	}
 	if truncated {
