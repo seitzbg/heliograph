@@ -127,7 +127,9 @@
   // (left nav). Each name is a '/'-separated path (the config hierarchy); we nest a node
   // per segment, and set `target` on the node whose exact path is a monitored target — so
   // a node can be BOTH a target and a folder (a host with children, as SmokePing allows).
-  // Siblings are sorted by name for a stable menu. Returns the top-level nodes:
+  // Siblings preserve first-encounter order (the server's config/weight order — see
+  // /api/targets), so the menu mirrors the config author's ordering instead of A–Z.
+  // Returns the top-level nodes:
   //   node = { name, path, target: <full name>|null, children: node[] }
   function buildTree(names) {
     const root = { children: [], _m: new Map() };
@@ -143,7 +145,7 @@
       }
       cur.target = full;
     }
-    (function finish(n) { n.children.sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0); delete n._m; n.children.forEach(finish); })(root);
+    (function finish(n) { delete n._m; n.children.forEach(finish); })(root);
     return root.children;
   }
 
