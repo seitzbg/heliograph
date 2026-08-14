@@ -359,5 +359,32 @@ check('collectingNote: band panels name the history they are accumulating; raw s
   assert.equal(D.collectingNote('raw', '1h'), 'collecting…'); // res is irrelevant for raw panels
 });
 
+// --- Vantage agent artifacts: the two files the reveal modal offers (agent.yaml + compose) ---
+check('agentYaml: embeds name/hub/key + spool_dir, YAML double-quoted', () => {
+  const y = D.agentYaml('nyc', 'smk_abc123', 'https://hub.example');
+  assert.match(y, /^# smoke-agent config for vantage "nyc"$/m);
+  assert.match(y, /^hub: "https:\/\/hub\.example"/m);
+  assert.match(y, /^vantage: "nyc"$/m);
+  assert.match(y, /^key: "smk_abc123"$/m);
+  assert.match(y, /^spool_dir: \/var\/lib\/smoke-agent\/spool$/m); // pairs with the compose volume
+});
+check('agentYaml: quotes are escaped so a hostile-ish name stays well-formed YAML', () => {
+  // ValidName blocks this at mint time, but the builder must not emit broken YAML regardless.
+  const y = D.agentYaml('a"b', 'k', 'http://h');
+  assert.match(y, /vantage: "a\\"b"/);
+});
+check('agentCompose: runnable compose that mounts agent.yaml and carries no secret', () => {
+  const c = D.agentCompose();
+  assert.match(c, /image: ghcr\.io\/seitzbg\/heliograph:main/);
+  assert.match(c, /entrypoint: \["smoke-agent"\]/);
+  assert.match(c, /command: \["-config", "\/etc\/heliograph\/agent\.yaml"\]/);
+  assert.match(c, /\.\/agent\.yaml:\/etc\/heliograph\/agent\.yaml:ro/);   // the mount ties the two files together
+  assert.match(c, /agent-spool:\/var\/lib\/smoke-agent\/spool/);
+  assert.match(c, /cap_add: \[NET_RAW\]/);
+  assert.match(c, /net\.ipv4\.ping_group_range: "0 10001"/);              // native Ping probe needs this
+  assert.match(c, /restart: unless-stopped/);
+  assert.ok(!/smk_/.test(c), 'compose must never contain key material — the key lives only in agent.yaml');
+});
+
 if (failed) { console.error(`\n${failed} test(s) failed`); process.exit(1); }
 console.log('\nall dashboard tests passed');

@@ -7,6 +7,13 @@ All notable changes to **Heliograph** are recorded here. The format follows
 ## [Unreleased]
 
 ### Added
+- **One-click vantage deployment from the browser.** The Vantages panel's reveal-key dialog now presents the
+  agent setup as two copyable/downloadable files behind a toggle: **`agent.yaml`** (the per-vantage
+  `hub`/`vantage`/`key`, with `hub` prefilled to the hub you're viewing and a durable `spool_dir`) and a
+  ready-to-run **`docker-compose.yaml`** that mounts it and runs the agent. **Copy** and **Download** act on
+  whichever file is shown, and the key lives only in `agent.yaml`. The published image now ships **both** the
+  `smoked` and `smoke-agent` binaries (the compose overrides the entrypoint to `smoke-agent`), so bringing a
+  vantage up needs only those two files and `docker compose up -d`.
 - **Display name + IP in the graph title.** A target can carry a `title:` (a display-name override, shown
   in the graph header instead of its tree-path key) and, with `-resolve-ips` / `SMOKED_RESOLVE_IPS=1`, its
   IP: a pinned `ip:` field, else a literal-IP `host`, else the hostname resolved at config-load (best-effort,

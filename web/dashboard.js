@@ -334,7 +334,48 @@
     return 'collecting…';
   }
 
-  window.Dash = { RANGES, RANGE_ORDER, parseRoute, mergeSeries, gridSince, fetchJSON, zoomResolution, pixelToTime, sharedYMax, buildTree, underPath, targetStatus, pickSeries, vantageList, orderVantages, defaultFocus, keepFocus, vantageColorVar, adminMode, relTime, listTargets, addTarget, editTarget, removeTarget, buildTargetNode, labelHTML, collectingNote };
+  // --- Vantage agent artifacts (pure; the reveal modal's two downloadable files) ---
+
+  // agentYaml renders the smoke-agent config for a freshly minted vantage. It mirrors the
+  // hub's vantage.AgentSnippet but fills `hub` with the real origin (the browser knows which
+  // hub you're on — the server only has a placeholder) and adds `spool_dir` so the durable
+  // spool volume in agentCompose is actually used. Scalars are JSON-quoted (== Go %q) so any
+  // name stays well-formed YAML. This file carries the key; keep it out of the compose.
+  function agentYaml(name, key, hub) {
+    return '# smoke-agent config for vantage ' + JSON.stringify(name) + '\n'
+      + 'hub: ' + JSON.stringify(hub) + '   # this hub — change if the agent reaches it by another URL\n'
+      + 'vantage: ' + JSON.stringify(name) + '\n'
+      + 'key: ' + JSON.stringify(key) + '\n'
+      + 'spool_dir: /var/lib/smoke-agent/spool\n';
+  }
+
+  // agentCompose renders a ready-to-run docker-compose.yaml for a vantage agent. It is the
+  // same for every vantage — the per-vantage data lives in the mounted agent.yaml, so this
+  // file holds no secret. The single published image ships both binaries, so we override the
+  // entrypoint to smoke-agent; cap_add/sysctls mirror the hub service so ICMP probes work.
+  function agentCompose() {
+    return [
+      '# docker-compose.yaml — heliograph vantage agent',
+      '# Save next to agent.yaml (the other tab), then:  docker compose up -d',
+      'services:',
+      '  smoke-agent:',
+      '    image: ghcr.io/seitzbg/heliograph:main',
+      '    entrypoint: ["smoke-agent"]',
+      '    command: ["-config", "/etc/heliograph/agent.yaml"]',
+      '    volumes:',
+      '      - ./agent.yaml:/etc/heliograph/agent.yaml:ro',
+      '      - agent-spool:/var/lib/smoke-agent/spool',
+      '    cap_add: [NET_RAW]',
+      '    sysctls:',
+      '      net.ipv4.ping_group_range: "0 10001"',
+      '    restart: unless-stopped',
+      'volumes:',
+      '  agent-spool: {}',
+      '',
+    ].join('\n');
+  }
+
+  window.Dash = { RANGES, RANGE_ORDER, parseRoute, mergeSeries, gridSince, fetchJSON, zoomResolution, pixelToTime, sharedYMax, buildTree, underPath, targetStatus, pickSeries, vantageList, orderVantages, defaultFocus, keepFocus, vantageColorVar, adminMode, relTime, listTargets, addTarget, editTarget, removeTarget, buildTargetNode, labelHTML, collectingNote, agentYaml, agentCompose };
 
   // ---------------------------------------------------------------- init (DOM) --
   function init() {
@@ -1044,21 +1085,47 @@
       try { data = await r.json(); } catch (e) { reportMintError(isRegen, 'Malformed server response.'); return; }
       $('vantName').value = '';
       $('vantAddErr').textContent = '';
-      showReveal(data.name, data.snippet || data.key || '');
+      showReveal(data.name, data.key || '');
     }
-    function showReveal(name, snippet) {
+    // Reveal-modal state: the one-time key + which file the toggle is showing. Held only while
+    // the modal is open; closeReveal() clears the key so it never lingers in memory or the DOM.
+    let revealName = '', revealKey = '', revealPane = 'agent';
+    const revealFile = () => (revealPane === 'compose' ? 'docker-compose.yaml' : 'agent.yaml');
+    // renderRevealPane paints the active file into the <pre> and syncs the tab state. agent.yaml
+    // carries the key (hub defaults to this page's origin — the browser knows the real hub; the
+    // server only had a placeholder); the compose file is keyless and identical for every vantage.
+    function renderRevealPane() {
+      $('vantRevealSnippet').textContent = revealPane === 'compose'
+        ? agentCompose()
+        : agentYaml(revealName, revealKey, window.location.origin);
+      $('vantTabAgent').setAttribute('aria-selected', String(revealPane === 'agent'));
+      $('vantTabCompose').setAttribute('aria-selected', String(revealPane === 'compose'));
+    }
+    function showReveal(name, key) {
+      revealName = name; revealKey = key; revealPane = 'agent';
       $('vantRevealName').textContent = name;
-      $('vantRevealSnippet').textContent = snippet; // contains the smk_ key
+      renderRevealPane();
       $('vantReveal').classList.remove('hidden');
       $('vantRevealClose').focus();
     }
     function closeReveal() {
+      revealName = ''; revealKey = '';         // drop the key from memory
       $('vantRevealSnippet').textContent = ''; // never leave key material in the DOM
       $('vantReveal').classList.add('hidden');
       renderVantages(); // refresh the list (new/rotated row, updated counts)
     }
+    $('vantTabAgent').addEventListener('click', () => { revealPane = 'agent'; renderRevealPane(); });
+    $('vantTabCompose').addEventListener('click', () => { revealPane = 'compose'; renderRevealPane(); });
     $('vantRevealClose').addEventListener('click', closeReveal);
     $('vantReveal').addEventListener('click', (e) => { if (e.target === $('vantReveal')) closeReveal(); }); // backdrop
+    $('vantDownload').addEventListener('click', () => {
+      const blob = new Blob([$('vantRevealSnippet').textContent], { type: 'text/yaml' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = revealFile();
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(url);
+    });
     $('vantCopy').addEventListener('click', async () => {
       const text = $('vantRevealSnippet').textContent;
       try {

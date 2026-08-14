@@ -107,7 +107,8 @@ revoked vantage "nyc"
 ```
 
 **GUI** (the Vantages tab): set `SMOKED_ADMIN_PASSWORD` on the hub to enable the
-admin panel, log in, then **add** (reveals the key + agent snippet once), **list**
+admin panel, log in, then **add** (reveals the key once — as a copyable/downloadable
+`agent.yaml` and a ready-to-run `docker-compose.yaml`, toggled in the dialog), **list**
 (name, created, last-seen, target count), **regenerate** (rotate), and **revoke**.
 The panel is reached through the proxy (behind the dashboard's Basic Auth, then
 its own admin password) or on `http://localhost:8087/` on the hub.

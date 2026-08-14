@@ -1,6 +1,8 @@
-# Build a static smoked binary, then ship it on a small base that carries the
-# external tools some probes shell out to (fping; irtt is optional and skipped
-# if absent). ICMP via fping needs CAP_NET_RAW at runtime (see compose).
+# Build the static smoked + smoke-agent binaries, then ship them on a small base that carries
+# the external tools some probes shell out to (fping; irtt is optional and skipped if absent).
+# One image, two entrypoints: `smoked` is the default; a federation vantage overrides the
+# entrypoint to `smoke-agent` (see the compose the Vantages panel generates). ICMP via fping
+# needs CAP_NET_RAW at runtime (see compose).
 # Build image pinned by digest for reproducibility. Bump the tag + digest together on a refresh
 # (Renovate keeps these current — see renovate.json); a pinned Go toolchain trades automatic patch
 # uptake for a reviewable, reproducible build. CODE_REVIEW M4/L7.
@@ -9,7 +11,8 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -trimpath -o /out/smoked ./cmd/smoked
+RUN CGO_ENABLED=0 go build -trimpath -o /out/smoked ./cmd/smoked \
+ && CGO_ENABLED=0 go build -trimpath -o /out/smoke-agent ./cmd/smoke-agent
 
 # Runtime base pinned by digest to a SUPPORTED Alpine branch (3.20 reached end of
 # normal security support 2026-04-01). Bump the tag + digest together on a refresh
@@ -23,8 +26,11 @@ RUN apk add --no-cache fping ca-certificates tzdata \
  && apk add --no-cache --virtual .setcap libcap \
  && setcap cap_net_raw+ep "$(command -v fping)" \
  && apk del .setcap \
- && adduser -D -H -u 10001 smoked
+ && adduser -D -H -u 10001 smoked \
+ && mkdir -p /var/lib/smoke-agent/spool \
+ && chown smoked /var/lib/smoke-agent/spool
 COPY --from=build /out/smoked /usr/local/bin/smoked
+COPY --from=build /out/smoke-agent /usr/local/bin/smoke-agent
 COPY web /web
 COPY config.example.yaml /etc/heliograph/config.yaml
 # Ship the MIT license notice inside the image (the source is MIT; a distributed
