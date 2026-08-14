@@ -348,5 +348,16 @@ check('labelHTML: title falls back to name, IP appended and escaped', () => {
   assert.equal(D.labelHTML('n', '<b>', '1&2'), '&lt;b&gt; <span class="tgtip">(1&amp;2)</span>'); // escapes both
 });
 
+check('collectingNote: band panels name the history they are accumulating; raw stays generic', () => {
+  const daily = D.collectingNote('band', '1d');
+  assert.match(daily, /daily band/);
+  assert.match(daily, /2 days/);           // tells a fresh deploy it fills in, not that it is broken
+  const hourly = D.collectingNote('band', '1h');
+  assert.match(hourly, /hourly band/);
+  assert.match(hourly, /2 hours/);
+  assert.equal(D.collectingNote('raw'), 'collecting…');
+  assert.equal(D.collectingNote('raw', '1h'), 'collecting…'); // res is irrelevant for raw panels
+});
+
 if (failed) { console.error(`\n${failed} test(s) failed`); process.exit(1); }
 console.log('\nall dashboard tests passed');
