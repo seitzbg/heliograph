@@ -253,8 +253,8 @@ jobs:
 
   # Build the bundled Caddy reverse-proxy image (Caddy.Dockerfile: xcaddy + DNS-provider plugins), so
   # a broken plugin pin or Dockerfile is caught in CI, and scan it. Not published (the federation
-  # profile builds it locally). Not a required check; the scan is report-only until the caddy base is
-  # vetted clean.
+  # profile builds it locally). BLOCKING (CODE_REVIEW M2): the Trivy scan reds the pipeline on any
+  # fixable HIGH/CRITICAL, same as the collector's finished-image scan below.
   caddy-image:
     needs: [go-test, frontend, govulncheck, db-test]
     runs-on: ubuntu-latest
@@ -287,9 +287,9 @@ jobs:
           name: sbom-caddy-spdx
           path: sbom-caddy.spdx.json
           retention-days: 30
-      - name: Trivy scan (report-only)
-        continue-on-error: true
+      - name: Trivy image scan (blocking)
         run: |
           docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$PWD/.trivyignore:/.trivyignore:ro" -e TRIVY_IGNOREFILE=/.trivyignore \
             aquasec/trivy:0.58.1@sha256:ab70a02200597efa04748f210f793936eb647cbcdb0ea69cc30b226d6f5a22c7 image --scanners vuln --severity HIGH,CRITICAL \
-            --ignore-unfixed heliograph-caddy:ci
+            --ignore-unfixed --exit-code 1 heliograph-caddy:ci
