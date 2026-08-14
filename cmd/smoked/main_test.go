@@ -391,15 +391,22 @@ func TestCommitRemoteDropsReloadRedefinedTarget(t *testing.T) {
 		t.Fatalf("current-identity round must alert, got %d events", cap.n)
 	}
 
-	// A round for a target a reload REMOVED entirely (absent from targetFP) is dropped by the filter
-	// before the store write — a distinct timestamp proves the drop is the identity check, not dedup.
+	// A round for a target a reload REMOVED entirely (absent from targetFP) is dropped by the
+	// membership gate before the store write. An EMPTY-fingerprint round exercises that gate in
+	// isolation: fingerprintStale never flags an empty fingerprint, so only the membership check can
+	// drop it — the distinct timestamp rules out dedup as the reason it isn't stored.
 	removedRT := &runtime{engine: rtNew.engine, alertsByTarget: map[string][]string{}, targetFP: map[string]string{}}
-	fresh := lost(time.Unix(1_700_000_120, 0), "sha256:new")
+	emptyFP := lost(time.Unix(1_700_000_120, 0), "")
+	if ins, err := removedRT.commitRemote(ctx, mem, []scheduler.Outcome{emptyFP}); err != nil || len(ins) != 0 {
+		t.Fatalf("empty-fp round for a removed target must be dropped by the membership gate, got inserted=%d err=%v", len(ins), err)
+	}
+	// And a fingerprint-stamped round for the removed target is likewise dropped.
+	fresh := lost(time.Unix(1_700_000_180, 0), "sha256:new")
 	if ins, err := removedRT.commitRemote(ctx, mem, []scheduler.Outcome{fresh}); err != nil || len(ins) != 0 {
 		t.Fatalf("round for a removed target must be dropped, got inserted=%d err=%v", len(ins), err)
 	}
 	if keys, _ := mem.Keys(); len(keys) != 1 {
-		t.Fatalf("removed-target round must not be stored, keys = %v", keys)
+		t.Fatalf("removed-target rounds must not be stored, keys = %v", keys)
 	}
 }
 

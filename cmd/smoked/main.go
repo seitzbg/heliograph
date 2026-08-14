@@ -952,6 +952,12 @@ func (rt *runtime) commitRemote(ctx context.Context, ing store.ResultIngester, o
 		}
 		kept = append(kept, o)
 	}
+	if dropped := len(out) - len(kept); dropped > 0 {
+		// A reload redefined/removed these targets between the handler's snapshot validation and
+		// this write, so the rounds are dropped at commit rather than stored under a stale identity.
+		// Log it (mirroring the handler's snapshot-time drop warning) so the event isn't silent.
+		slog.Warn("agent ingest: dropped rounds at commit; target redefined or removed by a reload", "dropped", dropped)
+	}
 	if len(kept) == 0 {
 		return nil, nil
 	}
