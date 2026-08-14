@@ -99,6 +99,14 @@ type Server struct {
 	// vantage) — the post-ingest hook that closes CODE_REVIEW #5 / P2-5. nil = no alerting
 	// on ingest (e.g. pure API tests).
 	OnIngest func(outcomes []scheduler.Outcome)
+	// IngestCommit, if set, SUPERSEDES the AddResults+OnIngest pair for the /agent/v1/results
+	// path: it persists a snapshot-validated batch and evaluates its alerts atomically under the
+	// runtime's reload boundary, re-checking each outcome's target identity against the LIVE
+	// assignment first. This closes the window between the handler's snapshot validation and the
+	// store write in which a config reload could redefine a target and leave a stale round stored
+	// under the new name (CODE_REVIEW M4). It returns the newly-inserted rounds (the store dedups
+	// replays). nil ⇒ the handler falls back to AddResults + OnIngest (e.g. pure API tests).
+	IngestCommit func(ctx context.Context, outcomes []scheduler.Outcome) (inserted []scheduler.Outcome, err error)
 	// RequireFingerprint, when true, makes agent ingest STRICT: a round with no measurement
 	// fingerprint (a pre-fingerprint agent) is dropped as a visible permanent drop instead of
 	// accepted. Default false keeps the lenient/compatible behavior (accepted + counted) so a

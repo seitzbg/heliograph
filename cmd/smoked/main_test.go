@@ -338,6 +338,71 @@ func TestStoreLocalDropsObsoleteIdentityFromStorage(t *testing.T) {
 	}
 }
 
+// CODE_REVIEW M4: the remote ingest handler validates a round against a runtime SNAPSHOT and then
+// persists it. A config reload landing in between could redefine (or remove) the target so the
+// round lands under the new identity. commitRemote re-checks each outcome against the LIVE runtime
+// under evalMu at write time, so a round validated under the old identity is dropped from BOTH
+// storage and alerting once a reload has redefined/removed its target — the ingest-path analog of
+// storeLocal. This models that reload-between-validation-and-write sequence deterministically: the
+// outcome is stamped for the OLD identity (as the handler built it), and the live runtime it commits
+// against is the reloaded one.
+func TestCommitRemoteDropsReloadRedefinedTarget(t *testing.T) {
+	cap := &capNotify{}
+	newRT := func(fp string) *runtime {
+		eng := alert.NewEngine(
+			map[string]*alert.Alert{"loss": {Name: "loss", Matcher: alert.CheckLoss{L: 50, X: 1}, To: []string{"cap"}}},
+			map[string]alert.Notifier{"cap": cap},
+		)
+		return &runtime{
+			engine:         eng,
+			alertsByTarget: map[string][]string{"t": {"loss"}},
+			targetFP:       map[string]string{"t": fp},
+		}
+	}
+	mem := store.NewMem(16)
+	ctx := context.Background()
+	lost := func(ts time.Time, fp string) scheduler.Outcome { // 100% loss, stamped fp + ts
+		return scheduler.Outcome{Target: probe.Target{Name: "t"}, Computed: sample.Compute(1, nil), When: ts, Fingerprint: fp}
+	}
+
+	// A reload redefined "t" (new fingerprint) after the handler validated the round under the old
+	// snapshot: the live runtime is now rtNew, and the round carries the OLD fingerprint.
+	rtNew := newRT("sha256:new")
+	stale := lost(time.Unix(1_700_000_000, 0), "sha256:old")
+	if ins, err := rtNew.commitRemote(ctx, mem, []scheduler.Outcome{stale}); err != nil || len(ins) != 0 {
+		t.Fatalf("reload-redefined round must be dropped, got inserted=%d err=%v", len(ins), err)
+	}
+	if keys, _ := mem.Keys(); len(keys) != 0 {
+		t.Fatalf("reload-redefined round must not be stored, store has keys %v", keys)
+	}
+	if cap.n != 0 {
+		t.Fatalf("reload-redefined round must not alert, got %d events", cap.n)
+	}
+
+	// A round measured under the CURRENT identity is stored and alerted.
+	cur := lost(time.Unix(1_700_000_060, 0), "sha256:new")
+	if ins, err := rtNew.commitRemote(ctx, mem, []scheduler.Outcome{cur}); err != nil || len(ins) != 1 {
+		t.Fatalf("current-identity round must be stored, got inserted=%d err=%v", len(ins), err)
+	}
+	if keys, _ := mem.Keys(); len(keys) != 1 || keys[0] != "t" {
+		t.Fatalf("current-identity round must be stored, keys = %v", keys)
+	}
+	if cap.n != 1 {
+		t.Fatalf("current-identity round must alert, got %d events", cap.n)
+	}
+
+	// A round for a target a reload REMOVED entirely (absent from targetFP) is dropped by the filter
+	// before the store write — a distinct timestamp proves the drop is the identity check, not dedup.
+	removedRT := &runtime{engine: rtNew.engine, alertsByTarget: map[string][]string{}, targetFP: map[string]string{}}
+	fresh := lost(time.Unix(1_700_000_120, 0), "sha256:new")
+	if ins, err := removedRT.commitRemote(ctx, mem, []scheduler.Outcome{fresh}); err != nil || len(ins) != 0 {
+		t.Fatalf("round for a removed target must be dropped, got inserted=%d err=%v", len(ins), err)
+	}
+	if keys, _ := mem.Keys(); len(keys) != 1 {
+		t.Fatalf("removed-target round must not be stored, keys = %v", keys)
+	}
+}
+
 // Bug C (CODE_REVIEW #4): attaching an alert to a previously-unalerted target on reload must
 // seed its window from durable history, so an already-breaching target fires immediately
 // instead of waiting X fresh rounds. swapRuntime runs the seed before the swap.
