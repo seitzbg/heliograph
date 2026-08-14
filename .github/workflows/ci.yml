@@ -228,9 +228,14 @@ jobs:
       # against :main.
       - name: Trivy image scan (blocking)
         run: |
-          docker run --rm -v /tmp:/tmp \
+          # trivy --input reads a docker-archive tarball or an OCI *directory* (it stats
+          # <input>/index.json), NOT an OCI-layout tarball — which is what buildx type=oci writes.
+          # Unpack the exact archive to a layout dir and scan that, so the scanned bytes are the
+          # same ones publish-image pushes.
+          mkdir -p /tmp/oci-layout && tar -xf /tmp/collector-image.tar -C /tmp/oci-layout
+          docker run --rm -v /tmp/oci-layout:/oci-layout:ro \
             -v "$PWD/.trivyignore.yaml:/.trivyignore.yaml:ro" -e TRIVY_IGNOREFILE=/.trivyignore.yaml \
-            aquasec/trivy:0.58.1@sha256:ab70a02200597efa04748f210f793936eb647cbcdb0ea69cc30b226d6f5a22c7 image --input /tmp/collector-image.tar \
+            aquasec/trivy:0.58.1@sha256:ab70a02200597efa04748f210f793936eb647cbcdb0ea69cc30b226d6f5a22c7 image --input /oci-layout \
             --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1
       # Hand the SCANNED archive to publish-image so it pushes the exact bytes (non-PR only; a PR
       # never publishes, so it needs no artifact).
