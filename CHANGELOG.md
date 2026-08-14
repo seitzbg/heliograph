@@ -180,6 +180,25 @@ All notable changes to **Heliograph** are recorded here. The format follows
   ./...` is clean on 1.26.6.
 
 ### Fixed
+- **Sequential probes' inter-attempt delays no longer overrun the round deadline.** `TCPConnect` and `SSH`
+  sleep `interval_ms` between their N attempts, but that sleep happens *outside* the per-attempt contexts,
+  while the per-ping budget divided the *whole* remaining round budget by `pings` — so the real total was
+  `pings × (budget/pings) + (pings-1) × interval`, which overruns the round deadline. With a large
+  `interval_ms` the parent deadline fired mid-sleep and the loop bailed after the **first** attempt, breaking
+  the guarantee that a dead host is probed all N times. The new `probe.PerPingBudgetWithDelay` reserves the
+  mandatory `(pings-1)` delays from the budget *before* dividing, and clamps the effective interval so the
+  delays can never consume more than half the round budget (bounding `interval_ms` against `step`/`pings`,
+  which the probe can't validate at construction). `HTTP`/`DNS` (no inter-attempt sleep) and `pings=1`/
+  no-deadline callers are unchanged. Regression-tested end-to-end (a large `interval_ms` still probes all N
+  within the deadline) plus a unit test of the budget/clamp math.
+- **Native `Ping` honors a `timeout_ms` larger than 1 s in its send schedule.** `spreadInterval` reserved a
+  hardcoded 1 s tail for replies regardless of the configured per-reply timeout, so a `timeout_ms` > 1 s was
+  accepted but the send schedule could push the last echo so late that less than the requested window
+  remained before the round deadline — `replyDeadline` then clamped the last echo's wait below the
+  configured timeout, causing avoidable loss on a high-latency target. The effective reply timeout is now
+  passed into `spreadInterval` and reserved as the tail (still capped at half the round budget for a short
+  `step`); the default 1 s behavior is unchanged. Regression-tested (a `timeout_ms` > 1 s against a short
+  step keeps the full window in the schedule).
 - **Email notifier no longer retries permanent SMTP failures.** A failed send that can never succeed
   on retry — a 5xx server rejection (unknown recipient, relay denied; `net/smtp` surfaces these as a
   `*textproto.Error` with `Code >= 500`) or the AUTH-not-advertised misconfiguration — is now abandoned
