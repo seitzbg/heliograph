@@ -100,8 +100,8 @@ All notable changes to **Heliograph** are recorded here. The format follows
   generates an SPDX SBOM (artifact) and runs a finished-image vulnerability scan (Trivy) on top of the
   existing Go-module `govulncheck`; it also re-scans the current `:main` on scheduled pipelines to
   catch newly-disclosed CVEs against pinned images. A `renovate.json` keeps the digests and plugin
-  versions current so the pins don't go stale. (The image scan is report-only for now — tighten to
-  blocking once the base image is clean.) CODE_REVIEW M4/L7.
+  versions current so the pins don't go stale. (The finished-image Trivy scan is now blocking — see
+  "Supply-chain release gates completed" above.) CODE_REVIEW M4/L7.
 - **Spool recovery streams each segment instead of loading it whole and copying every body.** On
   agent restart, recovery read each segment fully into memory and copied every decoded body before
   deciding which to keep, so a segment full of dead or budget-evicted rounds still cost a full copy
@@ -113,7 +113,7 @@ All notable changes to **Heliograph** are recorded here. The format follows
   before the handler could trim it. `SeriesAll` now takes a global budget and caps each target at
   `min(perTarget, budget/targets)`, so the server never sorts and the client never builds an
   unbounded result for a many-target bulk read, while every target keeps its newest rounds; the
-  response carries `truncated` when the bound bit.
+  response carries `truncated` when the bound was reached.
 - **Startup and reload now warn about alert recipients with no enabled notifier.** An alert `to` or a
   target `alertee` referencing an unknown notifier (a typo, or `webhook` without `-webhook`) was only
   noticed when an event was dispatched — invisible until the incident whose notification got silently
