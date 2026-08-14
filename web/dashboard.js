@@ -1408,16 +1408,22 @@
         const vantStr = (nd.vantages && nd.vantages.length) ? '@' + nd.vantages.join(',') : '';
         meta = esc([nd.probe || '', nd.host || '', paramsStr, vantStr].filter(Boolean).join(' · '));
       }
+      // A stable, unique id for the child group so the folder treeitem can aria-owns it — the group
+      // is a DOM sibling of the folder row (nesting it inside .crow would break the flex layout), so
+      // aria-owns is what conveys the folder→children ownership the WAI-ARIA tree pattern expects.
+      // encodeURIComponent keeps the id unique per path and free of whitespace.
+      const gid = n.isFolder ? 'cfg-grp-' + encodeURIComponent(n.path) : '';
       const kids = (n.isFolder && !collapsed)
-        ? '<div class="kids" role="group">' + n.children.map((c) => cfgRowHtml(c, d + 1)).join('') + '</div>' : '';
+        ? '<div class="kids" role="group" id="' + esc(gid) + '">' + n.children.map((c) => cfgRowHtml(c, d + 1)).join('') + '</div>' : '';
       const roving = n.path === cfgFocusPath ? '0' : '-1';
       const selected = n.path === cfgFocusPath ? 'true' : 'false';
       const expanded = n.isFolder ? ' aria-expanded="' + (!collapsed) + '"' : '';
+      const owns = (n.isFolder && !collapsed) ? ' aria-owns="' + esc(gid) + '"' : '';
       const twist = n.isFolder ? '<span class="ctwist" data-twist="1" aria-hidden="true">▾</span>' : '<span class="ctwist" aria-hidden="true"></span>';
       const addChild = n.isFolder
         ? '<button type="button" class="vadmin-btn cfg-addchild" data-add-child="' + esc(n.path) + '" aria-label="Add a target into ' + esc(n.path) + '" title="Add into this folder">+</button>' : '';
       return '<div class="crow' + (n.isFolder ? ' folder' : '') + (collapsed ? ' collapsed' : '') + '" draggable="true" data-path="' + esc(n.path) +
-        '" style="--d:' + d + '" role="treeitem" tabindex="' + roving + '" aria-selected="' + selected + '"' + expanded + '>' +
+        '" style="--d:' + d + '" role="treeitem" tabindex="' + roving + '" aria-selected="' + selected + '"' + expanded + owns + '>' +
         twist +
         '<span class="chandle" aria-hidden="true">⠿</span>' +
         '<span class="cname">' + esc(n.name) + (n.isFolder ? '/' : '') + '</span>' +
@@ -1667,8 +1673,12 @@
     $('cfgTree').addEventListener('keydown', (e) => {
       const NAVKEYS = ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End'];
       if (!NAVKEYS.includes(e.key)) return;
-      const row = e.target.closest && e.target.closest('.crow');
-      if (!row || !row.classList.contains('crow')) return; // ignore keys while focus is on a button
+      // Act only when the treeitem row ITSELF holds focus (roving tabindex is on the .crow). Using
+      // closest('.crow') would walk UP from a focused inner control (Edit/Remove/+) to the row and
+      // fire tree nav — including an Alt+Arrow reorder — while the button is focused; guard on the
+      // event target directly so keys on an inner control fall through to it.
+      const row = e.target;
+      if (!row.classList || !row.classList.contains('crow')) return;
       const rows = Dash.cfgVisibleRows(Dash.cfgTree(cfg.doc), cfgCollapsed);
       const action = Dash.cfgTreeKey(rows, row.getAttribute('data-path'), e.key, e.altKey);
       if (!action) return;
