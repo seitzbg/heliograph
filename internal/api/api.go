@@ -77,6 +77,9 @@ type Server struct {
 	// -> vantage names) — /api/targets surfaces it so the UI can show which vantages a
 	// target is measured from. nil means the field is omitted (tests/pure API/no federation).
 	TargetVantages func() map[string][]string
+	// TargetMeta, if set, returns each target's display-only metadata (title override + the
+	// IP to show in the graph title). nil means the field is omitted.
+	TargetMeta func() map[string]TargetMeta
 	// Configured, if set, returns the full configured target catalog (all vantages), so
 	// /api/targets lists a target even when it has no stored row for the requested vantage
 	// yet — e.g. a remote-only target the hub never probes locally (CODE_REVIEW #3 / P1-3).
@@ -242,7 +245,11 @@ func (srv *Server) probeSchema(w http.ResponseWriter, _ *http.Request) {
 }
 
 type targetDTO struct {
-	Name     string   `json:"name"`
+	Name string `json:"name"`
+	// Title is the display-name override (falls back to Name in the UI); IP is the address
+	// to show in the graph title (pinned or resolved). Both display-only, omitted when unset.
+	Title    string   `json:"title,omitempty"`
+	IP       string   `json:"ip,omitempty"`
 	Probe    string   `json:"probe"`
 	MedianMs *float64 `json:"median_ms"`
 	Loss     int      `json:"loss"`
@@ -258,9 +265,16 @@ type targetDTO struct {
 	NoData bool `json:"no_data,omitempty"`
 }
 
+// TargetMeta is a target's display-only metadata: its title override and the IP to show
+// in the graph title (pinned or resolved). Kept separate from measurement identity.
+type TargetMeta struct {
+	Title string
+	IP    string
+}
+
 // latestDTO builds a target DTO from a stored latest round, attaching the target's
-// vantage set. Shared by the live and catalog-driven listings.
-func latestDTO(o scheduler.Outcome, tv map[string][]string) targetDTO {
+// vantage set and display metadata. Shared by the live and catalog-driven listings.
+func latestDTO(o scheduler.Outcome, tv map[string][]string, meta map[string]TargetMeta) targetDTO {
 	dto := targetDTO{
 		Name:    o.Target.Name,
 		Probe:   o.ProbeName,
@@ -278,6 +292,9 @@ func latestDTO(o scheduler.Outcome, tv map[string][]string) targetDTO {
 	}
 	if vs := tv[o.Target.Name]; len(vs) > 0 {
 		dto.Vantages = vs
+	}
+	if md, ok := meta[o.Target.Name]; ok {
+		dto.Title, dto.IP = md.Title, md.IP
 	}
 	return dto
 }
@@ -297,6 +314,10 @@ func (srv *Server) targets(w http.ResponseWriter, r *http.Request) {
 	if srv.TargetVantages != nil {
 		tv = srv.TargetVantages()
 	}
+	var meta map[string]TargetMeta
+	if srv.TargetMeta != nil {
+		meta = srv.TargetMeta()
+	}
 	byName := make(map[string]scheduler.Outcome, len(latest))
 	for _, o := range latest {
 		byName[o.Target.Name] = o
@@ -308,7 +329,7 @@ func (srv *Server) targets(w http.ResponseWriter, r *http.Request) {
 		// otherwise emit a no-data entry carrying the target's vantage set (CODE_REVIEW #3).
 		for _, m := range srv.Configured() {
 			if o, ok := byName[m.Name]; ok {
-				out = append(out, latestDTO(o, tv))
+				out = append(out, latestDTO(o, tv, meta))
 				continue
 			}
 			dto := targetDTO{Name: m.Name, Probe: m.ProbeKind, NoData: true}
@@ -317,11 +338,14 @@ func (srv *Server) targets(w http.ResponseWriter, r *http.Request) {
 			} else if len(m.Vantages) > 0 {
 				dto.Vantages = m.Vantages
 			}
+			if md, ok := meta[m.Name]; ok {
+				dto.Title, dto.IP = md.Title, md.IP
+			}
 			out = append(out, dto)
 		}
 	} else {
 		for _, o := range latest {
-			out = append(out, latestDTO(o, tv))
+			out = append(out, latestDTO(o, tv, meta))
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })

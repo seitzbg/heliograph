@@ -305,13 +305,21 @@
     return node;
   }
 
-  window.Dash = { RANGES, RANGE_ORDER, parseRoute, mergeSeries, gridSince, fetchJSON, zoomResolution, pixelToTime, sharedYMax, buildTree, underPath, targetStatus, pickSeries, vantageList, orderVantages, defaultFocus, keepFocus, vantageColorVar, adminMode, relTime, listTargets, addTarget, editTarget, removeTarget, buildTargetNode };
+  const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  // labelHTML renders a target's graph-title label: the title (falling back to the target
+  // name) plus, when present, its IP in parentheses. Pure; exported for tests and reused by
+  // every title render site.
+  function labelHTML(name, title, ip) {
+    const base = esc(title || name);
+    return ip ? base + ' <span class="tgtip">(' + esc(ip) + ')</span>' : base;
+  }
+
+  window.Dash = { RANGES, RANGE_ORDER, parseRoute, mergeSeries, gridSince, fetchJSON, zoomResolution, pixelToTime, sharedYMax, buildTree, underPath, targetStatus, pickSeries, vantageList, orderVantages, defaultFocus, keepFocus, vantageColorVar, adminMode, relTime, listTargets, addTarget, editTarget, removeTarget, buildTargetNode, labelHTML };
 
   // ---------------------------------------------------------------- init (DOM) --
   function init() {
     const $ = (id) => document.getElementById(id);
     const fmt = (v, d) => (v == null || isNaN(v)) ? '--' : v.toFixed(d);
-    const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
     const enc = encodeURIComponent;
 
     // ---- data fetch for one range (raw series, or a server-windowed rollup band) ----
@@ -470,6 +478,11 @@
     // not just when the grid DOM panel happens to be cached (which a deep link doesn't have).
     const probeByName = new Map();
     function probeBadge(name) { const pk = probeByName.get(name); return pk ? '<span class="probe">' + esc(pk) + '</span> ' : ''; }
+    // titleByName/ipByName mirror probeByName (fed from the same /api/targets responses), so a
+    // detail/zoom view reached by deep link can render the display label (title + IP) without
+    // the grid DOM panel. displayLabel builds it via the shared labelHTML.
+    const titleByName = new Map(), ipByName = new Map();
+    function displayLabel(name) { return labelHTML(name, titleByName.get(name), ipByName.get(name)); }
     // ensureVantages backfills vantagesByTarget for a detail view reached before
     // refreshGrid has populated it (e.g. a deep link to #target=...): a no-op once the
     // grid has run, otherwise one /api/targets fetch to seed the map. `name` is accepted
@@ -479,14 +492,14 @@
       if (vantagesByTarget.size) return;
       try {
         const targets = (await fetchJSON('/api/targets')).targets || [];
-        for (const t of targets) { vantagesByTarget.set(t.name, vantageList(t)); probeByName.set(t.name, t.probe); }
+        for (const t of targets) { vantagesByTarget.set(t.name, vantageList(t)); probeByName.set(t.name, t.probe); titleByName.set(t.name, t.title); ipByName.set(t.name, t.ip); }
       } catch (e) { /* transient: vantagesFor falls back to ['local'] */ }
     }
     function ensurePanel(t) {
       let p = panels.get(t.name); if (p) return p;
       const grid = $('graphGrid'); if (panels.size === 0) grid.innerHTML = '';
       const el = document.createElement('div'); el.className = 'panel gpanel'; el.dataset.target = t.name;
-      el.innerHTML = '<h2><span class="probe">' + esc(t.probe) + '</span> ' + esc(t.name) + '</h2><div class="meta"></div><canvas></canvas>';
+      el.innerHTML = '<h2><span class="probe">' + esc(t.probe) + '</span> ' + labelHTML(t.name, t.title, t.ip) + '</h2><div class="meta"></div><canvas></canvas>';
       grid.appendChild(el);
       p = { el, canvas: el.querySelector('canvas'), meta: el.querySelector('.meta'), series: null };
       panels.set(t.name, p); return p;
@@ -522,7 +535,7 @@
         // forever. It stays reachable via the tree; its real series shows in the detail view,
         // which focuses the target's own vantage (CODE_REVIEW #3 / P1-3).
         statusByTarget.clear(); vantagesByTarget.clear();
-        for (const t of targets) { statusByTarget.set(t.name, targetStatus(t)); vantagesByTarget.set(t.name, vantageList(t)); probeByName.set(t.name, t.probe); }
+        for (const t of targets) { statusByTarget.set(t.name, targetStatus(t)); vantagesByTarget.set(t.name, vantageList(t)); probeByName.set(t.name, t.probe); titleByName.set(t.name, t.title); ipByName.set(t.name, t.ip); }
         treeNames = targets.map((t) => t.name);
         const gridTargets = targets.filter((t) => !t.no_data);
         // Reconcile ONLY against an authoritative target list (the fetch above succeeded):
@@ -715,7 +728,7 @@
     async function renderStack(name) {
       const gen = ++stackGen; // captured before any await — invalidates any earlier in-flight renderStack, same name or not
       curTarget = name; stackCanvases.length = 0;
-      $('stackTitle').innerHTML = probeBadge(name) + esc(name);
+      $('stackTitle').innerHTML = probeBadge(name) + displayLabel(name);
       const grid = $('stackGrid'); grid.innerHTML = '';
 
       await ensureVantages(name);
@@ -733,7 +746,7 @@
       });
       // Re-set with the probe badge now that ensureVantages() has seeded probeByName (covers a
       // deep link, where the grid panel isn't cached yet at the first title paint above).
-      $('stackTitle').innerHTML = probeBadge(name) + esc(name);
+      $('stackTitle').innerHTML = probeBadge(name) + displayLabel(name);
 
       if (vs.length <= 1) {
         // Single-vantage: no fetch fan-out, no overlays, no chips (renderStackChips() clears
@@ -800,7 +813,7 @@
     async function renderZoom(name, range) {
       const gen = ++zoomGen; // captured before any await — invalidates any earlier in-flight zoom call (renderZoom or zoomTo), same name/range or not
       curTarget = name; curRange = range; const R = RANGES[range];
-      $('zoomTitle').innerHTML = probeBadge(name) + esc(name) + ' <span class="reslabel">· ' + R.label + '</span>';
+      $('zoomTitle').innerHTML = probeBadge(name) + displayLabel(name) + ' <span class="reslabel">· ' + R.label + '</span>';
       $('zoomMeta').innerHTML = ''; $('zoomReset').hidden = true;
       $('zoomRes').textContent = 'drag on the graph to zoom into a time range';
       const canvas = $('zoomCanvas');

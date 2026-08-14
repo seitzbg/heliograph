@@ -73,9 +73,12 @@ type Database struct {
 // Node is one entry in the target tree. A node with a `host` becomes a monitor;
 // any node may carry inheritable settings and children.
 type Node struct {
-	Probe  string            `yaml:"probe" json:"probe,omitempty"`
-	Host   string            `yaml:"host" json:"host,omitempty"`
-	Title  string            `yaml:"title" json:"title,omitempty"`
+	Probe string `yaml:"probe" json:"probe,omitempty"`
+	Host  string `yaml:"host" json:"host,omitempty"`
+	Title string `yaml:"title" json:"title,omitempty"`
+	// IP is an optional pinned address shown in the graph title (display-only; the probe
+	// still targets Host). Distinct from Host so a hostname target can display a fixed IP.
+	IP     string            `yaml:"ip" json:"ip,omitempty"`
 	Pings  int               `yaml:"pings" json:"pings,omitempty"`
 	Step   Duration          `yaml:"step" json:"step,omitempty"`
 	Params map[string]string `yaml:"params" json:"params,omitempty"`
@@ -552,7 +555,7 @@ func (c *Config) Monitors() ([]model.Monitor, error) {
 		}
 		if n.Host != "" {
 			m := model.Monitor{
-				Name: path, ProbeKind: eff.probe, Host: n.Host,
+				Name: path, Title: n.Title, ProbeKind: eff.probe, Host: n.Host, IP: n.IP,
 				Pings: eff.pings, Step: eff.step, Params: eff.params,
 				Alerts: eff.alerts, Alertee: eff.alertee, Vantages: eff.vantages,
 			}

@@ -87,7 +87,7 @@ targets:
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	rt, err := buildRuntime(cfg, 3, 30*time.Second, time.Second, nil, nil)
+	rt, err := buildRuntime(cfg, 3, 30*time.Second, time.Second, false, nil, nil)
 	if err != nil {
 		t.Fatalf("buildRuntime: %v", err)
 	}
@@ -123,7 +123,7 @@ func TestRuntimeRetainsFullMonitorSet(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "default.yaml"), []byte(cfg), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	rt, err := buildRuntime(dir, 5, time.Second, time.Second, nil, nil)
+	rt, err := buildRuntime(dir, 5, time.Second, time.Second, false, nil, nil)
 	if err != nil {
 		t.Fatalf("buildRuntime: %v", err)
 	}
@@ -147,7 +147,7 @@ func TestBuildRuntimeMergesDBFragment(t *testing.T) {
 	getter := func() ([]byte, error) {
 		return []byte(`{"targets":{"children":{"db-t":{"probe":"TCPConnect","host":"127.0.0.1","params":{"port":"80"}}}}}`), nil
 	}
-	rt, err := buildRuntime(cfgPath, 1, time.Second, time.Second, map[string]alert.Notifier{}, getter)
+	rt, err := buildRuntime(cfgPath, 1, time.Second, time.Second, false, map[string]alert.Notifier{}, getter)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,7 +169,7 @@ func TestBuildRuntimeDBFragmentCollision(t *testing.T) {
 	getter := func() ([]byte, error) {
 		return []byte(`{"targets":{"children":{"dup":{"probe":"TCPConnect","host":"127.0.0.1","params":{"port":"80"}}}}}`), nil
 	}
-	if _, err := buildRuntime(cfgPath, 1, time.Second, time.Second, map[string]alert.Notifier{}, getter); err == nil || !strings.Contains(err.Error(), "duplicate") {
+	if _, err := buildRuntime(cfgPath, 1, time.Second, time.Second, false, map[string]alert.Notifier{}, getter); err == nil || !strings.Contains(err.Error(), "duplicate") {
 		t.Fatalf("want duplicate-branch error, got %v", err)
 	}
 }
@@ -196,7 +196,7 @@ func TestBuildRuntimeRejectsGenuinelyInvalidImportNotAppendImport(t *testing.T) 
 			t.Fatalf("AppendImport should accept a fragment relying on (missing) inherited probe: added=%d err=%v", added, err)
 		}
 		getter := func() ([]byte, error) { return merged, nil }
-		if _, err := buildRuntime(dir, 1, time.Second, time.Second, nil, getter); err == nil || !strings.Contains(err.Error(), "no probe set") {
+		if _, err := buildRuntime(dir, 1, time.Second, time.Second, false, nil, getter); err == nil || !strings.Contains(err.Error(), "no probe set") {
 			t.Fatalf("buildRuntime should reject the composed config for having no probe anywhere, got %v", err)
 		}
 	})
@@ -213,7 +213,7 @@ func TestBuildRuntimeRejectsGenuinelyInvalidImportNotAppendImport(t *testing.T) 
 			t.Fatalf("AppendImport should accept a fragment referencing an alert it can't see: added=%d err=%v", added, err)
 		}
 		getter := func() ([]byte, error) { return merged, nil }
-		if _, err := buildRuntime(dir, 1, time.Second, time.Second, nil, getter); err == nil || !strings.Contains(err.Error(), `undefined alert "nope"`) {
+		if _, err := buildRuntime(dir, 1, time.Second, time.Second, false, nil, getter); err == nil || !strings.Contains(err.Error(), `undefined alert "nope"`) {
 			t.Fatalf("buildRuntime should reject the composed config for the undefined alert, got %v", err)
 		}
 	})
@@ -229,7 +229,7 @@ func TestBuildRuntimeRejectsGenuinelyInvalidImportNotAppendImport(t *testing.T) 
 			t.Fatalf("AppendImport should accept an unknown-probe-kind fragment (schema-blind): added=%d err=%v", added, err)
 		}
 		getter := func() ([]byte, error) { return merged, nil }
-		if _, err := buildRuntime(dir, 1, time.Second, time.Second, nil, getter); err == nil || !strings.Contains(err.Error(), "unknown probe kind") {
+		if _, err := buildRuntime(dir, 1, time.Second, time.Second, false, nil, getter); err == nil || !strings.Contains(err.Error(), "unknown probe kind") {
 			t.Fatalf("buildRuntime should reject the composed config for the unknown probe kind, got %v", err)
 		}
 	})

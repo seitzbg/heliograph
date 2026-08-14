@@ -165,6 +165,14 @@ func TestFingerprintStableAndSensitive(t *testing.T) {
 	if mut(func(x *model.Monitor) { x.Vantages = []string{"nyc", "lon"} }, nil) != base {
 		t.Error("vantages leaked into the fingerprint")
 	}
+	// Title and IP are display-only — they must NOT change measurement identity, or editing
+	// a target's label / pinned IP would drop in-flight rounds and reset its stored series.
+	if mut(func(x *model.Monitor) { x.Title = "Renamed" }, nil) != base {
+		t.Error("title leaked into the fingerprint (it is display-only)")
+	}
+	if mut(func(x *model.Monitor) { x.IP = "9.9.9.9" }, nil) != base {
+		t.Error("display IP leaked into the fingerprint (it is display-only)")
+	}
 
 	// The JSON encoding must be unambiguous the same way ConfigVersion is: distinct
 	// param maps that a bare-delimiter join would collide must differ.
