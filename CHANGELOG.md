@@ -149,6 +149,21 @@ All notable changes to **Heliograph** are recorded here. The format follows
   installed it — the most bug-prone importer code (RRA stitching / tier selection) ran in no job.
   `rrdtool` is now installed in the blocking `go-test` job (RRA stitching) and the `db-test` job
   (the `--history` end-to-end path).
+- **The bundled Caddy image's vulnerability scan is now blocking.** CI already built and scanned the
+  Caddy reverse-proxy image (`Caddy.Dockerfile`), but the Trivy step ran with `continue-on-error:
+  true`, so a fixable HIGH/CRITICAL in that build could not fail the pipeline. It now mirrors the
+  collector's finished-image gate exactly — the same digest-pinned Trivy image, the shared
+  `.trivyignore` mount, and `--severity HIGH,CRITICAL --ignore-unfixed --exit-code 1` — and reds CI
+  on a real finding instead of only reporting it. (CODE_REVIEW M2.)
+- **`smoked`/`smoke-agent` report their real build version instead of a hard-coded `1.0.0`.** Both
+  binaries defined `var version = "1.0.0"` with no build-time override wired up, so every build —
+  including a bare local `go build` — claimed to be the 1.0.0 release regardless of what was
+  actually compiled. `version` now defaults to `dev` (an unversioned build must not claim a
+  release), and the Dockerfile accepts a `VERSION` build-arg injected via `-ldflags
+  -X main.version=...`; CI computes it from `git describe --tags --always --dirty` and passes it to
+  both the PR-build and publish `docker/build-push-action` steps, so `smoked -version` /
+  `smoke-agent -version` on a published image reports the actual commit/tag it was built from.
+  (CODE_REVIEW M8.)
 
 ### Security
 - **Go toolchain bumped 1.26.5 → 1.26.6** for the standard-library fixes in GO-2026-6089 (`net/http`),
@@ -279,6 +294,14 @@ All notable changes to **Heliograph** are recorded here. The format follows
   operator signal. Recovery now distinguishes a genuinely short/torn final frame (truncated and
   recovered, the expected crash artifact) from a checksum mismatch (`errBadFrame`), which fails
   loudly in any segment — closing the gap that made the frame CRC pointless for the active segment.
+- **Agent spool recovery rejects a corrupt/torn frame length instead of allocating up to ~4 GiB.**
+  `streamSegment` read a `uint32` payload length from the segment file and only checked that it
+  wasn't absurdly small (`< 8`) before `make([]byte, frameHeader+payloadLen)` — a torn write or bit
+  of corruption near the top of the u32 range could demand up to ~4 GiB, OOM-crash-looping the
+  agent on `openSpool` and blocking recovery of every valid buffered round in that segment. A valid
+  frame can never exceed one segment (`segmentMaxBytes`, 64 MiB), so a length above that is now
+  rejected as `errBadFrame` before any allocation — mirrored in `decodeFrame` for defense in depth.
+  Regression-tested (`TestStreamSegmentRejectsOversizedFrameLength`). (CODE_REVIEW M6.)
 - **SmokePing importer now inherits probe target-variables down the target tree.** Previously only
   the `probe` was inherited from ancestor `+`/`++` folders; a probe's target-variables (`lookup`,
   `port`, `recordtype`, `pings`, …) were read only from a target's own inline fields and the Probes

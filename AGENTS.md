@@ -13,7 +13,7 @@ track what shipped and what's next.
 
 | Tool | Version | Needed for |
 |------|---------|------------|
-| Go | see `go.mod` (`go 1.26.5`) | everything; CI uses `go-version-file: go.mod` |
+| Go | see `go.mod` (`go 1.26.6`) | everything; CI uses `go-version-file: go.mod` |
 | Node.js | 22 | the web unit tests (`web/*.test.mjs`) |
 | rrdtool | any | the SmokePing importer tests (`internal/importer/smokeping`) and `smoked import ... --history`; those tests **skip** without it |
 | Docker or Podman | any | building the container image; running a throwaway TimescaleDB for integration tests |
