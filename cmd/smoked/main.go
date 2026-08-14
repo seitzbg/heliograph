@@ -1252,16 +1252,18 @@ func buildRuntime(configPath string, demoPings int, demoStep, timeout time.Durat
 
 func demoMonitors(pings int, step time.Duration) []model.Monitor {
 	return []model.Monitor{
-		{Name: "Cloudflare DNS (ICMP)", ProbeKind: "FPing", Host: "1.1.1.1", Pings: pings, Step: step},
-		{Name: "Cloudflare DNS (native Ping)", ProbeKind: "Ping", Host: "1.1.1.1", Pings: pings, Step: step},
-		{Name: "Google DNS (ICMP)", ProbeKind: "FPing", Host: "8.8.8.8", Pings: pings, Step: step},
-		{Name: "Google DNS (native Ping)", ProbeKind: "Ping", Host: "8.8.8.8", Pings: pings, Step: step},
-		{Name: "localhost (ICMP)", ProbeKind: "FPing", Host: "127.0.0.1", Pings: pings, Step: step},
-		{Name: "Cloudflare 443 (TCP)", ProbeKind: "TCPConnect", Host: "1.1.1.1", Pings: pings, Step: step, Params: map[string]string{"port": "443"}},
-		{Name: "Google 443 (TCP)", ProbeKind: "TCPConnect", Host: "www.google.com", Pings: pings, Step: step, Params: map[string]string{"port": "443"}},
+		// Leaf names describe the PROBE METHOD, not "DNS" — these ICMP pings etc. hit a DNS
+		// server's IP but aren't DNS queries (only the "DNS query" targets below are).
+		{Name: "Cloudflare ICMP (FPing)", ProbeKind: "FPing", Host: "1.1.1.1", Pings: pings, Step: step},
+		{Name: "Cloudflare ICMP (native)", ProbeKind: "Ping", Host: "1.1.1.1", Pings: pings, Step: step},
+		{Name: "Google ICMP (FPing)", ProbeKind: "FPing", Host: "8.8.8.8", Pings: pings, Step: step},
+		{Name: "Google ICMP (native)", ProbeKind: "Ping", Host: "8.8.8.8", Pings: pings, Step: step},
+		{Name: "localhost ICMP (FPing)", ProbeKind: "FPing", Host: "127.0.0.1", Pings: pings, Step: step},
+		{Name: "Cloudflare TCP :443", ProbeKind: "TCPConnect", Host: "1.1.1.1", Pings: pings, Step: step, Params: map[string]string{"port": "443"}},
+		{Name: "Google TCP :443", ProbeKind: "TCPConnect", Host: "www.google.com", Pings: pings, Step: step, Params: map[string]string{"port": "443"}},
 		{Name: "Unreachable :9 (TCP, expect loss)", ProbeKind: "TCPConnect", Host: "192.0.2.1", Pings: pings, Step: step, Params: map[string]string{"port": "9"}},
-		{Name: "Cloudflare resolver (DNS)", ProbeKind: "DNS", Host: "1.1.1.1", Pings: pings, Step: step, Params: map[string]string{"lookup": "example.com"}},
-		{Name: "Google resolver (DNS)", ProbeKind: "DNS", Host: "8.8.8.8", Pings: pings, Step: step, Params: map[string]string{"lookup": "example.com"}},
+		{Name: "Cloudflare DNS query", ProbeKind: "DNS", Host: "1.1.1.1", Pings: pings, Step: step, Params: map[string]string{"lookup": "example.com"}},
+		{Name: "Google DNS query", ProbeKind: "DNS", Host: "8.8.8.8", Pings: pings, Step: step, Params: map[string]string{"lookup": "example.com"}},
 		{Name: "example.com (HTTP TTFB)", ProbeKind: "HTTP", Host: "example.com", Pings: pings, Step: step},
 		{Name: "cloudflare.com (HTTP TTFB)", ProbeKind: "HTTP", Host: "www.cloudflare.com", Pings: pings, Step: step},
 		{Name: "github.com (SSH banner)", ProbeKind: "SSH", Host: "github.com", Pings: pings, Step: step},

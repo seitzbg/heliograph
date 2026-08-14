@@ -50,30 +50,32 @@ targets:
   alerts: [loss]   # every target gets the loss alert unless it overrides
 
   children:
-    Cloudflare:
+    # Leaf names describe the PROBE METHOD; the folder names the host. (These are ICMP
+    # pings etc. to a DNS server's IP — not "DNS over ICMP", so they aren't named "DNS".)
+    Cloudflare (1.1.1.1):
       children:
-        DNS (ICMP):
+        ICMP (FPing):        # ICMP echo via the fping binary (inherited tree default)
           host: 1.1.1.1
-        DNS (native Ping):   # same host as DNS (ICMP) above, via the native Ping probe — side-by-side compare
+        ICMP (native):       # same host, the native Ping probe — side-by-side ICMP compare
           probe: Ping
           host: 1.1.1.1
-        "443 (TCP)":
+        "TCP :443":
           probe: TCPConnect
           host: 1.1.1.1
           params: { port: "443" }
-        resolver (DNS):
+        DNS query:           # the only actual DNS-protocol probe here
           probe: DNS
           host: 1.1.1.1
           params: { lookup: example.com }
 
-    Google:
+    Google (8.8.8.8):
       children:
-        DNS (ICMP):
+        ICMP (FPing):
           host: 8.8.8.8
-        DNS (native Ping):   # same host as DNS (ICMP) above, via the native Ping probe — side-by-side compare
+        ICMP (native):       # same host, the native Ping probe — side-by-side ICMP compare
           probe: Ping
           host: 8.8.8.8
-        resolver (DNS):
+        DNS query:
           probe: DNS
           host: 8.8.8.8
           params: { lookup: example.com }

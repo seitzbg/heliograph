@@ -78,6 +78,14 @@ All notable changes to **Heliograph** are recorded here. The format follows
   Also added a copy-pasteable Docker Compose example (with a single `SMOKE_DB_PASSWORD` variable shared
   by the DB and the collector's DSN) and code-review acknowledgements. (CODE_REVIEW M1 + CodeRabbit.)
 
+### Changed
+- **Demo target labels name the probe method, not "DNS".** The compare targets were named `DNS (ICMP)` /
+  `DNS (native Ping)` — misleading, since those are ICMP pings to a DNS *server's* IP, not DNS queries.
+  They're now grouped by host and named by method: under `Cloudflare (1.1.1.1)` / `Google (8.8.8.8)`,
+  the leaves are `ICMP (FPing)`, `ICMP (native)`, `TCP :443`, and `DNS query` (the only actual
+  DNS-protocol probe). Renaming changes a target's stored identity, so the demo's renamed series start
+  fresh. (`config.example.yaml`, the built-in demo set, and the README sample output.)
+
 ### Security
 - **Go toolchain bumped 1.26.5 → 1.26.6** for the standard-library fixes in GO-2026-6089 (`net/http`),
   GO-2026-6090 (`crypto/tls`), and GO-2026-6218 (`net/url`), which govulncheck flagged as reachable from
