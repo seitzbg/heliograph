@@ -56,6 +56,14 @@ All notable changes to **Heliograph** are recorded here. The format follows
   Compose example now do exactly that instead of carrying a `command:` list.
 
 ### Changed
+- **Hardened the email/SMTP alert notifier.** Each delivery attempt now runs under a bounded
+  per-transaction deadline (dial + STARTTLS + auth + data, default 10s) instead of risking an
+  indefinite stall on an unresponsive relay, and failed sends are retried with exponential
+  backoff up to a configurable attempt limit (default 4, mirroring the webhook delivery pool),
+  interrupted early on shutdown. A relay that doesn't advertise `AUTH` when credentials are
+  configured now returns an explicit error instead of silently falling back to an
+  unauthenticated session. (`EmailConfig.Timeout`/`MaxAttempts`/`BaseBackoff`; new
+  `heliograph_email_retried_total` metric.)
 - **Band panels explain the "collecting…" placeholder.** A long-range band panel with too little history
   to draw (fewer than 2 buckets) now says what it's waiting for — *"collecting… — daily band appears once
   history spans 2 days"* (and the hourly equivalent) — instead of a bare "collecting…". On a fresh
