@@ -35,10 +35,11 @@ import (
 	_ "github.com/seitzbg/heliograph/internal/probe/tcpconnect"
 )
 
-// version is the smoke-agent release version. Overridable at build time with
+// version is the smoke-agent release version. Unset in an unversioned build (a plain `go build`
+// must not claim a release); overridable at build time with
 //
 //	go build -ldflags "-X main.version=$(git describe --tags)"
-var version = "1.0.0"
+var version = "dev"
 
 // agentConfig is the resolved smoke-agent configuration: the merge of an
 // optional YAML file and CLI flag overrides, plus defaults.

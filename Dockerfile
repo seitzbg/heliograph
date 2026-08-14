@@ -11,8 +11,11 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -trimpath -o /out/smoked ./cmd/smoked \
- && CGO_ENABLED=0 go build -trimpath -o /out/smoke-agent ./cmd/smoke-agent
+# VERSION defaults to "dev" so a build that doesn't pass it (e.g. a bare `docker build .`)
+# doesn't claim a release; CI passes the real `git describe` (see .github/workflows/ci.yml). CODE_REVIEW M8.
+ARG VERSION=dev
+RUN CGO_ENABLED=0 go build -trimpath -ldflags "-X main.version=${VERSION}" -o /out/smoked ./cmd/smoked \
+ && CGO_ENABLED=0 go build -trimpath -ldflags "-X main.version=${VERSION}" -o /out/smoke-agent ./cmd/smoke-agent
 
 # Runtime base pinned by digest to a SUPPORTED Alpine branch (3.20 reached end of
 # normal security support 2026-04-01). Bump the tag + digest together on a refresh
