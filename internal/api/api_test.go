@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -410,6 +411,37 @@ func TestTargetsListsRemoteOnlyTarget(t *testing.T) {
 	}
 	if live == nil || live.NoData || live.MedianMs == nil {
 		t.Errorf("/api/targets?vantage=nyc must return live data for the remote-only target, got %+v", live)
+	}
+}
+
+func TestTargetsPreservesConfiguredOrder(t *testing.T) {
+	st := store.NewMem(100)
+	srv := New(st, "")
+	// Weight-ordered flatten: "zeta" before "alpha" (NOT alphabetical).
+	srv.Configured = func() []model.Monitor {
+		return []model.Monitor{
+			{Name: "zeta", ProbeKind: "FPing"},
+			{Name: "alpha", ProbeKind: "FPing"},
+			{Name: "mid", ProbeKind: "FPing"},
+		}
+	}
+	rec := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(rec, httptest.NewRequest("GET", "/api/targets", nil))
+	var tj struct {
+		Targets []struct {
+			Name string `json:"name"`
+		} `json:"targets"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &tj); err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, x := range tj.Targets {
+		got = append(got, x.Name)
+	}
+	want := []string{"zeta", "alpha", "mid"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("targets order = %v, want %v (must preserve Configured order, not A–Z)", got, want)
 	}
 }
 
