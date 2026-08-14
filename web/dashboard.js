@@ -496,7 +496,13 @@
       } catch (e) { /* transient: vantagesFor falls back to ['local'] */ }
     }
     function ensurePanel(t) {
-      let p = panels.get(t.name); if (p) return p;
+      let p = panels.get(t.name);
+      if (p) {
+        // Refresh the heading: title/ip (and probe) can change on a SIGHUP reload, so a
+        // cached panel must not keep a stale label.
+        p.el.querySelector('h2').innerHTML = '<span class="probe">' + esc(t.probe) + '</span> ' + labelHTML(t.name, t.title, t.ip);
+        return p;
+      }
       const grid = $('graphGrid'); if (panels.size === 0) grid.innerHTML = '';
       const el = document.createElement('div'); el.className = 'panel gpanel'; el.dataset.target = t.name;
       el.innerHTML = '<h2><span class="probe">' + esc(t.probe) + '</span> ' + labelHTML(t.name, t.title, t.ip) + '</h2><div class="meta"></div><canvas></canvas>';
@@ -820,6 +826,10 @@
 
       await ensureVantages(name);
       if (gen !== zoomGen) return; // a newer zoom call superseded this one
+      // Re-set the title now that ensureVantages() has seeded the display maps — a direct
+      // zoom deep link renders above before they were populated, so it would show the bare
+      // name (matching renderStack's two-phase title set).
+      $('zoomTitle').innerHTML = probeBadge(name) + displayLabel(name) + ' <span class="reslabel">· ' + R.label + '</span>';
       const vs = Dash.orderVantages(vantagesFor(name));
       zoomVantages = vs;
 
