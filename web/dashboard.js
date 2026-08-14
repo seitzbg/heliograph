@@ -1234,8 +1234,23 @@
     // Mirrors the Vantages panel above — the first GET decides the mode (disabled /
     // login / list / error) via Dash.adminMode. ----
     let cfg = { version: 0, doc: { targets: { children: {} } } };
+    // The full node path being edited (e.g. "Web/b"), set by openCfgModal('edit', path) and
+    // read back on submit — the Name field only ever shows/edits the leaf segment.
+    let cfgEditPath = null;
     function cShow(id) {
       for (const s of ['cfgDisabled', 'cfgLogin', 'cfgList', 'cfgError']) $(s).classList.toggle('hidden', s !== id);
+    }
+    // findCfgNode looks up a Dash.cfgTree(cfg.doc) entry by its full path, for prefilling the
+    // edit modal (folders included — depth-first search of the already-built tree).
+    function findCfgNode(path) {
+      const walk = (nodes) => {
+        for (const n of nodes) {
+          if (n.path === path) return n;
+          if (n.children.length) { const f = walk(n.children); if (f) return f; }
+        }
+        return null;
+      };
+      return walk(Dash.cfgTree(cfg.doc));
     }
     // cfgRowHtml renders one node of Dash.cfgTree(cfg.doc) recursively: a drag handle, the
     // name (folders get a trailing "/"), a probe/host meta line for leaves, and path-aware
@@ -1319,13 +1334,16 @@
       row.querySelector('.cfg-pdel').addEventListener('click', () => row.remove());
       return row;
     }
-    async function openCfgModal(mode, name) {
+    async function openCfgModal(mode, path) {
       const kinds = await ensureProbeKinds();
       $('cfgMode').value = mode;
-      $('cfgModalTitle').textContent = mode === 'edit' ? ('Edit ' + name) : 'Add target';
+      cfgEditPath = mode === 'edit' ? path : null;
+      const leaf = mode === 'edit' ? path.split('/').pop() : '';
+      $('cfgModalTitle').textContent = mode === 'edit' ? ('Edit ' + path) : 'Add target';
       $('cfgFormErr').textContent = '';
-      const node = mode === 'edit' ? ((cfg.doc.targets.children || {})[name] || {}) : {};
-      $('cfgName').value = mode === 'edit' ? name : '';
+      const found = mode === 'edit' ? findCfgNode(path) : null;
+      const node = found ? found.node : {};
+      $('cfgName').value = mode === 'edit' ? leaf : '';
       $('cfgName').disabled = mode === 'edit'; // rename = remove + add (v1)
       $('cfgProbe').innerHTML = kinds.map((k) => '<option value="' + esc(k) + '"' + (k === node.probe ? ' selected' : '') + '>' + esc(k) + '</option>').join('');
       $('cfgHost').value = node.host || '';
@@ -1339,7 +1357,7 @@
       $('cfgModal').classList.remove('hidden');
       $('cfgName').disabled ? $('cfgProbe').focus() : $('cfgName').focus();
     }
-    function closeCfgModal() { $('cfgModal').classList.add('hidden'); $('cfgFormErr').textContent = ''; }
+    function closeCfgModal() { $('cfgModal').classList.add('hidden'); $('cfgFormErr').textContent = ''; cfgEditPath = null; }
     function readCfgForm() {
       const params = {};
       for (const row of $('cfgParams').querySelectorAll('.vadmin-row')) {
@@ -1400,7 +1418,8 @@
       if (['__proto__', 'constructor', 'prototype'].includes(name)) { $('cfgFormErr').textContent = '"' + name + '" is a reserved name.'; return; }
       let mutated;
       try {
-        mutated = ($('cfgMode').value === 'edit') ? Dash.editTarget(cfg.doc, name, node) : Dash.addTarget(cfg.doc, name, node);
+        // Edit is path-aware (any depth); Add stays top-level only, unchanged.
+        mutated = ($('cfgMode').value === 'edit') ? Dash.editNodeAtPath(cfg.doc, cfgEditPath, node) : Dash.addTarget(cfg.doc, name, node);
       } catch (err) { $('cfgFormErr').textContent = err.message; return; }
       saveDoc(mutated, closeCfgModal);
     });
@@ -1409,9 +1428,9 @@
       if (ed) { openCfgModal('edit', ed.getAttribute('data-edit')); return; }
       const rm = e.target.closest('[data-remove]');
       if (rm) {
-        const name = rm.getAttribute('data-remove');
-        if (!window.confirm('Remove target "' + name + '"?')) return;
-        saveDoc(Dash.removeTarget(cfg.doc, name));
+        const path = rm.getAttribute('data-remove');
+        if (!window.confirm('Remove "' + path + '"?')) return;
+        saveDoc(Dash.removeNodeAtPath(cfg.doc, path));
       }
     });
     // Drag-to-reorder: HTML5 DnD on #cfgTree, scoped to one sibling group at a time (same
