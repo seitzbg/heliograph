@@ -47,7 +47,14 @@ func (p *tcpProbe) Measure(ctx context.Context, t probe.Target, pings int) (prob
 	// `pings` times instead of the first connect eating the whole round (correct loss,
 	// no worker held for the full step). This is the demo's Unreachable/blackhole case:
 	// a dropped SYN otherwise holds one connect for the entire round budget.
-	perPing := probe.PerPingBudget(ctx, pings)
+	//
+	// The inter-attempt sleeps below happen OUTSIDE the per-attempt contexts, so they
+	// must be reserved from the budget before it is divided — otherwise the total
+	// (N slots + (N-1) delays) overruns the round deadline and a large interval_ms
+	// starves the later attempts. PerPingBudgetWithDelay reserves the delays and clamps
+	// the interval so it can't consume more than half the budget; interDelay is the
+	// (possibly clamped) delay to actually sleep.
+	perPing, interDelay := probe.PerPingBudgetWithDelay(ctx, pings, p.interval)
 	for i := 0; i < pings; i++ {
 		if err := ctx.Err(); err != nil {
 			return probe.Result{Samples: samples}, err
@@ -63,11 +70,11 @@ func (p *tcpProbe) Measure(ctx context.Context, t probe.Target, pings int) (prob
 		// A failed connect (refused/timeout) is a lost ping (absent sample). Either
 		// way, honor the inter-attempt delay so a down host isn't flooded with
 		// back-to-back SYNs — the delay must not be skipped on failure.
-		if p.interval > 0 && i < pings-1 {
+		if interDelay > 0 && i < pings-1 {
 			select {
 			case <-ctx.Done():
 				return probe.Result{Samples: samples}, ctx.Err()
-			case <-time.After(p.interval):
+			case <-time.After(interDelay):
 			}
 		}
 	}

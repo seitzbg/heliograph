@@ -38,8 +38,11 @@ func (p *sshProbe) Measure(ctx context.Context, t probe.Target, pings int) (prob
 	var samples []float64
 	var d net.Dialer
 	// Fair per-ping share of the round budget, so a hung/blackholed host is probed all
-	// `pings` times (correct loss) instead of the first read eating the whole round.
-	perPing := probe.PerPingBudget(ctx, pings)
+	// `pings` times (correct loss) instead of the first read eating the whole round. The
+	// inter-attempt sleeps happen OUTSIDE the per-attempt contexts, so they are reserved
+	// from the budget before it is divided (and the delay is clamped so it can't starve
+	// the attempts) — see PerPingBudgetWithDelay. interDelay is the delay to sleep.
+	perPing, interDelay := probe.PerPingBudgetWithDelay(ctx, pings, p.interval)
 	for i := 0; i < pings; i++ {
 		if err := ctx.Err(); err != nil {
 			return probe.Result{Samples: samples}, err
@@ -50,11 +53,11 @@ func (p *sshProbe) Measure(ctx context.Context, t probe.Target, pings int) (prob
 		if ok {
 			samples = append(samples, rtt)
 		}
-		if p.interval > 0 && i < pings-1 {
+		if interDelay > 0 && i < pings-1 {
 			select {
 			case <-ctx.Done():
 				return probe.Result{Samples: samples}, ctx.Err()
-			case <-time.After(p.interval):
+			case <-time.After(interDelay):
 			}
 		}
 	}
