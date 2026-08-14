@@ -7,6 +7,11 @@ All notable changes to **Heliograph** are recorded here. The format follows
 ## [Unreleased]
 
 ### Added
+- **Author-defined menu order (`weight`).** Any config node (YAML or DB fragment) can carry an
+  optional `weight:` (int); siblings sort by `(weight, name)` instead of strict A–Z — a negative
+  weight pins a node to the top of its group, unset/`0` preserves the alphabetical default. Honored
+  by the config flatten, `/api/targets`, the dashboard menu, and the grid. (Drag-to-reorder in the
+  Config tab lands in a follow-up.)
 - **One-click vantage deployment from the browser.** The Vantages panel's reveal-key dialog now presents the
   agent setup as two copyable/downloadable files behind a toggle: **`agent.yaml`** (the per-vantage
   `hub`/`vantage`/`key`, with `hub` prefilled to the hub you're viewing and a durable `spool_dir`) and a

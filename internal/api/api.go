@@ -379,8 +379,8 @@ func (srv *Server) targets(w http.ResponseWriter, r *http.Request) {
 		for _, o := range latest {
 			out = append(out, latestDTO(o, tv, meta, recent))
 		}
+		sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	writeJSON(w, map[string]any{"targets": out})
 }
 

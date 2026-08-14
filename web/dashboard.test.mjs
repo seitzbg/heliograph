@@ -148,7 +148,7 @@ check('buildTree nests names into folders and marks targets', () => {
   assert.equal(t.length, 2);
   const dc = t.find((n) => n.name === 'datacenters');
   assert.equal(dc.path, 'datacenters'); assert.equal(dc.target, null);
-  assert.deepEqual(dc.children.map((c) => c.name), ['us-east', 'us-west']); // siblings sorted
+  assert.deepEqual(dc.children.map((c) => c.name), ['us-east', 'us-west']); // first-encounter order
   const east = dc.children[0];
   assert.equal(east.path, 'datacenters/us-east');
   assert.equal(east.children[0].target, 'datacenters/us-east/edge');
@@ -162,12 +162,12 @@ check('buildTree: a node that is both a target and a folder', () => {
   assert.equal(t[0].children.length, 1);                        // ...and a folder
   assert.equal(t[0].children[0].target, 'a/b');
 });
-check('buildTree sorts siblings and tolerates empty input', () => {
+check('buildTree preserves input order and tolerates empty input', () => {
   assert.deepEqual(D.buildTree([]), []);
   assert.deepEqual(D.buildTree(null), []);
   const t = D.buildTree(['b', 'a', 'a/z', 'a/a']);
-  assert.deepEqual(t.map((n) => n.name), ['a', 'b']);
-  assert.deepEqual(t[0].children.map((n) => n.name), ['a', 'z']);
+  assert.deepEqual(t.map((n) => n.name), ['b', 'a']);
+  assert.deepEqual(t[1].children.map((n) => n.name), ['z', 'a']);
 });
 
 // underPath: a target is within a folder scope iff it equals the path or sits beneath it
@@ -384,6 +384,14 @@ check('agentCompose: runnable compose that mounts agent.yaml and carries no secr
   assert.match(c, /net\.ipv4\.ping_group_range: "0 10001"/);              // native Ping probe needs this
   assert.match(c, /restart: unless-stopped/);
   assert.ok(!/smk_/.test(c), 'compose must never contain key material — the key lives only in agent.yaml');
+});
+
+check('buildTree preserves input (server) order of siblings, does not re-sort A–Z', () => {
+  // Server sends weight order: "zeta" before "alpha"; a folder before a later leaf.
+  const nodes = D.buildTree(['zeta', 'alpha', 'Cloudflare/DNS', 'Cloudflare/ICMP', 'aaa']);
+  assert.deepEqual(nodes.map((n) => n.name), ['zeta', 'alpha', 'Cloudflare', 'aaa']);
+  const cf = nodes.find((n) => n.name === 'Cloudflare');
+  assert.deepEqual(cf.children.map((c) => c.name), ['DNS', 'ICMP']); // sibling order preserved
 });
 
 if (failed) { console.error(`\n${failed} test(s) failed`); process.exit(1); }

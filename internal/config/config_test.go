@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -855,5 +856,76 @@ targets:
 	}
 	if m.Host != "one.one.one.one" {
 		t.Errorf("Monitor.Host = %q, want one.one.one.one (probe target unchanged)", m.Host)
+	}
+}
+
+func TestMonitorsHonorWeight(t *testing.T) {
+	cfg := &Config{
+		Database: Database{Pings: 20, Step: Duration(time.Second)}, // valid defaults; the test cares about order
+		Targets: &Node{Children: map[string]*Node{
+			"alpha": {Probe: "FPing", Host: "a", Weight: 10}, // pushed last despite A–Z
+			"omega": {Probe: "FPing", Host: "o", Weight: -1}, // pulled first
+			"mid":   {Probe: "FPing", Host: "m"},             // weight 0
+		}},
+	}
+	mons, err := cfg.Monitors()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, m := range mons {
+		names = append(names, m.Name)
+	}
+	want := []string{"omega", "mid", "alpha"}
+	if !reflect.DeepEqual(names, want) {
+		t.Fatalf("Monitors order = %v, want %v", names, want)
+	}
+}
+
+func TestOrderedChildren(t *testing.T) {
+	m := map[string]*Node{
+		"b": {}, "a": {}, // both weight 0 → tie-break by name
+		"top":  {Weight: -5}, // negative sorts first
+		"last": {Weight: 10},
+		"mid":  {Weight: 1},
+	}
+	got := orderedChildren(m)
+	want := []string{"top", "a", "b", "mid", "last"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("orderedChildren = %v, want %v", got, want)
+	}
+
+	if empty := orderedChildren(map[string]*Node{}); len(empty) != 0 {
+		t.Fatalf("orderedChildren(empty map) = %v, want empty slice", empty)
+	}
+}
+
+// Guards the yaml:"weight" tag: existing weight tests build *Node structs directly,
+// so a typo in the struct tag would silently ignore `weight:` in real YAML files
+// without any test catching it. This parses actual YAML through Parse (the same
+// entry point every other config test uses) and confirms the decoded order matches.
+func TestWeightRoundTripsThroughYAML(t *testing.T) {
+	const src = `
+targets:
+  children:
+    alpha: {probe: FPing, host: a, weight: 10}
+    omega: {probe: FPing, host: o, weight: -1}
+    mid:   {probe: FPing, host: m}
+`
+	c, err := Parse([]byte(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	mons, err := c.Monitors()
+	if err != nil {
+		t.Fatalf("Monitors: %v", err)
+	}
+	var names []string
+	for _, m := range mons {
+		names = append(names, m.Name)
+	}
+	want := []string{"omega", "mid", "alpha"} // weight -1, 0, 10
+	if !reflect.DeepEqual(names, want) {
+		t.Fatalf("YAML weight order = %v, want %v", names, want)
 	}
 }
