@@ -1,6 +1,8 @@
-# Time-bound allowlist for the BLOCKING finished-image Trivy scan (see .github/workflows/ci.yml).
+# Time-bound allowlist for the BLOCKING finished-image Trivy scans (see .github/workflows/ci.yml):
+# both the collector image (build-image job) and the bundled Caddy image (caddy-image job) mount
+# this same file, so an entry here applies to BOTH scans.
 #
-# The scan fails CI on any fixable HIGH/CRITICAL in the collector image. To accept a specific known
+# The scans fail CI on any fixable HIGH/CRITICAL in either image. To accept a specific known
 # finding, add its ID here — ALWAYS with an expiry, so a suppression can't linger silently:
 #
 #   CVE-2025-12345 exp:2026-12-31

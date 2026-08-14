@@ -301,7 +301,7 @@ All notable changes to **Heliograph** are recorded here. The format follows
   agent on `openSpool` and blocking recovery of every valid buffered round in that segment. A valid
   frame can never exceed one segment (`segmentMaxBytes`, 64 MiB), so a length above that is now
   rejected as `errBadFrame` before any allocation — mirrored in `decodeFrame` for defense in depth.
-  Regression-tested (`TestStreamSegmentRejectsOversizedFrameLength`). (CODE_REVIEW M6.)
+  Regression-tested (`TestStreamSegmentRejectsOversizedFrameLength`).
 - **SmokePing importer now inherits probe target-variables down the target tree.** Previously only
   the `probe` was inherited from ancestor `+`/`++` folders; a probe's target-variables (`lookup`,
   `port`, `recordtype`, `pings`, …) were read only from a target's own inline fields and the Probes
