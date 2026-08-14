@@ -1414,6 +1414,55 @@
         saveDoc(Dash.removeTarget(cfg.doc, name));
       }
     });
+    // Drag-to-reorder: HTML5 DnD on #cfgTree, scoped to one sibling group at a time (same
+    // parent path). Dropping onto a row from a different parent is a no-op — cross-folder
+    // move is a follow-up. Reorder writes sequential weights via Dash.reorderSiblings, then
+    // saves through the same optimistic-version saveDoc PUT used everywhere else.
+    (function cfgDnd() {
+      const host = $('cfgTree');
+      let dragPath = null, dragParent = null;
+      const parentOf = (p) => p.split('/').slice(0, -1).join('/');
+      // siblingNames returns the current (weight,name)-sorted names of `parent`'s children
+      // ('' = top level), read fresh from Dash.cfgTree(cfg.doc) each time.
+      const siblingNames = (parent) => {
+        const top = Dash.cfgTree(cfg.doc);
+        if (!parent) return top.map((n) => n.name);
+        const find = (nodes) => {
+          for (const n of nodes) {
+            if (n.path === parent) return n;
+            if (n.children.length) { const f = find(n.children); if (f) return f; }
+          }
+          return null;
+        };
+        const grp = find(top);
+        return grp ? grp.children.map((n) => n.name) : [];
+      };
+      const clearDropMarks = () => { for (const el of host.querySelectorAll('.cfg-drop')) el.classList.remove('cfg-drop'); };
+      host.addEventListener('dragstart', (e) => {
+        const row = e.target.closest('.crow'); if (!row) return;
+        dragPath = row.getAttribute('data-path'); dragParent = parentOf(dragPath);
+        e.dataTransfer.effectAllowed = 'move';
+      });
+      host.addEventListener('dragover', (e) => {
+        const row = e.target.closest('.crow'); if (!row || dragPath == null) return;
+        if (parentOf(row.getAttribute('data-path')) === dragParent) { e.preventDefault(); row.classList.add('cfg-drop'); }
+      });
+      host.addEventListener('dragleave', (e) => { const row = e.target.closest('.crow'); if (row) row.classList.remove('cfg-drop'); });
+      host.addEventListener('drop', (e) => {
+        const row = e.target.closest('.crow'); if (!row || dragPath == null) { dragPath = null; return; }
+        e.preventDefault(); clearDropMarks();
+        const targetPath = row.getAttribute('data-path');
+        if (parentOf(targetPath) !== dragParent || targetPath === dragPath) { dragPath = null; return; }
+        const dragName = dragPath.split('/').pop(), targetName = targetPath.split('/').pop();
+        const before = siblingNames(dragParent);
+        const order = before.slice();
+        order.splice(order.indexOf(dragName), 1);
+        order.splice(order.indexOf(targetName), 0, dragName);
+        const parent = dragParent; dragPath = null;
+        if (JSON.stringify(order) !== JSON.stringify(before)) saveDoc(Dash.reorderSiblings(cfg.doc, parent, order));
+      });
+      host.addEventListener('dragend', () => { dragPath = null; clearDropMarks(); });
+    })();
     $('cfgImportBtn').addEventListener('click', () => {
       $('cfgImportText').value = '';
       $('cfgImportErr').textContent = '';
