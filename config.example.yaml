@@ -60,9 +60,10 @@ targets:
   #     ip: 10.0.0.5              # pinned display IP (no DNS needed)
 
   children:
-    # Leaf names describe the PROBE METHOD; the folder names the host. (These are ICMP
-    # pings etc. to a DNS server's IP — not "DNS over ICMP", so they aren't named "DNS".)
-    Cloudflare (1.1.1.1):
+    # Leaf names describe the PROBE METHOD, grouped by provider. (These are ICMP pings etc.
+    # to a DNS server's IP — not "DNS over ICMP", so they aren't named "DNS".) The compose
+    # demo runs with -resolve-ips, so each leaf's IP shows in its graph title (1.1.1.1 here).
+    Cloudflare:
       children:
         ICMP (FPing):        # ICMP echo via the fping binary (inherited tree default)
           host: 1.1.1.1
@@ -78,7 +79,7 @@ targets:
           host: 1.1.1.1
           params: { lookup: example.com }
 
-    Google (8.8.8.8):
+    Google:
       children:
         ICMP (FPing):
           host: 8.8.8.8
