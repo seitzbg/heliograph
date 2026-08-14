@@ -1257,7 +1257,13 @@
     // Edit/Remove buttons. `--d` drives the CSS indent; folders nest their kids in `.kids`.
     function cfgRowHtml(n, depth) {
       const d = depth || 0;
-      const meta = n.isFolder ? '' : esc([n.node.probe || '', n.node.host || ''].filter(Boolean).join(' · '));
+      let meta = '';
+      if (!n.isFolder) {
+        const nd = n.node;
+        const paramsStr = nd.params ? Object.entries(nd.params).map(([k, v]) => k + '=' + v).join(' ') : '';
+        const vantStr = (nd.vantages && nd.vantages.length) ? '@' + nd.vantages.join(',') : '';
+        meta = esc([nd.probe || '', nd.host || '', paramsStr, vantStr].filter(Boolean).join(' · '));
+      }
       const kids = n.isFolder ? '<div class="kids">' + n.children.map((c) => cfgRowHtml(c, d + 1)).join('') + '</div>' : '';
       return '<div class="crow' + (n.isFolder ? ' folder' : '') + '" draggable="true" data-path="' + esc(n.path) + '" style="--d:' + d + '" role="treeitem">' +
         '<span class="chandle" aria-hidden="true">⠿</span>' +
@@ -1416,10 +1422,17 @@
       // a target literally named '__proto__'/'constructor'/'prototype' is still a footgun
       // (e.g. downstream JSON tooling, YAML export) worth rejecting up front in the UI.
       if (['__proto__', 'constructor', 'prototype'].includes(name)) { $('cfgFormErr').textContent = '"' + name + '" is a reserved name.'; return; }
+      const isEdit = $('cfgMode').value === 'edit';
+      // "/" is the structural path separator (cfgTree joins segments with it) — a node name
+      // is a single segment. Without this guard, a top-level target named e.g. "Web/a" would
+      // collide with the cfgTree path of an existing nested "a" under a "Web" folder, and
+      // findCfgNode's depth-first search would silently resolve Edit/Remove/drag to the wrong
+      // node. Only the add path can introduce a new name; edit reuses an existing path.
+      if (!isEdit && name.includes('/')) { $('cfgFormErr').textContent = 'Names can\'t contain "/".'; return; }
       let mutated;
       try {
         // Edit is path-aware (any depth); Add stays top-level only, unchanged.
-        mutated = ($('cfgMode').value === 'edit') ? Dash.editNodeAtPath(cfg.doc, cfgEditPath, node) : Dash.addTarget(cfg.doc, name, node);
+        mutated = isEdit ? Dash.editNodeAtPath(cfg.doc, cfgEditPath, node) : Dash.addTarget(cfg.doc, name, node);
       } catch (err) { $('cfgFormErr').textContent = err.message; return; }
       saveDoc(mutated, closeCfgModal);
     });
