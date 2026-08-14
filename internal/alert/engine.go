@@ -583,8 +583,16 @@ func (n *WebhookNotifier) worker() {
 func (n *WebhookNotifier) deliver(d delivery) {
 	backoff := n.baseBackoff
 	for attempt := 1; ; attempt++ {
-		if n.tryOnce(d) {
+		ok, permanent := n.tryOnce(d)
+		if ok {
 			n.delivered.Add(1)
+			return
+		}
+		if permanent {
+			// A 4xx (bad payload, auth, wrong URL) can never succeed on retry: give up now
+			// rather than burn the whole retry/backoff budget on a doomed delivery.
+			n.failed.Add(1)
+			slog.Warn("webhook: giving up: permanent failure", "url", n.URL, "alert", d.alert, "target", d.target, "attempt", attempt)
 			return
 		}
 		if attempt >= n.maxAttempts {
@@ -603,28 +611,45 @@ func (n *WebhookNotifier) deliver(d delivery) {
 	}
 }
 
-func (n *WebhookNotifier) tryOnce(d delivery) bool {
+// tryOnce sends one delivery. It returns ok=true on a 2xx; otherwise ok=false with permanent
+// marking a failure no retry can rescue — a build error (a URL validated at startup should never
+// reach here) or a 4xx client rejection (bad payload, auth, wrong URL), excluding 408 Request
+// Timeout and 429 Too Many Requests, which are transient. Everything else (transport error, 3xx,
+// 5xx) is transient and retried. Mirrors email's permanentSendError, inverted for HTTP: an SMTP
+// 5xx is permanent, an HTTP 4xx is.
+func (n *WebhookNotifier) tryOnce(d delivery) (ok, permanent bool) {
 	ctx, cancel := context.WithTimeout(n.baseCtx, n.timeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, n.URL, bytes.NewReader(d.body))
 	if err != nil {
 		slog.Error("webhook: build request failed", "url", n.URL, "alert", d.alert, "err", err)
-		return false
+		return false, true
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Idempotency-Key", d.idem)
 	resp, err := n.Client.Do(req)
 	if err != nil {
 		slog.Warn("webhook: delivery attempt failed", "url", n.URL, "alert", d.alert, "target", d.target, "err", err)
-		return false
+		return false, false
 	}
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		slog.Warn("webhook: non-2xx response", "url", n.URL, "alert", d.alert, "target", d.target, "status", resp.StatusCode)
+		perm := permanentHTTPStatus(resp.StatusCode)
+		slog.Warn("webhook: non-2xx response", "url", n.URL, "alert", d.alert, "target", d.target, "status", resp.StatusCode, "permanent", perm)
+		return false, perm
+	}
+	return true, false
+}
+
+// permanentHTTPStatus reports whether an HTTP status will never succeed on retry: a 4xx client
+// error (bad request / auth / not-found), except 408 Request Timeout and 429 Too Many Requests,
+// which are transient and worth retrying.
+func permanentHTTPStatus(code int) bool {
+	if code == http.StatusRequestTimeout || code == http.StatusTooManyRequests {
 		return false
 	}
-	return true
+	return code >= 400 && code < 500
 }
 
 // Close stops accepting new events, drains the queue (workers finish what's queued),
