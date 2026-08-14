@@ -1237,23 +1237,26 @@
     function cShow(id) {
       for (const s of ['cfgDisabled', 'cfgLogin', 'cfgList', 'cfgError']) $(s).classList.toggle('hidden', s !== id);
     }
-    function renderConfigRows() {
-      const rows = Dash.listTargets(cfg.doc);
+    // cfgRowHtml renders one node of Dash.cfgTree(cfg.doc) recursively: a drag handle, the
+    // name (folders get a trailing "/"), a probe/host meta line for leaves, and path-aware
+    // Edit/Remove buttons. `--d` drives the CSS indent; folders nest their kids in `.kids`.
+    function cfgRowHtml(n, depth) {
+      const d = depth || 0;
+      const meta = n.isFolder ? '' : esc([n.node.probe || '', n.node.host || ''].filter(Boolean).join(' · '));
+      const kids = n.isFolder ? '<div class="kids">' + n.children.map((c) => cfgRowHtml(c, d + 1)).join('') + '</div>' : '';
+      return '<div class="crow' + (n.isFolder ? ' folder' : '') + '" draggable="true" data-path="' + esc(n.path) + '" style="--d:' + d + '" role="treeitem">' +
+        '<span class="chandle" aria-hidden="true">⠿</span>' +
+        '<span class="cname">' + esc(n.name) + (n.isFolder ? '/' : '') + '</span>' +
+        '<span class="cmeta">' + meta + '</span>' +
+        '<button type="button" class="vadmin-btn" data-edit="' + esc(n.path) + '">Edit</button>' +
+        '<button type="button" class="vadmin-btn" data-remove="' + esc(n.path) + '">Remove</button>' +
+      '</div>' + kids;
+    }
+    function renderCfgTree() {
+      const tree = Dash.cfgTree(cfg.doc);
       $('cfgVersion').textContent = 'v' + cfg.version;
-      if (!rows.length) { $('cfgRows').innerHTML = '<tr><td colspan="5" class="vadmin-empty">No DB targets yet — add one.</td></tr>'; return; }
-      $('cfgRows').innerHTML = rows.map((r) => {
-        const nm = esc(r.name);
-        if (r.isFolder) {
-          return '<tr><td>' + nm + '</td><td colspan="3" style="color:var(--ink-faint)">folder — managed via files</td><td></td></tr>';
-        }
-        const n = r.node || {};
-        const details = esc([n.params ? Object.entries(n.params).map(([k, v]) => k + '=' + v).join(' ') : '',
-          (n.vantages && n.vantages.length) ? '@' + n.vantages.join(',') : ''].filter(Boolean).join('  '));
-        return '<tr><td>' + nm + '</td><td>' + esc(n.probe || '') + '</td><td>' + esc(n.host || '') + '</td><td style="color:var(--ink-soft)">' + details +
-          '</td><td style="text-align:right; white-space:nowrap">' +
-          '<button class="vadmin-btn" data-edit="' + nm + '">Edit</button>' +
-          '<button class="vadmin-btn" data-remove="' + nm + '">Remove</button></td></tr>';
-      }).join('');
+      if (!tree.length) { $('cfgTree').innerHTML = '<div class="tree-empty">No DB targets yet — add one.</div>'; return; }
+      $('cfgTree').innerHTML = tree.map((n) => cfgRowHtml(n, 0)).join('');
     }
     async function renderConfig(opts) {
       const afterLogin = !!(opts && opts.afterLogin);
@@ -1275,7 +1278,7 @@
       try { data = await r.json(); } catch (e) { cShow('cfgError'); return; }
       cfg.version = data.version || 0;
       cfg.doc = (data.doc && typeof data.doc === 'object') ? data.doc : { targets: { children: {} } };
-      renderConfigRows();
+      renderCfgTree();
       cShow('cfgList');
     }
     $('cfgRetry').addEventListener('click', () => renderConfig());
@@ -1370,7 +1373,7 @@
         let body = {}; try { body = await r.json(); } catch (e) { /* ignore */ }
         cfg.version = body.version || (cfg.version + 1);
         cfg.doc = mutated;
-        renderConfigRows();
+        renderCfgTree();
         if (onOk) onOk();
         return;
       }
@@ -1401,7 +1404,7 @@
       } catch (err) { $('cfgFormErr').textContent = err.message; return; }
       saveDoc(mutated, closeCfgModal);
     });
-    $('cfgRows').addEventListener('click', (e) => {
+    $('cfgTree').addEventListener('click', (e) => {
       const ed = e.target.closest('[data-edit]');
       if (ed) { openCfgModal('edit', ed.getAttribute('data-edit')); return; }
       const rm = e.target.closest('[data-remove]');
