@@ -49,10 +49,11 @@ import (
 	_ "github.com/seitzbg/heliograph/internal/probe/tcpconnect"
 )
 
-// version is the smoked release version. Overridable at build time with
+// version is the smoked release version. Unset in an unversioned build (a plain `go build`
+// must not claim a release); overridable at build time with
 //
 //	go build -ldflags "-X main.version=$(git describe --tags)"
-var version = "1.0.0"
+var version = "dev"
 
 // validateRuntimeFlags checks the operational numeric flags the collector shares. A
 // non-positive -timeout is the per-ping budget the scheduler multiplies by pings for
