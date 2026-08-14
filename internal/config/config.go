@@ -88,9 +88,9 @@ type Node struct {
 	// AppendImport idempotency (a re-import of a file with `alerts: []` would decode back to nil
 	// and spuriously conflict). nil marshals as `null` (→ nil), `[]` as `[]` (→ empty) — both
 	// round-trip.
-	Alerts   []string         `yaml:"alerts" json:"alerts"`     // alert names; inherited down the tree
-	Alertee  []string         `yaml:"alertee" json:"alertee"`   // extra notifier names; inherited down the tree
-	Vantages []string         `yaml:"vantages" json:"vantages"` // vantage points that probe this target; inherited
+	Alerts   []string `yaml:"alerts" json:"alerts"`     // alert names; inherited down the tree
+	Alertee  []string `yaml:"alertee" json:"alertee"`   // extra notifier names; inherited down the tree
+	Vantages []string `yaml:"vantages" json:"vantages"` // vantage points that probe this target; inherited
 	// Weight orders a node among its siblings: sorted (weight, name), unset/0 keeps A–Z.
 	// A negative weight pins a node to the top of its group. Applies to YAML and DB configs.
 	Weight   int              `yaml:"weight" json:"weight,omitempty"`
@@ -692,6 +692,7 @@ func firstNonZeroDur(a, b time.Duration) time.Duration {
 	}
 	return b
 }
+
 // orderedChildren returns child keys ordered by (weight, name): lower weight first, ties by
 // name. unset weight (0) preserves the historical A–Z order. This is the single ordering
 // choke point for the config tree — the flatten, merge, and API all read siblings through it.
