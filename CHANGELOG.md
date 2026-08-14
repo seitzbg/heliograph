@@ -199,6 +199,14 @@ All notable changes to **Heliograph** are recorded here. The format follows
   passed into `spreadInterval` and reserved as the tail (still capped at half the round budget for a short
   `step`); the default 1 s behavior is unchanged. Regression-tested (a `timeout_ms` > 1 s against a short
   step keeps the full window in the schedule).
+- **Email notifier no longer retries permanent SMTP failures.** A failed send that can never succeed
+  on retry — a 5xx server rejection (unknown recipient, relay denied; `net/smtp` surfaces these as a
+  `*textproto.Error` with `Code >= 500`) or the AUTH-not-advertised misconfiguration — is now abandoned
+  on the first attempt and counted `failed`, instead of burning the full retry/backoff budget (~41.5s)
+  on a doomed send. During an incident burst that wasted budget tied up a worker and filled the queue,
+  dropping other alerts. Transient failures (4xx replies, connection errors) still retry with backoff as
+  before. The AUTH misconfiguration is matched robustly on a wrapped sentinel (`errors.Is`), not the
+  message string; the operator-facing error text is unchanged.
 - **Target status dot no longer flips orange on a single dropped ping.** The nav-tree status dot keyed on
   the **last round's** loss, so one lost ping (1 of 20 = 5%) painted a target "degraded" (orange) until the
   next clean round — even though its long-run loss was ~0 and the drill-down graph showed nothing. The dot
