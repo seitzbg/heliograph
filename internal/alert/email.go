@@ -3,15 +3,23 @@ package alert
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/smtp"
+	"net/textproto"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 )
+
+// errAuthNotOffered marks the permanent misconfiguration where the operator configured SMTP AUTH
+// but the relay's EHLO doesn't advertise it (often a missing STARTTLS negotiation). No relay
+// round-trip will ever make such a send succeed, so deliver classifies it as non-retryable via
+// errors.Is — matching robustly on the sentinel rather than the human-readable message string.
+var errAuthNotOffered = errors.New("permanent SMTP AUTH misconfiguration")
 
 // EmailConfig configures the SMTP notifier.
 type EmailConfig struct {
@@ -116,7 +124,9 @@ func smtpSender(skipVerify bool) func(ctx context.Context, addr string, a smtp.A
 			// misconfiguration (often a missing STARTTLS negotiation), not something to paper over.
 			ok, _ := c.Extension("AUTH")
 			if !ok {
-				return fmt.Errorf("smtp: authentication configured but server %q does not advertise AUTH (STARTTLS may be required)", addr)
+				// Keep the operator-facing message intact and wrap the sentinel, so deliver can
+				// recognize this permanent misconfiguration with errors.Is (see errAuthNotOffered).
+				return fmt.Errorf("smtp: authentication configured but server %q does not advertise AUTH (STARTTLS may be required): %w", addr, errAuthNotOffered)
 			}
 			if err := c.Auth(a); err != nil {
 				return err
@@ -201,8 +211,27 @@ func (n *EmailNotifier) worker() {
 	}
 }
 
-// deliver sends one event, retrying with exponential backoff up to maxAttempts. The backoff wait is
-// interrupted by Close, so a shutdown drain doesn't stall on a down relay.
+// permanentSendError reports whether err can never succeed on retry, so deliver should give up
+// immediately instead of burning the whole retry/backoff budget (~41.5s = 4×10s timeout + backoff)
+// on a doomed send — during an incident burst that budget is a worker the queue needs for other
+// alerts. Two classes qualify: a 5xx SMTP reply (net/smtp surfaces server replies as
+// *textproto.Error; Code >= 500 is a permanent rejection — unknown recipient, relay denied — while
+// 4xx is transient and retryable), and the AUTH-not-advertised configuration error
+// (errAuthNotOffered), which no relay round-trip will fix.
+func permanentSendError(err error) bool {
+	if errors.Is(err, errAuthNotOffered) {
+		return true
+	}
+	var tperr *textproto.Error
+	if errors.As(err, &tperr) && tperr.Code >= 500 {
+		return true
+	}
+	return false
+}
+
+// deliver sends one event, retrying with exponential backoff up to maxAttempts. A permanent failure
+// (see permanentSendError) is abandoned on the first attempt — no retry can rescue it. The backoff
+// wait is interrupted by Close, so a shutdown drain doesn't stall on a down relay.
 func (n *EmailNotifier) deliver(e Event) {
 	msg := buildEmailMessage(e, n.from, n.to)
 	backoff := n.baseBackoff
@@ -212,6 +241,13 @@ func (n *EmailNotifier) deliver(e Event) {
 		cancel()
 		if err == nil {
 			n.delivered.Add(1)
+			return
+		}
+		if permanentSendError(err) {
+			// A 5xx rejection or the AUTH misconfiguration can never succeed on retry: give up now
+			// rather than tie up the worker for the whole retry budget on a doomed send.
+			n.failed.Add(1)
+			slog.Warn("email: giving up: permanent failure", "addr", n.addr, "alert", e.Alert, "target", e.Target, "attempt", attempt, "err", err)
 			return
 		}
 		slog.Warn("email: send attempt failed", "addr", n.addr, "alert", e.Alert, "target", e.Target, "attempt", attempt, "err", err)
