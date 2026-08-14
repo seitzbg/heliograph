@@ -191,6 +191,14 @@ All notable changes to **Heliograph** are recorded here. The format follows
   which the probe can't validate at construction). `HTTP`/`DNS` (no inter-attempt sleep) and `pings=1`/
   no-deadline callers are unchanged. Regression-tested end-to-end (a large `interval_ms` still probes all N
   within the deadline) plus a unit test of the budget/clamp math.
+- **Native `Ping` honors a `timeout_ms` larger than 1 s in its send schedule.** `spreadInterval` reserved a
+  hardcoded 1 s tail for replies regardless of the configured per-reply timeout, so a `timeout_ms` > 1 s was
+  accepted but the send schedule could push the last echo so late that less than the requested window
+  remained before the round deadline — `replyDeadline` then clamped the last echo's wait below the
+  configured timeout, causing avoidable loss on a high-latency target. The effective reply timeout is now
+  passed into `spreadInterval` and reserved as the tail (still capped at half the round budget for a short
+  `step`); the default 1 s behavior is unchanged. Regression-tested (a `timeout_ms` > 1 s against a short
+  step keeps the full window in the schedule).
 - **Target status dot no longer flips orange on a single dropped ping.** The nav-tree status dot keyed on
   the **last round's** loss, so one lost ping (1 of 20 = 5%) painted a target "degraded" (orange) until the
   next clean round — even though its long-run loss was ~0 and the drill-down graph showed nothing. The dot

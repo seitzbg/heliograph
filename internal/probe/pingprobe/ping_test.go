@@ -352,20 +352,46 @@ func TestSendPhaseDeadlineUsesRoundBudget(t *testing.T) {
 func TestSpreadInterval(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	if iv := spreadInterval(ctx, 20, 0); iv < 200*time.Millisecond {
+	if iv := spreadInterval(ctx, 20, 0, pingReplyTimeout); iv < 200*time.Millisecond {
 		t.Errorf("interval = %v, want spread out (>=200ms), not a ~50ms burst", iv)
 	}
 	// An explicit interval_ms override is honored (still capped to fit the budget).
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel2()
-	if iv := spreadInterval(ctx2, 20, 100*time.Millisecond); iv != 100*time.Millisecond {
+	if iv := spreadInterval(ctx2, 20, 100*time.Millisecond, pingReplyTimeout); iv != 100*time.Millisecond {
 		t.Errorf("override interval = %v, want 100ms honored", iv)
 	}
 	// A short budget shrinks the interval so the whole send span fits inside it.
 	ctx3, cancel3 := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel3()
-	iv3 := spreadInterval(ctx3, 20, 0)
+	iv3 := spreadInterval(ctx3, 20, 0, pingReplyTimeout)
 	if span := time.Duration(19) * iv3; span >= 2*time.Second {
 		t.Errorf("send span %v exceeds the 2s budget (interval=%v)", span, iv3)
+	}
+}
+
+// TestSpreadIntervalReservesConfiguredReplyTimeout is the regression test for the finding
+// that spreadInterval reserved only a hardcoded 1s tail even when timeout_ms > 1s. The
+// send schedule could then push the last echo so late that less than the configured reply
+// window remained before the round deadline, so replyDeadline clamped it to the deadline
+// and the last echo got a shorter timeout than requested — avoidable loss on a
+// high-latency target. With a reply timeout > 1s (and room in the budget), the nominal
+// last send plus the full configured reply window must still fit within the round budget.
+func TestSpreadIntervalReservesConfiguredReplyTimeout(t *testing.T) {
+	const budget = 6 * time.Second
+	const reply = 2 * time.Second // timeout_ms=2000, larger than the old hardcoded 1s cap
+	const pings = 10
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+
+	iv := spreadInterval(ctx, pings, 0, reply)
+	// The nominal last send lands (pings-1)*iv into the round; the reply window applied
+	// after it must not spill past the deadline (which would clamp the last echo's wait
+	// below the configured timeout). reply <= budget/2 here, so the full window must fit.
+	lastSend := time.Duration(pings-1) * iv
+	if lastSend+reply > budget {
+		t.Errorf("last send at %v + configured reply window %v = %v exceeds the %v round budget: "+
+			"the send schedule did not reserve the configured reply timeout (tail clamped to 1s)",
+			lastSend, reply, lastSend+reply, budget)
 	}
 }
