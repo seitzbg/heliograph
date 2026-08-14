@@ -98,6 +98,13 @@ All notable changes to **Heliograph** are recorded here. The format follows
   ./...` is clean on 1.26.6.
 
 ### Fixed
+- **Target status dot no longer flips orange on a single dropped ping.** The nav-tree status dot keyed on
+  the **last round's** loss, so one lost ping (1 of 20 = 5%) painted a target "degraded" (orange) until the
+  next clean round — even though its long-run loss was ~0 and the drill-down graph showed nothing. The dot
+  now keys on a **windowed recent average** (`recent_loss_pct`, the last 30 min, from the bulk availability
+  scan already used by `/api/sla`), so it only goes orange on **sustained** loss. A real outage is still
+  immediate — a fully-errored or ≥50%-loss last round shows red at once (the blackhole demo target stays
+  red). Falls back to the last round when a store can't aggregate the window.
 - **First-start no longer crashes when the database is still coming up.** On a fresh `docker compose up`
   the collector could exit immediately with `configstore: migrate: ... connect: connection refused`,
   leaving TimescaleDB running but the app dead until a `down`/`up` — because TimescaleDB's first-run init

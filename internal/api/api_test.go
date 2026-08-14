@@ -228,6 +228,63 @@ func TestRollupMissingAggregateReturns501(t *testing.T) {
 	}
 }
 
+// /api/targets exposes recent_loss_pct as a WINDOWED average (over recentStatusWindow),
+// not the last round's loss — so the UI's status dot keys on sustained loss. A target whose
+// latest round dropped one ping (5%) but is otherwise clean reports a tiny recent_loss_pct.
+func TestTargetsRecentLossPctIsWindowed(t *testing.T) {
+	rtts := func(n int) []float64 {
+		s := make([]float64, n)
+		for i := range s {
+			s[i] = 0.01
+		}
+		return s
+	}
+	st := store.NewMem(100)
+	now := time.Now()
+	var rounds []scheduler.Outcome
+	// 19 clean rounds within the recent window...
+	for i := 19; i >= 1; i-- {
+		rounds = append(rounds, scheduler.Outcome{
+			Target: probe.Target{Name: "t", Host: "h"}, ProbeName: "FPing",
+			Computed: sample.Compute(20, rtts(20)), When: now.Add(-time.Duration(i) * time.Minute),
+		})
+	}
+	// ...then a latest round that dropped exactly one ping (19 of 20 replied) = 5% that round.
+	rounds = append(rounds, scheduler.Outcome{
+		Target: probe.Target{Name: "t", Host: "h"}, ProbeName: "FPing",
+		Computed: sample.Compute(20, rtts(19)), When: now,
+	})
+	st.Add(rounds)
+
+	srv := New(st, "")
+	rec := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(rec, httptest.NewRequest("GET", "/api/targets", nil))
+	var tj struct {
+		Targets []struct {
+			Name          string   `json:"name"`
+			LossPct       float64  `json:"loss_pct"`
+			RecentLossPct *float64 `json:"recent_loss_pct"`
+		} `json:"targets"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &tj); err != nil {
+		t.Fatalf("targets json: %v", err)
+	}
+	if len(tj.Targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(tj.Targets))
+	}
+	got := tj.Targets[0]
+	if got.LossPct != 5 {
+		t.Errorf("last-round loss_pct = %v, want 5 (one dropped ping)", got.LossPct)
+	}
+	if got.RecentLossPct == nil {
+		t.Fatal("recent_loss_pct missing — the status dot can't smooth without it")
+	}
+	// One 5% round out of 20 in the window ⇒ ~0.25% average, far below the 5% last round.
+	if *got.RecentLossPct > 1 {
+		t.Errorf("recent_loss_pct = %v, want ~0.25 (windowed average, not the last round's 5%%)", *got.RecentLossPct)
+	}
+}
+
 // Live endpoints report only currently-configured targets: one removed on reload
 // (present in the store, absent from Active) must not show as healthy.
 func TestLiveEndpointsFilterToActiveTargets(t *testing.T) {
