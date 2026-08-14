@@ -41,6 +41,21 @@ jobs:
       # stitching / tier selection) would run in NO CI job (audit M3).
       - name: Install rrdtool
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends rrdtool
+      # Guard the Trivy allowlist format (CODE_REVIEW L4): every real entry must carry expired_at, so
+      # a vuln suppression can never linger silently, and the legacy flat-file `exp:` pseudo-syntax
+      # (which Trivy silently ignores) must not creep back in. Comments/examples are excluded.
+      - name: Lint .trivyignore.yaml
+        run: |
+          body=$(grep -vE '^\s*#' .trivyignore.yaml || true)
+          ids=$(printf '%s\n' "$body" | grep -cE '^\s*-\s*id:' || true)
+          exps=$(printf '%s\n' "$body" | grep -cE '^\s*expired_at:' || true)
+          if [ "$ids" != "$exps" ]; then
+            echo "each .trivyignore.yaml entry needs an expired_at (found $ids id: vs $exps expired_at:)"; exit 1
+          fi
+          if printf '%s\n' "$body" | grep -qE '\bexp:[0-9]'; then
+            echo "use 'expired_at:' (Trivy YAML), not the legacy flat-file 'exp:' which Trivy ignores"; exit 1
+          fi
+          echo ".trivyignore.yaml ok ($ids expiring exception(s))"
       # Formatting must be clean (gofmt -l prints files that need formatting).
       - name: gofmt
         run: test -z "$(gofmt -l cmd internal)"
@@ -137,14 +152,14 @@ jobs:
       - name: Integration tests
         run: go test -p 1 -count=1 ./internal/store/pgstore/ ./internal/vantage/ ./internal/api/ ./internal/configstore/ ./cmd/smoked/
 
-  # Build the collector image and push it to GHCR so the docker hosts can pull it. Runs only after
-  # every test job is green, so a red test blocks the image. Builds on all triggers; PUSHES only on
-  # non-PR events (push to main / tags) so PRs verify the Docker build without publishing. Also runs
-  # the SBOM + finished-image vuln scan here against the locally loaded image (go-test's govulncheck
-  # only covers the Go module graph, not the base image's OS packages).
-  # Build the collector image + scan it, with a READ-ONLY token (no registry/attestation write) — so
-  # PR builds verify the Docker build + finished-image scan but can NEVER publish. Publishing is the
-  # separate, non-PR `publish-image` job below. Runs only after every test job is green.
+  # Build the collector image ONCE, as an OCI archive, then SBOM + vuln-scan that exact artifact.
+  # This is the single source of truth: publish-image pushes these same bytes unchanged, so the
+  # digest that receives the tags + provenance attestation is byte-for-byte the one that was scanned
+  # here (CODE_REVIEW M1 — the previous design built a second time in publish-image, so the scan
+  # gated a different build than the one published). Runs on all triggers after every test job is
+  # green, with a READ-ONLY token: a PR build exercises the whole build→scan path but can NEVER
+  # publish (that is the separate, write-scoped, non-PR `publish-image` job below). The archive +
+  # its digest are handed to publish-image via workflow artifacts on non-PR runs.
   build-image:
     needs: [go-test, frontend, govulncheck, db-test]
     runs-on: ubuntu-latest
@@ -161,57 +176,78 @@ jobs:
         uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
         with:
           images: ghcr.io/${{ github.repository }}
-          tags: |
-            type=ref,event=branch
-            type=ref,event=tag
-            type=ref,event=pr
-            type=sha,format=short
+          labels: |
+            org.opencontainers.image.title=heliograph
       # Baked into the binary via main.version (CODE_REVIEW M8) so `smoked -version` / `smoke-agent
       # -version` reports something meaningful instead of the hard-coded "dev" default.
       - name: Compute version
         id: ver
         run: echo "version=$(git describe --tags --always --dirty)" >> "$GITHUB_OUTPUT"
-      - name: Build (load locally; never push here)
+      - name: Build once -> OCI archive (single source of truth; never pushed here)
         id: build
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           # single-arch amd64; provenance off keeps a plain single manifest (matches what the docker
-          # hosts pull) and lets `load` import it locally for the scan. Cache is shared with publish.
+          # hosts pull). type=oci writes a self-contained archive we scan here and push verbatim from
+          # publish-image via skopeo, so the scanned bytes == the published bytes. Cache shared with publish.
           provenance: false
-          load: true
           push: false
-          tags: ${{ steps.meta.outputs.tags }}
+          outputs: type=oci,dest=/tmp/collector-image.tar
           labels: ${{ steps.meta.outputs.labels }}
           build-args: VERSION=${{ steps.ver.outputs.version }}
           cache-to: type=gha,mode=max
           cache-from: type=gha
-      # SBOM (SPDX JSON) of the built image -> artifact. Scanner images are digest-pinned.
+      # The archive's own manifest digest, read straight from its OCI index — this is what skopeo
+      # preserves on push, so publish-image asserts the pushed digest equals it (CODE_REVIEW M1).
+      - name: Record image digest
+        id: digest
+        run: |
+          d=$(tar -xOf /tmp/collector-image.tar index.json | jq -r '.manifests[0].digest')
+          echo "digest=$d" >> "$GITHUB_OUTPUT"
+          echo "$d" > image-digest.txt
+          echo "built + scanning image digest: $d"
+      # SBOM (SPDX JSON) of the exact archive -> artifact, named with the digest so it is auditably
+      # tied to the published image. Scanner images are digest-pinned.
       - name: SBOM (syft)
         run: |
-          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
-            anchore/syft:v1.19.0@sha256:bc1ae555a43011d23bb011a4f50e175fc9a5984a008a3f8f2d692b211fcacd2a "docker:ghcr.io/${{ github.repository }}:${{ steps.meta.outputs.version }}" \
+          docker run --rm -v /tmp:/tmp \
+            anchore/syft:v1.19.0@sha256:bc1ae555a43011d23bb011a4f50e175fc9a5984a008a3f8f2d692b211fcacd2a oci-archive:/tmp/collector-image.tar \
             -o spdx-json > sbom.spdx.json
-      - name: Upload SBOM
+      - name: Upload SBOM + digest
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: sbom-spdx
-          path: sbom.spdx.json
+          path: |
+            sbom.spdx.json
+            image-digest.txt
           retention-days: 30
-      # BLOCKING finished-image scan: the base is CVE-clean as of this change, so a newly-disclosed
-      # fixable HIGH/CRITICAL against the pinned base now reds CI — bump the base pin, or add a
-      # time-bound exception to .trivyignore. The scheduled image-scan.yml re-runs this against :main.
+      # BLOCKING finished-image scan of the archive: the base is CVE-clean as of this change, so a
+      # newly-disclosed fixable HIGH/CRITICAL against the pinned base now reds CI — bump the base pin,
+      # or add a time-bound exception to .trivyignore.yaml. The scheduled image-scan.yml re-runs this
+      # against :main.
       - name: Trivy image scan (blocking)
         run: |
-          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
-            -v "$PWD/.trivyignore:/.trivyignore:ro" -e TRIVY_IGNOREFILE=/.trivyignore \
-            aquasec/trivy:0.58.1@sha256:ab70a02200597efa04748f210f793936eb647cbcdb0ea69cc30b226d6f5a22c7 image --scanners vuln --severity HIGH,CRITICAL \
-            --ignore-unfixed --exit-code 1 "ghcr.io/${{ github.repository }}:${{ steps.meta.outputs.version }}"
+          docker run --rm -v /tmp:/tmp \
+            -v "$PWD/.trivyignore.yaml:/.trivyignore.yaml:ro" -e TRIVY_IGNOREFILE=/.trivyignore.yaml \
+            aquasec/trivy:0.58.1@sha256:ab70a02200597efa04748f210f793936eb647cbcdb0ea69cc30b226d6f5a22c7 image --input /tmp/collector-image.tar \
+            --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1
+      # Hand the SCANNED archive to publish-image so it pushes the exact bytes (non-PR only; a PR
+      # never publishes, so it needs no artifact).
+      - name: Upload image archive
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: collector-image
+          path: /tmp/collector-image.tar
+          retention-days: 1
 
   # Publish the collector image to GHCR + attach a signed build-provenance attestation (a verifiable
   # source-ref -> image-digest mapping). NON-PR ONLY, and the ONLY job with write scopes — so the PR
-  # build above never holds a token that can publish. Reuses build-image's gha layer cache, so this
-  # build is fast rather than a rebuild from scratch.
+  # build above never holds a token that can publish. It does NOT rebuild: it pushes the exact OCI
+  # archive build-image scanned (via skopeo, which preserves the manifest digest), and asserts the
+  # pushed digest equals the scanned digest before attesting — so the scan, the tags, and the
+  # attestation all describe one and the same image (CODE_REVIEW M1).
   publish-image:
     needs: [build-image]
     if: github.event_name != 'pull_request'
@@ -222,17 +258,12 @@ jobs:
       id-token: write
       attestations: write
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Download the scanned image archive + digest
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          persist-credentials: false
-          fetch-depth: 0   # full history + tags, so `git describe` below finds the real nearest tag
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
-      - name: Log in to GHCR
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          pattern: '{collector-image,sbom-spdx}'
+          path: /tmp/artifacts
+          merge-multiple: true
       - name: Image metadata
         id: meta
         uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
@@ -242,27 +273,45 @@ jobs:
             type=ref,event=branch
             type=ref,event=tag
             type=sha,format=short
-      # Baked into the binary via main.version (CODE_REVIEW M8) so `smoked -version` / `smoke-agent
-      # -version` reports something meaningful instead of the hard-coded "dev" default.
-      - name: Compute version
-        id: ver
-        run: echo "version=$(git describe --tags --always --dirty)" >> "$GITHUB_OUTPUT"
-      - name: Build + push
-        id: build
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
-          context: .
-          provenance: false
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: VERSION=${{ steps.ver.outputs.version }}
-          cache-from: type=gha
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install skopeo
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends skopeo
+      # Push the SCANNED bytes verbatim to every release tag. skopeo copies the OCI archive without
+      # re-building or re-compressing, so the registry manifest digest matches the archive's.
+      - name: Push scanned archive to all tags
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          printf '%s\n' "$TAGS" | while read -r tag; do
+            [ -z "$tag" ] && continue
+            echo "pushing $tag"
+            skopeo copy --all "oci-archive:/tmp/artifacts/collector-image.tar" "docker://$tag"
+          done
+      # Assert the published digest is EXACTLY the one build-image scanned — the gate that ties the
+      # blocking scan to the released artifact (CODE_REVIEW M1). Any mismatch fails the release.
+      - name: Verify published digest == scanned digest
+        id: digest
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          scanned=$(cat /tmp/artifacts/image-digest.txt)
+          first_tag=$(printf '%s\n' "$TAGS" | head -n1)
+          pushed=$(skopeo inspect --format '{{.Digest}}' "docker://$first_tag")
+          echo "scanned=$scanned pushed=$pushed"
+          if [ "$scanned" != "$pushed" ]; then
+            echo "::error::published digest $pushed != scanned digest $scanned — the released image was not the scanned one"; exit 1
+          fi
+          echo "digest=$pushed" >> "$GITHUB_OUTPUT"
       - name: Attest build provenance
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-name: ghcr.io/${{ github.repository }}
-          subject-digest: ${{ steps.build.outputs.digest }}
+          subject-digest: ${{ steps.digest.outputs.digest }}
           push-to-registry: true
 
   # Build the bundled Caddy reverse-proxy image (Caddy.Dockerfile: xcaddy + DNS-provider plugins), so
@@ -304,6 +353,6 @@ jobs:
       - name: Trivy image scan (blocking)
         run: |
           docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
-            -v "$PWD/.trivyignore:/.trivyignore:ro" -e TRIVY_IGNOREFILE=/.trivyignore \
+            -v "$PWD/.trivyignore.yaml:/.trivyignore.yaml:ro" -e TRIVY_IGNOREFILE=/.trivyignore.yaml \
             aquasec/trivy:0.58.1@sha256:ab70a02200597efa04748f210f793936eb647cbcdb0ea69cc30b226d6f5a22c7 image --scanners vuln --severity HIGH,CRITICAL \
             --ignore-unfixed --exit-code 1 heliograph-caddy:ci
