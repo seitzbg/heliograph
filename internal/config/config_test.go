@@ -894,4 +894,38 @@ func TestOrderedChildren(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("orderedChildren = %v, want %v", got, want)
 	}
+
+	if empty := orderedChildren(map[string]*Node{}); len(empty) != 0 {
+		t.Fatalf("orderedChildren(empty map) = %v, want empty slice", empty)
+	}
+}
+
+// Guards the yaml:"weight" tag: existing weight tests build *Node structs directly,
+// so a typo in the struct tag would silently ignore `weight:` in real YAML files
+// without any test catching it. This parses actual YAML through Parse (the same
+// entry point every other config test uses) and confirms the decoded order matches.
+func TestWeightRoundTripsThroughYAML(t *testing.T) {
+	const src = `
+targets:
+  children:
+    alpha: {probe: FPing, host: a, weight: 10}
+    omega: {probe: FPing, host: o, weight: -1}
+    mid:   {probe: FPing, host: m}
+`
+	c, err := Parse([]byte(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	mons, err := c.Monitors()
+	if err != nil {
+		t.Fatalf("Monitors: %v", err)
+	}
+	var names []string
+	for _, m := range mons {
+		names = append(names, m.Name)
+	}
+	want := []string{"omega", "mid", "alpha"} // weight -1, 0, 10
+	if !reflect.DeepEqual(names, want) {
+		t.Fatalf("YAML weight order = %v, want %v", names, want)
+	}
 }
