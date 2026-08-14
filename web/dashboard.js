@@ -1442,7 +1442,11 @@
       const rm = e.target.closest('[data-remove]');
       if (rm) {
         const path = rm.getAttribute('data-remove');
-        if (!window.confirm('Remove "' + path + '"?')) return;
+        const found = findCfgNode(path);
+        const prompt = (found && found.isFolder)
+          ? 'Remove folder "' + path + '" and everything under it?'
+          : 'Remove "' + path + '"?';
+        if (!window.confirm(prompt)) return;
         saveDoc(Dash.removeNodeAtPath(cfg.doc, path));
       }
     });
@@ -1474,6 +1478,10 @@
         const row = e.target.closest('.crow'); if (!row) return;
         dragPath = row.getAttribute('data-path'); dragParent = parentOf(dragPath);
         e.dataTransfer.effectAllowed = 'move';
+        // Firefox refuses to start a drag at all without data on the DataTransfer (Chromium/
+        // WebKit don't require it) — the payload itself is unused; dragPath/dragParent above
+        // already carry what drop needs.
+        e.dataTransfer.setData('text/plain', dragPath);
       });
       host.addEventListener('dragover', (e) => {
         const row = e.target.closest('.crow'); if (!row || dragPath == null) return;
