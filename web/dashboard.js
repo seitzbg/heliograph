@@ -312,6 +312,64 @@
     return node;
   }
 
+  // --- Config-tree helpers (pure; the Config tab's read-modify-write tree core) ---
+  function cfgSortSiblings(ch) {
+    return Object.keys(ch).sort((a, b) => {
+      const wa = (ch[a] && ch[a].weight) || 0, wb = (ch[b] && ch[b].weight) || 0;
+      return wa !== wb ? wa - wb : (a < b ? -1 : a > b ? 1 : 0);
+    });
+  }
+  function cfgTree(doc) {
+    const walk = (ch, prefix) => cfgSortSiblings(ch).map((name) => {
+      const node = ch[name] || {};
+      const path = prefix ? prefix + '/' + name : name;
+      const kids = node.children && Object.keys(node.children).length ? walk(node.children, path) : [];
+      return { name, node, path, isFolder: kids.length > 0, weight: node.weight || 0, children: kids };
+    });
+    const ch = (doc && doc.targets && doc.targets.children) || {};
+    return walk(ch, '');
+  }
+  function reweightSiblings(orderedNames) {
+    const out = {}; orderedNames.forEach((n, i) => { out[n] = i; }); return out;
+  }
+  // childrenAtPath returns the children map that holds `parentPath`'s members ('' = top level),
+  // in a cloned doc; returns null if the path doesn't resolve.
+  function cfgChildrenAt(d, parentPath) {
+    let ch = (d.targets = d.targets || {}, d.targets.children = d.targets.children || {});
+    if (!parentPath) return ch;
+    for (const seg of parentPath.split('/')) {
+      if (!ch[seg] || !ch[seg].children) return null;
+      ch = ch[seg].children;
+    }
+    return ch;
+  }
+  function reorderSiblings(doc, parentPath, orderedNames) {
+    const d = cfgClone(doc); const ch = cfgChildrenAt(d, parentPath);
+    if (ch) { const w = reweightSiblings(orderedNames); for (const n of orderedNames) if (ch[n]) ch[n].weight = w[n]; }
+    return d;
+  }
+  function cfgNodeAt(d, path) { // returns {parent: childrenMap, key} for a full node path
+    const segs = path.split('/'); const key = segs.pop();
+    const parent = cfgChildrenAt(d, segs.join('/'));
+    return parent ? { parent, key } : null;
+  }
+  function editNodeAtPath(doc, path, node) {
+    const d = cfgClone(doc); const loc = cfgNodeAt(d, path);
+    if (loc && Object.prototype.hasOwnProperty.call(loc.parent, loc.key)) {
+      const old = loc.parent[loc.key] || {};
+      const merged = Object.assign({}, node);
+      if ('weight' in old) merged.weight = old.weight;          // preserve order
+      if (old.children) merged.children = old.children;         // preserve subtree
+      loc.parent[loc.key] = merged;
+    }
+    return d;
+  }
+  function removeNodeAtPath(doc, path) {
+    const d = cfgClone(doc); const loc = cfgNodeAt(d, path);
+    if (loc) delete loc.parent[loc.key];
+    return d;
+  }
+
   const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   // labelHTML renders a target's graph-title label: the title (falling back to the target
   // name) plus, when present, its IP in parentheses. Pure; exported for tests and reused by
@@ -377,7 +435,7 @@
     ].join('\n');
   }
 
-  window.Dash = { RANGES, RANGE_ORDER, parseRoute, mergeSeries, gridSince, fetchJSON, zoomResolution, pixelToTime, sharedYMax, buildTree, underPath, targetStatus, pickSeries, vantageList, orderVantages, defaultFocus, keepFocus, vantageColorVar, adminMode, relTime, listTargets, addTarget, editTarget, removeTarget, buildTargetNode, labelHTML, collectingNote, agentYaml, agentCompose };
+  window.Dash = { RANGES, RANGE_ORDER, parseRoute, mergeSeries, gridSince, fetchJSON, zoomResolution, pixelToTime, sharedYMax, buildTree, underPath, targetStatus, pickSeries, vantageList, orderVantages, defaultFocus, keepFocus, vantageColorVar, adminMode, relTime, listTargets, addTarget, editTarget, removeTarget, buildTargetNode, labelHTML, collectingNote, agentYaml, agentCompose, cfgTree, reweightSiblings, reorderSiblings, editNodeAtPath, removeNodeAtPath };
 
   // ---------------------------------------------------------------- init (DOM) --
   function init() {
