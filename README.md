@@ -246,11 +246,11 @@ Example output:
 registered probe plugins: FPing, TCPConnect
 ── round 1  (6 targets in 4.00s, wall-clock) ─────────────────
 TARGET                                 PROBE         MEDIAN    LOSS  NOTE
-Cloudflare DNS (ICMP)                  FPing         5.05ms    0/10
-Google DNS (ICMP)                      FPing         8.74ms    0/10
-localhost (ICMP)                       FPing         0.04ms    0/10
-Cloudflare 443 (TCP)                   TCPConnect    5.07ms    0/10
-Google 443 (TCP)                       TCPConnect    8.93ms    0/10
+Cloudflare ICMP (FPing)                FPing         5.05ms    0/10
+Google ICMP (FPing)                    FPing         8.74ms    0/10
+localhost ICMP (FPing)                 FPing         0.04ms    0/10
+Cloudflare TCP :443                    TCPConnect    5.07ms    0/10
+Google TCP :443                        TCPConnect    8.93ms    0/10
 Unreachable :9 (TCP, expect loss)      TCPConnect        --   10/10  err: context deadline exceeded
 ```
 
