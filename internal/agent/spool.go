@@ -56,6 +56,9 @@ func decodeFrame(src []byte) (seq int64, body []byte, n int, err error) {
 	if payloadLen < 8 {
 		return 0, nil, 0, errBadFrame
 	}
+	if payloadLen > segmentMaxBytes {
+		return 0, nil, 0, errBadFrame
+	}
 	crc := binary.LittleEndian.Uint32(src[4:8])
 	if len(src) < frameHeader+payloadLen {
 		return 0, nil, 0, errShortFrame
@@ -110,6 +113,11 @@ func streamSegment(path string, onFrame func(seq int64, body []byte) error) (con
 		payloadLen := int(binary.LittleEndian.Uint32(buf[0:4]))
 		if payloadLen < 8 {
 			return off, errBadFrame, nil // a frame's payload always carries at least the 8-byte seq
+		}
+		if payloadLen > segmentMaxBytes {
+			// a valid frame never exceeds one segment; a huge length is corruption/tearing —
+			// reject before allocating (a raw u32 could otherwise demand ~4 GiB). CODE_REVIEW M6.
+			return off, errBadFrame, nil
 		}
 		total := frameHeader + payloadLen
 		if cap(buf) < total {

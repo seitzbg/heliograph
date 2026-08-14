@@ -2,6 +2,7 @@ package agent
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"os"
@@ -138,6 +139,30 @@ func TestReadSegmentCorruptStopsThere(t *testing.T) {
 	}
 	if len(recs) != 1 || recs[0].seq != 1 {
 		t.Fatalf("recs = %+v, want to stop at corruption after seq 1", recs)
+	}
+}
+
+// A corrupt/torn length in the frame header must be rejected before it drives an allocation —
+// a raw u32 could otherwise demand ~4 GiB (CODE_REVIEW M6). The guard must fire on the length
+// check itself, not rely on io.ReadFull hitting EOF first.
+func TestStreamSegmentRejectsOversizedFrameLength(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "seg")
+	var hdr [8]byte
+	binary.LittleEndian.PutUint32(hdr[0:4], 0xFFFFFFF0) // corrupt: ~4 GiB payloadLen
+	// crc doesn't matter — the length guard must fire before any read/alloc of the body
+	if err := os.WriteFile(path, hdr[:], 0o600); err != nil {
+		t.Fatal(err)
+	}
+	off, stopErr, err := streamSegment(path, func(int64, []byte) error { return nil })
+	if err != nil {
+		t.Fatalf("hard error: %v", err)
+	}
+	if !errors.Is(stopErr, errBadFrame) {
+		t.Fatalf("stopErr = %v, want errBadFrame", stopErr)
+	}
+	if off != 0 {
+		t.Fatalf("consumed = %d, want 0 (nothing valid decoded)", off)
 	}
 }
 
