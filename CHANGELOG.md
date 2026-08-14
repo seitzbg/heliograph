@@ -45,10 +45,12 @@ All notable changes to **Heliograph** are recorded here. The format follows
 ### Changed
 - **Demo target labels name the probe method, not "DNS".** The compare targets were named `DNS (ICMP)` /
   `DNS (native Ping)` — misleading, since those are ICMP pings to a DNS *server's* IP, not DNS queries.
-  They're now grouped by host and named by method: under `Cloudflare (1.1.1.1)` / `Google (8.8.8.8)`,
-  the leaves are `ICMP (FPing)`, `ICMP (native)`, `TCP :443`, and `DNS query` (the only actual
-  DNS-protocol probe). Renaming changes a target's stored identity, so the demo's renamed series start
-  fresh. (`config.example.yaml`, the built-in demo set, and the README sample output.)
+  They're now grouped by provider and named by method: under `Cloudflare` / `Google`, the leaves are
+  `ICMP (FPing)`, `ICMP (native)`, `TCP :443`, and `DNS query` (the only actual DNS-protocol probe).
+  The Compose demo also runs with `-resolve-ips`, so each target's IP shows in its graph title (e.g.
+  `Cloudflare/ICMP (FPing) (1.1.1.1)`, `Websites/cloudflare.com (104.16.…)`) rather than being baked into
+  the folder name. Renaming changes a target's stored identity, so the demo's renamed series start fresh.
+  (`config.example.yaml`, the bundled `docker-compose.yml`, the built-in demo set, and the README sample.)
 - **Probe badge now precedes the graph title** — e.g. `[HTTP] cloudflare.com (HTTP TTFB)` instead of
   the badge trailing the name — in the per-target grid and the detail/zoom titles.
 - **Graphs grid defaults to per-panel Y-axis auto-scaling.** The small-multiples grid previously shared
