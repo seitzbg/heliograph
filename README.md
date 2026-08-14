@@ -25,12 +25,18 @@ from a steady fiber link to a flaky, lossy one:
 The **live dashboard** — the Overview ranks the worst targets by loss/latency/jitter and reports
 per-target availability:
 
-![Heliograph dashboard — worst targets and availability](docs/img/dashboard-overview.png)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/img/dashboard-overview-dark.png">
+  <img alt="Heliograph dashboard — worst targets and availability" src="docs/img/dashboard-overview.png">
+</picture>
 
 **Graphs** is the per-target grid (filter the tree, click a target for all four time ranges, then
 click a graph to zoom):
 
-![Heliograph per-target graph grid](docs/img/dashboard-graphs.png)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/img/dashboard-graphs-dark.png">
+  <img alt="Heliograph per-target graph grid" src="docs/img/dashboard-graphs.png">
+</picture>
 
 ## What works today (verified)
 
