@@ -50,6 +50,11 @@ All notable changes to **Heliograph** are recorded here. The format follows
   Compose example now do exactly that instead of carrying a `command:` list.
 
 ### Changed
+- **Band panels explain the "collecting…" placeholder.** A long-range band panel with too little history
+  to draw (fewer than 2 buckets) now says what it's waiting for — *"collecting… — daily band appears once
+  history spans 2 days"* (and the hourly equivalent) — instead of a bare "collecting…". On a fresh
+  deployment the 400-day daily band is empty for up to a day simply because one UTC day is a single bucket;
+  the new copy makes that read as "filling in", not "broken". Raw (per-round) panels are unchanged.
 - **Demo target labels name the probe method, not "DNS".** The compare targets were named `DNS (ICMP)` /
   `DNS (native Ping)` — misleading, since those are ICMP pings to a DNS *server's* IP, not DNS queries.
   They're now grouped by provider and named by method: under `Cloudflare` / `Google`, the leaves are

@@ -319,6 +319,21 @@
     return ip ? base + ' <span class="tgtip">(' + esc(ip) + ')</span>' : base;
   }
 
+  // collectingNote picks the placeholder shown when a panel has fewer than the 2 buckets it needs
+  // to draw a line/band. A band panel names the history it is still accumulating (daily appears
+  // once data spans 2 day-buckets, hourly once it spans 2 hour-buckets) so a fresh deployment
+  // reads as "filling in" rather than "broken" — the long-range daily band is empty for up to a
+  // day after first launch purely because one UTC day is a single bucket. Raw panels, which are
+  // just waiting for the first couple of rounds, keep the bare "collecting…".
+  function collectingNote(mode, res) {
+    if (mode === 'band') {
+      return res === '1d'
+        ? 'collecting… — daily band appears once history spans 2 days'
+        : 'collecting… — hourly band appears once history spans 2 hours';
+    }
+    return 'collecting…';
+  }
+
   // --- Vantage agent artifacts (pure; the reveal modal's two downloadable files) ---
 
   // agentYaml renders the smoke-agent config for a freshly minted vantage. It mirrors the
@@ -360,7 +375,7 @@
     ].join('\n');
   }
 
-  window.Dash = { RANGES, RANGE_ORDER, parseRoute, mergeSeries, gridSince, fetchJSON, zoomResolution, pixelToTime, sharedYMax, buildTree, underPath, targetStatus, pickSeries, vantageList, orderVantages, defaultFocus, keepFocus, vantageColorVar, adminMode, relTime, listTargets, addTarget, editTarget, removeTarget, buildTargetNode, labelHTML, agentYaml, agentCompose };
+  window.Dash = { RANGES, RANGE_ORDER, parseRoute, mergeSeries, gridSince, fetchJSON, zoomResolution, pixelToTime, sharedYMax, buildTree, underPath, targetStatus, pickSeries, vantageList, orderVantages, defaultFocus, keepFocus, vantageColorVar, adminMode, relTime, listTargets, addTarget, editTarget, removeTarget, buildTargetNode, labelHTML, collectingNote, agentYaml, agentCompose };
 
   // ---------------------------------------------------------------- init (DOM) --
   function init() {
@@ -398,7 +413,7 @@
     // buildOverlays. Absent/undefined ⇒ identical output to before overlays existed.
     function renderInto(canvas, s, R, height, yMax, overlays) {
       if (s && s.unsupported) { drawNote(canvas, 'needs the TimescaleDB store (-dsn -downsample)', height); return; }
-      if (!s || s.buckets.length < 2) { drawNote(canvas, 'collecting…', height); return; }
+      if (!s || s.buckets.length < 2) { drawNote(canvas, collectingNote(R.mode, R.res), height); return; }
       // Fixed wall-clock domain [now-windowMs, now]. t1 extends to the newest sample if
       // the client clock lags the server, so a fresh sample never clamps to the edge;
       // t0 anchors to the selected range so the axis labels stay literally correct.
@@ -844,7 +859,7 @@
     function drawZoom() {
       const z = zoomState; if (!z) return;
       if (z.series && z.series.unsupported) { drawNote(z.canvas, 'needs the TimescaleDB store (-dsn -downsample)', 360); return; }
-      if (!z.series || !z.series.buckets || z.series.buckets.length < 2) { drawNote(z.canvas, 'collecting…', 360); return; }
+      if (!z.series || !z.series.buckets || z.series.buckets.length < 2) { drawNote(z.canvas, collectingNote(z.band ? 'band' : 'raw', z.res), 360); return; }
       const overlays = z.byV ? buildOverlays(z.byV, z.vantages, z.focus) : undefined;
       Smoke.render(z.canvas, z.series, { height: 360, band: z.band, xlabels: z.xlabels, t0: z.t0, t1: z.t1, overlays });
     }
@@ -891,7 +906,7 @@
         // Fixed tier domain [now-windowMs, now], matching the stacked detail view.
         const lastT = s && s.buckets && s.buckets.length ? s.buckets[s.buckets.length - 1].t : NaN;
         const t1 = Math.max(Date.now(), Number.isFinite(lastT) ? lastT : 0);
-        zoomState = { canvas, series: s, band: R.mode === 'band', t0: t1 - R.windowMs, t1, xlabels: R.xl, custom: false };
+        zoomState = { canvas, series: s, band: R.mode === 'band', res: R.res, t0: t1 - R.windowMs, t1, xlabels: R.xl, custom: false };
         if (s && !s.unsupported && s.buckets.length >= 2) {
           $('zoomMeta').innerHTML = metaHtml(s);
           $('zoomRes').textContent = 'resolution: ' + R.desc + ' · ' + s.buckets.length + (R.mode === 'raw' ? ' rounds' : ' buckets') + (pick.failed ? ' · last known (refresh failed)' : ' · drag to zoom');
@@ -914,7 +929,7 @@
       // Fixed tier domain [now-windowMs, now], anchored to the focused vantage's data.
       const lastT = s && s.buckets && s.buckets.length ? s.buckets[s.buckets.length - 1].t : NaN;
       const t1 = Math.max(Date.now(), Number.isFinite(lastT) ? lastT : 0);
-      zoomState = { canvas, series: s, band: R.mode === 'band', t0: t1 - R.windowMs, t1, xlabels: R.xl, custom: false, byV, vantages: vs, focus: zoomFocus };
+      zoomState = { canvas, series: s, band: R.mode === 'band', res: R.res, t0: t1 - R.windowMs, t1, xlabels: R.xl, custom: false, byV, vantages: vs, focus: zoomFocus };
       if (s && !s.unsupported && s.buckets.length >= 2) {
         $('zoomMeta').innerHTML = metaHtml(s);
         $('zoomRes').textContent = 'resolution: ' + R.desc + ' · ' + s.buckets.length + (R.mode === 'raw' ? ' rounds' : ' buckets') + (failed ? ' · last known (refresh failed)' : ' · drag to zoom');
@@ -963,7 +978,7 @@
       }
       if (gen !== zoomGen) return; // a newer zoom call superseded this drag (also covers the single-vantage branch's await)
       zoomState = {
-        canvas, series: s, band: zr.mode === 'band', t0: fromMs, t1: toMs, xlabels: rangeLabels(fromMs, toMs), custom: true,
+        canvas, series: s, band: zr.mode === 'band', res: zr.res, t0: fromMs, t1: toMs, xlabels: rangeLabels(fromMs, toMs), custom: true,
         byV, vantages: vs.length > 1 ? vs : undefined, focus: vs.length > 1 ? zoomFocus : undefined,
       };
       $('zoomReset').hidden = false;
