@@ -105,20 +105,6 @@ jobs:
   # must red the pipeline, not skip silently.
   db-test:
     runs-on: ubuntu-latest
-    services:
-      timescaledb:
-        image: timescale/timescaledb:2.29.1-pg16@sha256:252a443e2936039b83dd8da1373d01e59e932d1054fa6adf1bc061f1d56ae60a
-        env:
-          POSTGRES_DB: smoke
-          POSTGRES_USER: smoke
-          POSTGRES_PASSWORD: smoke
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U smoke -d smoke"
-          --health-interval 2s
-          --health-timeout 5s
-          --health-retries 40
     env:
       SMOKE_TEST_DSN: postgres://smoke:smoke@localhost:5432/smoke?sslmode=disable
     steps:
@@ -132,8 +118,23 @@ jobs:
       # rrdtool. postgresql-client: pg_isready for the readiness re-check below.
       - name: Install rrdtool + psql client
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends rrdtool postgresql-client
-      # The service is gated healthy by Docker, but timescaledb restarts once during its first-boot
-      # init. Require two consecutive connects so a blip during that restart can't slip through.
+      # Run TimescaleDB as a manual container (not a GH Actions service) so we can pass
+      # `-c timescaledb.max_background_workers=0`. GH services can't override the container command,
+      # and that setting is startup-only (not reloadable). With no background worker the retention /
+      # cagg-refresh POLICIES that EnableDownsampling installs never AUTO-fire mid-suite — otherwise
+      # the 30-day retention job can drop a test's intentionally old-dated (pre-retention-window)
+      # rows between insert and read, a rare cross-test timing flake. The suite refreshes aggregates
+      # only via FOREGROUND `CALL refresh_continuous_aggregate`, so bgw=0 is functionally complete
+      # (verified: the whole pgstore suite passes against a bgw=0 TimescaleDB). Digest-pinned as before.
+      - name: Start TimescaleDB (background workers disabled)
+        run: |
+          docker run -d --name tsdb \
+            -e POSTGRES_DB=smoke -e POSTGRES_USER=smoke -e POSTGRES_PASSWORD=smoke \
+            -p 5432:5432 \
+            timescale/timescaledb:2.29.1-pg16@sha256:252a443e2936039b83dd8da1373d01e59e932d1054fa6adf1bc061f1d56ae60a \
+            -c timescaledb.max_background_workers=0
+      # timescaledb restarts once during its first-boot init. Require two consecutive connects so a
+      # blip during that restart can't slip through.
       - name: Wait for TimescaleDB
         run: |
           ok=0
