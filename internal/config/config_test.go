@@ -859,6 +859,29 @@ targets:
 	}
 }
 
+func TestMonitorsHonorWeight(t *testing.T) {
+	cfg := &Config{
+		Database: Database{Pings: 20, Step: Duration(time.Second)}, // valid defaults; the test cares about order
+		Targets: &Node{Children: map[string]*Node{
+			"alpha": {Probe: "FPing", Host: "a", Weight: 10}, // pushed last despite A–Z
+			"omega": {Probe: "FPing", Host: "o", Weight: -1}, // pulled first
+			"mid":   {Probe: "FPing", Host: "m"},             // weight 0
+		}},
+	}
+	mons, err := cfg.Monitors()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, m := range mons {
+		names = append(names, m.Name)
+	}
+	want := []string{"omega", "mid", "alpha"}
+	if !reflect.DeepEqual(names, want) {
+		t.Fatalf("Monitors order = %v, want %v", names, want)
+	}
+}
+
 func TestOrderedChildren(t *testing.T) {
 	m := map[string]*Node{
 		"b": {}, "a": {}, // both weight 0 → tie-break by name
