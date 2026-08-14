@@ -163,8 +163,13 @@
     // A configured target with no stored round for this vantage (e.g. a remote-only
     // target seen from the local view) gets a neutral dot, not a false green (P1-3).
     if (t.no_data) return 'nodata';
+    // Immediate outage: a hard error or a heavy-loss last round.
     if (t.error || (t.loss_pct != null && t.loss_pct >= 50)) return 'down';
-    if (t.loss_pct != null && t.loss_pct > 0.5) return 'degraded';
+    // Degraded on SUSTAINED loss: prefer the windowed recent average (recent_loss_pct) so a
+    // single dropped ping in the last round doesn't flip the dot orange. Fall back to the last
+    // round only when the store supplied no windowed figure.
+    const recent = t.recent_loss_pct != null ? t.recent_loss_pct : t.loss_pct;
+    if (recent != null && recent > 0.5) return 'degraded';
     return 'ok';
   }
 

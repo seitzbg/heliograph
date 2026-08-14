@@ -181,19 +181,32 @@ check('underPath matches exact, descendants, and all for empty', () => {
 });
 
 // targetStatus: heuristic dot severity for the menu — down on a probe error or heavy
-// loss, degraded on light loss, else ok. (Authoritative availability is the Overview tab.)
+// loss, degraded on SUSTAINED (windowed) loss, else ok. `recent_loss_pct` (windowed avg)
+// drives degraded so a single dropped ping in the last round doesn't flip the dot;
+// `loss_pct` (last round) still drives the immediate `down`. (Overview is authoritative.)
 check('targetStatus maps a DTO to a dot severity', () => {
   assert.equal(D.targetStatus({ error: 'timeout', loss_pct: 0 }), 'down');
   assert.equal(D.targetStatus({ loss_pct: 100 }), 'down');
   assert.equal(D.targetStatus({ loss_pct: 50 }), 'down');
-  assert.equal(D.targetStatus({ loss_pct: 5 }), 'degraded');
-  assert.equal(D.targetStatus({ loss_pct: 0.6 }), 'degraded');
-  assert.equal(D.targetStatus({ loss_pct: 0.5 }), 'ok');
-  assert.equal(D.targetStatus({ loss_pct: 0 }), 'ok');
   assert.equal(D.targetStatus(null), 'ok');
   // A configured target with no stored round for this vantage is neutral, not a false green (P1-3).
   assert.equal(D.targetStatus({ no_data: true }), 'nodata');
   assert.equal(D.targetStatus({ no_data: true, loss_pct: 0 }), 'nodata');
+});
+check('targetStatus: degraded reflects SUSTAINED loss, not one dropped ping', () => {
+  // The reported bug: last round dropped 1/20 pings (5%) but recent windowed loss is ~0.
+  // The dot must stay green, not flip orange on a single transient ping.
+  assert.equal(D.targetStatus({ loss_pct: 5, recent_loss_pct: 0.1 }), 'ok');
+  // Sustained recent loss trips degraded.
+  assert.equal(D.targetStatus({ loss_pct: 0, recent_loss_pct: 2 }), 'degraded');
+  assert.equal(D.targetStatus({ loss_pct: 0, recent_loss_pct: 0.6 }), 'degraded');
+  assert.equal(D.targetStatus({ loss_pct: 5, recent_loss_pct: 0.5 }), 'ok'); // boundary: 0.5 is not > 0.5
+  // A real outage is still immediate (last round), regardless of the smoothing window.
+  assert.equal(D.targetStatus({ loss_pct: 100, recent_loss_pct: 100 }), 'down');
+  assert.equal(D.targetStatus({ error: 'x', recent_loss_pct: 0 }), 'down');
+  // No windowed figure (e.g. in-memory store) falls back to the last round.
+  assert.equal(D.targetStatus({ loss_pct: 5 }), 'degraded');
+  assert.equal(D.targetStatus({ loss_pct: 0 }), 'ok');
 });
 
 // parseRoute: the Graphs view carries an optional folder scope for the config-tree menu,
