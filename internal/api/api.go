@@ -255,9 +255,13 @@ type targetDTO struct {
 	Loss     int      `json:"loss"`
 	Pings    int      `json:"pings"`
 	LossPct  float64  `json:"loss_pct"`
-	When     string   `json:"when"`
-	Error    string   `json:"error,omitempty"`
-	Vantages []string `json:"vantages,omitempty"`
+	// RecentLossPct is the average loss percent over a short recent window (not just the
+	// last round), so the UI can key the target's status dot on sustained loss rather than a
+	// single dropped ping. Omitted when the store can't aggregate it (falls back to LossPct).
+	RecentLossPct *float64 `json:"recent_loss_pct,omitempty"`
+	When          string   `json:"when"`
+	Error         string   `json:"error,omitempty"`
+	Vantages      []string `json:"vantages,omitempty"`
 	// NoData marks a configured target that has no stored round for the requested
 	// vantage yet — e.g. a remote-only target before its agent reports. Such a target
 	// is listed (so it appears in the tree and its deep link resolves) but carries no
@@ -272,9 +276,15 @@ type TargetMeta struct {
 	IP    string
 }
 
-// latestDTO builds a target DTO from a stored latest round, attaching the target's
-// vantage set and display metadata. Shared by the live and catalog-driven listings.
-func latestDTO(o scheduler.Outcome, tv map[string][]string, meta map[string]TargetMeta) targetDTO {
+// recentStatusWindow is how far back the status-dot loss is averaged. Short enough to
+// reflect current health, long enough that a single dropped ping doesn't dominate — so the
+// nav dot keys on sustained loss rather than one lossy round.
+const recentStatusWindow = 30 * time.Minute
+
+// latestDTO builds a target DTO from a stored latest round, attaching the target's vantage
+// set, display metadata, and windowed recent loss (for the status dot). Shared by the live
+// and catalog-driven listings.
+func latestDTO(o scheduler.Outcome, tv map[string][]string, meta map[string]TargetMeta, recent map[string]float64) targetDTO {
 	dto := targetDTO{
 		Name:    o.Target.Name,
 		Probe:   o.ProbeName,
@@ -295,6 +305,9 @@ func latestDTO(o scheduler.Outcome, tv map[string][]string, meta map[string]Targ
 	}
 	if md, ok := meta[o.Target.Name]; ok {
 		dto.Title, dto.IP = md.Title, md.IP
+	}
+	if rl, ok := recent[o.Target.Name]; ok {
+		dto.RecentLossPct = &rl
 	}
 	return dto
 }
@@ -318,6 +331,22 @@ func (srv *Server) targets(w http.ResponseWriter, r *http.Request) {
 	if srv.TargetMeta != nil {
 		meta = srv.TargetMeta()
 	}
+	// Windowed recent loss per target for the status dot — one bulk scan, best-effort: if the
+	// store can't aggregate it or the scan fails, the dot falls back to the last round's loss
+	// rather than failing the whole listing.
+	var recent map[string]float64
+	if avAll, ok := srv.store.(store.AvailabilityAller); ok {
+		if m, err := avAll.AvailabilityAll(r.Context(), v, time.Now().Add(-recentStatusWindow), nil); err == nil {
+			recent = make(map[string]float64, len(m))
+			for name, st := range m {
+				if st.Measured > 0 {
+					recent[name] = st.SumLossPct / float64(st.Measured)
+				}
+			}
+		} else {
+			slog.Warn("targets: recent-loss scan failed; status dots fall back to last round", "err", err)
+		}
+	}
 	byName := make(map[string]scheduler.Outcome, len(latest))
 	for _, o := range latest {
 		byName[o.Target.Name] = o
@@ -329,7 +358,7 @@ func (srv *Server) targets(w http.ResponseWriter, r *http.Request) {
 		// otherwise emit a no-data entry carrying the target's vantage set (CODE_REVIEW #3).
 		for _, m := range srv.Configured() {
 			if o, ok := byName[m.Name]; ok {
-				out = append(out, latestDTO(o, tv, meta))
+				out = append(out, latestDTO(o, tv, meta, recent))
 				continue
 			}
 			dto := targetDTO{Name: m.Name, Probe: m.ProbeKind, NoData: true}
@@ -341,11 +370,14 @@ func (srv *Server) targets(w http.ResponseWriter, r *http.Request) {
 			if md, ok := meta[m.Name]; ok {
 				dto.Title, dto.IP = md.Title, md.IP
 			}
+			if rl, ok := recent[m.Name]; ok {
+				dto.RecentLossPct = &rl
+			}
 			out = append(out, dto)
 		}
 	} else {
 		for _, o := range latest {
-			out = append(out, latestDTO(o, tv, meta))
+			out = append(out, latestDTO(o, tv, meta, recent))
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
