@@ -180,6 +180,17 @@ All notable changes to **Heliograph** are recorded here. The format follows
   ./...` is clean on 1.26.6.
 
 ### Fixed
+- **Sequential probes' inter-attempt delays no longer overrun the round deadline.** `TCPConnect` and `SSH`
+  sleep `interval_ms` between their N attempts, but that sleep happens *outside* the per-attempt contexts,
+  while the per-ping budget divided the *whole* remaining round budget by `pings` — so the real total was
+  `pings × (budget/pings) + (pings-1) × interval`, which overruns the round deadline. With a large
+  `interval_ms` the parent deadline fired mid-sleep and the loop bailed after the **first** attempt, breaking
+  the guarantee that a dead host is probed all N times. The new `probe.PerPingBudgetWithDelay` reserves the
+  mandatory `(pings-1)` delays from the budget *before* dividing, and clamps the effective interval so the
+  delays can never consume more than half the round budget (bounding `interval_ms` against `step`/`pings`,
+  which the probe can't validate at construction). `HTTP`/`DNS` (no inter-attempt sleep) and `pings=1`/
+  no-deadline callers are unchanged. Regression-tested end-to-end (a large `interval_ms` still probes all N
+  within the deadline) plus a unit test of the budget/clamp math.
 - **Target status dot no longer flips orange on a single dropped ping.** The nav-tree status dot keyed on
   the **last round's** loss, so one lost ping (1 of 20 = 5%) painted a target "degraded" (orange) until the
   next clean round — even though its long-run loss was ~0 and the drill-down graph showed nothing. The dot

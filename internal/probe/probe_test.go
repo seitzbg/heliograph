@@ -48,6 +48,50 @@ func TestPerPingBudgetNoParentDeadline(t *testing.T) {
 	if _, ok := actx.Deadline(); ok {
 		t.Fatal("attempt context must not invent a deadline when perPing <= 0")
 	}
+	// A probe that sleeps between attempts (TCPConnect/SSH) keeps its delay unchanged
+	// when there is no round deadline to reserve against.
+	if _, d := PerPingBudgetWithDelay(context.Background(), 3, 20*time.Millisecond); d != 20*time.Millisecond {
+		t.Fatalf("no parent deadline should leave the inter-attempt delay unchanged, got %s", d)
+	}
+}
+
+// PerPingBudgetWithDelay must reserve the mandatory (pings-1) inter-attempt sleeps from
+// the round budget before dividing, and clamp the delay so it can never consume more than
+// half the budget. The invariant that guards the "probed all N times" guarantee is that N
+// fixed slots plus (N-1) delays fit within the round budget.
+func TestPerPingBudgetWithDelayReservesAndClamps(t *testing.T) {
+	const budget = 900 * time.Millisecond
+	const pings = 3
+
+	// A modest delay is reserved but not clamped: perPing ≈ (budget-(N-1)*delay)/N.
+	parent, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+	perPing, delay := PerPingBudgetWithDelay(parent, pings, 10*time.Millisecond)
+	if delay != 10*time.Millisecond {
+		t.Fatalf("a small delay should pass through unclamped, got %s", delay)
+	}
+	if total := time.Duration(pings)*perPing + time.Duration(pings-1)*delay; total > budget {
+		t.Fatalf("slots+delays = %s overrun the %s budget", total, budget)
+	}
+	if perPing < 250*time.Millisecond || perPing > 300*time.Millisecond {
+		t.Fatalf("per-ping = %s, want ~(budget-2*10ms)/3 ≈ 293ms", perPing)
+	}
+
+	// An absurd delay is clamped so the (N-1) sleeps take at most half the budget, and the
+	// attempts still get a real, positive per-ping slot — the old code let the delay blow
+	// past the deadline and starved every attempt after the first.
+	parent2, cancel2 := context.WithTimeout(context.Background(), budget)
+	defer cancel2()
+	perPing2, delay2 := PerPingBudgetWithDelay(parent2, pings, time.Hour)
+	if maxDelay := budget / 2 / time.Duration(pings-1); delay2 > maxDelay+5*time.Millisecond {
+		t.Fatalf("delay = %s not clamped to ~half the budget (max %s)", delay2, maxDelay)
+	}
+	if perPing2 <= 0 {
+		t.Fatalf("per-ping = %s, want a positive slot even with an absurd delay", perPing2)
+	}
+	if total := time.Duration(pings)*perPing2 + time.Duration(pings-1)*delay2; total > budget {
+		t.Fatalf("clamped slots+delays = %s overrun the %s budget", total, budget)
+	}
 }
 
 // stubSchema exercises JSONSchema with a mix of scopes, defaults, and a mandatory var.

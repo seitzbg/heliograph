@@ -249,15 +249,53 @@ func AllSchemas() []map[string]any {
 // fast early attempt must not hand its unused time to a later one (which would let a
 // later ping run past -timeout). Returns 0 when ctx has no deadline (Pings==1 callers,
 // tests), meaning "no per-ping bound".
+//
+// This is the delay-free case of PerPingBudgetWithDelay (see there): probes that sleep
+// between attempts (TCPConnect/SSH) must use that variant instead so the sleeps are
+// reserved from the budget before it is divided.
 func PerPingBudget(ctx context.Context, pings int) time.Duration {
+	perPing, _ := PerPingBudgetWithDelay(ctx, pings, 0)
+	return perPing
+}
+
+// PerPingBudgetWithDelay sizes both the per-attempt timeout AND the effective
+// inter-attempt delay for a sequential probe that sleeps `delay` between its `pings`
+// attempts (TCPConnect/SSH). Those sleeps happen OUTSIDE the per-attempt contexts, so
+// PerPingBudget's naive budget/pings overruns the round deadline by (pings-1)*delay:
+// the total time is pings*(budget/pings) + (pings-1)*delay > budget. With a large delay
+// the parent deadline then fires mid-sleep and the loop bails after the first attempt —
+// breaking the guarantee that a dead host is probed all N times. Here the (pings-1)
+// mandatory delays are reserved from the budget BEFORE dividing, so the N fixed
+// per-attempt slots plus the delays all fit within the round deadline.
+//
+// The delay is itself clamped so the mandatory (pings-1) sleeps never consume more than
+// half the round budget — an operator can't configure an interval_ms so large it starves
+// the attempts of time. Since the budget is the scheduler's min(timeout*pings, step),
+// this bounds interval_ms against step/pings, which the probe can't validate at
+// construction time (it knows neither step nor pings then).
+//
+// Returns (perPing, effectiveDelay). With no ctx deadline (Pings==1 callers, tests) it
+// returns (0, delay): no per-ping bound, delay unchanged — nothing to reserve against.
+func PerPingBudgetWithDelay(ctx context.Context, pings int, delay time.Duration) (perPing, effectiveDelay time.Duration) {
 	if pings < 1 {
 		pings = 1
 	}
 	dl, ok := ctx.Deadline()
 	if !ok {
-		return 0
+		return 0, delay
 	}
-	return time.Until(dl) / time.Duration(pings)
+	budget := time.Until(dl)
+	effectiveDelay = delay
+	if pings >= 2 && effectiveDelay > 0 {
+		if maxDelay := budget / 2 / time.Duration(pings-1); effectiveDelay > maxDelay {
+			effectiveDelay = maxDelay
+		}
+	}
+	if effectiveDelay < 0 {
+		effectiveDelay = 0
+	}
+	usable := budget - time.Duration(pings-1)*effectiveDelay
+	return usable / time.Duration(pings), effectiveDelay
 }
 
 // AttemptContext derives the context for one ping of a sequential probe, bounded to
