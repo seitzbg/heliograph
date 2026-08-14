@@ -149,11 +149,15 @@ All notable changes to **Heliograph** are recorded here. The format follows
   It now streams frame-by-frame and unmarshals only the records it retains; torn-tail/corruption/
   contiguity/eviction behavior is unchanged.
 - **`/api/series/all` is now bounded in the query, not only the response.** The store previously
-  materialized up to (targets × 20k) rounds — and the database sorted that whole windowed set —
-  before the handler could trim it. `SeriesAll` now takes a global budget and caps each target at
-  `min(perTarget, budget/targets)`, so the server never sorts and the client never builds an
-  unbounded result for a many-target bulk read, while every target keeps its newest rounds; the
-  response carries `truncated` when the bound was reached.
+  ranked the ENTIRE windowed set with a `row_number()` window and only then filtered to the newest N
+  per target, so the database's scan+sort scaled with every row in the window even though the JSON
+  response was capped. `SeriesAll` now reads each target's newest rounds through an indexed per-target
+  `LIMIT` — a `CROSS JOIN LATERAL` walking the `(target, vantage, ts)` index — under a global budget
+  of `min(perTarget, budget/targets)`, so the work is proportional to what is returned (~perTarget
+  rows per target) rather than to the full window. Measured on 1.5M rows / 300 targets, this cut a
+  48-hour bulk read from ~584 ms to ~142 ms and its buffer reads ~4.7×. The response carries
+  `truncated` only when a target genuinely had older rounds dropped (fixing a false flag at the exact
+  per-target cap).
 - **Startup and reload now warn about alert recipients with no enabled notifier.** An alert `to` or a
   target `alertee` referencing an unknown notifier (a typo, or `webhook` without `-webhook`) was only
   noticed when an event was dispatched — invisible until the incident whose notification got silently

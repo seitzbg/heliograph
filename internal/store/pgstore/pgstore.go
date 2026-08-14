@@ -242,35 +242,46 @@ func (s *PGStore) backfillAggregates(ctx context.Context) error {
 	return nil
 }
 
-// migrateAggregates drops the existing continuous aggregates when their stored shape no
-// longer matches the current definition, so the recreate below can rebuild them. It fires
-// when an existing samples_hourly lacks either the vantage dimension (federation) or the
-// median_rounds column (CODE_REVIEW #6 / P2-6). One-time per change: after the recreate the
-// columns exist and the guard is false forever after (a fresh DB has no view yet — no-op).
+// migrateAggregates drops the existing continuous aggregates when EITHER view's stored shape no
+// longer matches the current definition, so the recreate below can rebuild them. A view is stale
+// when it lacks the vantage dimension (federation) or the median_rounds column (CODE_REVIEW #6 /
+// P2-6). Both samples_hourly AND samples_daily are validated: an earlier version checked only
+// hourly, so a current hourly paired with an incompatible daily (e.g. an older or hand-created daily
+// missing vantage) was never rebuilt and the 400-day daily graph kept blending vantages / reporting
+// mis-weighted medians while startup looked healthy (CODE_REVIEW M7). One-time per change: after the
+// recreate both views carry the columns and the guard is false forever after (a fresh DB has no
+// views yet — no-op; an absent view is created by EnableDownsampling, not "stale" here).
 //
 // A TimescaleDB continuous aggregate's SELECT/GROUP BY can't be altered in place, so this
 // drop+recreate is unavoidable — but on an existing DB it irreversibly loses every daily
 // rollup bucket older than the 30-day raw retention window (the raw rows behind those
 // buckets are already gone, so they can never be rebuilt). This is a one-time long-range-
 // history loss the first time an older hub upgrades and calls EnableDownsampling; see the
-// slog.Warn below, logged only when the drop actually fires.
+// slog.Warn below, logged only when the drop actually fires. Both views are dropped together so the
+// pair is always rebuilt to one consistent shape even when only one had drifted.
 // migrateAggregates returns true if it dropped the aggregates for a recreate (so the caller
 // backfills the rebuilt views).
 func (s *PGStore) migrateAggregates(ctx context.Context) (bool, error) {
-	var hasView bool
-	if err := s.pool.QueryRow(ctx, `SELECT to_regclass('samples_hourly') IS NOT NULL`).Scan(&hasView); err != nil {
-		return false, fmt.Errorf("pgstore: check aggregate: %w", err)
+	stale := false
+	for _, view := range []string{"samples_hourly", "samples_daily"} {
+		var hasView bool
+		if err := s.pool.QueryRow(ctx, `SELECT to_regclass($1) IS NOT NULL`, view).Scan(&hasView); err != nil {
+			return false, fmt.Errorf("pgstore: check aggregate %s: %w", view, err)
+		}
+		if !hasView {
+			continue // absent (not stale): EnableDownsampling's CREATE IF NOT EXISTS builds it fresh
+		}
+		var hasVantage, hasMedianRounds bool
+		if err := s.pool.QueryRow(ctx, `
+			SELECT bool_or(column_name='vantage'), bool_or(column_name='median_rounds')
+			  FROM information_schema.columns WHERE table_name=$1`, view).Scan(&hasVantage, &hasMedianRounds); err != nil {
+			return false, fmt.Errorf("pgstore: check aggregate columns %s: %w", view, err)
+		}
+		if !hasVantage || !hasMedianRounds {
+			stale = true // a present view with the wrong shape — rebuild the pair
+		}
 	}
-	if !hasView {
-		return false, nil
-	}
-	var hasVantage, hasMedianRounds bool
-	if err := s.pool.QueryRow(ctx, `
-		SELECT bool_or(column_name='vantage'), bool_or(column_name='median_rounds')
-		  FROM information_schema.columns WHERE table_name='samples_hourly'`).Scan(&hasVantage, &hasMedianRounds); err != nil {
-		return false, fmt.Errorf("pgstore: check aggregate columns: %w", err)
-	}
-	if hasVantage && hasMedianRounds {
+	if !stale {
 		return false, nil
 	}
 	slog.Warn("pgstore: rebuilding continuous aggregates to match the current definition " +
@@ -846,16 +857,31 @@ func (s *PGStore) SeriesAll(ctx context.Context, vantage string, cutoff time.Tim
 			}
 		}
 	}
-	// row_number() per target keeps the newest N of each (so no target is dropped whole,
-	// as a bare LIMIT would); the outer query then returns them oldest->newest.
+	// Read each target's newest rounds through an indexed per-target LIMIT — a CROSS JOIN LATERAL
+	// over the distinct targets — so the database walks at most perTarget+1 rows per target on the
+	// (target, vantage, ts) index instead of scanning and row_number()-ranking the ENTIRE windowed
+	// set as before. The old window query touched every row matching (vantage, cutoff) and sorted
+	// them all just to keep the newest N of each; the lateral makes the work proportional to what is
+	// actually returned, so a wide 48-hour bulk request can't force an unbounded scan/sort on this
+	// unauthenticated read (CODE_REVIEW M5). The outer ORDER BY returns each target oldest->newest.
+	//
+	// Fetch perTarget+1: the extra "sentinel" row, when it comes back, is proof the target has MORE
+	// than perTarget rounds and was therefore genuinely clipped. That is how truncation is detected
+	// exactly now, replacing the old len>=perTarget heuristic, which also fired for a target holding
+	// exactly perTarget rounds with nothing dropped — a false "truncated" flag at the cap boundary
+	// (CODE_REVIEW L3).
+	fetch := perTarget + 1
 	rows, err := s.pool.Query(ctx,
-		`SELECT ts, target, probe, host, vantage, pings, loss, median_seconds, rtts_seconds, err, duration_ms
-		   FROM (
-		     SELECT *, row_number() OVER (PARTITION BY target ORDER BY ts DESC) AS rn
-		       FROM samples WHERE vantage=$1 AND ts > $2
-		   ) q
-		   WHERE rn <= $3
-		   ORDER BY target, ts`, v, cutoff.UTC(), perTarget)
+		`SELECT s.ts, s.target, s.probe, s.host, s.vantage, s.pings, s.loss, s.median_seconds, s.rtts_seconds, s.err, s.duration_ms
+		   FROM (SELECT DISTINCT target FROM samples WHERE vantage=$1 AND ts > $2) t
+		   CROSS JOIN LATERAL (
+		         SELECT ts, target, probe, host, vantage, pings, loss, median_seconds, rtts_seconds, err, duration_ms
+		           FROM samples
+		          WHERE target = t.target AND vantage = $1 AND ts > $2
+		          ORDER BY ts DESC
+		          LIMIT $3
+		   ) s
+		   ORDER BY s.target, s.ts`, v, cutoff.UTC(), fetch)
 	if err != nil {
 		s.onErr(err)
 		return nil, false, err
@@ -874,16 +900,16 @@ func (s *PGStore) SeriesAll(ctx context.Context, vantage string, cutoff time.Tim
 		s.onErr(err)
 		return nil, false, err
 	}
-	// Truncation means a target's OLDEST rounds were actually dropped — i.e. it hit the
-	// per-target cap (rn <= perTarget, so len can only reach perTarget when clipped). The
-	// fair-share cap being lowered below the 20k ceiling is NOT truncation by itself: with
-	// many targets each under the cap, nothing is dropped, so this must not warn (it used to
-	// fire on every refresh once there were >=16 targets — a false alarm).
+	// A target that came back with the sentinel (perTarget+1 rows) truly had its OLDEST rounds
+	// dropped: trim it to the newest perTarget (rows are ascending by ts, so keep the tail) and flag
+	// truncation. A target with exactly perTarget rows and no sentinel is NOT truncated — nor is the
+	// fair-share cap merely being lowered below the 20k ceiling, which with many small targets drops
+	// nothing (the old heuristic falsely warned on every refresh once there were >=16 targets).
 	truncated := false
-	for _, hist := range out {
-		if len(hist) >= perTarget {
+	for name, hist := range out {
+		if len(hist) > perTarget {
+			out[name] = hist[len(hist)-perTarget:]
 			truncated = true
-			break
 		}
 	}
 	if truncated {
