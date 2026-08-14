@@ -155,6 +155,49 @@ func TestIngestAcceptsAssignedTarget(t *testing.T) {
 	}
 }
 
+// CODE_REVIEW M4: when IngestCommit is wired (production federation) it SUPERSEDES the plain
+// AddResults + OnIngest path — the handler routes the validated batch through it so the store write
+// and alert eval happen atomically under the runtime's reload boundary. Assert the handler prefers
+// it and does NOT also run the fallback (which would double-store / double-evaluate).
+func TestIngestUsesIngestCommitWhenSet(t *testing.T) {
+	ing := &fakeIngester{}
+	srv := ingestServer(ing)
+	var committed []scheduler.Outcome
+	srv.IngestCommit = func(_ context.Context, out []scheduler.Outcome) ([]scheduler.Outcome, error) {
+		committed = append(committed, out...)
+		return out, nil
+	}
+	onIngest := 0
+	srv.OnIngest = func([]scheduler.Outcome) { onIngest++ }
+	w := postResults(t, srv,
+		fmt.Sprintf(`{"results":[{"target":"cf","ts":%q,"pings":3,"rtts":[0.01,0.02,0.03]}]}`, recentTS()))
+	if w.Code != 200 {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body)
+	}
+	if len(committed) != 1 {
+		t.Fatalf("IngestCommit must receive the validated batch, got %d", len(committed))
+	}
+	if len(ing.got) != 0 {
+		t.Fatalf("fallback AddResults must not run when IngestCommit is set, stored %d", len(ing.got))
+	}
+	if onIngest != 0 {
+		t.Fatalf("fallback OnIngest must not run when IngestCommit is set, ran %d times", onIngest)
+	}
+}
+
+// A store-write error surfaced by IngestCommit must still answer 503 so the agent retains + retries.
+func TestIngestCommitErrorIs503(t *testing.T) {
+	srv := ingestServer(&fakeIngester{})
+	srv.IngestCommit = func(context.Context, []scheduler.Outcome) ([]scheduler.Outcome, error) {
+		return nil, errors.New("db down")
+	}
+	w := postResults(t, srv,
+		fmt.Sprintf(`{"results":[{"target":"cf","ts":%q,"pings":1,"rtts":[0.01]}]}`, recentTS()))
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d, want 503", w.Code)
+	}
+}
+
 // Audit M1: a round whose self-reported `pings` exceeds the assigned monitor's
 // pings must be dropped, not accepted. ingestServer pins cf.Pings=20; a round
 // claiming pings=10000 with no RTTs would otherwise make sample.Compute allocate
