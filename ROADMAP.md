@@ -174,6 +174,42 @@ Phase-6 items all ship in the single **v1.0** line.
   (`Availabler`/`AvailabilityAll`, and windowed `HistorySince`) computes availability over
   the full requested window, unbounded by the `History` cap, with per-target coverage.
 
+## Hardening & UI backlog (from the 2026-08-14 code review + session)
+
+Merged this session: #34 vantage docker-compose generator · #35 band-panel "collecting…" message ·
+#36 author-defined menu order (weight) · #37 Config-tab tree + drag-reorder · #38 hardening
+(M6 spool-alloc bound, M2 now-blocking Caddy scan, M8 build-time version injection).
+
+### Next up
+- 🚧 **M3 — SMTP notifier hardening** — IN PROGRESS: committed + `-race`-tested on branch
+  `worktree-m3-smtp-hardening` (per-transaction deadline, bounded retry/backoff, and an explicit
+  error when AUTH is configured but the relay doesn't advertise it — was silently unauthenticated).
+  Next: confirm the in-flight review → open PR → merge.
+
+### CODE_REVIEW.md items still open (triaged 2026-08-14; none critical/high)
+- **M5** — `/api/series/all` still `row_number()`-ranks the whole window per target though the rows
+  are capped, and the read API is unauthenticated. Fix: lateral per-target `LIMIT N`. *(Needs a
+  TimescaleDB to validate with `EXPLAIN (ANALYZE, BUFFERS)`.)*
+- **M1** — CI builds the collector image twice, so the scanned/SBOM'd digest isn't the one pushed +
+  attested. Fix: build-once → scan → promote the same digest. *(Do before cutting a release; L.)*
+- **M4** — remote-ingest validates a config snapshot then writes with no reload lock; a reload
+  between validate and insert can store a round under a redefined target. *(Opportunistic — can't
+  cause a false alert, only pollutes stored history/rollups.)*
+- **M7** — the aggregate-migration check validates only `samples_hourly`; a stale `samples_daily`
+  is never rebuilt. *(Narrow trigger; needs a DB.)*
+- **L1/L2/L3/L4** (small): probe per-ping budget ignores the `(pings-1)×interval` sleeps + unbounded
+  `interval_ms`; native-Ping reply-window tail capped at 1s even when `timeout_ms`>1s; false
+  "truncated" warning at an exact-cap dataset; `.trivyignore` expiry token isn't valid for the flat
+  file (move to `.trivyignore.yaml` `expired_at`).
+
+### Follow-ups from merged work
+- **Config-tab tree (#37):** keyboard-accessible reorder + real tree ARIA (tabindex/aria-expanded),
+  cross-folder drag, add-into-folder.
+- **Caddy image (#38):** the runtime `apk --upgrade c-ares/curl` + the three `xcaddy --with
+  golang.org/x/net|x/text|grpc` floors are interim patches over a stale pinned base — drop them once
+  `caddy:2.11-alpine` (or a newer Caddy release) ships the fixes natively, and bump the digest instead.
+- **README:** refresh the screenshots in dark mode.
+
 ## Notes / decisions
 - Stack: Go collector · TimescaleDB (raw samples; bands via SQL quantiles) · REST+JSON API ·
   vanilla-JS/canvas frontend · HTTPS/JSON + per-vantage API keys for federation. (See blueprint §1.)
