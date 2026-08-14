@@ -450,6 +450,19 @@ func main() {
 				current.Load().eval(out)
 				evalMu.Unlock()
 			}
+			// Persist + evaluate remote rounds under evalMu — the same reload boundary the local
+			// measure loop takes (localStore) — so the identity re-check and the durable write are
+			// atomic against a config reload (CODE_REVIEW M4). Supersedes the OnIngest hook above for
+			// the ingest path (that hook stays for pure API tests that don't wire this). st is a
+			// ResultIngester here (the agent routes only light up with -dsn, i.e. a PGStore); guard
+			// the assertion anyway so a future non-ingesting store cleanly falls back to that hook.
+			if ing, ok := st.(store.ResultIngester); ok {
+				srv.IngestCommit = func(ctx context.Context, out []scheduler.Outcome) ([]scheduler.Outcome, error) {
+					evalMu.Lock()
+					defer evalMu.Unlock()
+					return current.Load().commitRemote(ctx, ing, out)
+				}
+			}
 			srv.TargetVantages = func() map[string][]string {
 				ms := current.Load().monitors
 				m := make(map[string][]string, len(ms))
@@ -916,6 +929,44 @@ func (rt *runtime) storeLocal(st store.Store, out []scheduler.Outcome) {
 	}
 	st.Add(kept)
 	rt.eval(kept)
+}
+
+// commitRemote durably persists and alert-evaluates a batch of remote outcomes that the ingest
+// handler already validated against a runtime SNAPSHOT, re-checking each against THIS (the live)
+// runtime's target identities first. The caller holds evalMu, so between this re-check and the write
+// no swapRuntime can redefine a target — closing the window in which a reload landing after the
+// handler's snapshot validation could store a round under a since-redefined target (CODE_REVIEW M4).
+// It is the ingest-path analog of storeLocal, but uses the ResultIngester so a replayed round is
+// deduplicated (returning only the newly-inserted rounds, which are the only ones alert-evaluated).
+func (rt *runtime) commitRemote(ctx context.Context, ing store.ResultIngester, out []scheduler.Outcome) ([]scheduler.Outcome, error) {
+	kept := make([]scheduler.Outcome, 0, len(out))
+	for _, o := range out {
+		// Drop a round whose target a reload has since removed (absent from targetFP) or redefined
+		// (fingerprintStale) — the same identity gate storeLocal and eval apply, now enforced under
+		// the lock at write time rather than only against the handler's earlier snapshot.
+		if _, ok := rt.targetFP[o.Target.Name]; !ok {
+			continue
+		}
+		if rt.fingerprintStale(o) {
+			continue
+		}
+		kept = append(kept, o)
+	}
+	if dropped := len(out) - len(kept); dropped > 0 {
+		// A reload redefined/removed these targets between the handler's snapshot validation and
+		// this write, so the rounds are dropped at commit rather than stored under a stale identity.
+		// Log it (mirroring the handler's snapshot-time drop warning) so the event isn't silent.
+		slog.Warn("agent ingest: dropped rounds at commit; target redefined or removed by a reload", "dropped", dropped)
+	}
+	if len(kept) == 0 {
+		return nil, nil
+	}
+	inserted, err := ing.AddResults(ctx, kept)
+	if err != nil {
+		return nil, err
+	}
+	rt.eval(inserted)
+	return inserted, nil
 }
 
 // swapRuntime atomically installs nrt as the live runtime, carrying alert firing
