@@ -49,6 +49,16 @@ targets:
   title: Network
   alerts: [loss]   # every target gets the loss alert unless it overrides
 
+  # A target node (a leaf with `host:`) may set `title:` (a display-name override for its graph
+  # header, distinct from its tree-path key; grouping-node titles are not inherited). With the
+  # collector started with `-resolve-ips` (or SMOKED_RESOLVE_IPS=1),
+  # the graph title also shows the target's IP: a pinned `ip:` if set, else a literal-IP `host`,
+  # else the resolved hostname. Example:
+  #   my-server:
+  #     title: My Server          # header shows "My Server (10.0.0.5)" with -resolve-ips
+  #     host: my-server.internal  # still the probe target
+  #     ip: 10.0.0.5              # pinned display IP (no DNS needed)
+
   children:
     # Leaf names describe the PROBE METHOD; the folder names the host. (These are ICMP
     # pings etc. to a DNS server's IP — not "DNS over ICMP", so they aren't named "DNS".)

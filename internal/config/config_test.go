@@ -821,3 +821,39 @@ func TestAppendImportIdempotentWithEmptyMaps(t *testing.T) {
 		})
 	}
 }
+
+// TestMonitorCarriesDisplayIPAndTitle: a leaf may carry a pinned display `ip` and a
+// `title` (display name); both flow into the Monitor as display-only fields, separate
+// from the probed `host`.
+func TestMonitorCarriesDisplayIPAndTitle(t *testing.T) {
+	y := `
+targets:
+  probe: FPing
+  children:
+    cf:
+      title: Cloudflare DNS
+      host: one.one.one.one
+      ip: 1.1.1.1
+`
+	c, err := Parse([]byte(y))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	mons, err := c.Monitors()
+	if err != nil {
+		t.Fatalf("Monitors: %v", err)
+	}
+	if len(mons) != 1 {
+		t.Fatalf("want 1 monitor, got %d", len(mons))
+	}
+	m := mons[0]
+	if m.IP != "1.1.1.1" {
+		t.Errorf("Monitor.IP = %q, want 1.1.1.1", m.IP)
+	}
+	if m.Title != "Cloudflare DNS" {
+		t.Errorf("Monitor.Title = %q, want Cloudflare DNS", m.Title)
+	}
+	if m.Host != "one.one.one.one" {
+		t.Errorf("Monitor.Host = %q, want one.one.one.one (probe target unchanged)", m.Host)
+	}
+}

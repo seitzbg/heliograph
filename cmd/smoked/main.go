@@ -101,6 +101,7 @@ func main() {
 	webdir := flag.String("webdir", "web", "directory of static web assets to serve at /")
 	dsn := flag.String("dsn", os.Getenv("SMOKED_DSN"), "TimescaleDB/PostgreSQL DSN (or set SMOKED_DSN); if set, persist there instead of in-memory")
 	downsample := flag.Bool("downsample", envBool("SMOKED_DOWNSAMPLE"), "with -dsn: enable the hourly continuous aggregate + retention policies (or set SMOKED_DOWNSAMPLE=1)")
+	resolveIPs := flag.Bool("resolve-ips", envBool("SMOKED_RESOLVE_IPS"), "show each target's IP in the graph title (or set SMOKED_RESOLVE_IPS=1): a pinned `ip:`, else a literal-IP host, else the resolved hostname (best-effort, refreshed on reload)")
 	requireFingerprint := flag.Bool("require-fingerprint", false, "reject agent results that carry no measurement fingerprint (strict mode); default accepts them for pre-fingerprint agents. Flip on once every vantage's agent is upgraded (watch heliograph_agent_missing_fingerprint_total)")
 	configPath := flag.String("config", os.Getenv("SMOKED_CONFIG"), "path to a YAML config file, or a directory holding default.yaml + conf.d/*.yaml (or set SMOKED_CONFIG); replaces the built-in demo targets")
 	webhook := flag.String("webhook", "", "generic JSON webhook URL for alerts named 'to: [webhook]'")
@@ -232,7 +233,7 @@ func main() {
 
 	// The runtime (jobs + alert engine) is built from config (or the demo set) and
 	// held behind an atomic pointer so it can be swapped on SIGHUP reload.
-	rt, err := buildRuntime(*configPath, *pings, *step, *timeout, notifiers, dbFragment)
+	rt, err := buildRuntime(*configPath, *pings, *step, *timeout, *resolveIPs, notifiers, dbFragment)
 	if err != nil {
 		fatal("startup failed", err)
 	}
@@ -308,7 +309,7 @@ func main() {
 				func() {
 					applyMu.Lock()
 					defer applyMu.Unlock()
-					nrt, err := buildRuntime(*configPath, *pings, *step, *timeout, notifiers, dbFragment)
+					nrt, err := buildRuntime(*configPath, *pings, *step, *timeout, *resolveIPs, notifiers, dbFragment)
 					if err != nil {
 						slog.Error("reload failed, keeping running config", "err", err)
 						return
@@ -415,6 +416,7 @@ func main() {
 		// row for the requested vantage yet — chiefly a remote-only target the hub never
 		// probes locally — so it appears in the tree and its deep link resolves (P1-3).
 		srv.Configured = func() []model.Monitor { return current.Load().monitors }
+		srv.TargetMeta = func() map[string]api.TargetMeta { return current.Load().targetMeta }
 		// Federation: only with a DB (the vantage key store is TimescaleDB-backed). The
 		// agent routes (below) light up unconditionally here; the admin key-management API
 		// additionally requires a configured admin password (fail-closed — no password
@@ -481,7 +483,7 @@ func main() {
 					applyMu.Lock()
 					defer applyMu.Unlock()
 					build := func(getter func() ([]byte, error)) (*runtime, error) {
-						return buildRuntime(*configPath, *pings, *step, *timeout, notifiers, getter)
+						return buildRuntime(*configPath, *pings, *step, *timeout, *resolveIPs, notifiers, getter)
 					}
 					return applyConfig(cfgStore, &current, &evalMu, build, doc, expectedVersion, seedFn)
 				}
@@ -505,7 +507,7 @@ func main() {
 						return 0, unch, ver, nil // nothing to apply
 					}
 					build := func(getter func() ([]byte, error)) (*runtime, error) {
-						return buildRuntime(*configPath, *pings, *step, *timeout, notifiers, getter)
+						return buildRuntime(*configPath, *pings, *step, *timeout, *resolveIPs, notifiers, getter)
 					}
 					if aerr := applyConfig(cfgStore, &current, &evalMu, build, merged, ver, seedFn); aerr != nil {
 						return 0, 0, ver, aerr // applyConfig already returns api.ErrConfig* sentinels
@@ -847,6 +849,9 @@ type runtime struct {
 	// eval drops an outcome whose fingerprint disagrees — a round measured under an obsolete
 	// definition that a reload has since redefined (CODE_REVIEW #4, in-flight completion).
 	targetFP map[string]string
+	// targetMeta is each target's display-only metadata (title override + IP to show in the
+	// title), recomputed on every build so it refreshes on SIGHUP reload.
+	targetMeta map[string]api.TargetMeta
 }
 
 // eval runs the alert engine over a round's outcomes and dispatches notifications.
@@ -1132,7 +1137,7 @@ func unresolvedRecipients(alertDefs map[string]*alert.Alert, alerteeByTarget map
 // buildRuntime loads targets (from YAML config, or the demo set) and builds the
 // probe jobs and alert engine. A probe whose binary/deps are unavailable is
 // skipped with a warning, not fatal.
-func buildRuntime(configPath string, demoPings int, demoStep, timeout time.Duration, notifiers map[string]alert.Notifier, dbFragment func() ([]byte, error)) (rt *runtime, err error) {
+func buildRuntime(configPath string, demoPings int, demoStep, timeout time.Duration, resolveIPs bool, notifiers map[string]alert.Notifier, dbFragment func() ([]byte, error)) (rt *runtime, err error) {
 	// Final safeguard for the SIGHUP reload path: a panic while building the runtime
 	// (e.g. a config edge case the validator misses) must not take the collector
 	// down — the reload goroutine turns this error into "keep the running config".
@@ -1247,7 +1252,81 @@ func buildRuntime(configPath string, demoPings int, demoStep, timeout time.Durat
 		targetFP[m.Name] = federation.Fingerprint(m, probeCfgs[m.ProbeKind])
 	}
 	return &runtime{jobs: jobs, monitors: fullMonitors, probeCfgs: probeCfgs, engine: engine,
-		alertsByTarget: alertsByTarget, alerteeByTarget: alerteeByTarget, targetFP: targetFP}, nil
+		alertsByTarget: alertsByTarget, alerteeByTarget: alerteeByTarget, targetFP: targetFP,
+		targetMeta: buildTargetMeta(fullMonitors, resolveIPs)}, nil
+}
+
+// buildTargetMeta computes each target's display metadata: its title override (always) and
+// the IP to show in the graph title (only when resolveIPs is set — a pinned ip: or a
+// literal-IP host need no DNS; a hostname is resolved best-effort). Only targets with a
+// title or IP get an entry. Recomputed on every build, so a SIGHUP reload re-resolves.
+func buildTargetMeta(monitors []model.Monitor, resolveIPs bool) map[string]api.TargetMeta {
+	var lookup func(string) []string
+	if resolveIPs {
+		resolved := resolveHosts(hostsToResolve(monitors))
+		lookup = func(h string) []string { return resolved[h] }
+	}
+	meta := make(map[string]api.TargetMeta, len(monitors))
+	for _, m := range monitors {
+		md := api.TargetMeta{Title: m.Title}
+		if resolveIPs {
+			md.IP = config.DisplayIP(m, lookup)
+		}
+		if md.Title != "" || md.IP != "" {
+			meta[m.Name] = md
+		}
+	}
+	return meta
+}
+
+// hostsToResolve returns the distinct hostnames that need a DNS lookup for display — those
+// with no pinned ip: and a non-literal-IP host. (Pinned IPs and literal-IP hosts are shown
+// as-is.)
+func hostsToResolve(monitors []model.Monitor) []string {
+	seen := map[string]bool{}
+	var hosts []string
+	for _, m := range monitors {
+		if m.IP != "" || m.Host == "" || net.ParseIP(m.Host) != nil {
+			continue
+		}
+		if !seen[m.Host] {
+			seen[m.Host] = true
+			hosts = append(hosts, m.Host)
+		}
+	}
+	return hosts
+}
+
+// resolveHosts resolves each hostname to its IP addresses concurrently (bounded), best
+// effort: a failed or slow lookup just yields no entry, so display resolution never blocks
+// startup/reload for long. Bounded per-host and overall so many targets can't stall a build.
+func resolveHosts(hosts []string) map[string][]string {
+	const perHost, overall = 2 * time.Second, 5 * time.Second
+	ctx, cancel := context.WithTimeout(context.Background(), overall)
+	defer cancel()
+	out := make(map[string][]string, len(hosts))
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 16)
+	for _, h := range hosts {
+		wg.Add(1)
+		go func(h string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			hctx, hcancel := context.WithTimeout(ctx, perHost)
+			defer hcancel()
+			addrs, err := net.DefaultResolver.LookupHost(hctx, h)
+			if err != nil || len(addrs) == 0 {
+				return
+			}
+			mu.Lock()
+			out[h] = addrs
+			mu.Unlock()
+		}(h)
+	}
+	wg.Wait()
+	return out
 }
 
 func demoMonitors(pings int, step time.Duration) []model.Monitor {

@@ -327,5 +327,13 @@ check('addTarget: "__proto__" is stored as a real own property, not lost', () =>
   assert.throws(() => D.addTarget(out, '__proto__', { probe: 'HTTP', host: 'y' }), /already exists/);
 });
 
+check('labelHTML: title falls back to name, IP appended and escaped', () => {
+  assert.equal(D.labelHTML('cf', 'Cloudflare DNS', '1.1.1.1'), 'Cloudflare DNS <span class="tgtip">(1.1.1.1)</span>');
+  assert.equal(D.labelHTML('cf', '', '1.1.1.1'), 'cf <span class="tgtip">(1.1.1.1)</span>'); // no title -> name
+  assert.equal(D.labelHTML('cf', 'Cloudflare DNS', ''), 'Cloudflare DNS');                   // no IP -> label only
+  assert.equal(D.labelHTML('cf', undefined, undefined), 'cf');                                // both absent
+  assert.equal(D.labelHTML('n', '<b>', '1&2'), '&lt;b&gt; <span class="tgtip">(1&amp;2)</span>'); // escapes both
+});
+
 if (failed) { console.error(`\n${failed} test(s) failed`); process.exit(1); }
 console.log('\nall dashboard tests passed');

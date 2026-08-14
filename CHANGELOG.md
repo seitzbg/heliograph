@@ -7,6 +7,13 @@ All notable changes to **Heliograph** are recorded here. The format follows
 ## [Unreleased]
 
 ### Added
+- **Display name + IP in the graph title.** A target can carry a `title:` (a display-name override, shown
+  in the graph header instead of its tree-path key) and, with `-resolve-ips` / `SMOKED_RESOLVE_IPS=1`, its
+  IP: a pinned `ip:` field, else a literal-IP `host`, else the hostname resolved at config-load (best-effort,
+  concurrent, refreshed on SIGHUP reload). The header then reads `<probe> <title-or-name> (<ip>)`. Both fields
+  are display-only — kept out of the measurement fingerprint, so editing a label or pinned IP never resets a
+  target's stored series. Opt-in; default titles are unchanged. (`title`/`ip` on `config.example.yaml` nodes,
+  `/api/targets`, and the dashboard grid/detail/zoom headers.)
 - **Native-`Ping` compare targets in the demo config.** The demo (`config.example.yaml` and the built-in
   target set) now probes Cloudflare/Google DNS with **both** `FPing` and the native `Ping` probe against
   the same host, so the two ICMP probes render side by side for comparison.
