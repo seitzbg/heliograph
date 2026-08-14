@@ -16,6 +16,13 @@ All notable changes to **Heliograph** are recorded here. The format follows
 - **`SMOKED_WEBHOOK_URL` environment fallback** for the generic `-webhook` notifier, matching the
   existing `SMOKED_SLACK_WEBHOOK` / `SMOKED_DISCORD_WEBHOOK` / `SMOKED_SMTP_*` env support.
 
+### Fixed
+- **Config-tab tree edge cases.** An emptied folder (its last child removed or moved out) stays a
+  folder instead of rendering as a phantom leaf offering a host-target edit form; dropping a node
+  onto the folder it is already in is a no-op instead of a pointless re-append + save; and collapse
+  state for removed/renamed/moved folders is pruned so a future folder that reuses a path no longer
+  starts silently collapsed.
+
 ## [1.0.2] - 2026-08-14
 
 First **published** 1.0.x release. It gathers all the post-1.0.0 hardening and UI work (#34–#49):

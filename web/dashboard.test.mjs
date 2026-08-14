@@ -406,6 +406,19 @@ check('cfgTree: nests, sorts siblings by (weight,name), carries path', () => {
   assert.deepEqual(web.children.map((c) => c.name), ['b', 'a']);  // b weight -1 before a (0)
   assert.equal(web.children[0].path, 'Web/b');
 });
+check('cfgTree: a node with an (even empty) children map stays a folder; a leaf does not', () => {
+  // Removing a grouping node's last child leaves `children: {}` behind; it must stay a folder,
+  // not collapse into a phantom leaf that the row would offer to edit as a host target.
+  const emptied = D.removeNodeAtPath({ targets: { children: {
+    Web: { children: { a: { probe: 'HTTP', host: 'a' } } },
+  } } }, 'Web/a');
+  const web = D.cfgTree(emptied).find((n) => n.name === 'Web');
+  assert.equal(web.isFolder, true, 'emptied grouping node is still a folder');
+  assert.deepEqual(web.children, [], 'and now has no children');
+  // A leaf (host, no children map) is never a folder.
+  const leaf = D.cfgTree({ targets: { children: { x: { probe: 'HTTP', host: 'x' } } } })[0];
+  assert.equal(leaf.isFolder, false);
+});
 check('reweightSiblings: sequential indices by given order', () => {
   assert.deepEqual(D.reweightSiblings(['x', 'y', 'z']), { x: 0, y: 1, z: 2 });
 });
