@@ -91,6 +91,9 @@ type Node struct {
 	Alerts   []string         `yaml:"alerts" json:"alerts"`     // alert names; inherited down the tree
 	Alertee  []string         `yaml:"alertee" json:"alertee"`   // extra notifier names; inherited down the tree
 	Vantages []string         `yaml:"vantages" json:"vantages"` // vantage points that probe this target; inherited
+	// Weight orders a node among its siblings: sorted (weight, name), unset/0 keeps A–Z.
+	// A negative weight pins a node to the top of its group. Applies to YAML and DB configs.
+	Weight   int              `yaml:"weight" json:"weight,omitempty"`
 	Children map[string]*Node `yaml:"children" json:"children,omitempty"`
 }
 
@@ -355,7 +358,7 @@ func AppendImport(dbDoc, importBytes []byte) (merged json.RawMessage, added, unc
 	}
 	// Pass 1 — classify without mutating; a differing duplicate aborts the whole import.
 	var toAdd []string
-	for _, k := range sortedKeys(imp.Targets.Children) {
+	for _, k := range orderedChildren(imp.Targets.Children) {
 		if cur, ok := base.Targets.Children[k]; ok {
 			eq, err := nodesEqual(cur, imp.Targets.Children[k])
 			if err != nil {
@@ -434,7 +437,7 @@ func mergeBranches(base *Config, origin map[string]string, label string, frag *C
 	if frag == nil || frag.Targets == nil {
 		return nil
 	}
-	for _, key := range sortedKeys(frag.Targets.Children) {
+	for _, key := range orderedChildren(frag.Targets.Children) {
 		if prev, dup := origin[key]; dup {
 			return fmt.Errorf("config: duplicate top-level target %q in %s (already defined in %s)", key, label, prev)
 		}
@@ -586,7 +589,7 @@ func (c *Config) Monitors() ([]model.Monitor, error) {
 				out = append(out, m)
 			}
 		}
-		for _, key := range sortedKeys(n.Children) {
+		for _, key := range orderedChildren(n.Children) {
 			child := path + "/" + key
 			if path == "" {
 				child = key
@@ -689,12 +692,29 @@ func firstNonZeroDur(a, b time.Duration) time.Duration {
 	}
 	return b
 }
-func sortedKeys(m map[string]*Node) []string {
+// orderedChildren returns child keys ordered by (weight, name): lower weight first, ties by
+// name. unset weight (0) preserves the historical A–Z order. This is the single ordering
+// choke point for the config tree — the flatten, merge, and API all read siblings through it.
+// A key may map to a nil *Node (an empty YAML child, e.g. `empty:` with no value) — that's a
+// validation error surfaced later in Monitors(), not a panic here, so nil is treated as weight 0.
+func orderedChildren(m map[string]*Node) []string {
 	ks := make([]string, 0, len(m))
 	for k := range m {
 		ks = append(ks, k)
 	}
-	sort.Strings(ks)
+	weight := func(k string) int {
+		if n := m[k]; n != nil {
+			return n.Weight
+		}
+		return 0
+	}
+	sort.Slice(ks, func(i, j int) bool {
+		wi, wj := weight(ks[i]), weight(ks[j])
+		if wi != wj {
+			return wi < wj
+		}
+		return ks[i] < ks[j]
+	})
 	return ks
 }
 func sortedProbeKinds(m map[string]map[string]string) []string {

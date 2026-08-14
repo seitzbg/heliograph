@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -855,5 +856,19 @@ targets:
 	}
 	if m.Host != "one.one.one.one" {
 		t.Errorf("Monitor.Host = %q, want one.one.one.one (probe target unchanged)", m.Host)
+	}
+}
+
+func TestOrderedChildren(t *testing.T) {
+	m := map[string]*Node{
+		"b": {}, "a": {}, // both weight 0 → tie-break by name
+		"top":  {Weight: -5}, // negative sorts first
+		"last": {Weight: 10},
+		"mid":  {Weight: 1},
+	}
+	got := orderedChildren(m)
+	want := []string{"top", "a", "b", "mid", "last"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("orderedChildren = %v, want %v", got, want)
 	}
 }
