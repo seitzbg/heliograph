@@ -242,35 +242,46 @@ func (s *PGStore) backfillAggregates(ctx context.Context) error {
 	return nil
 }
 
-// migrateAggregates drops the existing continuous aggregates when their stored shape no
-// longer matches the current definition, so the recreate below can rebuild them. It fires
-// when an existing samples_hourly lacks either the vantage dimension (federation) or the
-// median_rounds column (CODE_REVIEW #6 / P2-6). One-time per change: after the recreate the
-// columns exist and the guard is false forever after (a fresh DB has no view yet — no-op).
+// migrateAggregates drops the existing continuous aggregates when EITHER view's stored shape no
+// longer matches the current definition, so the recreate below can rebuild them. A view is stale
+// when it lacks the vantage dimension (federation) or the median_rounds column (CODE_REVIEW #6 /
+// P2-6). Both samples_hourly AND samples_daily are validated: an earlier version checked only
+// hourly, so a current hourly paired with an incompatible daily (e.g. an older or hand-created daily
+// missing vantage) was never rebuilt and the 400-day daily graph kept blending vantages / reporting
+// mis-weighted medians while startup looked healthy (CODE_REVIEW M7). One-time per change: after the
+// recreate both views carry the columns and the guard is false forever after (a fresh DB has no
+// views yet — no-op; an absent view is created by EnableDownsampling, not "stale" here).
 //
 // A TimescaleDB continuous aggregate's SELECT/GROUP BY can't be altered in place, so this
 // drop+recreate is unavoidable — but on an existing DB it irreversibly loses every daily
 // rollup bucket older than the 30-day raw retention window (the raw rows behind those
 // buckets are already gone, so they can never be rebuilt). This is a one-time long-range-
 // history loss the first time an older hub upgrades and calls EnableDownsampling; see the
-// slog.Warn below, logged only when the drop actually fires.
+// slog.Warn below, logged only when the drop actually fires. Both views are dropped together so the
+// pair is always rebuilt to one consistent shape even when only one had drifted.
 // migrateAggregates returns true if it dropped the aggregates for a recreate (so the caller
 // backfills the rebuilt views).
 func (s *PGStore) migrateAggregates(ctx context.Context) (bool, error) {
-	var hasView bool
-	if err := s.pool.QueryRow(ctx, `SELECT to_regclass('samples_hourly') IS NOT NULL`).Scan(&hasView); err != nil {
-		return false, fmt.Errorf("pgstore: check aggregate: %w", err)
+	stale := false
+	for _, view := range []string{"samples_hourly", "samples_daily"} {
+		var hasView bool
+		if err := s.pool.QueryRow(ctx, `SELECT to_regclass($1) IS NOT NULL`, view).Scan(&hasView); err != nil {
+			return false, fmt.Errorf("pgstore: check aggregate %s: %w", view, err)
+		}
+		if !hasView {
+			continue // absent (not stale): EnableDownsampling's CREATE IF NOT EXISTS builds it fresh
+		}
+		var hasVantage, hasMedianRounds bool
+		if err := s.pool.QueryRow(ctx, `
+			SELECT bool_or(column_name='vantage'), bool_or(column_name='median_rounds')
+			  FROM information_schema.columns WHERE table_name=$1`, view).Scan(&hasVantage, &hasMedianRounds); err != nil {
+			return false, fmt.Errorf("pgstore: check aggregate columns %s: %w", view, err)
+		}
+		if !hasVantage || !hasMedianRounds {
+			stale = true // a present view with the wrong shape — rebuild the pair
+		}
 	}
-	if !hasView {
-		return false, nil
-	}
-	var hasVantage, hasMedianRounds bool
-	if err := s.pool.QueryRow(ctx, `
-		SELECT bool_or(column_name='vantage'), bool_or(column_name='median_rounds')
-		  FROM information_schema.columns WHERE table_name='samples_hourly'`).Scan(&hasVantage, &hasMedianRounds); err != nil {
-		return false, fmt.Errorf("pgstore: check aggregate columns: %w", err)
-	}
-	if hasVantage && hasMedianRounds {
+	if !stale {
 		return false, nil
 	}
 	slog.Warn("pgstore: rebuilding continuous aggregates to match the current definition " +
