@@ -242,6 +242,12 @@ func TestTargetsRecentLossPctIsWindowed(t *testing.T) {
 	st := store.NewMem(100)
 	now := time.Now()
 	var rounds []scheduler.Outcome
+	// An older 100%-loss outage OUTSIDE the window — it must not pull the average up (proves
+	// the aggregate honors the cutoff and isn't averaging all retained history).
+	rounds = append(rounds, scheduler.Outcome{
+		Target: probe.Target{Name: "t", Host: "h"}, ProbeName: "FPing",
+		Computed: sample.Compute(20, nil), When: now.Add(-recentStatusWindow - time.Minute),
+	})
 	// 19 clean rounds within the recent window...
 	for i := 19; i >= 1; i-- {
 		rounds = append(rounds, scheduler.Outcome{
@@ -279,9 +285,11 @@ func TestTargetsRecentLossPctIsWindowed(t *testing.T) {
 	if got.RecentLossPct == nil {
 		t.Fatal("recent_loss_pct missing — the status dot can't smooth without it")
 	}
-	// One 5% round out of 20 in the window ⇒ ~0.25% average, far below the 5% last round.
-	if *got.RecentLossPct > 1 {
-		t.Errorf("recent_loss_pct = %v, want ~0.25 (windowed average, not the last round's 5%%)", *got.RecentLossPct)
+	// One 5% round out of 20 in the window ⇒ 0.25% average (the out-of-window 100% outage is
+	// excluded). A tight bound rejects both a wrong 0% and an all-history average.
+	if r := *got.RecentLossPct; r < 0.2 || r > 0.3 {
+		t.Errorf("recent_loss_pct = %v, want ~0.25 (windowed average of one 5%% round in 20; "+
+			"the out-of-window 100%% outage must be excluded)", r)
 	}
 }
 
