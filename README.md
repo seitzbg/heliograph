@@ -38,6 +38,13 @@ click a graph to zoom):
   <img alt="Heliograph per-target graph grid" src="docs/img/dashboard-graphs.png">
 </picture>
 
+The **Config** tab edits DB-backed targets as a drag-to-reorder tree (merged live with the YAML
+config), and the **Vantages** panel manages federation agent keys — both behind the admin password:
+
+![Heliograph Config tab — DB-backed target tree with drag-to-reorder](docs/img/config-tree-dark.png)
+
+![Heliograph Vantages panel — federation agent keys](docs/img/vantages-dark.png)
+
 ## What works today (verified)
 
 - **Smoke-graph renderer** (`web/smoke-poc.html`) — a self-contained canvas re-implementation of SmokePing's signature chart: nested percentile bands darkening toward the median + the 8-bucket loss-colored median line, light/dark theme-aware, across four latency scenarios. This de-risks the "keep the look & feel" requirement. Open it in a browser to explore.
