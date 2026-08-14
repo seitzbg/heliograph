@@ -193,8 +193,16 @@
   .cfg-tree .kids { display:flex; flex-direction:column; gap:1px; }
   .cfg-tree .crow { display:flex; align-items:center; gap:8px; padding:6px 8px; padding-left:calc(8px + var(--d,0) * 18px); border-radius:7px; border:1px solid transparent; font-family:ui-monospace,Menlo,monospace; font-size:12.5px; color:var(--ink); }
   .cfg-tree .crow:hover { background:var(--bg); }
-  .cfg-tree .crow.cfg-drop { box-shadow:inset 0 2px 0 var(--accent); }
+  /* roving-tabindex tree: keyboard focus gets a clear ring; the single aria-selected row is tinted */
+  .cfg-tree .crow:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
+  .cfg-tree .crow[aria-selected="true"] { background:var(--accent-soft); border-color:var(--accent); }
+  .cfg-tree .crow.cfg-drop { box-shadow:inset 0 2px 0 var(--accent); }              /* insert-before cue */
+  .cfg-tree .crow.cfg-drop-into { box-shadow:inset 0 0 0 2px var(--accent); }        /* move-into-folder cue */
   .cfg-tree .crow.folder .cname { font-weight:600; }
+  /* collapse chevron: present (rotating) on folders, an empty spacer on leaves so names line up */
+  .cfg-tree .ctwist { flex:0 0 10px; text-align:center; color:var(--ink-faint); font-size:9px; transition:transform .12s; }
+  .cfg-tree .crow.folder .ctwist { cursor:pointer; }
+  .cfg-tree .crow.folder.collapsed .ctwist { transform:rotate(-90deg); }
   .cfg-tree .chandle { cursor:grab; color:var(--ink-faint); flex:0 0 auto; }
   .cfg-tree .cname { flex:0 0 auto; }
   .cfg-tree .cmeta { flex:1 1 auto; color:var(--ink-soft); font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
