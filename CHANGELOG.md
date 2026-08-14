@@ -6,6 +6,16 @@ All notable changes to **Heliograph** are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed
+- **Webhook/Slack/Discord notifiers now abandon permanent (HTTP 4xx) failures** instead of retrying
+  them through the whole backoff budget. A 4xx (bad payload, auth, wrong URL) can never succeed on
+  retry, so it is counted as failed on the first attempt — mirroring the email notifier's 5xx /
+  AUTH-not-offered handling. 408 Request Timeout and 429 Too Many Requests stay transient (retried).
+
+### Added
+- **`SMOKED_WEBHOOK_URL` environment fallback** for the generic `-webhook` notifier, matching the
+  existing `SMOKED_SLACK_WEBHOOK` / `SMOKED_DISCORD_WEBHOOK` / `SMOKED_SMTP_*` env support.
+
 ## [1.0.2] - 2026-08-14
 
 First **published** 1.0.x release. It gathers all the post-1.0.0 hardening and UI work (#34–#49):

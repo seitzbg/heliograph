@@ -105,7 +105,7 @@ func main() {
 	resolveIPs := flag.Bool("resolve-ips", envBool("SMOKED_RESOLVE_IPS"), "show each target's IP in the graph title (or set SMOKED_RESOLVE_IPS=1): a pinned `ip:`, else a literal-IP host, else the resolved hostname (best-effort, refreshed on reload)")
 	requireFingerprint := flag.Bool("require-fingerprint", false, "reject agent results that carry no measurement fingerprint (strict mode); default accepts them for pre-fingerprint agents. Flip on once every vantage's agent is upgraded (watch heliograph_agent_missing_fingerprint_total)")
 	configPath := flag.String("config", os.Getenv("SMOKED_CONFIG"), "path to a YAML config file, or a directory holding default.yaml + conf.d/*.yaml (or set SMOKED_CONFIG); replaces the built-in demo targets")
-	webhook := flag.String("webhook", "", "generic JSON webhook URL for alerts named 'to: [webhook]'")
+	webhook := flag.String("webhook", os.Getenv("SMOKED_WEBHOOK_URL"), "generic JSON webhook URL (or set SMOKED_WEBHOOK_URL) for alerts named 'to: [webhook]'")
 	slackWebhook := flag.String("slack-webhook", os.Getenv("SMOKED_SLACK_WEBHOOK"), "Slack incoming-webhook URL (or set SMOKED_SLACK_WEBHOOK) for alerts named 'to: [slack]'")
 	discordWebhook := flag.String("discord-webhook", os.Getenv("SMOKED_DISCORD_WEBHOOK"), "Discord webhook URL (or set SMOKED_DISCORD_WEBHOOK) for alerts named 'to: [discord]'")
 	smtpAddr := flag.String("smtp-addr", os.Getenv("SMOKED_SMTP_ADDR"), "SMTP server host:port (or set SMOKED_SMTP_ADDR) to enable the email notifier ('to: [email]')")

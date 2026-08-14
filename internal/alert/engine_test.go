@@ -86,6 +86,60 @@ func TestWebhookRetriesThenDelivers(t *testing.T) {
 	}
 }
 
+// A 4xx is a permanent rejection (bad payload / auth / wrong URL): abandon it on the first
+// attempt instead of burning the whole retry budget on a delivery no retry can rescue.
+func TestWebhookAbandonsPermanent4xx(t *testing.T) {
+	var attempts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts.Add(1)
+		w.WriteHeader(http.StatusBadRequest) // 400: permanent
+	}))
+	defer srv.Close()
+
+	n := NewWebhookNotifierConfig(srv.URL, nil, WebhookConfig{Workers: 1, QueueSize: 8, MaxAttempts: 5, BaseBackoff: time.Millisecond, Timeout: time.Second})
+	n.Notify(Event{Target: "t", Vantage: "local", Alert: "loss", Firing: true, RTTms: 1, When: time.Unix(1_700_000_000, 0)})
+	n.Close(context.Background()) // drains: the worker finishes the (doomed) delivery, then exits
+
+	if got := attempts.Load(); got != 1 {
+		t.Errorf("attempts = %d, want 1 (a 4xx must not be retried)", got)
+	}
+	if st := n.Stats(); st.Failed != 1 || st.Retried != 0 || st.Delivered != 0 {
+		t.Errorf("stats after permanent 4xx = {failed:%d retried:%d delivered:%d}, want {1 0 0}", st.Failed, st.Retried, st.Delivered)
+	}
+}
+
+// 408 and 429 are the two 4xx codes that ARE transient: a 429 (rate-limited) must be retried,
+// not abandoned like a 400.
+func TestWebhookRetries429(t *testing.T) {
+	var attempts atomic.Int32
+	delivered := make(chan struct{}, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if attempts.Add(1) < 3 { // rate-limit twice, then accept
+			w.WriteHeader(http.StatusTooManyRequests) // 429: transient
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		select {
+		case delivered <- struct{}{}:
+		default:
+		}
+	}))
+	defer srv.Close()
+
+	n := NewWebhookNotifierConfig(srv.URL, nil, WebhookConfig{Workers: 1, QueueSize: 8, MaxAttempts: 5, BaseBackoff: time.Millisecond, Timeout: time.Second})
+	defer n.Close(context.Background())
+	n.Notify(Event{Target: "t", Vantage: "local", Alert: "loss", Firing: true, RTTms: 1, When: time.Unix(1_700_000_000, 0)})
+
+	select {
+	case <-delivered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("webhook never delivered; a 429 should be retried, not abandoned")
+	}
+	if got := attempts.Load(); got != 3 {
+		t.Errorf("attempts = %d, want 3 (429 retried twice, then 200)", got)
+	}
+}
+
 // A full queue must drop the newest event without blocking Notify (bounding both
 // memory and goroutines), and the drop must be counted, not silent.
 // A graceful drain must spend its deadline retrying a queued event, not give it a single

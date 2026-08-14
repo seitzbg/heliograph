@@ -200,11 +200,6 @@ All remaining 2026-08-14 code-review items are **done**, shipped in **v1.0.2** (
   the **v1.0.2** publish (the `v1.0.1` tag was superseded — see CHANGELOG).
 
 ### Remaining follow-ups (non-blocking; none critical/high)
-- **Webhook notifier — permanent-failure classification:** the webhook/Slack/Discord delivery pool
-  retries every failure; it should abandon permanent ones (HTTP 4xx) the way the email notifier now
-  abandons 5xx / AUTH-not-offered, instead of burning the retry budget.
-- **Generic `webhook` notifier — env parity:** enabled only by the `-webhook` flag, while `slack` /
-  `discord` / `email` all have `SMOKED_*` env fallbacks. Add `SMOKED_WEBHOOK_URL` for consistency.
 - **Config-tab tree nits:** prune stale `cfgCollapsed` paths after a node is removed/renamed; a drop
   onto a node's own parent should no-op; an emptied folder still renders as a folder, not a leaf.
 - **Caddy image (#38):** the runtime `apk --upgrade c-ares/curl` + the three `xcaddy --with
