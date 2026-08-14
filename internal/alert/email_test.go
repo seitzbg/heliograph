@@ -39,7 +39,7 @@ func TestEmailNotifierSends(t *testing.T) {
 	var captured [][]byte
 	var gotFrom string
 	var gotTo []string
-	fake := func(addr string, a smtp.Auth, from string, to []string, msg []byte) error {
+	fake := func(ctx context.Context, addr string, a smtp.Auth, from string, to []string, msg []byte) error {
 		mu.Lock()
 		defer mu.Unlock()
 		captured = append(captured, msg)
@@ -70,7 +70,7 @@ func TestEmailNotifierSends(t *testing.T) {
 // succeeding — mirrors TestWebhookRetriesThenDelivers.
 func TestEmailNotifierRetriesThenDelivers(t *testing.T) {
 	var attempts atomic.Int32
-	send := func(addr string, a smtp.Auth, from string, to []string, msg []byte) error {
+	send := func(ctx context.Context, addr string, a smtp.Auth, from string, to []string, msg []byte) error {
 		if attempts.Add(1) <= 2 { // fail the first two attempts, then succeed
 			return errors.New("temporary failure")
 		}
@@ -102,7 +102,7 @@ func TestEmailNotifierRetriesThenDelivers(t *testing.T) {
 // failed, not retried forever.
 func TestEmailNotifierGivesUpAfterMaxAttempts(t *testing.T) {
 	var attempts atomic.Int32
-	send := func(addr string, a smtp.Auth, from string, to []string, msg []byte) error {
+	send := func(ctx context.Context, addr string, a smtp.Auth, from string, to []string, msg []byte) error {
 		attempts.Add(1)
 		return errors.New("permanent failure")
 	}
@@ -128,6 +128,50 @@ func TestEmailNotifierGivesUpAfterMaxAttempts(t *testing.T) {
 	}
 }
 
+// Close must not wait out a per-attempt timeout on a send that is stuck mid-transaction: once its
+// deadline hits it force-cancels the in-flight send (via baseCtx) and counts it failed. Mirrors
+// TestWebhookCloseCancelsInflightAtDeadline.
+func TestEmailCloseCancelsInflightAtDeadline(t *testing.T) {
+	release := make(chan struct{})
+	started := make(chan struct{})
+	var startedOnce atomic.Bool
+	send := func(ctx context.Context, addr string, a smtp.Auth, from string, to []string, msg []byte) error {
+		if startedOnce.CompareAndSwap(false, true) {
+			close(started)
+		}
+		select {
+		case <-ctx.Done(): // Close cancelled baseCtx: abort the stuck transaction
+			return ctx.Err()
+		case <-release:
+			return nil
+		}
+	}
+	defer close(release)
+	// Long per-attempt timeout: without deadline-driven cancellation the send would block ~30s, so
+	// it would still be in flight when Close returns.
+	n := newEmailNotifier(EmailConfig{
+		Addr: "mail.example.com:587", From: "s@x", To: []string{"a@x"}, QueueSize: 4, Workers: 1,
+		MaxAttempts: 3, BaseBackoff: time.Millisecond, Timeout: 30 * time.Second,
+	}, send)
+	n.Notify(Event{Target: "t", Alert: "loss", Firing: true, When: testWhen})
+	select {
+	case <-started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("delivery never reached the sender")
+	}
+
+	start := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	n.Close(ctx)
+	if el := time.Since(start); el > 5*time.Second {
+		t.Fatalf("Close took %v; the in-flight send was not cancelled at the deadline", el)
+	}
+	if f := n.Stats().Failed; f != 1 {
+		t.Errorf("Failed = %d, want 1 (the in-flight delivery must be cancelled + counted, not left hanging)", f)
+	}
+}
+
 // A relay that accepts the TCP connection but never speaks must not hang the sender
 // forever: the real smtpSender (not the injected fake) must time out.
 func TestSMTPSenderDialTimeout(t *testing.T) {
@@ -137,18 +181,26 @@ func TestSMTPSenderDialTimeout(t *testing.T) {
 	}
 	defer l.Close()
 
-	accepted := make(chan net.Conn, 1)
+	// Accept the connection and hold it open, silent, until the test ends: the client must stall on
+	// the unanswered 220 greeting and hit its deadline. Tying the server-side close to the test's
+	// lifetime (via done) means the accepted conn is always released, win or lose the greeting race.
+	done := make(chan struct{})
+	defer close(done)
 	go func() {
 		c, err := l.Accept()
-		if err == nil {
-			accepted <- c // held open, never spoken to: the client stalls on the 220 greeting
+		if err != nil {
+			return
 		}
+		defer c.Close()
+		<-done
 	}()
 
 	const timeout = 150 * time.Millisecond
-	send := smtpSender(false, timeout)
+	send := smtpSender(false)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
 	start := time.Now()
-	err = send(l.Addr().String(), nil, "f@x", []string{"t@x"}, []byte("msg"))
+	err = send(ctx, l.Addr().String(), nil, "f@x", []string{"t@x"}, []byte("msg"))
 	elapsed := time.Since(start)
 	if err == nil {
 		t.Fatal("smtpSender returned nil error against a relay that never speaks; want a timeout error")
@@ -156,11 +208,59 @@ func TestSMTPSenderDialTimeout(t *testing.T) {
 	if elapsed > 10*timeout {
 		t.Errorf("smtpSender took %v to fail, want roughly the %v deadline", elapsed, timeout)
 	}
+}
+
+// Cancelling ctx (not its deadline) must unblock a real smtpSender stuck reading from a stalled
+// relay: with a far-off deadline, SetDeadline alone can't rescue the read, so this exercises the
+// watcher goroutine's conn.Close() on ctx.Done() — the load-bearing half of the Close-cancels-
+// in-flight fix, which the injected-sender test above cannot reach.
+func TestSMTPSenderContextCancelUnblocks(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer l.Close()
+
+	connected := make(chan struct{})
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		c, err := l.Accept()
+		if err != nil {
+			return
+		}
+		close(connected) // dial has completed: the client is now blocked reading the 220 greeting
+		defer c.Close()
+		<-done // stall: never speak
+	}()
+
+	// Deadline is far off, so only ctx cancellation (via the watcher) can end the stalled read.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	send := smtpSender(false)
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- send(ctx, l.Addr().String(), nil, "f@x", []string{"t@x"}, []byte("msg"))
+	}()
 
 	select {
-	case c := <-accepted:
-		c.Close()
-	case <-time.After(time.Second):
+	case <-connected:
+	case <-time.After(3 * time.Second):
+		t.Fatal("client never connected")
+	}
+	start := time.Now()
+	cancel() // trigger the watcher: it must force-close the conn and unblock the read
+
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Fatal("smtpSender returned nil after ctx cancel; want a non-nil error")
+		}
+		if el := time.Since(start); el > 5*time.Second {
+			t.Errorf("smtpSender took %v to unblock after cancel; the watcher did not force-close the conn", el)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("smtpSender did not return within 5s of ctx cancel; the watcher did not unblock the read")
 	}
 }
 
@@ -205,8 +305,10 @@ func TestSMTPSenderAuthNotOffered(t *testing.T) {
 	}()
 
 	auth := smtp.PlainAuth("", "u", "p", "127.0.0.1")
-	send := smtpSender(false, 2*time.Second)
-	err = send(l.Addr().String(), auth, "f@x", []string{"t@x"}, []byte("msg"))
+	send := smtpSender(false)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	err = send(ctx, l.Addr().String(), auth, "f@x", []string{"t@x"}, []byte("msg"))
 	if err == nil || !strings.Contains(err.Error(), "does not advertise AUTH") {
 		t.Fatalf("err = %v, want the \"does not advertise AUTH\" error", err)
 	}

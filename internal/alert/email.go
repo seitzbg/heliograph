@@ -35,11 +35,14 @@ type EmailNotifier struct {
 	from string
 	to   []string
 	auth smtp.Auth
-	send func(addr string, a smtp.Auth, from string, to []string, msg []byte) error
+	send func(ctx context.Context, addr string, a smtp.Auth, from string, to []string, msg []byte) error
 
 	queue       chan Event
-	done        chan struct{} // closed by Close to interrupt in-flight backoffs
+	done        chan struct{}      // closed by Close to interrupt in-flight backoffs
+	baseCtx     context.Context    // parent of every attempt's send context
+	baseCancel  context.CancelFunc // cancels the in-flight send when the drain deadline hits
 	wg          sync.WaitGroup
+	timeout     time.Duration
 	maxAttempts int
 	baseBackoff time.Duration
 
@@ -53,28 +56,43 @@ type EmailNotifier struct {
 // strict cert verification unless cfg.TLSSkipVerify), authenticates when cfg.Auth is set, and falls
 // back to a plaintext session for a relay that offers no STARTTLS.
 func NewEmailNotifier(cfg EmailConfig) *EmailNotifier {
-	timeout := cfg.Timeout
-	if timeout <= 0 {
-		timeout = 10 * time.Second
-	}
-	return newEmailNotifier(cfg, smtpSender(cfg.TLSSkipVerify, timeout))
+	return newEmailNotifier(cfg, smtpSender(cfg.TLSSkipVerify))
 }
 
 // smtpSender returns a net/smtp.SendMail-compatible send function. Unlike the stdlib SendMail it
 // exposes the STARTTLS tls.Config, so an internal relay with a self-signed cert works when the
-// operator opts in via TLSSkipVerify; it also tolerates a relay that advertises no STARTTLS. timeout
-// bounds the whole transaction (dial + STARTTLS + auth + data) so a stalled relay can't hang a
-// worker forever.
-func smtpSender(skipVerify bool, timeout time.Duration) func(addr string, a smtp.Auth, from string, to []string, msg []byte) error {
-	return func(addr string, a smtp.Auth, from string, to []string, msg []byte) error {
-		conn, err := net.DialTimeout("tcp", addr, timeout)
+// operator opts in via TLSSkipVerify; it also tolerates a relay that advertises no STARTTLS. The
+// call is bound to ctx: its deadline caps the whole transaction (dial + STARTTLS + auth + data) with
+// a single budget, and its cancellation (a Close-triggered shutdown) force-closes the connection so
+// a send blocked on a stalled relay can't outlive the drain — net/smtp has no context of its own.
+// Callers should pass a ctx carrying a deadline (deliver wraps each attempt in context.WithTimeout);
+// without one the transaction is bounded only by ctx cancellation.
+func smtpSender(skipVerify bool) func(ctx context.Context, addr string, a smtp.Auth, from string, to []string, msg []byte) error {
+	return func(ctx context.Context, addr string, a smtp.Auth, from string, to []string, msg []byte) error {
+		var dialer net.Dialer
+		conn, err := dialer.DialContext(ctx, "tcp", addr)
 		if err != nil {
 			return err
 		}
-		if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
-			conn.Close()
-			return err
+		// One deadline for the whole transaction (dial already honored ctx above), so a slow dial
+		// can't buy the exchange a second full timeout window.
+		if deadline, ok := ctx.Deadline(); ok {
+			if err := conn.SetDeadline(deadline); err != nil {
+				conn.Close()
+				return err
+			}
 		}
+		// Force-close the conn when ctx is cancelled (e.g. Close hit its drain deadline) so a read or
+		// write blocked on a hung relay unblocks with an error instead of hanging to the deadline.
+		stop := make(chan struct{})
+		defer close(stop)
+		go func() {
+			select {
+			case <-ctx.Done():
+				conn.Close()
+			case <-stop:
+			}
+		}()
 		host, _, err := net.SplitHostPort(addr)
 		if err != nil {
 			host = addr
@@ -127,12 +145,15 @@ func smtpSender(skipVerify bool, timeout time.Duration) func(addr string, a smtp
 }
 
 // newEmailNotifier is the injectable-sender constructor used by tests.
-func newEmailNotifier(cfg EmailConfig, send func(addr string, a smtp.Auth, from string, to []string, msg []byte) error) *EmailNotifier {
+func newEmailNotifier(cfg EmailConfig, send func(ctx context.Context, addr string, a smtp.Auth, from string, to []string, msg []byte) error) *EmailNotifier {
 	if cfg.QueueSize <= 0 {
 		cfg.QueueSize = 1024
 	}
 	if cfg.Workers <= 0 {
 		cfg.Workers = 2
+	}
+	if cfg.Timeout <= 0 {
+		cfg.Timeout = 10 * time.Second
 	}
 	if cfg.MaxAttempts <= 0 {
 		cfg.MaxAttempts = 4
@@ -144,9 +165,13 @@ func newEmailNotifier(cfg EmailConfig, send func(addr string, a smtp.Auth, from 
 		addr: cfg.Addr, from: cfg.From, to: cfg.To, auth: cfg.Auth, send: send,
 		queue:       make(chan Event, cfg.QueueSize),
 		done:        make(chan struct{}),
+		timeout:     cfg.Timeout,
 		maxAttempts: cfg.MaxAttempts,
 		baseBackoff: cfg.BaseBackoff,
 	}
+	// Every attempt's send derives from baseCtx, so Close can cancel an in-flight transaction once
+	// the drain deadline is reached (not just interrupt the backoff wait) — mirrors WebhookNotifier.
+	n.baseCtx, n.baseCancel = context.WithCancel(context.Background())
 	for i := 0; i < cfg.Workers; i++ {
 		n.wg.Add(1)
 		go n.worker()
@@ -182,7 +207,9 @@ func (n *EmailNotifier) deliver(e Event) {
 	msg := buildEmailMessage(e, n.from, n.to)
 	backoff := n.baseBackoff
 	for attempt := 1; ; attempt++ {
-		err := n.send(n.addr, n.auth, n.from, n.to, msg)
+		ctx, cancel := context.WithTimeout(n.baseCtx, n.timeout)
+		err := n.send(ctx, n.addr, n.auth, n.from, n.to, msg)
+		cancel()
 		if err == nil {
 			n.delivered.Add(1)
 			return
@@ -204,7 +231,9 @@ func (n *EmailNotifier) deliver(e Event) {
 	}
 }
 
-// Close stops accepting events and drains the queue within ctx's deadline, then returns. Idempotent.
+// Close stops accepting events and drains the queue, waiting for the workers up to ctx's deadline;
+// past the deadline it interrupts the remaining backoff waits and force-cancels any in-flight SMTP
+// transaction, then returns. Idempotent.
 func (n *EmailNotifier) Close(ctx context.Context) {
 	n.mu.Lock()
 	if n.closed {
@@ -223,8 +252,12 @@ func (n *EmailNotifier) Close(ctx context.Context) {
 	select {
 	case <-drained:
 		close(n.done)
-	case <-ctx.Done(): // deadline hit; stop remaining backoff waits so drain doesn't stall on them
+		n.baseCancel() // release the base context
+	case <-ctx.Done():
+		// Deadline hit: stop the remaining backoff waits and cancel the in-flight send so a hung
+		// relay can't keep a worker (and its open connection) past the shutdown budget.
 		close(n.done)
+		n.baseCancel()
 		<-drained
 	}
 }
