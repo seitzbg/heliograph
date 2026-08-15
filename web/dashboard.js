@@ -321,8 +321,13 @@
     const walk = (ch, prefix) => cfgSortSiblings(ch).map((name) => {
       const node = ch[name] || {};
       const path = prefix ? prefix + '/' + name : name;
-      const kids = node.children && Object.keys(node.children).length ? walk(node.children, path) : [];
-      return { name, node, path, isFolder: kids.length > 0, weight: node.weight || 0, children: kids };
+      // A node is a folder if it carries a `children` map — even an empty one. Removing or moving
+      // out a folder's last child leaves `children: {}` behind; keying folder-ness off "has a
+      // children map" (not "has ≥1 child") keeps such an emptied folder a folder instead of
+      // silently collapsing it into a phantom leaf (leaves never carry a children map).
+      const isFolder = !!(node.children && typeof node.children === 'object');
+      const kids = isFolder && Object.keys(node.children).length ? walk(node.children, path) : [];
+      return { name, node, path, isFolder, weight: node.weight || 0, children: kids };
     });
     const ch = (doc && doc.targets && doc.targets.children) || {};
     return walk(ch, '');
@@ -1435,6 +1440,12 @@
     }
     function renderCfgTree() {
       const tree = Dash.cfgTree(cfg.doc);
+      // Prune collapse state for folders that no longer exist: a removed / renamed / moved node
+      // otherwise leaves its old path in cfgCollapsed forever, and a future folder that reuses the
+      // path would silently start collapsed. Keep every path that is still a folder, visible or not.
+      const folderPaths = new Set();
+      (function walk(ns) { for (const n of ns) if (n.isFolder) { folderPaths.add(n.path); walk(n.children); } })(tree);
+      for (const p of Array.from(cfgCollapsed)) if (!folderPaths.has(p)) cfgCollapsed.delete(p);
       $('cfgVersion').textContent = 'v' + cfg.version;
       if (!tree.length) { cfgFocusPath = null; $('cfgTree').innerHTML = '<div class="tree-empty">No DB targets yet — add one.</div>'; return; }
       // Keep the roving-focus anchor on a still-visible row; a save/collapse can retire the old
@@ -1718,6 +1729,9 @@
         if (destParent === from || destParent.startsWith(from + '/')) return null;
         let index, noop = false;
         if (kind === 'into') {
+          // Dropping a node onto the folder it is already directly in changes nothing — no-op
+          // rather than pointlessly re-append (and PUT) it to the end of its own group.
+          if (destParent === dragParent) noop = true;
           index = cfgSiblingNames(destParent).length; // append into the folder
         } else {
           let order = cfgSiblingNames(destParent);

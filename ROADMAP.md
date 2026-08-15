@@ -200,8 +200,6 @@ All remaining 2026-08-14 code-review items are **done**, shipped in **v1.0.2** (
   the **v1.0.2** publish (the `v1.0.1` tag was superseded — see CHANGELOG).
 
 ### Remaining follow-ups (non-blocking; none critical/high)
-- **Config-tab tree nits:** prune stale `cfgCollapsed` paths after a node is removed/renamed; a drop
-  onto a node's own parent should no-op; an emptied folder still renders as a folder, not a leaf.
 - **Caddy image (#38):** the runtime `apk --upgrade c-ares/curl` + the three `xcaddy --with
   golang.org/x/net|x/text|grpc` floors are interim patches over a stale pinned base — drop them once
   `caddy:2.11-alpine` (or a newer Caddy release) ships the fixes natively, and bump the digest instead.
