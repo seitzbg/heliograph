@@ -25,18 +25,12 @@ from a steady fiber link to a flaky, lossy one:
 The **live dashboard** — the Overview ranks the worst targets by loss/latency/jitter and reports
 per-target availability:
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/img/dashboard-overview-dark.png">
-  <img alt="Heliograph dashboard — worst targets and availability" src="docs/img/dashboard-overview.png">
-</picture>
+![Heliograph dashboard — worst targets and availability](docs/img/dashboard-overview-dark.png)
 
 **Graphs** is the per-target grid (filter the tree, click a target for all four time ranges, then
 click a graph to zoom):
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/img/dashboard-graphs-dark.png">
-  <img alt="Heliograph per-target graph grid" src="docs/img/dashboard-graphs.png">
-</picture>
+![Heliograph per-target graph grid](docs/img/dashboard-graphs-dark.png)
 
 The **Config** tab edits DB-backed targets as a drag-to-reorder tree (merged live with the YAML
 config), and the **Vantages** panel manages federation agent keys — both behind the admin password:
