@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/seitzbg/heliograph/internal/vantage"
 )
@@ -353,5 +354,34 @@ func TestListVantagesZeroCountWhenVantageNotAssigned(t *testing.T) {
 	}
 	if _, present := resp.Vantages[0]["targets"]; !present {
 		t.Errorf("targets field absent when TargetVantages is set; want present with value 0")
+	}
+}
+
+func TestLoginCookieHonorsSessionTTL(t *testing.T) {
+	// Default (unset TTL) -> 12h on both the cookie Max-Age and the signed token.
+	srv, _ := adminServer("hunter2")
+	c := login(t, srv.Routes(), "hunter2")
+	if c.MaxAge != int((12 * time.Hour).Seconds()) {
+		t.Errorf("default cookie MaxAge = %d, want %d (12h)", c.MaxAge, int((12 * time.Hour).Seconds()))
+	}
+	if !verifySession(srv.AdminKey, c.Value, time.Now().Add(12*time.Hour-time.Minute)) {
+		t.Error("default token should still be valid just under 12h")
+	}
+	if verifySession(srv.AdminKey, c.Value, time.Now().Add(12*time.Hour+time.Minute)) {
+		t.Error("default token should be expired just over 12h")
+	}
+
+	// A configured TTL drives both the Max-Age and the token expiry.
+	srv2, _ := adminServer("hunter2")
+	srv2.AdminSessionTTL = 24 * time.Hour
+	c2 := login(t, srv2.Routes(), "hunter2")
+	if c2.MaxAge != int((24 * time.Hour).Seconds()) {
+		t.Errorf("configured cookie MaxAge = %d, want %d (24h)", c2.MaxAge, int((24 * time.Hour).Seconds()))
+	}
+	if !verifySession(srv2.AdminKey, c2.Value, time.Now().Add(24*time.Hour-time.Minute)) {
+		t.Error("configured token should still be valid just under 24h")
+	}
+	if verifySession(srv2.AdminKey, c2.Value, time.Now().Add(24*time.Hour+time.Minute)) {
+		t.Error("configured token should be expired just over 24h")
 	}
 }

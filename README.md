@@ -192,7 +192,9 @@ by API key, everything else behind Basic Auth (`DASH_USER` / `DASH_PASSWORD_HASH
 `SMOKED_ADMIN_PASSWORD` in `.env` to enable the Config/Vantages admin GUI, and generate an
 independent persistent cookie-signing secret with `openssl rand -hex 32` as
 `SMOKED_ADMIN_SESSION_KEY`. If that key is omitted, login remains secure but sessions end whenever
-the collector restarts. Over the proxy's TLS, the admin session cookie works remotely. smoked's own
+the collector restarts. A login stays valid for 12 hours by default; set `SMOKED_ADMIN_SESSION_TTL`
+to any Go duration (e.g. `24h`, `168h`, `30m`, minimum `1m`) to lengthen or shorten it. Over the
+proxy's TLS, the admin session cookie works remotely. smoked's own
 `127.0.0.1:8087` stays available **on
 the hub itself only** — it binds loopback, so it is not reachable from other LAN hosts; reach it
 remotely through the proxy or an SSH tunnel, never by rebinding it to `0.0.0.0` (the read API is

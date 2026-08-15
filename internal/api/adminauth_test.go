@@ -60,3 +60,32 @@ func TestSessionSignVerify(t *testing.T) {
 		t.Error("garbage token accepted")
 	}
 }
+
+func TestParseAdminSessionTTL(t *testing.T) {
+	valid := []struct {
+		in   string
+		want time.Duration
+	}{
+		{"12h", 12 * time.Hour},
+		{"24h", 24 * time.Hour},
+		{"30m", 30 * time.Minute},
+		{"168h", 168 * time.Hour},
+		{" 1h ", time.Hour}, // trimmed
+		{"1m", time.Minute}, // exactly the floor
+	}
+	for _, c := range valid {
+		got, err := ParseAdminSessionTTL(c.in)
+		if err != nil {
+			t.Errorf("ParseAdminSessionTTL(%q) unexpected error: %v", c.in, err)
+			continue
+		}
+		if got != c.want {
+			t.Errorf("ParseAdminSessionTTL(%q) = %v, want %v", c.in, got, c.want)
+		}
+	}
+	for _, in := range []string{"", "0", "30", "59s", "-5m", "garbage", "12"} {
+		if d, err := ParseAdminSessionTTL(in); err == nil {
+			t.Errorf("ParseAdminSessionTTL(%q) = %v, want error", in, d)
+		}
+	}
+}

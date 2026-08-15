@@ -14,6 +14,29 @@ import (
 
 const adminSessionKeyBytes = 32
 
+// DefaultAdminSessionTTL is how long an admin login stays valid when SMOKED_ADMIN_SESSION_TTL is
+// unset — both the signed token's expiry and the cookie's Max-Age.
+const DefaultAdminSessionTTL = 12 * time.Hour
+
+// minAdminSessionTTL guards against a fat-fingered tiny value (e.g. "30" read as 30ns, or "1s")
+// that would log an operator out almost immediately. There is no upper bound: a long-lived
+// session is the operator's own security trade-off, and the HMAC token carries its own expiry.
+const minAdminSessionTTL = time.Minute
+
+// ParseAdminSessionTTL parses the admin session lifetime supplied through SMOKED_ADMIN_SESSION_TTL.
+// It accepts any Go duration string (e.g. "12h", "24h", "30m", "168h") and requires at least one
+// minute, so a Compose/K8s deployment can lengthen or shorten the login lifetime via `environment:`.
+func ParseAdminSessionTTL(s string) (time.Duration, error) {
+	d, err := time.ParseDuration(strings.TrimSpace(s))
+	if err != nil {
+		return 0, fmt.Errorf("must be a Go duration like 12h, 24h, or 30m: %w", err)
+	}
+	if d < minAdminSessionTTL {
+		return 0, fmt.Errorf("must be at least %s, got %s", minAdminSessionTTL, d)
+	}
+	return d, nil
+}
+
 // ParseAdminSessionKey decodes the independent, persistent session-signing secret supplied through
 // SMOKED_ADMIN_SESSION_KEY. Requiring exactly 32 random bytes (64 hex characters) keeps a weak human
 // password out of the HMAC key: otherwise any captured <payload>.<signature> cookie would be a fast

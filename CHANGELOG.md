@@ -28,6 +28,10 @@ All notable changes to **Heliograph** are recorded here. The format follows
   Paragraph text keeps its own readable-width cap.
 
 ### Added
+- **Configurable admin session lifetime** via `SMOKED_ADMIN_SESSION_TTL`. A login stays valid for
+  12 hours by default; set the env var to any Go duration (`24h`, `168h`, `30m`, …, minimum `1m`) to
+  lengthen or shorten both the signed token's expiry and the cookie's `Max-Age`. An unparseable or
+  sub-minute value is rejected at startup.
 - **Choose how many graphs per row** on the Graphs tab. A **Columns** control in the legend
   (`Auto · 2 · 3 · 4 · 6`) sets the grid width: `Auto` fits as many as the viewport allows (the
   default), while a fixed count caps the columns but never shrinks a graph below a ~360px minimum —
