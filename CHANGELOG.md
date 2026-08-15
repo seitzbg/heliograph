@@ -17,6 +17,9 @@ All notable changes to **Heliograph** are recorded here. The format follows
 - **Clearer, scrollable Config modals.** Each field's label now sits above a full-width control
   instead of labels and inputs flowing inline and wrapping, and a modal taller than the viewport
   scrolls internally so Save stays reachable; save errors show inline in the open modal.
+- **Classic top bar.** Navigation and controls moved into a single bar across the top — brand ·
+  tabs · theme · admin — with the title/description below it, instead of a hero block with the
+  theme control floating in the corner and login buried inside tabs.
 
 ### Added
 - **`SMOKED_WEBHOOK_URL` environment fallback** for the generic `-webhook` notifier, matching the
@@ -26,6 +29,11 @@ All notable changes to **Heliograph** are recorded here. The format follows
   `DNS` — with optional group-level Vantages/Alerts inherited by every child. A group can't be empty
   (the config validator rejects a node with no host and no children), so it is created with its first
   targets; add more later with the folder's `+`.
+- **Global admin login/logout in the top bar.** One shared login modal — plus an "Admin · Log out"
+  indicator — replaces the separate password forms that lived inside the Config and Vantages tabs;
+  when signed out those tabs point to the top-bar control. New `POST /api/admin/logout` (clears the
+  session cookie, which is HttpOnly so JS can't) and `GET /api/admin/session` (a whoami probe that
+  drives the bar's Log in / Admin state on every tab).
 
 ### Fixed
 - **Config-tab tree edge cases.** An emptied folder (its last child removed or moved out) stays a

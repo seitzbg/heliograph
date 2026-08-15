@@ -1268,24 +1268,15 @@
           '<button class="vadmin-btn" data-revoke="' + nm + '">Revoke</button></td></tr>';
       }).join('');
     }
-    async function renderVantages(opts) {
-      const afterLogin = !!(opts && opts.afterLogin);
+    async function renderVantages() {
       let r;
       try { r = await fetch('/api/admin/vantages', { cache: 'no-store' }); }
       catch (e) { vShow('vantError'); return; }
       const mode = Dash.adminMode(r.status);
       if (mode === 'disabled') { vShow('vantDisabled'); return; }
       if (mode === 'error') { vShow('vantError'); return; }
-      if (mode === 'login') {
-        vShow('vantLogin');
-        // Secure-cookie probe: a 204 login followed by a 401 here means the session cookie
-        // didn't stick (plain-HTTP LAN, not a secure context). Make that legible.
-        $('vantLoginErr').textContent = afterLogin
-          ? "Login didn't persist — the admin session needs a secure context (HTTPS via the proxy, or localhost). You are on " + location.origin + '.'
-          : '';
-        if (!afterLogin) $('vantPass').focus();
-        return;
-      }
+      // Auth is handled by the top-bar Log in control; keep the bar in sync and point there.
+      if (mode === 'login') { refreshAdminState(); vShow('vantLogin'); return; }
       // mode === 'list'
       let data;
       try { data = await r.json(); } catch (e) { vShow('vantError'); return; }
@@ -1294,22 +1285,6 @@
       vShow('vantList');
     }
     $('vantRetry').addEventListener('click', () => renderVantages());
-    $('vantLogin').addEventListener('submit', async (e) => {
-      e.preventDefault();
-      $('vantLoginErr').textContent = '';
-      const pass = $('vantPass').value;
-      $('vantPass').value = ''; // clear immediately — don't leave the password in the field
-      let lr;
-      try {
-        lr = await fetch('/api/admin/login', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ password: pass }),
-        });
-      } catch (err) { $('vantLoginErr').textContent = 'Network error.'; return; }
-      if (lr.status === 401) { $('vantLoginErr').textContent = 'Invalid password.'; return; }
-      if (lr.status !== 204) { $('vantLoginErr').textContent = 'Login failed (HTTP ' + lr.status + ').'; return; }
-      renderVantages({ afterLogin: true });
-    });
     function reportMintError(isRegen, msg) {
       if (isRegen) window.alert('Regenerate failed: ' + msg);
       else $('vantAddErr').textContent = msg;
@@ -1536,22 +1511,15 @@
         if (el.getAttribute('data-path') === path) { el.focus(); return; }
       }
     }
-    async function renderConfig(opts) {
-      const afterLogin = !!(opts && opts.afterLogin);
+    async function renderConfig() {
       let r;
       try { r = await fetch('/api/admin/config', { cache: 'no-store' }); }
       catch (e) { cShow('cfgError'); return; }
       const mode = Dash.adminMode(r.status);
       if (mode === 'disabled') { cShow('cfgDisabled'); return; }
       if (mode === 'error') { cShow('cfgError'); return; }
-      if (mode === 'login') {
-        cShow('cfgLogin');
-        $('cfgLoginErr').textContent = afterLogin
-          ? "Login didn't persist — the admin session needs a secure context (HTTPS via the proxy, or localhost). You are on " + location.origin + '.'
-          : '';
-        if (!afterLogin) $('cfgPass').focus();
-        return;
-      }
+      // Auth is handled by the top-bar Log in control; keep the bar in sync and point there.
+      if (mode === 'login') { refreshAdminState(); cShow('cfgLogin'); return; }
       let data;
       try { data = await r.json(); } catch (e) { cShow('cfgError'); return; }
       cfg.version = data.version || 0;
@@ -1560,19 +1528,53 @@
       cShow('cfgList');
     }
     $('cfgRetry').addEventListener('click', () => renderConfig());
-    $('cfgLogin').addEventListener('submit', async (e) => {
+    // ---- Top-bar admin auth: one shared login modal + a session probe driving the bar's
+    // Log in / Admin·Log out / hidden(disabled) state on every tab. The session endpoint is read
+    // by raw status (204 authed, 401 logged out, 404 admin disabled), not Dash.adminMode. ----
+    function setAdminBar(state) { // 'in' | 'out' | 'disabled' (disabled hides both controls)
+      $('adminAcct').classList.toggle('hidden', state !== 'in');
+      $('adminLoginBtn').classList.toggle('hidden', state !== 'out');
+    }
+    async function refreshAdminState() {
+      let st = 0;
+      try { st = (await fetch('/api/admin/session', { cache: 'no-store' })).status; } catch (e) { st = 0; }
+      setAdminBar(st === 204 ? 'in' : st === 404 ? 'disabled' : 'out');
+      return st;
+    }
+    function rerenderActiveAdminTab() {
+      if (!$('viewConfig').classList.contains('hidden')) renderConfig();
+      else if (!$('viewVantages').classList.contains('hidden')) renderVantages();
+    }
+    function openAdminLogin() { $('adminLoginErr').textContent = ''; $('adminPass').value = ''; $('adminLoginModal').classList.remove('hidden'); $('adminPass').focus(); }
+    function closeAdminLogin() { $('adminLoginModal').classList.add('hidden'); $('adminPass').value = ''; $('adminLoginErr').textContent = ''; }
+    $('adminLoginBtn').addEventListener('click', openAdminLogin);
+    $('adminLoginCancel').addEventListener('click', closeAdminLogin);
+    $('adminLoginModal').addEventListener('click', (e) => { if (e.target === $('adminLoginModal')) closeAdminLogin(); });
+    $('adminLoginForm').addEventListener('submit', async (e) => {
       e.preventDefault();
-      $('cfgLoginErr').textContent = '';
-      const pass = $('cfgPass').value;
-      $('cfgPass').value = '';
+      $('adminLoginErr').textContent = '';
+      const pass = $('adminPass').value;
+      $('adminPass').value = ''; // don't leave the password in the field
       let lr;
-      try {
-        lr = await fetch('/api/admin/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: pass }) });
-      } catch (err) { $('cfgLoginErr').textContent = 'Network error.'; return; }
-      if (lr.status === 401) { $('cfgLoginErr').textContent = 'Invalid password.'; return; }
-      if (lr.status !== 204) { $('cfgLoginErr').textContent = 'Login failed (HTTP ' + lr.status + ').'; return; }
-      renderConfig({ afterLogin: true });
+      try { lr = await fetch('/api/admin/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: pass }) }); }
+      catch (err) { $('adminLoginErr').textContent = 'Network error.'; return; }
+      if (lr.status === 401) { $('adminLoginErr').textContent = 'Invalid password.'; return; }
+      if (lr.status !== 204) { $('adminLoginErr').textContent = 'Login failed (HTTP ' + lr.status + ').'; return; }
+      // Secure-cookie probe: on plain-HTTP LAN the Secure cookie won't stick, so a 204 login is
+      // followed by a 401 session — surface that rather than silently staying logged out.
+      if (await refreshAdminState() !== 204) {
+        $('adminLoginErr').textContent = "Login didn't persist — the admin session needs a secure context (HTTPS via the proxy, or localhost). You are on " + location.origin + '.';
+        return;
+      }
+      closeAdminLogin();
+      rerenderActiveAdminTab();
     });
+    $('adminLogoutBtn').addEventListener('click', async () => {
+      try { await fetch('/api/admin/logout', { method: 'POST' }); } catch (e) { /* ignore */ }
+      await refreshAdminState();
+      rerenderActiveAdminTab();
+    });
+    refreshAdminState(); // set the bar's admin control on load, independent of the current tab
 
     // Probe kinds for the modal's dropdown (fetched once, lazily).
     let cfgProbeKinds = null;
