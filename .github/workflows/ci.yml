@@ -18,7 +18,7 @@ on:
     branches: [main]
 
 # Least-privilege DEFAULT: read-only. Package-write is granted narrowly, at job scope, only to the
-# publishing job (build-image) — and only its non-PR runs actually push. The test jobs stay read-only.
+# publishing job (publish-image) — and only its non-PR runs actually push. The test jobs stay read-only.
 permissions:
   contents: read
 
@@ -251,9 +251,10 @@ jobs:
   # Publish the collector image to GHCR + attach a signed build-provenance attestation (a verifiable
   # source-ref -> image-digest mapping). NON-PR ONLY, and the ONLY job with write scopes — so the PR
   # build above never holds a token that can publish. It does NOT rebuild: it pushes the exact OCI
-  # archive build-image scanned (via skopeo, which preserves the manifest digest), and asserts the
-  # pushed digest equals the scanned digest before attesting — so the scan, the tags, and the
-  # attestation all describe one and the same image (CODE_REVIEW M1).
+  # archive build-image scanned. Skopeo is required to preserve its digest into a staging tag,
+  # which is verified and attested, then addressed immutably by digest BEFORE any public branch /
+  # release / SHA alias is changed. Every promoted tag is individually preservation-gated and
+  # verified, so the scan, every tag, and the attestation describe one image (CODE_REVIEW M1/M4).
   publish-image:
     needs: [build-image]
     if: github.event_name != 'pull_request'
@@ -287,38 +288,55 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Install skopeo
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends skopeo
-      # Push the SCANNED bytes verbatim to every release tag. skopeo copies the OCI archive without
-      # re-building or re-compressing, so the registry manifest digest matches the archive's.
-      - name: Push scanned archive to all tags
+      # First copy to a commit-specific candidate. --preserve-digests makes conversion/recompression
+      # a hard failure, and this check happens before any branch/release/SHA alias is touched.
+      - name: Stage and verify scanned image
+        id: candidate
         env:
-          TAGS: ${{ steps.meta.outputs.tags }}
+          IMAGE: ghcr.io/${{ github.repository }}
+          CANDIDATE: ghcr.io/${{ github.repository }}:candidate-${{ github.sha }}
         run: |
-          printf '%s\n' "$TAGS" | while read -r tag; do
-            [ -z "$tag" ] && continue
-            echo "pushing $tag"
-            skopeo copy --all "oci-archive:/tmp/artifacts/collector-image.tar" "docker://$tag"
-          done
-      # Assert the published digest is EXACTLY the one build-image scanned — the gate that ties the
-      # blocking scan to the released artifact (CODE_REVIEW M1). Any mismatch fails the release.
-      - name: Verify published digest == scanned digest
-        id: digest
-        env:
-          TAGS: ${{ steps.meta.outputs.tags }}
-        run: |
-          scanned=$(cat /tmp/artifacts/image-digest.txt)
-          first_tag=$(printf '%s\n' "$TAGS" | head -n1)
-          pushed=$(skopeo inspect --format '{{.Digest}}' "docker://$first_tag")
-          echo "scanned=$scanned pushed=$pushed"
-          if [ "$scanned" != "$pushed" ]; then
-            echo "::error::published digest $pushed != scanned digest $scanned — the released image was not the scanned one"; exit 1
+          scanned=$(tr -d '\n' < /tmp/artifacts/image-digest.txt)
+          skopeo copy --all --preserve-digests --digestfile /tmp/candidate-digest.txt \
+            "oci-archive:/tmp/artifacts/collector-image.tar" "docker://$CANDIDATE"
+          copied=$(tr -d '\n' < /tmp/candidate-digest.txt)
+          staged=$(skopeo inspect --format '{{.Digest}}' "docker://$CANDIDATE")
+          echo "scanned=$scanned copied=$copied staged=$staged"
+          if [ "$copied" != "$scanned" ] || [ "$staged" != "$scanned" ]; then
+            echo "::error::candidate digest differs from scanned digest $scanned; release aliases were not changed"; exit 1
           fi
-          echo "digest=$pushed" >> "$GITHUB_OUTPUT"
-      - name: Attest build provenance
+          echo "ref=$IMAGE@$scanned" >> "$GITHUB_OUTPUT"
+          echo "digest=$scanned" >> "$GITHUB_OUTPUT"
+      # Attest the verified immutable candidate before release aliases move. If attestation fails,
+      # no branch/release/SHA tag has changed; if a later promotion fails part-way, every tag that
+      # did move still points to this already-attested digest.
+      - name: Attest verified candidate
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-name: ghcr.io/${{ github.repository }}
-          subject-digest: ${{ steps.digest.outputs.digest }}
+          subject-digest: ${{ steps.candidate.outputs.digest }}
           push-to-registry: true
+      # Promote only from the verified registry candidate. Each destination copy must preserve the
+      # digest and each resulting tag is inspected, so no later tag can silently diverge from the
+      # artifact that passed the blocking scan.
+      - name: Promote verified candidate to all tags
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+          CANDIDATE: ${{ steps.candidate.outputs.ref }}
+          SCANNED: ${{ steps.candidate.outputs.digest }}
+        run: |
+          while IFS= read -r tag; do
+            [ -z "$tag" ] && continue
+            echo "promoting $CANDIDATE -> $tag"
+            skopeo copy --all --preserve-digests --digestfile /tmp/tag-digest.txt \
+              "docker://$CANDIDATE" "docker://$tag"
+            copied=$(tr -d '\n' < /tmp/tag-digest.txt)
+            pushed=$(skopeo inspect --format '{{.Digest}}' "docker://$tag")
+            echo "tag=$tag copied=$copied pushed=$pushed"
+            if [ "$copied" != "$SCANNED" ] || [ "$pushed" != "$SCANNED" ]; then
+              echo "::error::$tag digest differs from scanned digest $SCANNED"; exit 1
+            fi
+          done <<< "$TAGS"
 
   # Build the bundled Caddy reverse-proxy image (Caddy.Dockerfile: xcaddy + DNS-provider plugins), so
   # a broken plugin pin or Dockerfile is caught in CI, and scan it. Not published (the federation

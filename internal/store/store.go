@@ -167,7 +167,10 @@ type AvailabilityAller interface {
 // cutoff = the newest round timestamp it has already seen (its watermark) it
 // transfers only rounds newer than that, not the whole window every tick. Strictly
 // after (not at) cutoff, so an incremental fetch never re-sends the watermark round.
-// Targets with no rounds after cutoff are omitted; returned oldest->newest per target.
+// `targets` is the bounded configured catalog to read; targets with no rounds after cutoff are
+// omitted, and returned rounds are oldest->newest per target. Supplying the catalog keeps a
+// persistent implementation from discovering targets by scanning raw samples before the bounded
+// per-target reads.
 // The error lets a backing-store failure surface as an API 503, not a false-empty view.
 //
 // maxTotal bounds the TOTAL rounds returned across all targets (a global budget on top of any
@@ -175,7 +178,7 @@ type AvailabilityAller interface {
 // bulk read over many targets can't materialize an unbounded result. The bool reports whether that
 // bound (or a per-target cap) truncated the result (CODE_REVIEW M5).
 type SeriesAller interface {
-	SeriesAll(ctx context.Context, vantage string, cutoff time.Time, maxTotal int) (rounds map[string][]scheduler.Outcome, truncated bool, err error)
+	SeriesAll(ctx context.Context, vantage string, targets []string, cutoff time.Time, maxTotal int) (rounds map[string][]scheduler.Outcome, truncated bool, err error)
 }
 
 // boundSeriesTotal trims all[*] in place so the total rounds across every target does not exceed
@@ -412,13 +415,20 @@ func (s *MemStore) LatestAll(vantage string) (map[string]scheduler.Outcome, erro
 // oldest->newest (history is kept in insertion order). Best-effort like History,
 // bounded by the in-memory cap; production uses the pgstore implementation. Targets
 // with no rounds after cutoff are omitted.
-func (s *MemStore) SeriesAll(_ context.Context, vantage string, cutoff time.Time, maxTotal int) (map[string][]scheduler.Outcome, bool, error) {
+func (s *MemStore) SeriesAll(_ context.Context, vantage string, targets []string, cutoff time.Time, maxTotal int) (map[string][]scheduler.Outcome, bool, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	want := VantageOrDefault(vantage)
+	var allowed map[string]bool
+	if targets != nil {
+		allowed = make(map[string]bool, len(targets))
+		for _, target := range targets {
+			allowed[target] = true
+		}
+	}
 	out := make(map[string][]scheduler.Outcome)
 	for k, h := range s.history {
-		if k.vantage != want {
+		if k.vantage != want || (allowed != nil && !allowed[k.target]) {
 			continue
 		}
 		var rounds []scheduler.Outcome

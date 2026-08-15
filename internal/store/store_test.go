@@ -156,7 +156,7 @@ func TestMemStoreSeriesAll(t *testing.T) {
 	add("b", 3*time.Minute)
 
 	// cutoff at t0+1m: strictly-after keeps a@2m and b@3m only.
-	got, _, err := s.SeriesAll(context.Background(), "", t0.Add(1*time.Minute), 0) // 0 = unbounded
+	got, _, err := s.SeriesAll(context.Background(), "", nil, t0.Add(1*time.Minute), 0) // 0 = unbounded
 	if err != nil {
 		t.Fatalf("SeriesAll: %v", err)
 	}
@@ -168,7 +168,7 @@ func TestMemStoreSeriesAll(t *testing.T) {
 	}
 
 	// zero cutoff -> everything, oldest->newest per target.
-	all, _, _ := s.SeriesAll(context.Background(), "", time.Time{}, 0)
+	all, _, _ := s.SeriesAll(context.Background(), "", nil, time.Time{}, 0)
 	if len(all["a"]) != 3 {
 		t.Fatalf("a full len = %d, want 3", len(all["a"]))
 	}
@@ -179,9 +179,21 @@ func TestMemStoreSeriesAll(t *testing.T) {
 	}
 
 	// cutoff past everything -> no targets in the map.
-	none, _, _ := s.SeriesAll(context.Background(), "", t0.Add(1*time.Hour), 0)
+	none, _, _ := s.SeriesAll(context.Background(), "", nil, t0.Add(1*time.Hour), 0)
 	if len(none) != 0 {
 		t.Errorf("past-cutoff map len = %d, want 0", len(none))
+	}
+
+	// A supplied application catalog excludes historical rows for removed targets.
+	configured, _, err := s.SeriesAll(context.Background(), "", []string{"a"}, time.Time{}, 0)
+	if err != nil {
+		t.Fatalf("SeriesAll configured catalog: %v", err)
+	}
+	if len(configured["a"]) != 3 {
+		t.Errorf("configured a rounds = %d, want 3", len(configured["a"]))
+	}
+	if _, ok := configured["b"]; ok {
+		t.Error("configured catalog returned removed target b")
 	}
 }
 
@@ -197,7 +209,7 @@ func TestMemStoreSeriesAllGlobalBound(t *testing.T) {
 		}
 	}
 	// maxTotal=30 across 3 targets -> each keeps its 10 newest; truncated.
-	got, truncated, err := s.SeriesAll(context.Background(), "", base.Add(-time.Second), 30)
+	got, truncated, err := s.SeriesAll(context.Background(), "", nil, base.Add(-time.Second), 30)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -217,7 +229,7 @@ func TestMemStoreSeriesAllGlobalBound(t *testing.T) {
 	if total > 30 {
 		t.Fatalf("bounded total = %d, want <= 30", total)
 	}
-	if _, tr, _ := s.SeriesAll(context.Background(), "", base.Add(-time.Second), 0); tr {
+	if _, tr, _ := s.SeriesAll(context.Background(), "", nil, base.Add(-time.Second), 0); tr {
 		t.Fatal("maxTotal=0 (unbounded) must not truncate")
 	}
 }

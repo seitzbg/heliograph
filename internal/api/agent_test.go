@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/seitzbg/heliograph/internal/agentwire"
 	"github.com/seitzbg/heliograph/internal/federation"
 	"github.com/seitzbg/heliograph/internal/model"
 	"github.com/seitzbg/heliograph/internal/scheduler"
@@ -182,6 +183,30 @@ func TestIngestUsesIngestCommitWhenSet(t *testing.T) {
 	}
 	if onIngest != 0 {
 		t.Fatalf("fallback OnIngest must not run when IngestCommit is set, ran %d times", onIngest)
+	}
+}
+
+// A reload can drop snapshot-validated rounds inside IngestCommit. Those rounds must be reported
+// as dropped, not accepted merely because they passed the handler's earlier assignment snapshot.
+func TestIngestReportsCommitTimeReloadDrops(t *testing.T) {
+	srv := ingestServer(&fakeIngester{})
+	srv.IngestCommit = func(_ context.Context, out []scheduler.Outcome) ([]scheduler.Outcome, error) {
+		if len(out) != 1 {
+			t.Fatalf("IngestCommit got %d rounds, want 1", len(out))
+		}
+		return nil, nil // live runtime redefined/removed the target before the commit
+	}
+	w := postResults(t, srv,
+		fmt.Sprintf(`{"results":[{"target":"cf","ts":%q,"pings":1,"rtts":[0.01]}]}`, recentTS()))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body)
+	}
+	var resp agentwire.ResultsResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Accepted != 0 || resp.Dropped != 1 {
+		t.Fatalf("commit-time drop counts = %+v, want accepted=0 dropped=1", resp)
 	}
 }
 
@@ -378,10 +403,14 @@ func TestIngestReplayStoredAndEvaluatedOnce(t *testing.T) {
 // counted per vantage on /metrics so an operator can watch a rolling agent upgrade complete —
 // the counter stops rising — rather than relying on a single process-wide log line (#2).
 func TestIngestMissingFingerprintMetric(t *testing.T) {
-	srv := ingestServer(&fakeIngester{})
+	ing := &fakeIngester{}
+	srv := ingestServer(ing)
 	body := fmt.Sprintf(`{"results":[{"target":"cf","ts":%q,"pings":1,"rtts":[0.01]}]}`, recentTS())
 	if w := postResults(t, srv, body); w.Code != 200 { // no "fingerprint" field
 		t.Fatalf("status=%d body=%s", w.Code, w.Body)
+	}
+	if len(ing.got) != 1 || ing.got[0].Fingerprint == "" {
+		t.Fatalf("lenient missing-fingerprint round must carry the hub snapshot identity to commit, got %+v", ing.got)
 	}
 	r := httptest.NewRequest("GET", "/metrics", nil)
 	w := httptest.NewRecorder()

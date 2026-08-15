@@ -391,6 +391,14 @@ func TestCommitRemoteDropsReloadRedefinedTarget(t *testing.T) {
 		t.Fatalf("current-identity round must alert, got %d events", cap.n)
 	}
 
+	// A pre-fingerprint agent is accepted leniently by the handler, but the handler stamps the
+	// OLD snapshot's computed identity before calling commitRemote. A reload that redefines the
+	// target must therefore drop it too; empty on the wire no longer means empty at this boundary.
+	fromLegacyAgent := lost(time.Unix(1_700_000_090, 0), "sha256:old")
+	if accepted, err := rtNew.commitRemote(ctx, mem, []scheduler.Outcome{fromLegacyAgent}); err != nil || len(accepted) != 0 {
+		t.Fatalf("snapshot-stamped legacy-agent round must be dropped after redefine, accepted=%d err=%v", len(accepted), err)
+	}
+
 	// A round for a target a reload REMOVED entirely (absent from targetFP) is dropped by the
 	// membership gate before the store write. An EMPTY-fingerprint round exercises that gate in
 	// isolation: fingerprintStale never flags an empty fingerprint, so only the membership check can

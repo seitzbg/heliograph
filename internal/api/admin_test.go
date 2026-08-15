@@ -147,6 +147,9 @@ func TestAdminSessionAndLogout(t *testing.T) {
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("session (no cookie) = %d, want 401", w.Code)
 	}
+	if w.Header().Get("Cache-Control") != "no-store" {
+		t.Errorf("unauthorized session response Cache-Control = %q, want no-store", w.Header().Get("Cache-Control"))
+	}
 
 	cookie := login(t, mux, "hunter2")
 
@@ -167,6 +170,9 @@ func TestAdminSessionAndLogout(t *testing.T) {
 	mux.ServeHTTP(w, r)
 	if w.Code != http.StatusNoContent {
 		t.Fatalf("logout = %d, want 204", w.Code)
+	}
+	if w.Header().Get("Cache-Control") != "no-store" {
+		t.Errorf("logout response Cache-Control = %q, want no-store", w.Header().Get("Cache-Control"))
 	}
 	var cleared *http.Cookie
 	for _, c := range w.Result().Cookies() {

@@ -2,6 +2,7 @@ package pgstore
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
@@ -10,10 +11,126 @@ func caggHasColumn(t *testing.T, s *PGStore, view, col string) bool {
 	t.Helper()
 	var ok bool
 	if err := s.pool.QueryRow(context.Background(),
-		`SELECT bool_or(column_name=$2) FROM information_schema.columns WHERE table_name=$1`, view, col).Scan(&ok); err != nil {
+		`SELECT bool_or(column_name=$2) FROM information_schema.columns
+		  WHERE table_schema=current_schema() AND table_name=$1`, view, col).Scan(&ok); err != nil {
 		t.Fatalf("column check %s.%s: %v", view, col, err)
 	}
 	return ok
+}
+
+func TestAggregateDefinitionCurrent(t *testing.T) {
+	hourly := `
+		SELECT time_bucket('01:00:00'::interval, samples.ts) AS bucket,
+		       samples.target, samples.vantage,
+		       avg(samples.median_seconds) AS median_avg,
+		       min(samples.median_seconds) AS median_min,
+		       max(samples.median_seconds) AS median_max,
+		       avg((samples.loss)::double precision /
+		           (NULLIF(samples.pings, 0))::double precision) AS loss_frac,
+		       count(*) AS rounds,
+		       count(samples.median_seconds) AS median_rounds
+		FROM samples
+		GROUP BY (time_bucket('01:00:00'::interval, samples.ts)),
+		         samples.target, samples.vantage;`
+	if !aggregateDefinitionCurrent(hourly, "hour") {
+		t.Fatal("current Timescale-style hourly definition was rejected")
+	}
+	qualified := strings.ReplaceAll(hourly, "samples.", `"monitoring"."samples".`)
+	if !aggregateDefinitionCurrent(qualified, "hour") {
+		t.Fatal("schema/table-qualified hourly definition was rejected")
+	}
+
+	daily := `
+		SELECT time_bucket('1 day', ts) AS bucket, target, vantage,
+		       avg(median_seconds) AS median_avg, min(median_seconds) AS median_min,
+		       max(median_seconds) AS median_max,
+		       avg(loss::float / NULLIF(pings, 0)) AS loss_frac,
+		       count(*) AS rounds, count(median_seconds) AS median_rounds
+		FROM samples GROUP BY time_bucket('1 day', ts), target, vantage`
+	if !aggregateDefinitionCurrent(daily, "day") {
+		t.Fatal("current source-style daily definition was rejected")
+	}
+
+	for name, definition := range map[string]string{
+		"wrong bucket":         strings.Replace(hourly, "01:00:00", "02:00:00", 2),
+		"wrong median average": strings.Replace(hourly, "avg(samples.median_seconds) AS median_avg", "max(samples.median_seconds) AS median_avg", 1),
+		"wrong loss function":  strings.Replace(hourly, "avg((samples.loss)", "sum((samples.loss)", 1),
+		"wrong median count":   strings.Replace(hourly, "count(samples.median_seconds) AS median_rounds", "count(*) AS median_rounds", 1),
+		"missing vantage group": strings.Replace(hourly,
+			"samples.target, samples.vantage;", "samples.target;", 1),
+		"target expression group": strings.Replace(hourly,
+			"samples.target, samples.vantage;", "lower(samples.target), samples.vantage;", 1),
+		"extra grouping dimension": strings.Replace(hourly,
+			"samples.target, samples.vantage;", "samples.probe, samples.target, samples.vantage;", 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if aggregateDefinitionCurrent(definition, "hour") {
+				t.Error("semantically stale definition was accepted")
+			}
+		})
+	}
+}
+
+// A current pair created by an older Heliograph has no application version marker. Startup must
+// validate and adopt those actual Timescale catalog definitions without dropping the relations —
+// a false negative here would unnecessarily destroy rollup history older than raw retention.
+func TestMigrateAggregatesAdoptsCurrentUnversionedViews(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	for _, q := range []string{
+		`DROP MATERIALIZED VIEW IF EXISTS samples_daily CASCADE`,
+		`DROP MATERIALIZED VIEW IF EXISTS samples_hourly CASCADE`,
+	} {
+		if _, err := s.pool.Exec(ctx, q); err != nil {
+			t.Fatalf("drop caggs: %v", err)
+		}
+	}
+	for _, i := range []int{0, 2} { // the hourly and daily CREATE statements
+		if _, err := s.pool.Exec(ctx, downsampleStmts[i]); err != nil {
+			t.Fatalf("create current aggregate: %v", err)
+		}
+	}
+	if _, err := s.pool.Exec(ctx, aggregateVersionSchema); err != nil {
+		t.Fatalf("create version catalog: %v", err)
+	}
+	if _, err := s.pool.Exec(ctx,
+		`DELETE FROM heliograph_aggregate_versions WHERE aggregate_name = ANY($1::text[])`,
+		[]string{"samples_hourly", "samples_daily"}); err != nil {
+		t.Fatalf("clear version markers: %v", err)
+	}
+
+	before := map[string]uint32{}
+	for _, spec := range aggregateSpecs {
+		var oid uint32
+		if err := s.pool.QueryRow(ctx,
+			`SELECT to_regclass(format('%I.%I', current_schema(), $1::text))::oid`, spec.name).
+			Scan(&oid); err != nil {
+			t.Fatalf("read %s OID: %v", spec.name, err)
+		}
+		before[spec.name] = oid
+	}
+	if err := s.EnableDownsampling(ctx); err != nil {
+		t.Fatalf("EnableDownsampling: %v", err)
+	}
+	for _, spec := range aggregateSpecs {
+		var after uint32
+		if err := s.pool.QueryRow(ctx,
+			`SELECT to_regclass(format('%I.%I', current_schema(), $1::text))::oid`, spec.name).
+			Scan(&after); err != nil {
+			t.Fatalf("read %s OID after adoption: %v", spec.name, err)
+		}
+		if after != before[spec.name] {
+			t.Errorf("%s was rebuilt despite a current definition: OID %d -> %d", spec.name, before[spec.name], after)
+		}
+		current, versioned, err := s.aggregateCurrent(ctx, spec)
+		if err != nil {
+			t.Fatalf("aggregateCurrent(%s): %v", spec.name, err)
+		}
+		if !current || !versioned {
+			t.Errorf("%s after adoption = current:%v versioned:%v, want true/true", spec.name, current, versioned)
+		}
+	}
 }
 
 // CODE_REVIEW M7: migrateAggregates must rebuild samples_daily when ITS shape is stale even if
@@ -79,5 +196,63 @@ func TestMigrateAggregatesRebuildsStaleDaily(t *testing.T) {
 	// Hourly must remain current after the pair rebuild.
 	if !caggHasColumn(t, s, "samples_hourly", "vantage") || !caggHasColumn(t, s, "samples_hourly", "median_rounds") {
 		t.Error("samples_hourly lost its shape after the rebuild")
+	}
+}
+
+// CODE_REVIEW L6: exposing all expected column names is not enough. A hand-created/future view
+// can retain that surface while changing bucket width or aggregate expressions. The application
+// version is tied to the relation OID, so this unversioned replacement must be inspected and the
+// pair rebuilt before startup trusts it.
+func TestMigrateAggregatesRebuildsSemanticDrift(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	for _, q := range []string{
+		`DROP MATERIALIZED VIEW IF EXISTS samples_daily CASCADE`,
+		`DROP MATERIALIZED VIEW IF EXISTS samples_hourly CASCADE`,
+	} {
+		if _, err := s.pool.Exec(ctx, q); err != nil {
+			t.Fatalf("drop caggs: %v", err)
+		}
+	}
+	if _, err := s.pool.Exec(ctx, downsampleStmts[0]); err != nil {
+		t.Fatalf("create current hourly: %v", err)
+	}
+	if _, err := s.pool.Exec(ctx, `
+		CREATE MATERIALIZED VIEW samples_daily
+		WITH (timescaledb.continuous, timescaledb.materialized_only = false) AS
+		SELECT time_bucket('2 days', ts) AS bucket, target, vantage,
+		       max(median_seconds) AS median_avg, min(median_seconds) AS median_min,
+		       max(median_seconds) AS median_max,
+		       avg(loss::float / NULLIF(pings, 0)) AS loss_frac,
+		       count(*) AS rounds, count(*) AS median_rounds
+		FROM samples GROUP BY bucket, target, vantage WITH NO DATA`); err != nil {
+		t.Fatalf("create semantic-drift daily: %v", err)
+	}
+	if _, err := s.pool.Exec(ctx, aggregateVersionSchema); err != nil {
+		t.Fatalf("create version catalog: %v", err)
+	}
+	if _, err := s.pool.Exec(ctx,
+		`DELETE FROM heliograph_aggregate_versions WHERE aggregate_name = ANY($1::text[])`,
+		[]string{"samples_hourly", "samples_daily"}); err != nil {
+		t.Fatalf("clear version markers: %v", err)
+	}
+	for _, col := range []string{"vantage", "median_rounds"} {
+		if !caggHasColumn(t, s, "samples_daily", col) {
+			t.Fatalf("precondition: drifted daily must still expose %s", col)
+		}
+	}
+
+	if err := s.EnableDownsampling(ctx); err != nil {
+		t.Fatalf("EnableDownsampling: %v", err)
+	}
+	for _, spec := range aggregateSpecs {
+		current, versioned, err := s.aggregateCurrent(ctx, spec)
+		if err != nil {
+			t.Fatalf("aggregateCurrent(%s): %v", spec.name, err)
+		}
+		if !current || !versioned {
+			t.Errorf("%s after rebuild = current:%v versioned:%v, want true/true", spec.name, current, versioned)
+		}
 	}
 }

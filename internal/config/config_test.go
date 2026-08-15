@@ -502,8 +502,24 @@ targets:
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	if _, err := c.Monitors(); err == nil {
-		t.Error("expected an error for two paths colliding to the same target name")
+	if _, err := c.Monitors(); err == nil || !strings.Contains(err.Error(), "cannot contain '/'") {
+		t.Errorf("expected a slash-key validation error, got %v", err)
+	}
+
+	// Reject a lone slash-containing key too: it need not collide to be unaddressable by the
+	// browser's slash-delimited Config-tree paths. Group-only keys are covered by the same walk.
+	lone, err := Parse([]byte(`
+probes: { FPing: {} }
+targets:
+  probe: FPing
+  children:
+    "site/check": { host: 1.1.1.1 }
+`))
+	if err != nil {
+		t.Fatalf("Parse lone slash key: %v", err)
+	}
+	if _, err := lone.Monitors(); err == nil || !strings.Contains(err.Error(), "cannot contain '/'") {
+		t.Errorf("expected lone slash key to be rejected, got %v", err)
 	}
 
 	// A host on the root node yields an empty target name.

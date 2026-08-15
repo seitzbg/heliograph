@@ -66,10 +66,10 @@ type Server struct {
 	// probe and round metrics — the webhook notifier wires its delivery counters here
 	// (a plain func so api needs no dependency on the alert package). nil = none.
 	ExtraMetrics func(*strings.Builder)
-	// Vantages, AdminPassword, AdminKey enable the admin key-management API. All three
-	// must be set (Vantages requires -dsn; AdminPassword is SMOKED_ADMIN_PASSWORD; AdminKey
-	// is a random per-process HMAC key). If AdminPassword is "" the admin routes are not
-	// registered at all — fail-closed.
+	// AdminPassword + AdminKey enable login/logout/session. AdminKey must be independent,
+	// high-entropy signing material (production loads SMOKED_ADMIN_SESSION_KEY, or generates a
+	// process-local fallback). Vantages additionally enables its key-management routes; ConfigGet /
+	// ConfigApply separately enable config CRUD. An empty password or key registers no admin routes.
 	Vantages      VantageAdmin
 	AdminPassword string
 	AdminKey      []byte
@@ -84,7 +84,9 @@ type Server struct {
 	// /api/targets lists a target even when it has no stored row for the requested vantage
 	// yet — e.g. a remote-only target the hub never probes locally (CODE_REVIEW #3 / P1-3).
 	// Without it, /api/targets shows only targets that already have a latest row, hiding
-	// remote-only targets from the tree and their deep links. nil = latest-only listing.
+	// remote-only targets from the tree and their deep links. It is also the required bounded
+	// target catalog for /api/series/all; that endpoint returns 503 when Configured is nil rather
+	// than falling back to raw-history target discovery.
 	Configured func() []model.Monitor
 	// VantageAuth, if set, gates the agent routes (requireAgent) behind an API-key check
 	// against the vantage key store. nil means the agent routes are not registered at
@@ -104,9 +106,11 @@ type Server struct {
 	// runtime's reload boundary, re-checking each outcome's target identity against the LIVE
 	// assignment first. This closes the window between the handler's snapshot validation and the
 	// store write in which a config reload could redefine a target and leave a stale round stored
-	// under the new name (CODE_REVIEW M4). It returns the newly-inserted rounds (the store dedups
-	// replays). nil ⇒ the handler falls back to AddResults + OnIngest (e.g. pure API tests).
-	IngestCommit func(ctx context.Context, outcomes []scheduler.Outcome) (inserted []scheduler.Outcome, err error)
+	// under the new name (CODE_REVIEW M4). It returns the rounds that survived that LIVE identity
+	// gate (including idempotent replays); the handler uses this to report commit-time reload drops
+	// accurately. Store deduplication and alerting over newly-inserted rows stay inside the callback.
+	// nil ⇒ the handler falls back to AddResults + OnIngest (e.g. pure API tests).
+	IngestCommit func(ctx context.Context, outcomes []scheduler.Outcome) (accepted []scheduler.Outcome, err error)
 	// RequireFingerprint, when true, makes agent ingest STRICT: a round with no measurement
 	// fingerprint (a pre-fingerprint agent) is dropped as a visible permanent drop instead of
 	// accepted. Default false keeps the lenient/compatible behavior (accepted + counted) so a
@@ -824,7 +828,7 @@ const maxGridWindow = 48 * time.Hour
 
 // maxSeriesAllTotalRounds bounds the TOTAL rounds /api/series/all serializes across all targets.
 // SeriesAll caps rows per target (20k), but a bulk request over many targets could still
-// materialize a huge response (1000 targets × 20k = 20M) — an authenticated memory/DoS sink on the
+// materialize a huge response (1000 targets × 20k = 20M) — an unauthenticated memory/DoS sink on the
 // response path. capSeriesAll trims to this budget, keeping the newest rounds of each target so
 // every target stays represented, and the handler surfaces `truncated` (CODE_REVIEW M5).
 const maxSeriesAllTotalRounds = 300_000
@@ -852,6 +856,33 @@ func capSeriesAll(all map[string][]scheduler.Outcome, max int) bool {
 		}
 	}
 	return trimmed
+}
+
+// seriesCatalog returns the bounded configured targets measured from vantage. A catalog is required:
+// falling back to Store.Keys would reintroduce an unbounded DISTINCT over persistent history on this
+// unauthenticated endpoint, which is exactly what the catalog-driven query is intended to remove.
+func (srv *Server) seriesCatalog(vantage string) ([]string, error) {
+	if srv.Configured == nil {
+		return nil, errors.New("configured target catalog unavailable")
+	}
+	want := store.VantageOrDefault(vantage)
+	seen := map[string]bool{}
+	var names []string
+	for _, m := range srv.Configured() {
+		vantages := m.Vantages
+		if len(vantages) == 0 {
+			vantages = []string{store.DefaultVantage}
+		}
+		for _, v := range vantages {
+			if v == want && !seen[m.Name] {
+				seen[m.Name] = true
+				names = append(names, m.Name)
+				break
+			}
+		}
+	}
+	sort.Strings(names)
+	return names, nil
 }
 
 // seriesAll returns recent per-round samples for every target in one response — the
@@ -897,7 +928,13 @@ func (srv *Server) seriesAll(w http.ResponseWriter, r *http.Request) {
 			cutoff = st
 		}
 	}
-	all, storeTruncated, err := sa.SeriesAll(r.Context(), vant, cutoff, maxSeriesAllTotalRounds)
+	catalog, err := srv.seriesCatalog(vant)
+	if err != nil {
+		slog.Error("series/all target catalog failed", "err", err)
+		http.Error(w, `{"error":"series unavailable"}`, http.StatusServiceUnavailable)
+		return
+	}
+	all, storeTruncated, err := sa.SeriesAll(r.Context(), vant, catalog, cutoff, maxSeriesAllTotalRounds)
 	if err != nil {
 		slog.Error("series/all query failed", "err", err)
 		http.Error(w, `{"error":"series unavailable"}`, http.StatusServiceUnavailable)
@@ -1191,6 +1228,7 @@ func (srv *Server) adminSession(w http.ResponseWriter, r *http.Request) {
 
 func (srv *Server) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
 		c, err := r.Cookie(adminCookie)
 		if err != nil || !verifySession(srv.AdminKey, c.Value, time.Now()) {
 			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)

@@ -108,8 +108,31 @@ func TestWebhookAbandonsPermanent4xx(t *testing.T) {
 	}
 }
 
-// 408 and 429 are the two 4xx codes that ARE transient: a 429 (rate-limited) must be retried,
-// not abandoned like a 400.
+func TestPermanentHTTPStatus(t *testing.T) {
+	tests := []struct {
+		code      int
+		permanent bool
+	}{
+		{http.StatusOK, false},
+		{http.StatusMovedPermanently, false},
+		{http.StatusBadRequest, true},
+		{http.StatusConflict, true},
+		{http.StatusRequestTimeout, false},
+		{http.StatusMisdirectedRequest, false},
+		{http.StatusLocked, false},
+		{http.StatusTooEarly, false},
+		{http.StatusTooManyRequests, false},
+		{http.StatusInternalServerError, false},
+	}
+	for _, tt := range tests {
+		if got := permanentHTTPStatus(tt.code); got != tt.permanent {
+			t.Errorf("permanentHTTPStatus(%d) = %v, want %v", tt.code, got, tt.permanent)
+		}
+	}
+}
+
+// A rate-limited delivery must be retried, not abandoned like a permanent 400. The complete
+// listener-free 4xx classification (including 425 Too Early) is covered above.
 func TestWebhookRetries429(t *testing.T) {
 	var attempts atomic.Int32
 	delivered := make(chan struct{}, 1)

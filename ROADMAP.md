@@ -180,22 +180,31 @@ Earlier merges: #34 vantage docker-compose generator · #35 band-panel "collecti
 #36 author-defined menu order (weight) · #37 Config-tab tree + drag-reorder · #38 hardening
 (M6 spool-alloc bound, M2 now-blocking Caddy scan, M8 build-time version injection).
 
-All remaining 2026-08-14 code-review items are **done**, shipped in **v1.0.2** (2026-08-14):
+The original 2026-08-14 items shipped in **v1.0.2**; the review of that release and its admin-top-bar
+follow-up found several edge cases, now fixed in **Unreleased**:
 - ✅ **M3** — SMTP notifier hardening: per-transaction deadline, bounded retry/backoff, explicit
   AUTH-not-offered error, in-flight cancel on drain (#40); permanent-failure no-retry — 5xx /
-  AUTH-not-offered (#42).
+  AUTH-not-offered (#42). Webhook 421/423/425 responses now remain retryable too (Unreleased).
 - ✅ **M4** — remote ingest validates + persists under the reload lock, so a reload can't straddle
-  validate and write (#41).
-- ✅ **M5 + L3** — `/api/series/all` bounded via an indexed per-target `LATERAL` top-N (work bound to
-  rows returned, EXPLAIN-verified), exact-cap truncation flag fixed (#44).
-- ✅ **M7** — aggregate-migration validates BOTH view shapes (`samples_hourly` + `samples_daily`) (#45).
+  validate and write (#41); legacy agents without fingerprints are snapshot-stamped and commit-time
+  drops are reported accurately (Unreleased).
+- ✅ **M5 + L3** — `/api/series/all` bounded via an indexed per-target `LATERAL` top-N (work bounded
+  by configured catalog size and the per-target fetch cap after the Unreleased follow-up removed
+  raw `DISTINCT` discovery); exact-cap truncation flag fixed (#44).
+- ✅ **M7** — aggregate migration validates BOTH views (`samples_hourly` + `samples_daily`) (#45),
+  with an application schema version and complete semantic/catalog checks added in Unreleased.
 - ✅ **M1 + L4 + L5** — build-once-promote the collector image (scan the exact OCI archive, skopeo-push
   it, assert published == scanned digest, attest), expiring `.trivyignore.yaml`, doc drift (#46).
+  Unreleased makes digest preservation a pre-promotion gate and verifies every destination tag.
 - ✅ **L1 + L2** — probe timing: per-ping budget reserves inter-attempt delays; native Ping honors
   `timeout_ms` > 1s (#43).
 - ✅ **Config-tab tree #37 follow-ups** — keyboard-accessible reorder + WAI-ARIA tree semantics
-  (`role`/`aria-owns`/roving `tabindex`), cross-folder drag, add-into-folder (#48).
-- ✅ **README** — dark-mode screenshots incl. admin Config-tree + Vantages (#47).
+  (`role`/`aria-owns`/roving `tabindex`), cross-folder drag, add-into-folder (#48); Unreleased closes
+  destructive edits, sibling-folder drops, empty hostless groups, slash keys, and tied rename order.
+- ✅ **Admin top bar** — independent restart-stable session secret, sequenced auth probes, confirmed
+  logout state, and route-owned status updates (Unreleased).
+- ✅ **README** — dark-mode screenshots incl. admin Config-tree + Vantages (#47), refreshed for the
+  global top bar and Add group action in Unreleased.
 - ✅ CI db-test flake fixed — TimescaleDB run with background workers disabled (#49); this unblocked
   the **v1.0.2** publish (the `v1.0.1` tag was superseded — see CHANGELOG).
 
