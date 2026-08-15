@@ -47,6 +47,16 @@ All notable changes to **Heliograph** are recorded here. The format follows
   drives the bar's Log in / Admin state on every tab).
 
 ### Fixed
+- **Webhook/Slack/Discord notifiers no longer follow redirects.** The delivery client now returns
+  `http.ErrUseLastResponse` on a 3xx, so a redirect is evaluated as the non-2xx response it is
+  (transient, retried) instead of being chased to its final status. Previously the default client
+  followed a `302`→`200` and recorded a phantom successful delivery (never retrying a misdirected
+  endpoint), and a `307`/`308` re-POSTed the alert body to the redirect target — an untrusted host.
+- **Graphs grid no longer overflows narrow viewports.** The per-graph minimum width is clamped to
+  the container (`min(360px, 100%)`) in both the CSS and the columns helper, so a window narrower
+  than the minimum collapses to a single full-width column instead of forcing a horizontal scroll.
+  The restored **Columns** choice is also validated against the offered options, falling back to
+  `Auto` for any stale or hand-edited `localStorage` value.
 - **Config edits and tree operations are non-destructive.** The form now changes only the fields it
   owns, preserving imported `title`, `ip`, `pings`, `step`, `alertee`, weight, children, and unknown
   future fields. Dropping on a sibling folder moves into it; rename keeps tied-weight order; a

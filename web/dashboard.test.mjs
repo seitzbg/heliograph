@@ -698,16 +698,17 @@ check('cfgTreeKey: ignores unrelated keys and empty rows', () => {
   assert.equal(D.cfgTreeKey([], 'Web', 'ArrowDown', false), null);
 });
 
-check('gridTemplateFor: auto (and non-positive) -> auto-fit min-width tracks', () => {
-  assert.equal(D.gridTemplateFor('auto', 360, 18), 'repeat(auto-fit, minmax(360px, 1fr))');
-  assert.equal(D.gridTemplateFor(0, 360, 18), 'repeat(auto-fit, minmax(360px, 1fr))');
-  assert.equal(D.gridTemplateFor('nonsense', 360, 18), 'repeat(auto-fit, minmax(360px, 1fr))');
+check('gridTemplateFor: auto (and non-positive) -> auto-fit tracks, floor clamped to 100%', () => {
+  assert.equal(D.gridTemplateFor('auto', 360, 18), 'repeat(auto-fit, minmax(min(360px, 100%), 1fr))');
+  assert.equal(D.gridTemplateFor(0, 360, 18), 'repeat(auto-fit, minmax(min(360px, 100%), 1fr))');
+  assert.equal(D.gridTemplateFor('nonsense', 360, 18), 'repeat(auto-fit, minmax(min(360px, 100%), 1fr))');
 });
-check('gridTemplateFor: a fixed N caps columns but floors each track at the min width', () => {
-  // N tracks + (N-1) gaps; the max() floor makes auto-fill wrap to fewer when they will not fit.
-  assert.equal(D.gridTemplateFor(4, 360, 18), 'repeat(auto-fill, minmax(max(360px, (100% - 54px) / 4), 1fr))');
-  assert.equal(D.gridTemplateFor('2', 360, 18), 'repeat(auto-fill, minmax(max(360px, (100% - 18px) / 2), 1fr))');
-  assert.equal(D.gridTemplateFor(6, 360, 18), 'repeat(auto-fill, minmax(max(360px, (100% - 90px) / 6), 1fr))');
+check('gridTemplateFor: a fixed N caps columns; the floor is clamped to 100% so narrow viewports do not overflow', () => {
+  // N tracks + (N-1) gaps; the max() floor makes auto-fill wrap to fewer when they will not fit,
+  // and min(...,100%) collapses to a single full-width track below the minimum instead of overflowing.
+  assert.equal(D.gridTemplateFor(4, 360, 18), 'repeat(auto-fill, minmax(max(min(360px, 100%), (100% - 54px) / 4), 1fr))');
+  assert.equal(D.gridTemplateFor('2', 360, 18), 'repeat(auto-fill, minmax(max(min(360px, 100%), (100% - 18px) / 2), 1fr))');
+  assert.equal(D.gridTemplateFor(6, 360, 18), 'repeat(auto-fill, minmax(max(min(360px, 100%), (100% - 90px) / 6), 1fr))');
 });
 
 if (failed) { console.error(`\n${failed} test(s) failed`); process.exit(1); }

@@ -84,10 +84,13 @@
   // behavior). A fixed integer N caps the layout at N columns while never letting a track
   // fall below `min`: the max() floor means when N tracks won't fit at `min`, auto-fill
   // wraps to fewer instead of shrinking the graphs. `min`/`gap` are CSS px numbers.
+  // The floor is `min(<min>px, 100%)`, not a bare `<min>px`, so a viewport narrower than the
+  // minimum collapses to a single full-width track instead of overflowing horizontally.
   function gridTemplateFor(cols, min, gap) {
+    const floor = 'min(' + min + 'px, 100%)';
     const n = Math.floor(Number(cols));
-    if (!(n > 0)) return 'repeat(auto-fit, minmax(' + min + 'px, 1fr))';
-    return 'repeat(auto-fill, minmax(max(' + min + 'px, (100% - ' + (n - 1) * gap + 'px) / ' + n + '), 1fr))';
+    if (!(n > 0)) return 'repeat(auto-fit, minmax(' + floor + ', 1fr))';
+    return 'repeat(auto-fill, minmax(max(' + floor + ', (100% - ' + (n - 1) * gap + 'px) / ' + n + '), 1fr))';
   }
 
   // fetchJSON GETs a JSON endpoint and REJECTS a non-2xx response instead of decoding
@@ -991,8 +994,11 @@
     // Graphs-per-row: 'auto' fits as many as the min width allows; a fixed N caps columns
     // but never shrinks a graph below GRAPH_MIN (wraps to fewer instead). Persisted per browser.
     const GRAPH_MIN = 360, GRAPH_GAP = 18;
+    // Only the values the seg buttons offer are valid; a stale or hand-edited localStorage entry
+    // (e.g. "5" -> a layout no button represents, "Infinity" -> invalid CSS) falls back to 'auto'.
+    const GRID_COL_OPTIONS = new Set(['auto', '2', '3', '4', '6']);
     let gridCols = 'auto';
-    try { const s = localStorage.getItem('graphCols'); if (s) gridCols = s; } catch (e) {}
+    try { const s = localStorage.getItem('graphCols'); if (GRID_COL_OPTIONS.has(s)) gridCols = s; } catch (e) {}
     function applyGridCols() {
       const g = $('graphGrid'); if (g) g.style.gridTemplateColumns = gridTemplateFor(gridCols, GRAPH_MIN, GRAPH_GAP);
     }
