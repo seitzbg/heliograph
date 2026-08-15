@@ -79,6 +79,17 @@
     return min;
   }
 
+  // gridTemplateFor builds the Graphs grid's `grid-template-columns`. `cols` === 'auto'
+  // (the default) fits as many `min`-px tracks as the container allows (auto-fit — today's
+  // behavior). A fixed integer N caps the layout at N columns while never letting a track
+  // fall below `min`: the max() floor means when N tracks won't fit at `min`, auto-fill
+  // wraps to fewer instead of shrinking the graphs. `min`/`gap` are CSS px numbers.
+  function gridTemplateFor(cols, min, gap) {
+    const n = Math.floor(Number(cols));
+    if (!(n > 0)) return 'repeat(auto-fit, minmax(' + min + 'px, 1fr))';
+    return 'repeat(auto-fill, minmax(max(' + min + 'px, (100% - ' + (n - 1) * gap + 'px) / ' + n + '), 1fr))';
+  }
+
   // fetchJSON GETs a JSON endpoint and REJECTS a non-2xx response instead of decoding
   // its body (#2). The API returns JSON error bodies with HTTP 503 when storage is
   // unavailable; decoding those as ordinary data turned a transient failure into an
@@ -702,7 +713,7 @@
     ].join('\n');
   }
 
-  window.Dash = { RANGES, RANGE_ORDER, parseRoute, mergeSeries, gridSince, fetchJSON, zoomResolution, pixelToTime, sharedYMax, buildTree, underPath, targetStatus, pickSeries, vantageList, orderVantages, defaultFocus, keepFocus, vantageColorVar, adminMode, adminSessionState, createAdminStateController, statusProbeOwnsView, relTime, listTargets, addTarget, editTarget, removeTarget, buildTargetNode, buildGroupNode, labelHTML, collectingNote, agentYaml, agentCompose, cfgTree, reweightSiblings, reorderSiblings, editNodeAtPath, removeNodeAtPath, renameNodeAtPath, addNodeAtPath, moveNode, moveInList, cfgDropDestination, cfgVisibleRows, cfgTreeKey };
+  window.Dash = { RANGES, RANGE_ORDER, parseRoute, mergeSeries, gridSince, gridTemplateFor, fetchJSON, zoomResolution, pixelToTime, sharedYMax, buildTree, underPath, targetStatus, pickSeries, vantageList, orderVantages, defaultFocus, keepFocus, vantageColorVar, adminMode, adminSessionState, createAdminStateController, statusProbeOwnsView, relTime, listTargets, addTarget, editTarget, removeTarget, buildTargetNode, buildGroupNode, labelHTML, collectingNote, agentYaml, agentCompose, cfgTree, reweightSiblings, reorderSiblings, editNodeAtPath, removeNodeAtPath, renameNodeAtPath, addNodeAtPath, moveNode, moveInList, cfgDropDestination, cfgVisibleRows, cfgTreeKey };
 
   // ---------------------------------------------------------------- init (DOM) --
   function init() {
@@ -977,6 +988,14 @@
     // In unison mode the visible set shares one Y-axis max (sharedYMax) so the small
     // multiples are comparable; scoping to a subtree rescales to just that subtree.
     let unisonScale = false; // default: each panel auto-scales to its own data; the toggle shares a Y-axis
+    // Graphs-per-row: 'auto' fits as many as the min width allows; a fixed N caps columns
+    // but never shrinks a graph below GRAPH_MIN (wraps to fewer instead). Persisted per browser.
+    const GRAPH_MIN = 360, GRAPH_GAP = 18;
+    let gridCols = 'auto';
+    try { const s = localStorage.getItem('graphCols'); if (s) gridCols = s; } catch (e) {}
+    function applyGridCols() {
+      const g = $('graphGrid'); if (g) g.style.gridTemplateColumns = gridTemplateFor(gridCols, GRAPH_MIN, GRAPH_GAP);
+    }
     function renderGridPanels() {
       const vis = [];
       for (const p of panels.values()) {
@@ -2129,6 +2148,10 @@
     })();
     $('zoomReset').addEventListener('click', () => { if (curTarget && curRange) renderZoom(curTarget, curRange); });
     $('unisonToggle').addEventListener('change', (e) => { unisonScale = e.target.checked; renderGridPanels(); });
+    $('colsSeg').addEventListener('click', (e) => { const b = e.target.closest('button'); if (!b) return; gridCols = b.dataset.cols; try { localStorage.setItem('graphCols', gridCols); } catch (err) {} document.querySelectorAll('#colsSeg button').forEach((x) => x.setAttribute('aria-pressed', String(x === b))); applyGridCols(); });
+    // reflect the persisted columns choice on load, then apply it to the grid
+    document.querySelectorAll('#colsSeg button').forEach((x) => x.setAttribute('aria-pressed', String(x.dataset.cols === gridCols)));
+    applyGridCols();
 
     // ---- config-tree menu events ----
     $('navTree').addEventListener('click', (e) => { const row = e.target.closest('.row'); if (row) activateRow(row, !!e.target.closest('[data-twist]')); });
