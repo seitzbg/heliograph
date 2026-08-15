@@ -6,6 +6,12 @@ All notable changes to **Heliograph** are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed
+- **The Graphs "Columns" picker only offers counts that fit.** At the current browser width it hides
+  the column counts that can't fit (they would only wrap to fewer — clicking did nothing), and hides
+  the whole picker when even 3 columns won't fit, since `Auto` is then the only sensible choice. It
+  re-evaluates on window resize.
+
 ## [1.0.3] - 2026-08-15
 
 The next release after v1.0.2, gathering the post-1.0.2 UI and hardening work (#50–#60): a

@@ -711,5 +711,16 @@ check('gridTemplateFor: a fixed N caps columns; the floor is clamped to 100% so 
   assert.equal(D.gridTemplateFor(6, 360, 18), 'repeat(auto-fill, minmax(max(min(360px, 100%), (100% - 90px) / 6), 1fr))');
 });
 
+check('maxColumnsFor: how many min-width columns fit at a given width', () => {
+  assert.equal(D.maxColumnsFor(0, 360, 18), 0);
+  assert.equal(D.maxColumnsFor(-100, 360, 18), 0);
+  assert.equal(D.maxColumnsFor(359, 360, 18), 1);  // narrower than one min -> still one (full-width)
+  assert.equal(D.maxColumnsFor(360, 360, 18), 1);
+  assert.equal(D.maxColumnsFor(756, 360, 18), 2);  // 2*360 + 1*18 = 738 <= 756 < 3-col
+  assert.equal(D.maxColumnsFor(1115, 360, 18), 2); // just under the 3-col threshold
+  assert.equal(D.maxColumnsFor(1116, 360, 18), 3); // 3*360 + 2*18
+  assert.equal(D.maxColumnsFor(2250, 360, 18), 6); // 6*360 + 5*18
+});
+
 if (failed) { console.error(`\n${failed} test(s) failed`); process.exit(1); }
 console.log('\nall dashboard tests passed');
