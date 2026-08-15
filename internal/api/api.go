@@ -73,6 +73,9 @@ type Server struct {
 	Vantages      VantageAdmin
 	AdminPassword string
 	AdminKey      []byte
+	// AdminSessionTTL is how long a login stays valid (token expiry + cookie Max-Age). Zero or
+	// negative means DefaultAdminSessionTTL; production loads SMOKED_ADMIN_SESSION_TTL.
+	AdminSessionTTL time.Duration
 	// TargetVantages, if set, returns each configured target's assigned vantage set (name
 	// -> vantage names) — /api/targets surfaces it so the UI can show which vantages a
 	// target is measured from. nil means the field is omitted (tests/pure API/no federation).
@@ -1198,10 +1201,14 @@ func (srv *Server) adminLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"invalid password"}`, http.StatusUnauthorized)
 		return
 	}
+	ttl := srv.AdminSessionTTL
+	if ttl <= 0 {
+		ttl = DefaultAdminSessionTTL
+	}
 	w.Header().Set("Cache-Control", "no-store") // never cache a session-issuing response
 	http.SetCookie(w, &http.Cookie{
-		Name: adminCookie, Value: signSession(srv.AdminKey, time.Now().Add(12*time.Hour)),
-		Path: "/api/admin", HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode, MaxAge: 12 * 3600,
+		Name: adminCookie, Value: signSession(srv.AdminKey, time.Now().Add(ttl)),
+		Path: "/api/admin", HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode, MaxAge: int(ttl.Seconds()),
 	})
 	w.WriteHeader(http.StatusNoContent)
 }

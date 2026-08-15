@@ -490,6 +490,15 @@ func main() {
 					}
 					slog.Warn("admin sessions will be invalidated on collector restart; set SMOKED_ADMIN_SESSION_KEY to a persistent 64-character random hex secret")
 				}
+				// SMOKED_ADMIN_SESSION_TTL overrides how long a login stays valid (default 12h).
+				if ttl := os.Getenv("SMOKED_ADMIN_SESSION_TTL"); ttl != "" {
+					d, err := api.ParseAdminSessionTTL(ttl)
+					if err != nil {
+						fatal("invalid SMOKED_ADMIN_SESSION_TTL", err)
+					}
+					srv.AdminSessionTTL = d
+					slog.Info("admin session lifetime set", "ttl", d.String())
+				}
 			}
 			if srv.AdminPassword == "" {
 				slog.Warn("admin key-management API disabled: set SMOKED_ADMIN_PASSWORD to enable /api/admin/vantages")
