@@ -21,7 +21,7 @@ The signature **smoke graph**, rebuilt on HTML canvas — nested percentile band
 darkening toward the median, with an 8-bucket loss-colored median line, theme-aware. Four scenarios,
 from a steady fiber link to a flaky, lossy one:
 
-![Heliograph smoke graphs — congested / steady / jittery / flaky links](docs/img/smoke-graph.png)
+![Heliograph smoke graphs — congested / steady / jittery / flaky links](docs/img/smoke-graph-dark.png)
 
 The **live dashboard** — the Overview ranks the worst targets by loss/latency/jitter and reports
 per-target availability:
