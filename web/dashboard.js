@@ -309,6 +309,42 @@
     if (al.length) node.alerts = al;
     return node;
   }
+  // buildGroupNode assembles a grouping (folder) node from the "Add group" form: a `children`
+  // map built from one or more child target rows, plus optional group-level vantages/alerts that
+  // the config inherits down to every child. A group MUST carry at least one child target — the
+  // config validator rejects an empty node (no host, no children), and `children,omitempty` drops
+  // an empty map on save, so a childless group could never round-trip. Each child needs a name and
+  // a host (a hostless leaf is itself an empty node). Throws — with a user-facing message — on no
+  // usable child, a missing host, a duplicate or reserved child name, or a "/" in a child name
+  // (the structural path separator). Fully-blank rows are skipped so a stray empty row is harmless.
+  function buildGroupNode(f) {
+    const kids = {};
+    const seen = new Set();
+    let count = 0;
+    for (const c of (f.children || [])) {
+      const name = (c.name || '').trim();
+      const host = (c.host || '').trim();
+      if (!name && !host) continue; // blank row — ignore
+      if (!name) throw new Error('every group target needs a name');
+      if (name.includes('/')) throw new Error('target names can\'t contain "/"');
+      if (['__proto__', 'constructor', 'prototype'].includes(name)) throw new Error('"' + name + '" is a reserved name');
+      if (!host) throw new Error('target "' + name + '" needs a host');
+      if (seen.has(name)) throw new Error('duplicate target name "' + name + '" in the group');
+      seen.add(name);
+      // defineProperty (not kids[name]=) so a child literally named '__proto__' would be a real own
+      // property — though the reserved-name guard above already rejects it; kept for symmetry with
+      // addNodeAtPath's storage.
+      Object.defineProperty(kids, name, { value: buildTargetNode({ probe: c.probe, host, params: c.params }), enumerable: true, writable: true, configurable: true });
+      count++;
+    }
+    if (!count) throw new Error('add at least one target to the group');
+    const node = { children: kids };
+    const vs = (f.vantages || []).map((s) => s.trim()).filter(Boolean);
+    if (vs.length) node.vantages = vs;
+    const al = (f.alerts || []).map((s) => s.trim()).filter(Boolean);
+    if (al.length) node.alerts = al;
+    return node;
+  }
 
   // --- Config-tree helpers (pure; the Config tab's read-modify-write tree core) ---
   function cfgSortSiblings(ch) {
@@ -370,6 +406,25 @@
   function removeNodeAtPath(doc, path) {
     const d = cfgClone(doc); const loc = cfgNodeAt(d, path);
     if (loc) delete loc.parent[loc.key];
+    return d;
+  }
+  // renameNodeAtPath rekeys the node at `path` to `newName` within its parent, preserving the
+  // node's value (its subtree, weight and every field) and its position among siblings — the
+  // parent map is rebuilt in place with just the key swapped, so order holds even when siblings
+  // share a weight (where name is the sort tiebreaker). A no-op when the name is unchanged or the
+  // path is stale (returns the clone); throws on a sibling name collision. `newName` must be a
+  // single segment — the caller rejects "/" (the structural path separator) before calling.
+  function renameNodeAtPath(doc, path, newName) {
+    const d = cfgClone(doc); const loc = cfgNodeAt(d, path);
+    if (!loc || !Object.prototype.hasOwnProperty.call(loc.parent, loc.key)) return d; // stale UI
+    if (newName === loc.key) return d; // unchanged
+    if (Object.prototype.hasOwnProperty.call(loc.parent, newName)) {
+      const pp = path.split('/').slice(0, -1).join('/');
+      throw new Error('a target named "' + newName + '" already exists' + (pp ? ' in "' + pp + '"' : ' at the top level'));
+    }
+    const entries = Object.keys(loc.parent).map((k) => [k === loc.key ? newName : k, loc.parent[k]]);
+    for (const k of Object.keys(loc.parent)) delete loc.parent[k];
+    for (const [k, v] of entries) Object.defineProperty(loc.parent, k, { value: v, enumerable: true, writable: true, configurable: true });
     return d;
   }
   // cfgEnsureChildrenAt is like cfgChildrenAt but CREATES the `children` map on any existing
@@ -570,7 +625,7 @@
     ].join('\n');
   }
 
-  window.Dash = { RANGES, RANGE_ORDER, parseRoute, mergeSeries, gridSince, fetchJSON, zoomResolution, pixelToTime, sharedYMax, buildTree, underPath, targetStatus, pickSeries, vantageList, orderVantages, defaultFocus, keepFocus, vantageColorVar, adminMode, relTime, listTargets, addTarget, editTarget, removeTarget, buildTargetNode, labelHTML, collectingNote, agentYaml, agentCompose, cfgTree, reweightSiblings, reorderSiblings, editNodeAtPath, removeNodeAtPath, addNodeAtPath, moveNode, moveInList, cfgVisibleRows, cfgTreeKey };
+  window.Dash = { RANGES, RANGE_ORDER, parseRoute, mergeSeries, gridSince, fetchJSON, zoomResolution, pixelToTime, sharedYMax, buildTree, underPath, targetStatus, pickSeries, vantageList, orderVantages, defaultFocus, keepFocus, vantageColorVar, adminMode, relTime, listTargets, addTarget, editTarget, removeTarget, buildTargetNode, buildGroupNode, labelHTML, collectingNote, agentYaml, agentCompose, cfgTree, reweightSiblings, reorderSiblings, editNodeAtPath, removeNodeAtPath, renameNodeAtPath, addNodeAtPath, moveNode, moveInList, cfgVisibleRows, cfgTreeKey };
 
   // ---------------------------------------------------------------- init (DOM) --
   function init() {
@@ -1557,7 +1612,7 @@
       const found = mode === 'edit' ? findCfgNode(path) : null;
       const node = found ? found.node : {};
       $('cfgName').value = mode === 'edit' ? leaf : '';
-      $('cfgName').disabled = mode === 'edit'; // rename = remove + add (v1)
+      $('cfgName').disabled = false; // editable in both modes — a changed name renames the node
       $('cfgProbe').innerHTML = kinds.map((k) => '<option value="' + esc(k) + '"' + (k === node.probe ? ' selected' : '') + '>' + esc(k) + '</option>').join('');
       $('cfgHost').value = node.host || '';
       const pc = $('cfgParams'); pc.innerHTML = '';
@@ -1568,7 +1623,7 @@
       $('cfgVantages').value = (node.vantages || []).join(', ');
       $('cfgAlerts').value = (node.alerts || []).join(', ');
       $('cfgModal').classList.remove('hidden');
-      $('cfgName').disabled ? $('cfgProbe').focus() : $('cfgName').focus();
+      $('cfgName').focus();
     }
     function closeCfgModal() { $('cfgModal').classList.add('hidden'); $('cfgFormErr').textContent = ''; cfgEditPath = null; cfgAddParent = ''; }
     function readCfgForm() {
@@ -1589,9 +1644,12 @@
     // concurrency). 200 -> adopt; 400 -> show the validation error in the modal (keep input);
     // 409 -> someone else changed it, reload; 401 -> back to login.
     async function saveDoc(mutated, onOk) {
+      // Surface the error inline in whichever config modal is open (target or group); fall back
+      // to an alert only if neither is (e.g. an inline Remove from the tree).
       const showErr = (msg) => {
-        if ($('cfgModal').classList.contains('hidden')) window.alert(msg);
-        else $('cfgFormErr').textContent = msg;
+        if (!$('cfgModal').classList.contains('hidden')) $('cfgFormErr').textContent = msg;
+        else if (!$('cfgGroupModal').classList.contains('hidden')) $('cfgGroupErr').textContent = msg;
+        else window.alert(msg);
       };
       let r;
       try {
@@ -1608,8 +1666,8 @@
         if (onOk) onOk();
         return;
       }
-      if (r.status === 401) { closeCfgModal(); renderConfig(); return; }
-      if (r.status === 409) { closeCfgModal(); window.alert('Config changed elsewhere — reloading the latest.'); renderConfig(); return; }
+      if (r.status === 401) { closeCfgModal(); closeCfgGroupModal(); renderConfig(); return; }
+      if (r.status === 409) { closeCfgModal(); closeCfgGroupModal(); window.alert('Config changed elsewhere — reloading the latest.'); renderConfig(); return; }
       // 400 or other: show the detail
       let msg = 'HTTP ' + r.status;
       try { msg = (await r.json()).error || msg; } catch (e) { /* keep */ }
@@ -1635,14 +1693,88 @@
       // collide with the cfgTree path of an existing nested "a" under a "Web" folder, and
       // findCfgNode's depth-first search would silently resolve Edit/Remove/drag to the wrong
       // node. Only the add path can introduce a new name; edit reuses an existing path.
-      if (!isEdit && name.includes('/')) { $('cfgFormErr').textContent = 'Names can\'t contain "/".'; return; }
+      // A name is a single path segment in both modes now (edit can rename), so "/" is always out.
+      if (name.includes('/')) { $('cfgFormErr').textContent = 'Names can\'t contain "/".'; return; }
       let mutated;
       try {
-        // Edit is path-aware (any depth); Add inserts under cfgAddParent ('' = top level, else the
-        // folder whose "+" opened the modal) via the path-aware Dash.addNodeAtPath.
-        mutated = isEdit ? Dash.editNodeAtPath(cfg.doc, cfgEditPath, node) : Dash.addNodeAtPath(cfg.doc, cfgAddParent, name, node);
+        if (isEdit) {
+          // Update the node's value at its current path, then — if the name changed — rekey it.
+          // renameNodeAtPath preserves the node's subtree, weight and sibling position.
+          mutated = Dash.editNodeAtPath(cfg.doc, cfgEditPath, node);
+          if (name !== cfgEditPath.split('/').pop()) {
+            mutated = Dash.renameNodeAtPath(mutated, cfgEditPath, name);
+            cfgFocusPath = cfgEditPath.split('/').slice(0, -1).concat(name).join('/'); // keep focus on the renamed row
+          }
+        } else {
+          // Add inserts under cfgAddParent ('' = top level, else the folder whose "+" opened it).
+          mutated = Dash.addNodeAtPath(cfg.doc, cfgAddParent, name, node);
+        }
       } catch (err) { $('cfgFormErr').textContent = err.message; return; }
       saveDoc(mutated, closeCfgModal);
+    });
+    // --- Add group modal: create a folder (site) plus one or more child targets in one step.
+    // A group can't be empty (the validator rejects a node with no host and no children, and
+    // children,omitempty drops an empty map on save), so ≥1 child is required; more can be added
+    // later via the folder's "+". Validation lives in Dash.buildGroupNode; this is DOM glue.
+    function cfgGroupChildRow(kinds, sel) {
+      const row = document.createElement('div');
+      row.className = 'cfg-childrow';
+      row.innerHTML =
+        '<input class="vadmin-input cfg-cname" type="text" placeholder="name e.g. ICMP (FPing)"> ' +
+        '<select class="vadmin-input cfg-cprobe" aria-label="Probe"></select> ' +
+        '<input class="vadmin-input cfg-chost" type="text" placeholder="host e.g. 8.8.8.8"> ' +
+        '<button type="button" class="vadmin-btn cfg-cdel" aria-label="Remove this target">×</button>';
+      row.querySelector('.cfg-cprobe').innerHTML = kinds.map((k) => '<option value="' + esc(k) + '"' + (k === sel ? ' selected' : '') + '>' + esc(k) + '</option>').join('');
+      row.querySelector('.cfg-cdel').addEventListener('click', () => {
+        const box = $('cfgGroupChildren');
+        row.remove();
+        if (!box.querySelector('.cfg-childrow')) box.appendChild(cfgGroupChildRow(kinds)); // always keep ≥1 row
+      });
+      return row;
+    }
+    async function openCfgGroupModal() {
+      const kinds = await ensureProbeKinds();
+      $('cfgGroupName').value = '';
+      $('cfgGroupVantages').value = '';
+      $('cfgGroupAlerts').value = '';
+      $('cfgGroupErr').textContent = '';
+      const box = $('cfgGroupChildren'); box.innerHTML = '';
+      box.appendChild(cfgGroupChildRow(kinds));
+      $('cfgGroupChildAdd').onclick = () => box.appendChild(cfgGroupChildRow(kinds));
+      $('cfgGroupModal').classList.remove('hidden');
+      $('cfgGroupName').focus();
+    }
+    function closeCfgGroupModal() { $('cfgGroupModal').classList.add('hidden'); $('cfgGroupErr').textContent = ''; }
+    function readCfgGroupForm() {
+      const children = Array.from($('cfgGroupChildren').querySelectorAll('.cfg-childrow')).map((r) => ({
+        name: r.querySelector('.cfg-cname').value,
+        probe: r.querySelector('.cfg-cprobe').value,
+        host: r.querySelector('.cfg-chost').value,
+      }));
+      return {
+        name: $('cfgGroupName').value.trim(),
+        vantages: ($('cfgGroupVantages').value || '').split(','),
+        alerts: ($('cfgGroupAlerts').value || '').split(','),
+        children,
+      };
+    }
+    $('cfgAddGroupBtn').addEventListener('click', () => openCfgGroupModal());
+    $('cfgGroupCancel').addEventListener('click', closeCfgGroupModal);
+    $('cfgGroupModal').addEventListener('click', (e) => { if (e.target === $('cfgGroupModal')) closeCfgGroupModal(); });
+    $('cfgGroupForm').addEventListener('submit', (e) => {
+      e.preventDefault();
+      $('cfgGroupErr').textContent = '';
+      const f = readCfgGroupForm();
+      if (!f.name) { $('cfgGroupErr').textContent = 'Group name required.'; return; }
+      if (f.name.includes('/')) { $('cfgGroupErr').textContent = 'Names can\'t contain "/".'; return; }
+      if (['__proto__', 'constructor', 'prototype'].includes(f.name)) { $('cfgGroupErr').textContent = '"' + f.name + '" is a reserved name.'; return; }
+      let mutated;
+      try {
+        mutated = Dash.addNodeAtPath(cfg.doc, '', f.name, Dash.buildGroupNode(f));
+      } catch (err) { $('cfgGroupErr').textContent = err.message; return; }
+      // saveDoc reports server-side (400) errors against the target modal / window.alert; the
+      // common client-side errors are already surfaced inline above via buildGroupNode.
+      saveDoc(mutated, closeCfgGroupModal);
     });
     $('cfgTree').addEventListener('click', (e) => {
       // Twist chevron toggles a folder's collapse (mouse counterpart of Left/Right); keep focus
