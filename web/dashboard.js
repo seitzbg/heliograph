@@ -1955,6 +1955,15 @@
       $('tabConfig').setAttribute('aria-selected', String(view === 'config'));
     }
     function currentView() { return parseRoute(location.hash).view; }
+    // Status-line owner for the admin tabs. Overview/Graphs update #statusText inside their own
+    // refresh loops; Config/Vantages don't, so without this the line stays stuck on the initial
+    // "connecting…". A light /api/targets probe reflects collector reachability there.
+    async function pingStatus() {
+      try {
+        const targets = (await fetchJSON('/api/targets')).targets || [];
+        $('statusText').textContent = targets.length + ' targets · updated ' + new Date().toLocaleTimeString();
+      } catch (e) { $('statusText').textContent = 'collector unreachable — showing last known'; }
+    }
     function route() {
       // Never leave a one-time key in the DOM across navigations: clear any open reveal.
       { const rev = $('vantReveal'); if (rev && !rev.classList.contains('hidden')) { $('vantRevealSnippet').textContent = ''; rev.classList.add('hidden'); } }
@@ -1965,8 +1974,8 @@
       else if (r.view === 'graphs') { gridScope = r.path || ''; setTabs('graphs'); show('viewGraphs'); renderScope(); renderTree(); renderGridPanels(); refreshGrid(); }
       else if (r.view === 'stack') { setTabs('stack'); show('viewStack'); renderStack(r.name); }
       else if (r.view === 'zoom') { setTabs('zoom'); show('viewZoom'); renderZoom(r.name, r.range); }
-      else if (r.view === 'vantages') { setTabs('vantages'); show('viewVantages'); renderVantages(); }
-      else if (r.view === 'config') { setTabs('config'); show('viewConfig'); renderConfig(); }
+      else if (r.view === 'vantages') { setTabs('vantages'); show('viewVantages'); renderVantages(); pingStatus(); }
+      else if (r.view === 'config') { setTabs('config'); show('viewConfig'); renderConfig(); pingStatus(); }
       $('statusText').textContent = (r.view === 'stack' || r.view === 'zoom') ? r.name : $('statusText').textContent;
       window.scrollTo(0, 0);
     }
@@ -2076,6 +2085,7 @@
     let rt; window.addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(rerender, 140); });
     setInterval(() => { if (currentView() === 'graphs') refreshGrid(); }, 5000);
     setInterval(() => { if (currentView() === 'overview') refreshOverview(); }, 15000);
+    setInterval(() => { const v = currentView(); if (v === 'config' || v === 'vantages') pingStatus(); }, 15000);
     setInterval(() => { const v = currentView(); if (v === 'stack') renderStack(curTarget); else if (v === 'zoom' && !(zoomState && zoomState.custom)) { const r = parseRoute(location.hash); renderZoom(r.name, r.range); } }, 30000);
 
     themeLabel();

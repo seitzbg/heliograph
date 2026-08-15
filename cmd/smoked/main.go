@@ -6,7 +6,6 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -473,11 +472,12 @@ func main() {
 			}
 			slog.Info("agent endpoints enabled at /agent/v1/assignment, /agent/v1/results")
 			srv.AdminPassword = os.Getenv("SMOKED_ADMIN_PASSWORD")
-			adminKey := make([]byte, 32)
-			if _, err := rand.Read(adminKey); err != nil {
-				fatal("admin key", err)
+			// Derive the session-signing key from the password so admin logins survive a restart
+			// (a per-process random key logged everyone out on every restart). Empty password =>
+			// no key, admin routes stay off. See api.DeriveAdminKey.
+			if srv.AdminPassword != "" {
+				srv.AdminKey = api.DeriveAdminKey(srv.AdminPassword)
 			}
-			srv.AdminKey = adminKey
 			if srv.AdminPassword == "" {
 				slog.Warn("admin key-management API disabled: set SMOKED_ADMIN_PASSWORD to enable /api/admin/vantages")
 			} else {

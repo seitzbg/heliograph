@@ -41,6 +41,13 @@ All notable changes to **Heliograph** are recorded here. The format follows
   onto the folder it is already in is a no-op instead of a pointless re-append + save; and collapse
   state for removed/renamed/moved folders is pruned so a future folder that reuses a path no longer
   starts silently collapsed.
+- **Admin logins survive a collector restart.** The session-signing key was random per process, so
+  every restart invalidated all cookies and logged admins out. It is now derived deterministically
+  from `SMOKED_ADMIN_PASSWORD` (domain-separated SHA-256), so sessions persist across restarts;
+  changing the password still rotates the key and invalidates old sessions.
+- **The status line no longer sticks on "connecting…" on the Config/Vantages tabs.** Only the
+  Overview/Graphs refresh loops updated it, so landing on an admin tab left it stuck; those tabs now
+  refresh it from a light `/api/targets` probe (on entry and every 15s).
 
 ## [1.0.2] - 2026-08-14
 
