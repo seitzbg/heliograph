@@ -1618,8 +1618,9 @@
       let st;
       try { st = (await fetch('/api/admin/session', { cache: 'no-store' })).status; }
       catch (e) { return 0; } // unknown: preserve the last confirmed state
-      adminState.resolveProbe(gen, st);
-      return st;
+      // A newer probe/login/logout invalidates this result for callers as well as for the bar.
+      // Returning its stale 204/401 would let the login flow act on a state the controller rejected.
+      return adminState.resolveProbe(gen, st) ? st : 0;
     }
     function rerenderActiveAdminTab() {
       if (!$('viewConfig').classList.contains('hidden')) renderConfig();

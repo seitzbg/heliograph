@@ -302,11 +302,41 @@ func TestMigrateAggregatesRebuildsSemanticDrift(t *testing.T) {
 			t.Fatalf("precondition: drifted daily must still expose %s", col)
 		}
 	}
+	before := make(map[string]uint32, len(aggregateSpecs))
+	for _, spec := range aggregateSpecs {
+		var oid uint32
+		if err := s.pool.QueryRow(ctx,
+			`SELECT to_regclass(format('%I.%I', current_schema(), $1::text))::oid`, spec.name).
+			Scan(&oid); err != nil {
+			t.Fatalf("read pre-migration %s OID: %v", spec.name, err)
+		}
+		before[spec.name] = oid
+	}
 
 	if err := s.EnableDownsampling(ctx); err != nil {
 		t.Fatalf("EnableDownsampling: %v", err)
 	}
 	for _, spec := range aggregateSpecs {
+		var oid uint32
+		if err := s.pool.QueryRow(ctx,
+			`SELECT to_regclass(format('%I.%I', current_schema(), $1::text))::oid`, spec.name).
+			Scan(&oid); err != nil {
+			t.Fatalf("read rebuilt %s OID: %v", spec.name, err)
+		}
+		if oid == before[spec.name] {
+			t.Errorf("%s was marked without being rebuilt: OID stayed %d", spec.name, oid)
+		}
+		var definition string
+		if err := s.pool.QueryRow(ctx, `
+			SELECT view_definition
+			  FROM timescaledb_information.continuous_aggregates
+			 WHERE view_schema = current_schema() AND view_name = $1`, spec.name).
+			Scan(&definition); err != nil {
+			t.Fatalf("read rebuilt %s definition: %v", spec.name, err)
+		}
+		if !aggregateDefinitionCurrent(definition, spec.bucket) {
+			t.Errorf("rebuilt %s catalog definition is not current: %s", spec.name, definition)
+		}
 		current, versioned, err := s.aggregateCurrent(ctx, spec)
 		if err != nil {
 			t.Fatalf("aggregateCurrent(%s): %v", spec.name, err)

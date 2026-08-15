@@ -288,13 +288,15 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Install skopeo
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends skopeo
-      # First copy to a commit-specific candidate. --preserve-digests makes conversion/recompression
-      # a hard failure, and this check happens before any branch/release/SHA alias is touched.
+      # First copy to a workflow-run-specific candidate. Branch and release-tag runs for the same
+      # commit can overlap (concurrency is per ref), so a SHA-only staging tag would let them race.
+      # --preserve-digests makes conversion/recompression a hard failure, and this check happens
+      # before any branch/release/SHA alias is touched.
       - name: Stage and verify scanned image
         id: candidate
         env:
           IMAGE: ghcr.io/${{ github.repository }}
-          CANDIDATE: ghcr.io/${{ github.repository }}:candidate-${{ github.sha }}
+          CANDIDATE: ghcr.io/${{ github.repository }}:candidate-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           scanned=$(tr -d '\n' < /tmp/artifacts/image-digest.txt)
           skopeo copy --all --preserve-digests --digestfile /tmp/candidate-digest.txt \

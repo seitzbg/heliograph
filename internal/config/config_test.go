@@ -522,6 +522,22 @@ targets:
 		t.Errorf("expected lone slash key to be rejected, got %v", err)
 	}
 
+	groupOnly, err := Parse([]byte(`
+probes: { FPing: {} }
+targets:
+  probe: FPing
+  children:
+    "site/check":
+      children:
+        endpoint: { host: 1.1.1.1 }
+`))
+	if err != nil {
+		t.Fatalf("Parse grouping-only slash key: %v", err)
+	}
+	if _, err := groupOnly.Monitors(); err == nil || !strings.Contains(err.Error(), "cannot contain '/'") {
+		t.Errorf("expected grouping-only slash key to be rejected, got %v", err)
+	}
+
 	// A host on the root node yields an empty target name.
 	rootHost := "probes: { FPing: {} }\ntargets: { probe: FPing, host: 1.1.1.1 }\n"
 	c2, err := Parse([]byte(rootHost))

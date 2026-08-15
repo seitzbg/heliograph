@@ -170,7 +170,8 @@ type AvailabilityAller interface {
 // `targets` is the bounded configured catalog to read; targets with no rounds after cutoff are
 // omitted, and returned rounds are oldest->newest per target. Supplying the catalog keeps a
 // persistent implementation from discovering targets by scanning raw samples before the bounded
-// per-target reads.
+// per-target reads. A nil or empty catalog selects no targets; callers must pass every configured
+// target explicitly.
 // The error lets a backing-store failure surface as an API 503, not a false-empty view.
 //
 // maxTotal bounds the TOTAL rounds returned across all targets (a global budget on top of any
@@ -419,16 +420,13 @@ func (s *MemStore) SeriesAll(_ context.Context, vantage string, targets []string
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	want := VantageOrDefault(vantage)
-	var allowed map[string]bool
-	if targets != nil {
-		allowed = make(map[string]bool, len(targets))
-		for _, target := range targets {
-			allowed[target] = true
-		}
+	allowed := make(map[string]bool, len(targets))
+	for _, target := range targets {
+		allowed[target] = true
 	}
 	out := make(map[string][]scheduler.Outcome)
 	for k, h := range s.history {
-		if k.vantage != want || (allowed != nil && !allowed[k.target]) {
+		if k.vantage != want || !allowed[k.target] {
 			continue
 		}
 		var rounds []scheduler.Outcome

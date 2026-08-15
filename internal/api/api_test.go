@@ -991,6 +991,17 @@ func TestSeriesAllBulk(t *testing.T) {
 		t.Errorf("incremental a.rounds=%d, want 1 (only the newer round)", len(r2.Targets["a"].Rounds))
 	}
 
+	// An empty live catalog must not rediscover historical rows from the in-memory store. This
+	// matches pgstore and keeps removed targets out even when the running config has no monitors.
+	srv.Configured = func() []model.Monitor { return nil }
+	rec, empty := get("/api/series/all?window=3h")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("empty-catalog status %d, want 200", rec.Code)
+	}
+	if len(empty.Targets) != 0 {
+		t.Errorf("empty configured catalog returned %d historical target(s), want 0", len(empty.Targets))
+	}
+
 	// window is required and validated.
 	for _, p := range []string{"/api/series/all", "/api/series/all?window=zzz"} {
 		rec := httptest.NewRecorder()

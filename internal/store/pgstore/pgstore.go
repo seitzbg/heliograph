@@ -454,9 +454,10 @@ func aggregateDefinitionCurrent(definition, bucket string) bool {
 		return false
 	}
 	buckets := []string{"'" + bucket + "'"}
-	if bucket == "hour" {
+	switch bucket {
+	case "hour":
 		buckets = append(buckets, "'1hour'", "'01:00:00'")
-	} else if bucket == "day" {
+	case "day":
 		buckets = append(buckets, "'1day'", "'24:00:00'")
 	}
 	for _, literal := range buckets {
