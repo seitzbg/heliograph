@@ -444,6 +444,41 @@ check('removeNodeAtPath: deletes a nested node, leaves siblings', () => {
   assert.ok(!('a' in out.targets.children.Web.children));
   assert.ok('b' in out.targets.children.Web.children);
 });
+check('renameNodeAtPath: rekeys in place, preserves value + position, rejects collision', () => {
+  const doc = { targets: { children: {
+    Web: { weight: 0, children: { a: { host: 'a', weight: 0 }, b: { host: 'b', weight: 1 } } },
+    DNS: { host: 'd', weight: 1 },
+  } } };
+  const out = D.renameNodeAtPath(doc, 'Web/a', 'alpha');
+  const web = D.cfgTree(out).find((n) => n.name === 'Web');
+  assert.deepEqual(web.children.map((c) => c.name), ['alpha', 'b']); // renamed; weight-0 keeps it first
+  assert.equal(web.children[0].node.host, 'a');                      // value preserved
+  assert.throws(() => D.renameNodeAtPath(doc, 'Web/a', 'b'), /already exists/); // sibling collision
+  const same = D.renameNodeAtPath(doc, 'Web/a', 'a'); // unchanged name = no-op
+  assert.deepEqual(D.cfgTree(same).find((n) => n.name === 'Web').children.map((c) => c.name), ['a', 'b']);
+  assert.deepEqual(D.cfgTree(D.renameNodeAtPath(doc, 'Web/zzz', 'q')).find((n) => n.name === 'Web').children.map((c) => c.name), ['a', 'b']); // stale path = no-op
+});
+check('buildGroupNode: children map from rows + optional inherited vantages/alerts', () => {
+  const n = D.buildGroupNode({
+    vantages: ['local', ' nyc '], alerts: [' loss '],
+    children: [
+      { name: 'ICMP (FPing)', probe: 'FPing', host: '8.8.8.8' },
+      { name: 'DNS query', probe: 'DNS', host: '8.8.8.8' },
+      { name: '', host: '' }, // fully-blank row is skipped
+    ],
+  });
+  assert.deepEqual(Object.keys(n.children), ['ICMP (FPing)', 'DNS query']);
+  assert.equal(n.children['ICMP (FPing)'].probe, 'FPing');
+  assert.equal(n.children['ICMP (FPing)'].host, '8.8.8.8');
+  assert.deepEqual(n.vantages, ['local', 'nyc']);
+  assert.deepEqual(n.alerts, ['loss']);
+});
+check('buildGroupNode: rejects empty group, hostless child, dup name, and "/"', () => {
+  assert.throws(() => D.buildGroupNode({ children: [] }), /at least one target/);
+  assert.throws(() => D.buildGroupNode({ children: [{ name: 'x', probe: 'Ping', host: '' }] }), /needs a host/);
+  assert.throws(() => D.buildGroupNode({ children: [{ name: 'a', probe: 'Ping', host: 'h' }, { name: 'a', probe: 'DNS', host: 'h' }] }), /duplicate/);
+  assert.throws(() => D.buildGroupNode({ children: [{ name: 'a/b', probe: 'Ping', host: 'h' }] }), /can't contain/);
+});
 
 // --- Config-tree follow-ups (#37): add-into-folder, cross-folder move, keyboard nav/reorder ---
 // addNodeAtPath: the path-aware add. Top-level '' is exactly the old addTarget; a nested parent

@@ -208,10 +208,21 @@
   .cfg-tree .cmeta { flex:1 1 auto; color:var(--ink-soft); font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .cfg-tree .crow .vadmin-btn { padding:4px 9px; font-size:11.5px; }
   .vadmin-reveal-backdrop { position:fixed; inset:0; background:rgba(0,0,0,.45); display:flex; align-items:center; justify-content:center; padding:20px; z-index:50; }
-  .vadmin-reveal { max-width:640px; width:100%; box-shadow:var(--shadow); }
+  .vadmin-reveal { max-width:640px; width:100%; box-shadow:var(--shadow); max-height:calc(100vh - 40px); overflow-y:auto; }
   .vadmin-warn { color:var(--warn); font-weight:600; font-size:13px; }
   .vadmin-pre { background:var(--plot-bg); border:1px solid var(--border); border-radius:8px; padding:12px; font-family:ui-monospace,Menlo,monospace; font-size:12px; color:var(--ink); overflow-x:auto; white-space:pre-wrap; word-break:break-all; }
   .vadmin-reveal-actions { display:flex; gap:10px; margin-top:12px; }
+  /* Config add/edit/group modals: stack each field's label above a full-width control, one field
+     per line, so they read clearly instead of the labels + inputs flowing inline and wrapping. */
+  #cfgForm .vadmin-lbl, #cfgGroupForm .vadmin-lbl { display:block; margin-top:14px; }
+  #cfgName, #cfgProbe, #cfgHost, #cfgVantages, #cfgAlerts,
+  #cfgGroupName, #cfgGroupVantages, #cfgGroupAlerts { display:block; width:100%; box-sizing:border-box; margin-top:5px; }
+  /* Group modal's per-target rows: name · probe · host · remove, wrapping on narrow widths. */
+  #cfgGroupChildren { display:flex; flex-direction:column; gap:8px; margin-top:5px; }
+  .cfg-childrow { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .cfg-childrow .cfg-cname { flex:1 1 150px; min-width:0; }
+  .cfg-childrow .cfg-chost { flex:2 1 190px; min-width:0; }
+  .cfg-childrow .cfg-cprobe { flex:0 0 auto; }
 </style>
 <script>
   // Restore a saved theme before first paint (avoids a light/dark flash).
@@ -385,6 +396,7 @@
           <span class="vadmin-lbl">DB targets <span id="cfgVersion" class="vadmin-err" style="color:var(--ink-faint)"></span></span>
           <span style="display:flex; gap:8px">
             <button id="cfgAddBtn" class="vadmin-btn" type="button">+ Add target</button>
+            <button id="cfgAddGroupBtn" class="vadmin-btn" type="button">+ Add group</button>
             <button id="cfgImportBtn" class="vadmin-btn" type="button">Import YAML</button>
           </span>
         </div>
@@ -417,6 +429,27 @@
         <div class="vadmin-reveal-actions">
           <button type="submit" class="vadmin-btn">Save</button>
           <button type="button" id="cfgCancel" class="vadmin-btn">Cancel</button>
+        </div>
+      </form>
+    </div>
+
+    <div id="cfgGroupModal" class="vadmin-reveal-backdrop hidden">
+      <form id="cfgGroupForm" class="panel vadmin-reveal" role="dialog" aria-modal="true" aria-labelledby="cfgGroupTitle" autocomplete="off">
+        <h3 id="cfgGroupTitle">Add group</h3>
+        <p class="vadmin-note">A group is a folder of targets under one site name (e.g. <code>Google</code> → ICMP, DNS). It needs at least one target; the group-level Vantages/Alerts below are inherited by every target under it. Add more later with the folder's <code>+</code>.</p>
+        <label class="vadmin-lbl" for="cfgGroupName">Group name</label>
+        <input id="cfgGroupName" class="vadmin-input" type="text" placeholder="e.g. Google">
+        <label class="vadmin-lbl" for="cfgGroupVantages">Vantages (comma-separated, optional — inherited)</label>
+        <input id="cfgGroupVantages" class="vadmin-input" type="text" placeholder="local, nyc">
+        <label class="vadmin-lbl" for="cfgGroupAlerts">Alerts (comma-separated, optional — inherited)</label>
+        <input id="cfgGroupAlerts" class="vadmin-input" type="text" placeholder="loss">
+        <label class="vadmin-lbl">Targets (name · probe · host)</label>
+        <div id="cfgGroupChildren"></div>
+        <button type="button" id="cfgGroupChildAdd" class="vadmin-btn">+ target</button>
+        <span id="cfgGroupErr" class="vadmin-err" role="alert"></span>
+        <div class="vadmin-reveal-actions">
+          <button type="submit" class="vadmin-btn">Save</button>
+          <button type="button" id="cfgGroupCancel" class="vadmin-btn">Cancel</button>
         </div>
       </form>
     </div>

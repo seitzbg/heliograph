@@ -11,10 +11,21 @@ All notable changes to **Heliograph** are recorded here. The format follows
   them through the whole backoff budget. A 4xx (bad payload, auth, wrong URL) can never succeed on
   retry, so it is counted as failed on the first attempt — mirroring the email notifier's 5xx /
   AUTH-not-offered handling. 408 Request Timeout and 429 Too Many Requests stay transient (retried).
+- **Rename a Config-tab target or group in place.** The Edit form's Name field is now editable; a
+  changed name rekeys the node, preserving its subtree, weight and sibling position (previously
+  rename meant remove + re-add).
+- **Clearer, scrollable Config modals.** Each field's label now sits above a full-width control
+  instead of labels and inputs flowing inline and wrapping, and a modal taller than the viewport
+  scrolls internally so Save stays reachable; save errors show inline in the open modal.
 
 ### Added
 - **`SMOKED_WEBHOOK_URL` environment fallback** for the generic `-webhook` notifier, matching the
   existing `SMOKED_SLACK_WEBHOOK` / `SMOKED_DISCORD_WEBHOOK` / `SMOKED_SMTP_*` env support.
+- **Create target groups from the Config tab.** A new **"+ Add group"** button opens a modal that
+  creates a folder (site) plus one or more child targets in a single step — e.g. `Google` → `ICMP`,
+  `DNS` — with optional group-level Vantages/Alerts inherited by every child. A group can't be empty
+  (the config validator rejects a node with no host and no children), so it is created with its first
+  targets; add more later with the folder's `+`.
 
 ### Fixed
 - **Config-tab tree edge cases.** An emptied folder (its last child removed or moved out) stays a
