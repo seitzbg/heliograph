@@ -6,6 +6,15 @@ All notable changes to **Heliograph** are recorded here. The format follows
 
 ## [Unreleased]
 
+## [1.0.3] - 2026-08-15
+
+The next release after v1.0.2, gathering the post-1.0.2 UI and hardening work (#50–#60): a
+full-width dashboard with a per-row **Columns** control, a classic top bar with global admin
+login/logout, in-place Config-tab group creation and rename, a configurable admin session lifetime
+(`SMOKED_ADMIN_SESSION_TTL`) signed by a key that is now independent of the login password, notifier
+hardening (permanent-`4xx` abandonment and no redirect-following), application-versioned continuous
+aggregates, and the build-once-promote supply-chain pipeline. Detail below.
+
 ### Changed
 - **Webhook/Slack/Discord notifiers now abandon permanent (HTTP 4xx) failures** instead of retrying
   them through the whole backoff budget. A 4xx (bad payload, auth, wrong URL) can never succeed on
@@ -1123,7 +1132,8 @@ the smoke-graph look, a fast/parallel poller, and probes as plugins.
 - Full re-implementation reference / code map maintained outside the repo at
   `~/.claude/plans/smokeping-codemap/`.
 
-[Unreleased]: https://github.com/seitzbg/heliograph/compare/v1.0.2...main
+[Unreleased]: https://github.com/seitzbg/heliograph/compare/v1.0.3...main
+[1.0.3]: https://github.com/seitzbg/heliograph/compare/v1.0.2...v1.0.3
 [1.0.2]: https://github.com/seitzbg/heliograph/compare/v1.0.0...v1.0.2
 [1.0.0]: https://github.com/seitzbg/heliograph/releases/tag/v1.0.0
 [0.1.0]: https://github.com/seitzbg/heliograph/releases/tag/v0.1.0
