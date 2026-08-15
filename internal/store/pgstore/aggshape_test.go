@@ -18,6 +18,22 @@ func caggHasColumn(t *testing.T, s *PGStore, view, col string) bool {
 	return ok
 }
 
+func readAggregateOIDs(t *testing.T, s *PGStore) map[string]uint32 {
+	t.Helper()
+	ctx := context.Background()
+	oids := make(map[string]uint32, len(aggregateSpecs))
+	for _, spec := range aggregateSpecs {
+		var oid uint32
+		if err := s.pool.QueryRow(ctx,
+			`SELECT to_regclass(format('%I.%I', current_schema(), $1::text))::oid`, spec.name).
+			Scan(&oid); err != nil {
+			t.Fatalf("read %s OID: %v", spec.name, err)
+		}
+		oids[spec.name] = oid
+	}
+	return oids
+}
+
 func TestAggregateDefinitionCurrent(t *testing.T) {
 	hourly := `
 		SELECT time_bucket('01:00:00'::interval, samples.ts) AS bucket,
@@ -111,23 +127,13 @@ func TestMigrateAggregatesRebuildsFilteredDefinition(t *testing.T) {
 		t.Fatalf("clear version markers: %v", err)
 	}
 
-	var before uint32
-	if err := s.pool.QueryRow(ctx,
-		`SELECT to_regclass(format('%I.%I', current_schema(), $1::text))::oid`, "samples_daily").
-		Scan(&before); err != nil {
-		t.Fatalf("read filtered daily OID: %v", err)
-	}
+	before := readAggregateOIDs(t, s)
 	if err := s.EnableDownsampling(ctx); err != nil {
 		t.Fatalf("EnableDownsampling: %v", err)
 	}
-	var after uint32
-	if err := s.pool.QueryRow(ctx,
-		`SELECT to_regclass(format('%I.%I', current_schema(), $1::text))::oid`, "samples_daily").
-		Scan(&after); err != nil {
-		t.Fatalf("read rebuilt daily OID: %v", err)
-	}
-	if after == before {
-		t.Errorf("filtered samples_daily was adopted instead of rebuilt: OID stayed %d", after)
+	after := readAggregateOIDs(t, s)
+	if after["samples_daily"] == before["samples_daily"] {
+		t.Errorf("filtered samples_daily was adopted instead of rebuilt: OID stayed %d", after["samples_daily"])
 	}
 }
 
@@ -160,28 +166,14 @@ func TestMigrateAggregatesAdoptsCurrentUnversionedViews(t *testing.T) {
 		t.Fatalf("clear version markers: %v", err)
 	}
 
-	before := map[string]uint32{}
-	for _, spec := range aggregateSpecs {
-		var oid uint32
-		if err := s.pool.QueryRow(ctx,
-			`SELECT to_regclass(format('%I.%I', current_schema(), $1::text))::oid`, spec.name).
-			Scan(&oid); err != nil {
-			t.Fatalf("read %s OID: %v", spec.name, err)
-		}
-		before[spec.name] = oid
-	}
+	before := readAggregateOIDs(t, s)
 	if err := s.EnableDownsampling(ctx); err != nil {
 		t.Fatalf("EnableDownsampling: %v", err)
 	}
+	after := readAggregateOIDs(t, s)
 	for _, spec := range aggregateSpecs {
-		var after uint32
-		if err := s.pool.QueryRow(ctx,
-			`SELECT to_regclass(format('%I.%I', current_schema(), $1::text))::oid`, spec.name).
-			Scan(&after); err != nil {
-			t.Fatalf("read %s OID after adoption: %v", spec.name, err)
-		}
-		if after != before[spec.name] {
-			t.Errorf("%s was rebuilt despite a current definition: OID %d -> %d", spec.name, before[spec.name], after)
+		if after[spec.name] != before[spec.name] {
+			t.Errorf("%s was rebuilt despite a current definition: OID %d -> %d", spec.name, before[spec.name], after[spec.name])
 		}
 		current, versioned, err := s.aggregateCurrent(ctx, spec)
 		if err != nil {
@@ -302,29 +294,15 @@ func TestMigrateAggregatesRebuildsSemanticDrift(t *testing.T) {
 			t.Fatalf("precondition: drifted daily must still expose %s", col)
 		}
 	}
-	before := make(map[string]uint32, len(aggregateSpecs))
-	for _, spec := range aggregateSpecs {
-		var oid uint32
-		if err := s.pool.QueryRow(ctx,
-			`SELECT to_regclass(format('%I.%I', current_schema(), $1::text))::oid`, spec.name).
-			Scan(&oid); err != nil {
-			t.Fatalf("read pre-migration %s OID: %v", spec.name, err)
-		}
-		before[spec.name] = oid
-	}
+	before := readAggregateOIDs(t, s)
 
 	if err := s.EnableDownsampling(ctx); err != nil {
 		t.Fatalf("EnableDownsampling: %v", err)
 	}
+	after := readAggregateOIDs(t, s)
 	for _, spec := range aggregateSpecs {
-		var oid uint32
-		if err := s.pool.QueryRow(ctx,
-			`SELECT to_regclass(format('%I.%I', current_schema(), $1::text))::oid`, spec.name).
-			Scan(&oid); err != nil {
-			t.Fatalf("read rebuilt %s OID: %v", spec.name, err)
-		}
-		if oid == before[spec.name] {
-			t.Errorf("%s was marked without being rebuilt: OID stayed %d", spec.name, oid)
+		if after[spec.name] == before[spec.name] {
+			t.Errorf("%s was marked without being rebuilt: OID stayed %d", spec.name, after[spec.name])
 		}
 		var definition string
 		if err := s.pool.QueryRow(ctx, `

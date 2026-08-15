@@ -258,6 +258,12 @@ jobs:
   publish-image:
     needs: [build-image]
     if: github.event_name != 'pull_request'
+    # Workflow-level concurrency is per ref, so a main build and tag build can overlap. Serialize
+    # only the publishing jobs globally: this makes one reusable candidate tag race-free without
+    # delaying their read-only build/test/scan jobs or accumulating a staging tag per run.
+    concurrency:
+      group: heliograph-publish-image
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -288,15 +294,14 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Install skopeo
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends skopeo
-      # First copy to a workflow-run-specific candidate. Branch and release-tag runs for the same
-      # commit can overlap (concurrency is per ref), so a SHA-only staging tag would let them race.
-      # --preserve-digests makes conversion/recompression a hard failure, and this check happens
-      # before any branch/release/SHA alias is touched.
+      # First copy to the reusable candidate tag. The publish-image concurrency group above makes
+      # that mutable tag exclusive across branch/tag runs. --preserve-digests makes conversion or
+      # recompression a hard failure, and this check happens before any public alias is touched.
       - name: Stage and verify scanned image
         id: candidate
         env:
           IMAGE: ghcr.io/${{ github.repository }}
-          CANDIDATE: ghcr.io/${{ github.repository }}:candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          CANDIDATE: ghcr.io/${{ github.repository }}:candidate
         run: |
           scanned=$(tr -d '\n' < /tmp/artifacts/image-digest.txt)
           skopeo copy --all --preserve-digests --digestfile /tmp/candidate-digest.txt \
