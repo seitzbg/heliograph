@@ -136,6 +136,49 @@ func TestAdminDisabledWhenNoSigningKey(t *testing.T) {
 	}
 }
 
+func TestAdminSessionAndLogout(t *testing.T) {
+	srv, _ := adminServer("hunter2")
+	mux := srv.Routes()
+
+	// session probe without a cookie -> 401 (drives the top bar's "Log in" state)
+	r := httptest.NewRequest("GET", "/api/admin/session", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("session (no cookie) = %d, want 401", w.Code)
+	}
+
+	cookie := login(t, mux, "hunter2")
+
+	// session probe with a valid cookie -> 204 ("Admin · Log out" state)
+	r = httptest.NewRequest("GET", "/api/admin/session", nil)
+	r.AddCookie(cookie)
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, r)
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("session (cookie) = %d, want 204", w.Code)
+	}
+
+	// logout -> 204 and a Set-Cookie that clears the session (HttpOnly cookie can't be
+	// cleared from JS, so the client relies on this).
+	r = httptest.NewRequest("POST", "/api/admin/logout", nil)
+	r.AddCookie(cookie)
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, r)
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("logout = %d, want 204", w.Code)
+	}
+	var cleared *http.Cookie
+	for _, c := range w.Result().Cookies() {
+		if c.Name == "smoked_admin" {
+			cleared = c
+		}
+	}
+	if cleared == nil || cleared.MaxAge >= 0 {
+		t.Fatalf("logout must send a clearing smoked_admin cookie (MaxAge<0), got %+v", cleared)
+	}
+}
+
 func TestAdminLoginAndCRUD(t *testing.T) {
 	srv, fk := adminServer("hunter2")
 	mux := srv.Routes()

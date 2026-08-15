@@ -42,7 +42,6 @@
   body { margin:0; background:var(--bg); color:var(--ink); font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; line-height:1.55; -webkit-font-smoothing:antialiased; }
   .wrap { max-width:1240px; margin:0 auto; padding:24px 22px 64px; }
   header.top { display:flex; align-items:flex-start; justify-content:space-between; gap:20px; flex-wrap:wrap; }
-  .eyebrow { font-family:ui-monospace,Menlo,monospace; font-size:11px; letter-spacing:.18em; text-transform:uppercase; color:var(--accent); font-weight:600; }
   h1 { font-family:ui-monospace,"SF Mono",Menlo,monospace; font-size:clamp(22px,3vw,30px); line-height:1.1; margin:8px 0 5px; letter-spacing:-.01em; }
   .lede { color:var(--ink-soft); max-width:70ch; font-size:14.5px; }
   .status { font-family:ui-monospace,Menlo,monospace; font-size:12px; color:var(--ink-soft); display:inline-flex; align-items:center; gap:7px; margin-top:8px; }
@@ -55,6 +54,18 @@
   .tabs button { font-family:ui-monospace,Menlo,monospace; font-size:13px; color:var(--ink-soft); background:transparent; border:0; border-radius:999px; padding:7px 18px; cursor:pointer; }
   .tabs button[aria-selected="true"] { background:var(--accent-soft); color:var(--ink); box-shadow:inset 0 0 0 1px var(--accent); }
   .tabs button:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+  /* Classic top bar: brand · tabs · (theme + admin) across one row, wrapping on narrow widths. */
+  header.topbar { display:flex; align-items:center; gap:12px 18px; flex-wrap:wrap; padding:12px 0 14px; border-bottom:1px solid var(--border); }
+  .topbar-brand { font-family:ui-monospace,Menlo,monospace; font-size:13px; letter-spacing:.2em; text-transform:uppercase; color:var(--accent); font-weight:700; }
+  header.topbar .tabs { margin-top:0; }
+  header.topbar .controls { margin-left:auto; }
+  .admin-acct { display:inline-flex; align-items:center; gap:8px; font-family:ui-monospace,Menlo,monospace; font-size:12px; color:var(--ink-soft); }
+  .admin-dot { width:7px; height:7px; border-radius:50%; background:var(--accent); display:inline-block; }
+  .topbar-btn { font-family:ui-monospace,Menlo,monospace; font-size:12px; color:var(--ink-soft); background:var(--surface); border:1px solid var(--border); border-radius:999px; padding:7px 13px; cursor:pointer; }
+  .topbar-btn:hover { border-color:var(--accent); color:var(--ink); }
+  .topbar-btn:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+  .hero { margin-top:18px; }
+  .hero .status { margin-top:10px; }
   .seg { display:inline-flex; background:var(--surface); border:1px solid var(--border); border-radius:999px; padding:3px; }
   .seg button { font-family:ui-monospace,Menlo,monospace; font-size:11.5px; color:var(--ink-soft); background:transparent; border:0; border-radius:999px; padding:4px 11px; cursor:pointer; }
   .seg button[aria-pressed="true"] { background:var(--accent-soft); color:var(--ink); box-shadow:inset 0 0 0 1px var(--accent); }
@@ -214,9 +225,9 @@
   .vadmin-reveal-actions { display:flex; gap:10px; margin-top:12px; }
   /* Config add/edit/group modals: stack each field's label above a full-width control, one field
      per line, so they read clearly instead of the labels + inputs flowing inline and wrapping. */
-  #cfgForm .vadmin-lbl, #cfgGroupForm .vadmin-lbl { display:block; margin-top:14px; }
+  #cfgForm .vadmin-lbl, #cfgGroupForm .vadmin-lbl, #adminLoginForm .vadmin-lbl { display:block; margin-top:14px; }
   #cfgName, #cfgProbe, #cfgHost, #cfgVantages, #cfgAlerts,
-  #cfgGroupName, #cfgGroupVantages, #cfgGroupAlerts { display:block; width:100%; box-sizing:border-box; margin-top:5px; }
+  #cfgGroupName, #cfgGroupVantages, #cfgGroupAlerts, #adminPass { display:block; width:100%; box-sizing:border-box; margin-top:5px; }
   /* Group modal's per-target rows: name · probe · host · remove, wrapping on narrow widths. */
   #cfgGroupChildren { display:flex; flex-direction:column; gap:8px; margin-top:5px; }
   .cfg-childrow { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
@@ -231,23 +242,39 @@
 </head>
 <body>
 <div class="wrap">
-  <header class="top">
-    <div>
-      <div class="eyebrow">Heliograph · live</div>
-      <h1>Latency monitor</h1>
-      <p class="lede">Live smoke graphs rendered client-side from the Go collector's JSON API. <b>Overview</b> ranks the worst targets and reports availability; <b>Graphs</b> is the per-target grid — click a target for all four ranges, then click a graph to zoom.</p>
-      <div class="status"><span class="dot"></span><span id="statusText">connecting…</span></div>
-      <div class="tabs" role="tablist">
-        <button id="tabOverview" role="tab" aria-selected="true">Overview</button>
-        <button id="tabGraphs" role="tab" aria-selected="false">Graphs</button>
-        <button id="tabVantages" role="tab" aria-selected="false">Vantages</button>
-        <button id="tabConfig" role="tab" aria-selected="false">Config</button>
-      </div>
-    </div>
+  <header class="topbar">
+    <div class="topbar-brand">Heliograph</div>
+    <nav class="tabs" role="tablist">
+      <button id="tabOverview" role="tab" aria-selected="true">Overview</button>
+      <button id="tabGraphs" role="tab" aria-selected="false">Graphs</button>
+      <button id="tabVantages" role="tab" aria-selected="false">Vantages</button>
+      <button id="tabConfig" role="tab" aria-selected="false">Config</button>
+    </nav>
     <div class="controls">
+      <span id="adminAcct" class="admin-acct hidden"><span class="admin-dot" aria-hidden="true"></span>Admin<button class="topbar-btn" id="adminLogoutBtn" type="button">Log out</button></span>
+      <button class="topbar-btn hidden" id="adminLoginBtn" type="button">Log in</button>
       <button class="theme-toggle" id="themeBtn" aria-label="Toggle light/dark theme"><span id="themeIcon">◑</span><span id="themeLabel">Theme</span></button>
     </div>
   </header>
+  <div class="hero">
+    <h1>Latency monitor</h1>
+    <p class="lede">Live smoke graphs rendered client-side from the Go collector's JSON API. <b>Overview</b> ranks the worst targets and reports availability; <b>Graphs</b> is the per-target grid — click a target for all four ranges, then click a graph to zoom.</p>
+    <div class="status"><span class="dot"></span><span id="statusText">connecting…</span></div>
+  </div>
+
+  <div id="adminLoginModal" class="vadmin-reveal-backdrop hidden">
+    <form id="adminLoginForm" class="panel vadmin-reveal" role="dialog" aria-modal="true" aria-labelledby="adminLoginTitle" autocomplete="off">
+      <h3 id="adminLoginTitle">Admin login</h3>
+      <p class="vadmin-note">Sign in to manage database targets and vantages. The session lasts 12 hours and needs a secure context (HTTPS via the proxy, or localhost).</p>
+      <label class="vadmin-lbl" for="adminPass">Admin password</label>
+      <input id="adminPass" type="password" class="vadmin-input" autocomplete="current-password">
+      <span id="adminLoginErr" class="vadmin-err" role="alert"></span>
+      <div class="vadmin-reveal-actions">
+        <button type="submit" class="vadmin-btn">Sign in</button>
+        <button type="button" id="adminLoginCancel" class="vadmin-btn">Cancel</button>
+      </div>
+    </form>
+  </div>
 
   <!-- OVERVIEW -->
   <section id="viewOverview">
@@ -328,12 +355,7 @@
       <code>smoked vantage add / ls / revoke</code> (also needs <code>-dsn</code>).
     </div>
 
-    <form id="vantLogin" class="panel vadmin-row hidden" autocomplete="off">
-      <label class="vadmin-lbl" for="vantPass">Admin password</label>
-      <input id="vantPass" type="password" class="vadmin-input" autocomplete="current-password">
-      <button type="submit" class="vadmin-btn">Sign in</button>
-      <span id="vantLoginErr" class="vadmin-err" role="alert"></span>
-    </form>
+    <div id="vantLogin" class="panel vadmin-note hidden">Admin access required — use <b>Log in</b> at the top right to manage vantages.</div>
 
     <div id="vantList" class="hidden">
       <div class="panel">
@@ -383,12 +405,7 @@
       (<code>-config</code>), and <code>SMOKED_ADMIN_PASSWORD</code> on the hub.
     </div>
 
-    <form id="cfgLogin" class="panel vadmin-row hidden" autocomplete="off">
-      <label class="vadmin-lbl" for="cfgPass">Admin password</label>
-      <input id="cfgPass" type="password" class="vadmin-input" autocomplete="current-password">
-      <button type="submit" class="vadmin-btn">Sign in</button>
-      <span id="cfgLoginErr" class="vadmin-err" role="alert"></span>
-    </form>
+    <div id="cfgLogin" class="panel vadmin-note hidden">Admin access required — use <b>Log in</b> at the top right to manage database targets.</div>
 
     <div id="cfgList" class="hidden">
       <div class="panel">

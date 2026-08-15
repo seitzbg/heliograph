@@ -191,8 +191,15 @@ func (srv *Server) Routes() *http.ServeMux {
 	mux.HandleFunc("GET /api/series/all", srv.seriesAll)
 	mux.HandleFunc("GET /api/rollup", srv.rollup)
 	mux.HandleFunc("GET /metrics", srv.metrics)
-	if srv.AdminPassword != "" && srv.Vantages != nil && len(srv.AdminKey) > 0 {
+	if srv.AdminPassword != "" && len(srv.AdminKey) > 0 {
+		// Admin auth endpoints, available whenever admin is configured — independent of which
+		// admin feature (vantages/config) is wired — so the top-bar login/logout + session probe
+		// work on every tab.
 		mux.HandleFunc("POST /api/admin/login", srv.adminLogin)
+		mux.HandleFunc("POST /api/admin/logout", srv.adminLogout)
+		mux.HandleFunc("GET /api/admin/session", srv.requireAdmin(srv.adminSession))
+	}
+	if srv.AdminPassword != "" && srv.Vantages != nil && len(srv.AdminKey) > 0 {
 		mux.HandleFunc("GET /api/admin/vantages", srv.requireAdmin(srv.listVantages))
 		mux.HandleFunc("POST /api/admin/vantages", srv.requireAdmin(srv.addVantage))
 		mux.HandleFunc("DELETE /api/admin/vantages/{name}", srv.requireAdmin(srv.revokeVantage))
@@ -1159,6 +1166,26 @@ func (srv *Server) adminLogin(w http.ResponseWriter, r *http.Request) {
 		Name: adminCookie, Value: signSession(srv.AdminKey, time.Now().Add(12*time.Hour)),
 		Path: "/api/admin", HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode, MaxAge: 12 * 3600,
 	})
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// adminLogout clears the admin session cookie (the cookie is HttpOnly, so the browser can't
+// clear it from JS — the client hits this to log out). Idempotent; no auth required, since
+// presenting no/stale credentials to log out is harmless.
+func (srv *Server) adminLogout(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	http.SetCookie(w, &http.Cookie{
+		Name: adminCookie, Value: "", Path: "/api/admin",
+		HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode, MaxAge: -1,
+	})
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// adminSession is a whoami probe behind requireAdmin: 204 when the session cookie is valid,
+// 401 when not (and 404 when admin is disabled, since the route isn't registered). The top bar
+// uses it to decide whether to show "Log in" or "Admin · Log out" on any tab.
+func (srv *Server) adminSession(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusNoContent)
 }
 
