@@ -444,7 +444,9 @@ func (s *PGStore) markAggregateNames(ctx context.Context, names []string) error 
 // aggregateDefinitionCurrent performs the one-time compatibility check for an unversioned
 // aggregate. Timescale exposes PostgreSQL's normalized SELECT text, which can vary in harmless
 // qualification, whitespace, parentheses, and inserted casts between versions. Strip those forms
-// and require every semantic component Heliograph consumes.
+// and compare the complete SELECT/FROM/GROUP BY shape. Exact matching matters here: accepting a
+// definition merely because it contains every required aggregate would also accept a WHERE filter
+// and permanently version incomplete rollups.
 func aggregateDefinitionCurrent(definition, bucket string) bool {
 	n := normalizeAggregateDefinition(definition)
 	selectPart, groupPart, ok := strings.Cut(n, "groupby")
@@ -457,30 +459,21 @@ func aggregateDefinitionCurrent(definition, bucket string) bool {
 	} else if bucket == "day" {
 		buckets = append(buckets, "'1day'", "'24:00:00'")
 	}
-	bucketOK := false
 	for _, literal := range buckets {
 		token := "time_bucket" + literal + ",ts"
-		if strings.Contains(selectPart, token+"asbucket") && groupPart == token+",target,vantage" {
-			bucketOK = true
-			break
+		wantSelect := "select" + token + "asbucket,target,vantage," +
+			"avgmedian_secondsasmedian_avg," +
+			"minmedian_secondsasmedian_min," +
+			"maxmedian_secondsasmedian_max," +
+			"avgloss/nullifpings,0asloss_frac," +
+			"count*asrounds," +
+			"countmedian_secondsasmedian_rounds" +
+			"fromsamples"
+		if selectPart == wantSelect && groupPart == token+",target,vantage" {
+			return true
 		}
 	}
-	if !bucketOK {
-		return false
-	}
-	for _, token := range []string{
-		"avgmedian_secondsasmedian_avg",
-		"minmedian_secondsasmedian_min",
-		"maxmedian_secondsasmedian_max",
-		"avgloss/nullifpings,0asloss_frac",
-		"count*asrounds",
-		"countmedian_secondsasmedian_rounds",
-	} {
-		if !strings.Contains(selectPart, token) {
-			return false
-		}
-	}
-	return true
+	return false
 }
 
 var aggregateQualifierRE = regexp.MustCompile(`[a-z_][a-z0-9_$]*\.`)

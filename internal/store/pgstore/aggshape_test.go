@@ -56,6 +56,7 @@ func TestAggregateDefinitionCurrent(t *testing.T) {
 		"wrong median average": strings.Replace(hourly, "avg(samples.median_seconds) AS median_avg", "max(samples.median_seconds) AS median_avg", 1),
 		"wrong loss function":  strings.Replace(hourly, "avg((samples.loss)", "sum((samples.loss)", 1),
 		"wrong median count":   strings.Replace(hourly, "count(samples.median_seconds) AS median_rounds", "count(*) AS median_rounds", 1),
+		"filtered rows":        strings.Replace(hourly, "FROM samples", "FROM samples WHERE samples.vantage = 'local'", 1),
 		"missing vantage group": strings.Replace(hourly,
 			"samples.target, samples.vantage;", "samples.target;", 1),
 		"target expression group": strings.Replace(hourly,
@@ -68,6 +69,65 @@ func TestAggregateDefinitionCurrent(t *testing.T) {
 				t.Error("semantically stale definition was accepted")
 			}
 		})
+	}
+}
+
+// A filtered aggregate can expose the exact expected columns, buckets, grouping, and aggregate
+// expressions while silently omitting source rows. An unversioned/restored filtered definition
+// must therefore be rebuilt rather than adopted and marked authoritative.
+func TestMigrateAggregatesRebuildsFilteredDefinition(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	for _, q := range []string{
+		`DROP MATERIALIZED VIEW IF EXISTS samples_daily CASCADE`,
+		`DROP MATERIALIZED VIEW IF EXISTS samples_hourly CASCADE`,
+	} {
+		if _, err := s.pool.Exec(ctx, q); err != nil {
+			t.Fatalf("drop caggs: %v", err)
+		}
+	}
+	if _, err := s.pool.Exec(ctx, downsampleStmts[0]); err != nil {
+		t.Fatalf("create current hourly: %v", err)
+	}
+	if _, err := s.pool.Exec(ctx, `
+		CREATE MATERIALIZED VIEW samples_daily
+		WITH (timescaledb.continuous, timescaledb.materialized_only = false) AS
+		SELECT time_bucket('1 day', ts) AS bucket, target, vantage,
+		       avg(median_seconds) AS median_avg, min(median_seconds) AS median_min,
+		       max(median_seconds) AS median_max,
+		       avg(loss::float / NULLIF(pings, 0)) AS loss_frac,
+		       count(*) AS rounds, count(median_seconds) AS median_rounds
+		FROM samples WHERE vantage = 'local'
+		GROUP BY bucket, target, vantage WITH NO DATA`); err != nil {
+		t.Fatalf("create filtered daily: %v", err)
+	}
+	if _, err := s.pool.Exec(ctx, aggregateVersionSchema); err != nil {
+		t.Fatalf("create version catalog: %v", err)
+	}
+	if _, err := s.pool.Exec(ctx,
+		`DELETE FROM heliograph_aggregate_versions WHERE aggregate_name = ANY($1::text[])`,
+		[]string{"samples_hourly", "samples_daily"}); err != nil {
+		t.Fatalf("clear version markers: %v", err)
+	}
+
+	var before uint32
+	if err := s.pool.QueryRow(ctx,
+		`SELECT to_regclass(format('%I.%I', current_schema(), $1::text))::oid`, "samples_daily").
+		Scan(&before); err != nil {
+		t.Fatalf("read filtered daily OID: %v", err)
+	}
+	if err := s.EnableDownsampling(ctx); err != nil {
+		t.Fatalf("EnableDownsampling: %v", err)
+	}
+	var after uint32
+	if err := s.pool.QueryRow(ctx,
+		`SELECT to_regclass(format('%I.%I', current_schema(), $1::text))::oid`, "samples_daily").
+		Scan(&after); err != nil {
+		t.Fatalf("read rebuilt daily OID: %v", err)
+	}
+	if after == before {
+		t.Errorf("filtered samples_daily was adopted instead of rebuilt: OID stayed %d", after)
 	}
 }
 
