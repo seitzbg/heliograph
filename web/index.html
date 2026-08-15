@@ -311,15 +311,17 @@
           <span class="lbl">Jitter</span><span class="smoke-key" id="smokeKey" aria-hidden="true"></span>
           <span class="swatch" style="color:var(--ink-faint)">min → median → max</span>
           <span class="lbl" style="margin-left:8px">Loss</span><span id="lossLegend" style="display:inline-flex;gap:12px;flex-wrap:wrap"></span>
-          <span class="lbl" style="margin-left:auto">Cols</span>
-          <div class="seg" id="colsSeg" role="group" aria-label="Graphs per row" title="Graphs per row (fixed counts never shrink a graph below its minimum width)">
-            <button type="button" data-cols="auto" aria-pressed="true">Auto</button>
-            <button type="button" data-cols="2" aria-pressed="false">2</button>
-            <button type="button" data-cols="3" aria-pressed="false">3</button>
-            <button type="button" data-cols="4" aria-pressed="false">4</button>
-            <button type="button" data-cols="6" aria-pressed="false">6</button>
+          <div class="legend-right" style="margin-left:auto; display:inline-flex; align-items:center; gap:8px 16px; flex-wrap:wrap">
+            <span class="lbl" id="colsLabel">Cols</span>
+            <div class="seg" id="colsSeg" role="group" aria-label="Graphs per row" title="Graphs per row — only counts that fit at the current width are shown">
+              <button type="button" data-cols="auto" aria-pressed="true">Auto</button>
+              <button type="button" data-cols="2" aria-pressed="false">2</button>
+              <button type="button" data-cols="3" aria-pressed="false">3</button>
+              <button type="button" data-cols="4" aria-pressed="false">4</button>
+              <button type="button" data-cols="6" aria-pressed="false">6</button>
+            </div>
+            <label class="lbl" style="cursor:pointer; display:inline-flex; align-items:center; gap:5px" title="Share one Y-axis across all graphs so they're comparable"><input type="checkbox" id="unisonToggle"> unison scale</label>
           </div>
-          <label class="lbl" style="cursor:pointer; display:inline-flex; align-items:center; gap:5px" title="Share one Y-axis across all graphs so they're comparable"><input type="checkbox" id="unisonToggle"> unison scale</label>
         </div>
         <div class="grid" id="graphGrid"><div class="empty">Waiting for the collector…</div></div>
       </div>

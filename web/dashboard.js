@@ -93,6 +93,15 @@
     return 'repeat(auto-fill, minmax(max(' + floor + ', (100% - ' + (n - 1) * gap + 'px) / ' + n + '), 1fr))';
   }
 
+  // maxColumnsFor returns how many `min`-px graph columns (with `gap` between them) actually fit
+  // in `width` px — n columns need n*min + (n-1)*gap <= width. The Columns picker uses it to hide
+  // counts that can't fit (clicking them would just wrap to fewer) and to hide itself entirely
+  // when even 3 won't fit. Always at least 1 for any positive width.
+  function maxColumnsFor(width, min, gap) {
+    if (!(width > 0)) return 0;
+    return Math.max(1, Math.floor((width + gap) / (min + gap)));
+  }
+
   // fetchJSON GETs a JSON endpoint and REJECTS a non-2xx response instead of decoding
   // its body (#2). The API returns JSON error bodies with HTTP 503 when storage is
   // unavailable; decoding those as ordinary data turned a transient failure into an
@@ -716,7 +725,7 @@
     ].join('\n');
   }
 
-  window.Dash = { RANGES, RANGE_ORDER, parseRoute, mergeSeries, gridSince, gridTemplateFor, fetchJSON, zoomResolution, pixelToTime, sharedYMax, buildTree, underPath, targetStatus, pickSeries, vantageList, orderVantages, defaultFocus, keepFocus, vantageColorVar, adminMode, adminSessionState, createAdminStateController, statusProbeOwnsView, relTime, listTargets, addTarget, editTarget, removeTarget, buildTargetNode, buildGroupNode, labelHTML, collectingNote, agentYaml, agentCompose, cfgTree, reweightSiblings, reorderSiblings, editNodeAtPath, removeNodeAtPath, renameNodeAtPath, addNodeAtPath, moveNode, moveInList, cfgDropDestination, cfgVisibleRows, cfgTreeKey };
+  window.Dash = { RANGES, RANGE_ORDER, parseRoute, mergeSeries, gridSince, gridTemplateFor, maxColumnsFor, fetchJSON, zoomResolution, pixelToTime, sharedYMax, buildTree, underPath, targetStatus, pickSeries, vantageList, orderVantages, defaultFocus, keepFocus, vantageColorVar, adminMode, adminSessionState, createAdminStateController, statusProbeOwnsView, relTime, listTargets, addTarget, editTarget, removeTarget, buildTargetNode, buildGroupNode, labelHTML, collectingNote, agentYaml, agentCompose, cfgTree, reweightSiblings, reorderSiblings, editNodeAtPath, removeNodeAtPath, renameNodeAtPath, addNodeAtPath, moveNode, moveInList, cfgDropDestination, cfgVisibleRows, cfgTreeKey };
 
   // ---------------------------------------------------------------- init (DOM) --
   function init() {
@@ -1001,6 +1010,28 @@
     try { const s = localStorage.getItem('graphCols'); if (GRID_COL_OPTIONS.has(s)) gridCols = s; } catch (e) {}
     function applyGridCols() {
       const g = $('graphGrid'); if (g) g.style.gridTemplateColumns = gridTemplateFor(gridCols, GRAPH_MIN, GRAPH_GAP);
+      updateColsPicker();
+    }
+    // updateColsPicker keeps the Columns picker honest at the current browser width: it hides the
+    // count buttons that can't fit (clicking them does nothing — the grid just wraps to fewer), and
+    // hides the picker entirely when even 3 columns won't fit, since Auto is then the only sensible
+    // choice. It also re-syncs aria-pressed so a selection hidden by a resize re-presses when it fits
+    // again. No-op while the Graphs view is hidden (the grid has no width to measure).
+    function updateColsPicker() {
+      const g = $('graphGrid'), seg = $('colsSeg'), label = $('colsLabel');
+      if (!g || !seg || !label) return;
+      const w = g.clientWidth;
+      if (!w) return;
+      const maxFit = maxColumnsFor(w, GRAPH_MIN, GRAPH_GAP);
+      const show = maxFit > 2; // no picker unless more than 2 columns can fit
+      seg.style.display = show ? '' : 'none';
+      label.style.display = show ? '' : 'none';
+      if (!show) return;
+      seg.querySelectorAll('button[data-cols]').forEach((b) => {
+        const c = b.dataset.cols;
+        b.style.display = c === 'auto' || Number(c) <= maxFit ? '' : 'none';
+        b.setAttribute('aria-pressed', String(c === gridCols));
+      });
     }
     function renderGridPanels() {
       const vis = [];
@@ -1011,6 +1042,7 @@
       }
       const yMax = unisonScale ? sharedYMax(vis.map((p) => p.series)) : undefined;
       for (const p of vis) renderInto(p.canvas, p.series, RANGES['3h'], 170, yMax);
+      updateColsPicker(); // the grid now has a measurable width (e.g. first paint on view entry)
     }
 
     // ---- config-tree menu (left nav) ----
@@ -2158,6 +2190,8 @@
     // reflect the persisted columns choice on load, then apply it to the grid
     document.querySelectorAll('#colsSeg button').forEach((x) => x.setAttribute('aria-pressed', String(x.dataset.cols === gridCols)));
     applyGridCols();
+    // Re-evaluate which counts fit (and whether the picker shows) whenever the window resizes.
+    window.addEventListener('resize', updateColsPicker);
 
     // ---- config-tree menu events ----
     $('navTree').addEventListener('click', (e) => { const row = e.target.closest('.row'); if (row) activateRow(row, !!e.target.closest('[data-twist]')); });
