@@ -1,6 +1,7 @@
 # Heliograph
 
 [![CI](https://github.com/seitzbg/heliograph/actions/workflows/ci.yml/badge.svg)](https://github.com/seitzbg/heliograph/actions/workflows/ci.yml)
+&nbsp;[![Release](https://img.shields.io/github/v/release/seitzbg/heliograph?label=release)](https://github.com/seitzbg/heliograph/releases)
 &nbsp;[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 **Read the network in smoke and light** — a modern, non-Perl reimplementation of
@@ -12,7 +13,7 @@ beyond parity with multi-vantage **federation** and database-sourced configurati
 > *graph* right in the name. Fitting for a tool whose remote **vantages** signal what they see and
 > whose smoke bands you read at a glance. (The daemon is still `smoked`.)
 
-Stable since **v1.0.0** — see [CHANGELOG.md](CHANGELOG.md) and the [roadmap](ROADMAP.md).
+See the [changelog](CHANGELOG.md) for release notes and the [roadmap](ROADMAP.md) for what's next.
 
 ## Screenshots
 
@@ -39,33 +40,35 @@ config), and the **Vantages** panel manages federation agent keys — both behin
 
 ![Heliograph Vantages panel — federation agent keys](docs/img/vantages-dark.png)
 
-## What works today (verified)
+## Features
 
-- **Smoke-graph renderer** (`web/smoke-poc.html`) — a self-contained canvas re-implementation of SmokePing's signature chart: nested percentile bands darkening toward the median + the 8-bucket loss-colored median line, light/dark theme-aware, across four latency scenarios. This de-risks the "keep the look & feel" requirement. Open it in a browser to explore.
-- **Plugin probes** — a `Probe` interface + registry; probes self-register via `init()`. Seven shipped, all live-tested against real hosts:
-  - `FPing` — wraps `fping(8)` for ICMP echo RTT (CLI-wrapper style).
-  - `Ping` — native ICMP echo via `golang.org/x/net/icmp`, no `fping` binary/`setcap`: an
-    unprivileged datagram socket first (needs the `net.ipv4.ping_group_range` sysctl), falling
-    back to a raw socket (needs `CAP_NET_RAW`) — `mode: auto|unprivileged|privileged` can pin
-    one path. Params: `packetsize` (default `56`), `interval_ms` (optional — by default the N sends
-    are spread across the round so a tight burst doesn't inflate loss or spike the send rate to one
-    destination, like `FPing`). Coexists with `FPing`.
-  - `TCPConnect` — native TCP-connect timing, no external binary.
-  - `DNS` — native resolver query timing via `miekg/dns` (no external `dig`).
-  - `HTTP` — native HTTP(S) time-to-first-byte (minus DNS) via `net/http` + `httptrace` (no external `curl`).
-  - `SSH` — native SSH-banner-read timing, no external binary.
-  - `IRTT` — wraps `irtt(1)` for UDP round-trip / jitter (needs an irtt server).
-- **Fast, parallel scheduler** — a bounded goroutine worker pool runs all probes concurrently, each under its own timeout. One slow/hung target cannot block the others (proven by `scheduler_test.go`).
-- **SmokePing sample math** — median, loss (= missing samples), and the "centered" array that makes smoke bands render symmetrically (`internal/sample`, unit-tested against SmokePing's `rrdupdate_string` semantics).
-- **JSON API** — `/api/probes`, `/api/probes/schema` (each probe's config as JSON Schema, generated from the same source as runtime validation), `/api/targets`, `/api/series?target=NAME`, `/api/charts?by=loss|median|stddev` (worst-N targets), `/api/sla?window=24h` (per-target availability). `series` returns the raw per-round sample array (the input a client-side smoke chart needs).
-- **Live web dashboard** (`web/index.html`) — fetches `/api/series` and renders each target with the shared canvas smoke renderer (`web/smoke.js`), auto-refreshing; light/dark theme-aware. Served same-origin by the collector.
-- **YAML config with inheritance** (`internal/config`, `config.example.yaml`) — a target tree where `probe`/`pings`/`step`/`params`/`alerts` set on a node apply to everything beneath it until overridden (SmokePing's key ergonomic). Each leaf is validated against its probe's `Schema()` — the modern stand-in for SmokePing's per-probe dynamic grammar. `-config file.yaml` replaces the built-in demo targets. `-config` also accepts a **directory** (`examples/config-dir/`): `default.yaml` holds `database`/`probes`/`alerts` + tree-wide defaults, and `conf.d/*.yaml` drop-in fragments each add top-level target branches (SmokePing `@include`-style concatenation, loaded in sorted filename order; a fragment may contain only `targets.children`). A node may also set `title:` (a display-name override for the graph header) and `ip:` (a pinned IP); with `-resolve-ips` (or `SMOKED_RESOLVE_IPS=1`) the header shows the target's IP — pinned, a literal-IP host, or the resolved hostname.
-- **Alert engine** (`internal/alert`) — per-target windows of recent loss/latency samples, with hysteresis matchers (`CheckLoss`, `CheckLatency`: raise after X bad rounds, clear after X good) and a pattern DSL — right-anchored shape matches (`>50%,>50%`, `>200,>200`) with `*N*` skips, a bare `*` wildcard, and `==U`/`!=U` for a lost round's unknown rtt. Firing/resolved state with edge-triggering; per-alert `priority` inhibits noisier alerts on the same target, and a per-target `alertee` adds extra recipients. Notifiers = log, generic webhook (JSON POST), **Slack**, **Discord**, and **email (SMTP)** (configured
-by flag or `SMOKED_*` env var, and referenced from an alert as `to: [slack]` / `to: [discord]` /
-`to: [email]`). Verified firing live on real loss and latency. Alerts are defined in config and attached to targets by name.
-- **Pluggable store** — a `store.Store` interface with two implementations:
-  - `MemStore` — in-memory (default; for dev/tests).
-  - `pgstore` — **TimescaleDB**: one row per round in a `samples` hypertable keeping the raw per-round sample array (loss gaps stored as SQL `NULL`), so smoke bands come from the real distribution. Verified end-to-end against a live TimescaleDB.
+- **Seven probes** — `Ping` (native ICMP, no `fping`/`setcap`), `TCPConnect`, `DNS`, `HTTP`
+  (time-to-first-byte), and `SSH` (banner) are pure Go; `FPing` and `IRTT` wrap their CLIs. New
+  probes self-register through a small `Probe` interface.
+- **Signature smoke graphs**, rebuilt on HTML canvas — nested percentile bands (jitter) darkening
+  toward a loss-colored median line, computed from the real per-round distribution, light/dark
+  theme-aware.
+- **Fast, parallel poller** — a bounded worker pool probes every target concurrently, each under
+  its own timeout and on its own schedule; one slow or hung target never blocks the rest.
+- **TimescaleDB storage** — one row per round in a `samples` hypertable keeps the raw sample array
+  (loss as SQL `NULL`), so bands reflect the true distribution. Hourly/daily continuous aggregates
+  serve long time ranges; an in-memory store backs dev and tests.
+- **Live dashboard** — an Overview that ranks the worst targets by loss/latency/jitter with
+  per-target availability, plus a filterable per-target graph grid (four time ranges, adjustable
+  columns, drag-to-zoom), served same-origin.
+- **Alerting** — hysteresis loss/latency matchers and a right-anchored pattern DSL, edge-triggered
+  firing/resolved with priority inhibition and per-target recipients. Notifiers: log, webhook,
+  Slack, Discord, and email (SMTP).
+- **Inheritable config** — a YAML target tree where `probe`/`step`/`params`/`alerts` cascade to
+  children and each leaf is schema-validated; load it from a file or a `conf.d/` directory, or edit
+  it live in the browser from a DB-backed **Config** tab merged with the YAML.
+- **Federation** — remote `smoke-agent` vantages report to the hub over HTTPS with per-vantage API
+  keys, adding a per-vantage median overlay on every graph, a Vantages admin panel, and a bundled
+  Caddy reverse proxy. See the [federation guide](docs/federation.md).
+- **JSON API** — probes and their JSON Schema, per-target series, worst-N charts, and availability
+  (`/api/series`, `/api/charts`, `/api/sla`, `/api/probes/schema`, …).
+- **SmokePing importer** — migrate an existing install's target config and RRD history with
+  `smoked import smokeping`.
 
 ## Run it
 
@@ -308,16 +311,20 @@ web/
 - **Probes as plugins**: native interface for the core set; a gRPC `go-plugin` protocol (planned) will let third parties add probes in any language without recompiling.
 - **Storage keeps raw samples**: the smoke graph needs the per-round distribution, so store the N samples (not just the median) and compute bands at query time.
 
-## Beyond parity and roadmap
+## Beyond parity
 
-**Federation (multi-vantage) is complete** — the hub, the `smoke-agent` remote collector, the per-vantage overlay UI, the Vantages admin GUI panel, and the bundled reverse proxy: a per-vantage storage dimension (the hub probes as `local`), `vantages:` config with a per-vantage assignment builder, a TimescaleDB-backed API-key store with a `smoked vantage` CLI + a password-gated admin API and login-gated GUI panel, the agent-facing endpoints (`GET /agent/v1/assignment`, `POST /agent/v1/results`) with idempotent ingest and per-vantage alert evaluation, per-vantage overlay graphs in the detail views, and a bundled Caddy compose profile that terminates TLS (automatic Let's Encrypt / DNS-01) and serves the agent API by key + the dashboard behind Basic Auth. Transport is HTTPS/JSON with per-vantage API keys behind a required reverse proxy (the bundled Caddy, or your own) — superseding the earlier gRPC+mTLS plan. See the **[federation operator guide](docs/federation.md)** and [Federation deployment](#federation-deployment-reverse-proxy).
+Two capabilities go past SmokePing, and both ship in the 1.0 line:
 
-**Database-sourced configuration also ships in 1.0** — targets/probes/alerts can live in the store
-alongside YAML (additive, `conf.d`-style), edited from an in-browser **Config** tab, with a
-`smoked config import` / `smoked import smokeping` path to migrate an existing SmokePing install.
+- **Multi-vantage federation** — remote `smoke-agent` collectors report to the hub over HTTPS with
+  per-vantage API keys, and each detail graph overlays a median line per vantage. Transport is
+  HTTPS/JSON behind a required reverse proxy — a bundled Caddy (automatic Let's Encrypt / DNS-01) or
+  your own. See the **[federation operator guide](docs/federation.md)** and
+  [Federation deployment](#federation-deployment-reverse-proxy).
+- **Database-sourced configuration** — targets, probes, and alerts can live in the store alongside
+  YAML (additive, `conf.d`-style), edited from the in-browser **Config** tab, with
+  `smoked config import` / `smoked import smokeping` to migrate an existing SmokePing install.
 
-Still planned: further notifier integrations (e.g. PagerDuty). See the
-[roadmap](ROADMAP.md).
+Planned next: further notifier integrations (e.g. PagerDuty). See the [roadmap](ROADMAP.md).
 
 ## Acknowledgements
 

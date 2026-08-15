@@ -6,6 +6,11 @@ All notable changes to **Heliograph** are recorded here. The format follows
 
 ## [Unreleased]
 
+### Docs
+- **README refreshed** — the verbose "What works today" section is now a concise, scannable
+  **Features** list; the dark dashboard screenshots were regenerated at the new full-width layout
+  (2560px, incl. the Graphs columns picker).
+
 ### Changed
 - **The Graphs "Columns" picker only offers counts that fit.** At the current browser width it hides
   the column counts that can't fit (they would only wrap to fewer — clicking did nothing), and hides
