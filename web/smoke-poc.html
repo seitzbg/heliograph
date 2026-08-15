@@ -48,7 +48,7 @@
     line-height: 1.55; -webkit-font-smoothing: antialiased;
   }
   .mono { font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace; }
-  .wrap { max-width: 1160px; margin: 0 auto; padding: 28px 22px 64px; }
+  .wrap { margin: 0 auto; padding: 28px clamp(22px, 3vw, 48px) 64px; }
 
   header.top { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; flex-wrap: wrap; margin-bottom: 8px; }
   .eyebrow { font-family: ui-monospace, Menlo, monospace; font-size: 11px; letter-spacing: .18em; text-transform: uppercase; color: var(--accent); font-weight: 600; }

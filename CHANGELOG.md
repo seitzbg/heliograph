@@ -10,6 +10,9 @@ All notable changes to **Heliograph** are recorded here. The format follows
 - **README refreshed** — the verbose "What works today" section is now a concise, scannable
   **Features** list; the dark dashboard screenshots were regenerated at the new full-width layout
   (2560px, incl. the Graphs columns picker).
+- **Smoke-graph demo goes full-width** — `web/smoke-poc.html` drops its fixed 1160px column so the
+  proof-of-concept fills the window like the dashboard, and its README screenshot was regenerated to
+  match (the graphs now span the full width instead of a narrow left column).
 
 ### Changed
 - **The Graphs "Columns" picker only offers counts that fit.** At the current browser width it hides
