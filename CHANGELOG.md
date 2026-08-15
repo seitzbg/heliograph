@@ -22,8 +22,17 @@ All notable changes to **Heliograph** are recorded here. The format follows
 - **Classic top bar.** Navigation and controls moved into a single bar across the top — brand ·
   tabs · theme · admin — with the title/description below it, instead of a hero block with the
   theme control floating in the corner and login buried inside tabs.
+- **Full-width dashboard layout.** The page content no longer stops at a fixed 1240px centered
+  column — it fills the browser window (side gutters scale from 22px up to 48px on wide screens),
+  so wide and ultrawide displays use the whole width instead of showing large empty margins.
+  Paragraph text keeps its own readable-width cap.
 
 ### Added
+- **Choose how many graphs per row** on the Graphs tab. A **Columns** control in the legend
+  (`Auto · 2 · 3 · 4 · 6`) sets the grid width: `Auto` fits as many as the viewport allows (the
+  default), while a fixed count caps the columns but never shrinks a graph below a ~360px minimum —
+  when the chosen count won't fit, the grid wraps to fewer columns instead of squeezing. The choice
+  persists per browser (`localStorage`).
 - **`SMOKED_WEBHOOK_URL` environment fallback** for the generic `-webhook` notifier, matching the
   existing `SMOKED_SLACK_WEBHOOK` / `SMOKED_DISCORD_WEBHOOK` / `SMOKED_SMTP_*` env support.
 - **Create target groups from the Config tab.** A new **"+ Add group"** button opens a modal that

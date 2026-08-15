@@ -40,7 +40,7 @@
   }
   * { box-sizing:border-box; }
   body { margin:0; background:var(--bg); color:var(--ink); font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; line-height:1.55; -webkit-font-smoothing:antialiased; }
-  .wrap { max-width:1240px; margin:0 auto; padding:24px 22px 64px; }
+  .wrap { margin:0 auto; padding:24px clamp(22px,3vw,48px) 64px; }
   header.top { display:flex; align-items:flex-start; justify-content:space-between; gap:20px; flex-wrap:wrap; }
   h1 { font-family:ui-monospace,"SF Mono",Menlo,monospace; font-size:clamp(22px,3vw,30px); line-height:1.1; margin:8px 0 5px; letter-spacing:-.01em; }
   .lede { color:var(--ink-soft); max-width:70ch; font-size:14.5px; }
@@ -146,7 +146,7 @@
   /* Graphs view: config-tree left nav + graph grid */
   .graphs-layout { display:grid; grid-template-columns:264px minmax(0,1fr); gap:18px; align-items:start; margin-top:18px; }
   @media (max-width:820px){ .graphs-layout { grid-template-columns:1fr; } }
-  .graphs-layout .grid { margin-top:14px; grid-template-columns:repeat(auto-fit, minmax(320px,1fr)); }
+  .graphs-layout .grid { margin-top:14px; grid-template-columns:repeat(auto-fit, minmax(360px,1fr)); }
   .graphs-layout .legend { margin-top:14px; }
   .nav { padding:12px 12px 10px; position:sticky; top:12px; }
   @media (max-width:820px){ .nav { position:static; } }
@@ -311,7 +311,15 @@
           <span class="lbl">Jitter</span><span class="smoke-key" id="smokeKey" aria-hidden="true"></span>
           <span class="swatch" style="color:var(--ink-faint)">min → median → max</span>
           <span class="lbl" style="margin-left:8px">Loss</span><span id="lossLegend" style="display:inline-flex;gap:12px;flex-wrap:wrap"></span>
-          <label class="lbl" style="margin-left:auto; cursor:pointer; display:inline-flex; align-items:center; gap:5px" title="Share one Y-axis across all graphs so they're comparable"><input type="checkbox" id="unisonToggle"> unison scale</label>
+          <span class="lbl" style="margin-left:auto">Cols</span>
+          <div class="seg" id="colsSeg" role="group" aria-label="Graphs per row" title="Graphs per row (fixed counts never shrink a graph below its minimum width)">
+            <button type="button" data-cols="auto" aria-pressed="true">Auto</button>
+            <button type="button" data-cols="2" aria-pressed="false">2</button>
+            <button type="button" data-cols="3" aria-pressed="false">3</button>
+            <button type="button" data-cols="4" aria-pressed="false">4</button>
+            <button type="button" data-cols="6" aria-pressed="false">6</button>
+          </div>
+          <label class="lbl" style="cursor:pointer; display:inline-flex; align-items:center; gap:5px" title="Share one Y-axis across all graphs so they're comparable"><input type="checkbox" id="unisonToggle"> unison scale</label>
         </div>
         <div class="grid" id="graphGrid"><div class="empty">Waiting for the collector…</div></div>
       </div>
