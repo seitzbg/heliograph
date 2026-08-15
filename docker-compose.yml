@@ -56,6 +56,10 @@ services:
       # GUI panel. Empty (the default) leaves it fail-closed/disabled. Set it in
       # .env to provision vantages from the browser instead of the CLI.
       SMOKED_ADMIN_PASSWORD: ${SMOKED_ADMIN_PASSWORD:-}
+      # Independent 32-byte (64 hex character) cookie-signing key. Generate once with
+      # `openssl rand -hex 32` and keep it stable for sessions to survive restarts.
+      # Empty is safe but intentionally uses a new key on every collector start.
+      SMOKED_ADMIN_SESSION_KEY: ${SMOKED_ADMIN_SESSION_KEY:-}
       # The image's default command runs `-serve -addr :8087 -webdir /web`; these env vars drive the
       # rest (config / DSN / downsample), keeping the DB password out of the command list. Each
       # mirrors a -flag on cmd/smoked, and the `vantage`/`import` subcommands already read SMOKED_DSN.

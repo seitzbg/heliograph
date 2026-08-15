@@ -269,6 +269,35 @@ check('adminMode maps HTTP status -> panel mode', () => {
   assert.equal(D.adminMode(503), 'error');
   assert.equal(D.adminMode(0), 'error');
 });
+check('adminSessionState never treats an unknown/error response as logged out', () => {
+  assert.equal(D.adminSessionState(204), 'in');
+  assert.equal(D.adminSessionState(401), 'out');
+  assert.equal(D.adminSessionState(404), 'disabled');
+  assert.equal(D.adminSessionState(0), 'unknown');
+  assert.equal(D.adminSessionState(500), 'unknown');
+});
+check('admin state controller ignores reordered probes and requires a confirmed logout', () => {
+  const painted = [];
+  const ctl = D.createAdminStateController((state) => painted.push(state));
+  const beforeLogin = ctl.beginProbe();
+  const afterLogin = ctl.beginProbe();
+  assert.equal(ctl.resolveProbe(afterLogin, 204), true);
+  assert.equal(ctl.resolveProbe(beforeLogin, 401), false, 'late pre-login 401 must be ignored');
+  assert.deepEqual(painted, ['in']);
+
+  const beforeLogout = ctl.beginProbe();
+  assert.equal(ctl.confirmLogout(503), false, 'failed logout must not claim signed out');
+  assert.equal(ctl.resolveProbe(beforeLogout, 500), false, 'unknown probe must preserve state');
+  assert.deepEqual(painted, ['in']);
+  assert.equal(ctl.confirmLogout(204), true);
+  assert.equal(ctl.resolveProbe(beforeLogout, 204), false, 'pre-logout probe must be invalidated');
+  assert.deepEqual(painted, ['in', 'out']);
+});
+check('a deferred admin-tab status probe loses ownership after navigation', () => {
+  assert.equal(D.statusProbeOwnsView('config', 'config'), true);
+  assert.equal(D.statusProbeOwnsView('config', 'graphs'), false);
+  assert.equal(D.statusProbeOwnsView('vantages', 'overview'), false);
+});
 check('relTime: never / just now / minutes / hours / days', () => {
   const now = Date.parse('2026-08-08T12:00:00Z');
   assert.equal(D.relTime(null, now), 'never');
@@ -406,15 +435,14 @@ check('cfgTree: nests, sorts siblings by (weight,name), carries path', () => {
   assert.deepEqual(web.children.map((c) => c.name), ['b', 'a']);  // b weight -1 before a (0)
   assert.equal(web.children[0].path, 'Web/b');
 });
-check('cfgTree: a node with an (even empty) children map stays a folder; a leaf does not', () => {
-  // Removing a grouping node's last child leaves `children: {}` behind; it must stay a folder,
-  // not collapse into a phantom leaf that the row would offer to edit as a host target.
+check('cfgTree: an explicit empty children map is a folder; mutations prune invalid empty groups', () => {
+  const explicit = D.cfgTree({ targets: { children: { Web: { children: {} } } } })[0];
+  assert.equal(explicit.isFolder, true, 'defensive rendering preserves explicit folder identity');
   const emptied = D.removeNodeAtPath({ targets: { children: {
     Web: { children: { a: { probe: 'HTTP', host: 'a' } } },
   } } }, 'Web/a');
-  const web = D.cfgTree(emptied).find((n) => n.name === 'Web');
-  assert.equal(web.isFolder, true, 'emptied grouping node is still a folder');
-  assert.deepEqual(web.children, [], 'and now has no children');
+  assert.equal(D.cfgTree(emptied).find((n) => n.name === 'Web'), undefined,
+    'a hostless group is removed with its last child so the server never rejects the save');
   // A leaf (host, no children map) is never a folder.
   const leaf = D.cfgTree({ targets: { children: { x: { probe: 'HTTP', host: 'x' } } } })[0];
   assert.equal(leaf.isFolder, false);
@@ -433,18 +461,32 @@ check('reorderSiblings: top level via empty parentPath', () => {
   assert.equal(out.targets.children.Web.weight, 0);
   assert.equal(out.targets.children.DNS.weight, 1);
 });
-check('editNodeAtPath: replaces fields but preserves weight and children', () => {
-  const out = D.editNodeAtPath(cfgDoc(), 'Web/b', { probe:'FPing', host:'b2' });
+check('editNodeAtPath: updates form fields while preserving unexposed fields, weight and children', () => {
+  const doc = cfgDoc();
+  Object.assign(doc.targets.children.Web.children.b, {
+    title: 'Shown title', ip: '192.0.2.4', pings: 17, step: '45s', alertee: ['ops'],
+    alerts: ['old'], params: { port: '80' }, custom_future_field: 'keep-me',
+    children: { kid: { host: 'k' } },
+  });
+  const out = D.editNodeAtPath(doc, 'Web/b', { probe:'FPing', host:'b2' });
   const b = out.targets.children.Web.children.b;
   assert.equal(b.probe, 'FPing'); assert.equal(b.host, 'b2');
-  assert.equal(b.weight, -1);                                     // preserved
+  assert.equal(b.weight, -1); assert.equal(b.title, 'Shown title'); assert.equal(b.ip, '192.0.2.4');
+  assert.equal(b.pings, 17); assert.equal(b.step, '45s'); assert.deepEqual(b.alertee, ['ops']);
+  assert.equal(b.custom_future_field, 'keep-me'); assert.ok(b.children.kid);
+  assert.equal(b.alerts, undefined); assert.equal(b.params, undefined); // cleared form-owned fields
+  const renamed = D.renameNodeAtPath(out, 'Web/b', 'renamed').targets.children.Web.children.renamed;
+  assert.equal(renamed.title, 'Shown title'); assert.equal(renamed.ip, '192.0.2.4');
+  assert.equal(renamed.pings, 17); assert.equal(renamed.step, '45s');
+  assert.deepEqual(renamed.alertee, ['ops']); assert.equal(renamed.custom_future_field, 'keep-me');
+  assert.ok(renamed.children.kid, 'the actual edit-then-rename workflow preserves the subtree');
 });
 check('removeNodeAtPath: deletes a nested node, leaves siblings', () => {
   const out = D.removeNodeAtPath(cfgDoc(), 'Web/a');
   assert.ok(!('a' in out.targets.children.Web.children));
   assert.ok('b' in out.targets.children.Web.children);
 });
-check('renameNodeAtPath: rekeys in place, preserves value + position, rejects collision', () => {
+check('renameNodeAtPath: rekeys in place, preserves payload/weights/position, rejects collision', () => {
   const doc = { targets: { children: {
     Web: { weight: 0, children: { a: { host: 'a', weight: 0 }, b: { host: 'b', weight: 1 } } },
     DNS: { host: 'd', weight: 1 },
@@ -453,10 +495,19 @@ check('renameNodeAtPath: rekeys in place, preserves value + position, rejects co
   const web = D.cfgTree(out).find((n) => n.name === 'Web');
   assert.deepEqual(web.children.map((c) => c.name), ['alpha', 'b']); // renamed; weight-0 keeps it first
   assert.equal(web.children[0].node.host, 'a');                      // value preserved
+  assert.deepEqual(web.children.map((c) => c.weight), [0, 1]);      // no unnecessary reweight
   assert.throws(() => D.renameNodeAtPath(doc, 'Web/a', 'b'), /already exists/); // sibling collision
   const same = D.renameNodeAtPath(doc, 'Web/a', 'a'); // unchanged name = no-op
   assert.deepEqual(D.cfgTree(same).find((n) => n.name === 'Web').children.map((c) => c.name), ['a', 'b']);
   assert.deepEqual(D.cfgTree(D.renameNodeAtPath(doc, 'Web/zzz', 'q')).find((n) => n.name === 'Web').children.map((c) => c.name), ['a', 'b']); // stale path = no-op
+});
+check('renameNodeAtPath: tied weights keep the old visual position after an alphabetical crossing', () => {
+  const doc = { targets: { children: {
+    a: { host: 'a', weight: 0 }, b: { host: 'b', weight: 0 }, c: { host: 'c', weight: 0 },
+  } } };
+  const out = D.renameNodeAtPath(doc, 'b', 'z');
+  assert.deepEqual(D.cfgTree(out).map((n) => n.name), ['a', 'z', 'c']);
+  assert.deepEqual(D.cfgTree(out).map((n) => n.weight), [0, 1, 2]);
 });
 check('buildGroupNode: children map from rows + optional inherited vantages/alerts', () => {
   const n = D.buildGroupNode({
@@ -542,6 +593,15 @@ check('moveNode: cross-folder move relocates the subtree and reweights both grou
   assert.equal(dns.b.weight, 0); assert.equal(dns.x.weight, 1);
   assert.deepEqual(Object.keys(doc.targets.children.Web.children).sort(), ['a', 'b', 'c']); // input untouched
 });
+check('moveNode: moving the last child out prunes an invalid hostless source group', () => {
+  const doc = { targets: { children: {
+    EmptyMe: { children: { only: { probe: 'HTTP', host: 'x' } } },
+    Dest: { children: { keep: { probe: 'HTTP', host: 'y' } } },
+  } } };
+  const out = D.moveNode(doc, 'EmptyMe/only', 'Dest');
+  assert.equal(out.targets.children.EmptyMe, undefined);
+  assert.ok(out.targets.children.Dest.children.only);
+});
 check('moveNode: append (index omitted / out of range) lands last in the destination', () => {
   const out = D.moveNode(mvDoc(), 'Web/a', 'DNS'); // no index -> append
   assert.deepEqual(D.cfgTree(out).find((n) => n.name === 'DNS').children.map((n) => n.name), ['x', 'a']);
@@ -569,6 +629,12 @@ check('moveNode: name collision in the destination throws (does not clobber)', (
 check('moveNode: a stale srcPath is a harmless no-op', () => {
   const out = D.moveNode(mvDoc(), 'Web/zzz', 'DNS', 0);
   assert.deepEqual(D.cfgTree(out).find((n) => n.name === 'DNS').children.map((n) => n.name), ['x']);
+});
+
+check('cfgDropDestination: dropping onto a sibling folder moves inside it', () => {
+  assert.deepEqual(D.cfgDropDestination('leaf', 'Folder', true), { destParent: 'Folder', kind: 'into' });
+  assert.deepEqual(D.cfgDropDestination('G/a', 'G/b', false), { destParent: 'G', kind: 'before' });
+  assert.equal(D.cfgDropDestination('Folder', 'Folder/child', true), null); // own descendant
 });
 
 // moveInList: the pure Alt+Up / Alt+Down reorder core (clamped, returns a new array).

@@ -594,6 +594,12 @@ func (c *Config) Monitors() ([]model.Monitor, error) {
 			if path == "" {
 				child = key
 			}
+			// The browser config tree uses slash-delimited paths, and the flattened path is the
+			// scheduler/store identity. Reject a slash in EVERY node key (including a grouping-only
+			// node), not merely the ambiguous cases that happen to collide with another monitor.
+			if strings.Contains(key, "/") {
+				problems = append(problems, fmt.Sprintf("%s: node key %q cannot contain '/'", child, key))
+			}
 			walk(child, n.Children[key], eff)
 		}
 	}

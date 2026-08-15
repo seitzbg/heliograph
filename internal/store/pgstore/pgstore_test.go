@@ -925,7 +925,7 @@ func TestPGStoreSeriesAllPerTargetCap(t *testing.T) {
 	}
 	s.Add(outs)
 
-	all, _, err := s.SeriesAll(ctx, "local", base.Add(-time.Second), 0) // 0 = no global bound; everything is after this
+	all, _, err := s.SeriesAll(ctx, "local", []string{"a", "b"}, base.Add(-time.Second), 0) // 0 = no global bound; everything is after this
 	if err != nil {
 		t.Fatalf("SeriesAll: %v", err)
 	}
@@ -940,7 +940,7 @@ func TestPGStoreSeriesAllPerTargetCap(t *testing.T) {
 		t.Errorf("a cap kept %v..%v, want rounds 2..4 (newest 3)", all["a"][0].When, all["a"][2].When)
 	}
 	// strictly-after cutoff: a cutoff at round 2's ts drops a's 0..2 and all of b.
-	after, _, err := s.SeriesAll(ctx, "local", base.Add(2*time.Minute), 0)
+	after, _, err := s.SeriesAll(ctx, "local", []string{"a", "b"}, base.Add(2*time.Minute), 0)
 	if err != nil {
 		t.Fatalf("SeriesAll (cutoff): %v", err)
 	}
@@ -984,7 +984,7 @@ func TestPGStoreSeriesAllGlobalBound(t *testing.T) {
 	}
 	s.Add(outs)
 	// maxTotal=6 over 3 targets -> each capped to its 2 newest; truncated.
-	all, truncated, err := s.SeriesAll(ctx, "local", base.Add(-time.Second), 6)
+	all, truncated, err := s.SeriesAll(ctx, "local", []string{"a", "b", "c"}, base.Add(-time.Second), 6)
 	if err != nil {
 		t.Fatalf("SeriesAll: %v", err)
 	}
@@ -1040,7 +1040,7 @@ func TestPGStoreSeriesAllNoFalseTruncation(t *testing.T) {
 	s.Add(outs)
 	// maxTotal=12 over 4 targets -> fair share = 3, which lowers the per-target cap below the
 	// 20k ceiling BUT each target has only 2 rounds (< 3), so nothing is actually dropped.
-	all, truncated, err := s.SeriesAll(ctx, "local", base.Add(-time.Second), 12)
+	all, truncated, err := s.SeriesAll(ctx, "local", []string{"a", "b", "c", "d"}, base.Add(-time.Second), 12)
 	if err != nil {
 		t.Fatalf("SeriesAll: %v", err)
 	}

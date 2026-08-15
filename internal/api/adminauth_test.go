@@ -2,34 +2,40 @@ package api
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 	"time"
 )
 
-func TestDeriveAdminKey(t *testing.T) {
-	// Deterministic: the same password yields the same key across "restarts" — which is what
-	// lets an admin session survive a collector restart (a random key would invalidate it).
-	k1 := DeriveAdminKey("hunter2")
-	k2 := DeriveAdminKey("hunter2")
-	if !bytes.Equal(k1, k2) {
-		t.Fatal("DeriveAdminKey is not deterministic for the same password")
+func TestParseAdminSessionKey(t *testing.T) {
+	encoded := strings.Repeat("ab", adminSessionKeyBytes)
+	k1, err := ParseAdminSessionKey(encoded)
+	if err != nil {
+		t.Fatalf("ParseAdminSessionKey: %v", err)
 	}
-	if len(k1) != 32 {
-		t.Errorf("key length = %d, want 32", len(k1))
+	k2, err := ParseAdminSessionKey(encoded)
+	if err != nil || !bytes.Equal(k1, k2) {
+		t.Fatalf("same persisted secret did not reproduce the signing key: equal=%v err=%v", bytes.Equal(k1, k2), err)
 	}
-	// A different password rotates the key (so changing the password logs everyone out).
-	if bytes.Equal(k1, DeriveAdminKey("hunter3")) {
-		t.Error("different passwords produced the same key")
+	if len(k1) != adminSessionKeyBytes {
+		t.Errorf("key length = %d, want %d", len(k1), adminSessionKeyBytes)
 	}
-	// End to end: a session signed before a "restart" still verifies after, using the re-derived
-	// key; and never verifies under a key derived from a different password.
+	for _, bad := range []string{"", "abcd", strings.Repeat("zz", adminSessionKeyBytes), strings.Repeat("ab", adminSessionKeyBytes+1)} {
+		if _, err := ParseAdminSessionKey(bad); err == nil {
+			t.Errorf("ParseAdminSessionKey(%q) succeeded, want an error", bad)
+		}
+	}
+
+	// End to end: a session signed before a "restart" still verifies after loading the same
+	// independent key; rotating that key invalidates it without exposing the login password.
 	now := time.Unix(1_700_000_000, 0)
-	tok := signSession(DeriveAdminKey("hunter2"), now.Add(time.Hour))
-	if !verifySession(DeriveAdminKey("hunter2"), tok, now) {
-		t.Error("session did not survive a simulated restart (re-derived key)")
+	tok := signSession(k1, now.Add(time.Hour))
+	if !verifySession(k2, tok, now) {
+		t.Error("session did not survive a simulated restart (re-loaded key)")
 	}
-	if verifySession(DeriveAdminKey("hunter3"), tok, now) {
-		t.Error("session verified under a key derived from a different password")
+	rotated, _ := ParseAdminSessionKey(strings.Repeat("cd", adminSessionKeyBytes))
+	if verifySession(rotated, tok, now) {
+		t.Error("session verified under a rotated key")
 	}
 }
 

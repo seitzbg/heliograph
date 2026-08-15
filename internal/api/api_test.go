@@ -861,11 +861,13 @@ func TestSeriesWindow(t *testing.T) {
 type countingStore struct {
 	*store.MemStore
 	latest, latestAll, avail, availAll, seriesAll int
+	seriesTargets                                 []string
 }
 
-func (c *countingStore) SeriesAll(ctx context.Context, vantage string, cutoff time.Time, maxTotal int) (map[string][]scheduler.Outcome, bool, error) {
+func (c *countingStore) SeriesAll(ctx context.Context, vantage string, targets []string, cutoff time.Time, maxTotal int) (map[string][]scheduler.Outcome, bool, error) {
 	c.seriesAll++
-	return c.MemStore.SeriesAll(ctx, vantage, cutoff, maxTotal)
+	c.seriesTargets = append([]string(nil), targets...)
+	return c.MemStore.SeriesAll(ctx, vantage, targets, cutoff, maxTotal)
 }
 
 func (c *countingStore) Latest(k string) (scheduler.Outcome, bool) {
@@ -943,6 +945,14 @@ func TestSeriesAllBulk(t *testing.T) {
 		})
 	}
 	srv := New(cs, "")
+	srv.Configured = func() []model.Monitor {
+		return []model.Monitor{
+			{Name: "c", Vantages: []string{"local"}},
+			{Name: "a"}, // no explicit vantage defaults to local
+			{Name: "b", Vantages: []string{"local", "nyc"}},
+			{Name: "remote-only", Vantages: []string{"nyc"}},
+		}
+	}
 
 	type resp struct {
 		Cutoff  string `json:"cutoff"`
@@ -967,6 +977,9 @@ func TestSeriesAllBulk(t *testing.T) {
 	if cs.seriesAll != 1 {
 		t.Errorf("SeriesAll called %d times, want 1 (bulk, not per-target)", cs.seriesAll)
 	}
+	if want := []string{"a", "b", "c"}; !reflect.DeepEqual(cs.seriesTargets, want) {
+		t.Errorf("SeriesAll target catalog = %v, want %v", cs.seriesTargets, want)
+	}
 	if len(r.Targets) != 3 || len(r.Targets["a"].Rounds) != 2 {
 		t.Errorf("targets=%d a.rounds=%d, want 3 targets with 2 rounds each", len(r.Targets), len(r.Targets["a"].Rounds))
 	}
@@ -976,6 +989,17 @@ func TestSeriesAllBulk(t *testing.T) {
 	_, r2 := get("/api/series/all?window=3h&since=" + strconv.FormatInt(sinceMs, 10))
 	if len(r2.Targets["a"].Rounds) != 1 {
 		t.Errorf("incremental a.rounds=%d, want 1 (only the newer round)", len(r2.Targets["a"].Rounds))
+	}
+
+	// An empty live catalog must not rediscover historical rows from the in-memory store. This
+	// matches pgstore and keeps removed targets out even when the running config has no monitors.
+	srv.Configured = func() []model.Monitor { return nil }
+	rec, empty := get("/api/series/all?window=3h")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("empty-catalog status %d, want 200", rec.Code)
+	}
+	if len(empty.Targets) != 0 {
+		t.Errorf("empty configured catalog returned %d historical target(s), want 0", len(empty.Targets))
 	}
 
 	// window is required and validated.
@@ -992,16 +1016,28 @@ func TestSeriesAllBulk(t *testing.T) {
 // 503, not a false-empty grid (CODE_REVIEW #4 discipline extended to the new endpoint).
 type errSeriesStore struct{ *store.MemStore }
 
-func (errSeriesStore) SeriesAll(context.Context, string, time.Time, int) (map[string][]scheduler.Outcome, bool, error) {
+func (errSeriesStore) SeriesAll(context.Context, string, []string, time.Time, int) (map[string][]scheduler.Outcome, bool, error) {
 	return nil, false, errors.New("db read failed")
 }
 
 func TestSeriesAllReadFailure503(t *testing.T) {
 	srv := New(errSeriesStore{store.NewMem(10)}, "")
+	srv.Configured = func() []model.Monitor { return []model.Monitor{{Name: "a"}} }
 	rec := httptest.NewRecorder()
 	srv.Routes().ServeHTTP(rec, httptest.NewRequest("GET", "/api/series/all?window=3h", nil))
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Errorf("series/all on a read failure = %d, want 503", rec.Code)
+	}
+}
+
+func TestSeriesAllRequiresConfiguredCatalog(t *testing.T) {
+	// Do not fall back to Store.Keys here: PGStore.Keys performs raw-history target discovery,
+	// reopening the unauthenticated work bound that the configured catalog closes.
+	srv := New(store.NewMem(10), "")
+	rec := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(rec, httptest.NewRequest("GET", "/api/series/all?window=3h", nil))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("series/all without Configured catalog = %d, want 503", rec.Code)
 	}
 }
 

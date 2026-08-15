@@ -185,16 +185,18 @@ func (srv *Server) agentResults(w http.ResponseWriter, r *http.Request) {
 			When:      ts.UTC(),
 			Duration:  time.Duration(rd.DurationMs * float64(time.Millisecond)),
 			Vantage:   v,
-			// Carry the validated fingerprint through to alert eval, so a remote round that
-			// crosses a config reload redefining its target is dropped there too, exactly like
-			// a local in-flight round (CODE_REVIEW #4). Empty (transitional agent) stays empty.
-			Fingerprint: rd.Fingerprint,
+			// Stamp the identity validated in THIS assignment snapshot even when a transitional
+			// agent omitted its fingerprint. Missing-agent provenance is already counted separately;
+			// carrying the snapshot fingerprint closes the reload-before-commit race for lenient
+			// agents just as it does for current agents (CODE_REVIEW M2/M4).
+			Fingerprint: wantFP[rd.Target],
 		}
 		if rd.Err != "" {
 			o.Err = errors.New(rd.Err)
 		}
 		outcomes = append(outcomes, o)
 	}
+	accepted := len(outcomes)
 	if len(outcomes) > 0 {
 		// Persist + alert-evaluate the validated batch. When IngestCommit is wired (production
 		// federation), it does both atomically under the runtime reload lock and re-validates each
@@ -207,7 +209,12 @@ func (srv *Server) agentResults(w http.ResponseWriter, r *http.Request) {
 		// duplicate notification (CODE_REVIEW #4/replay). Each outcome carries its vantage (P2-5).
 		var err error
 		if srv.IngestCommit != nil {
-			_, err = srv.IngestCommit(r.Context(), outcomes)
+			var committed []scheduler.Outcome
+			committed, err = srv.IngestCommit(r.Context(), outcomes)
+			if err == nil {
+				accepted = len(committed)
+				dropped += len(outcomes) - accepted
+			}
 		} else {
 			var inserted []scheduler.Outcome
 			if inserted, err = ing.AddResults(r.Context(), outcomes); err == nil {
@@ -233,5 +240,5 @@ func (srv *Server) agentResults(w http.ResponseWriter, r *http.Request) {
 		// log that goes silent for later-affected vantages (CODE_REVIEW #2).
 		srv.recordMissingFingerprint(v, noFP)
 	}
-	writeJSON(w, agentwire.ResultsResponse{Accepted: len(outcomes), Dropped: dropped})
+	writeJSON(w, agentwire.ResultsResponse{Accepted: accepted, Dropped: dropped})
 }

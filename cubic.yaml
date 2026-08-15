@@ -1,0 +1,10 @@
+# yaml-language-server: $schema=https://cubic.dev/schema/cubic-repository-config.schema.json
+
+version: 1
+
+# Keep both normal and ultra reviews available through explicit @cubic-dev-ai requests, but do not
+# spend review capacity automatically when a pull request opens or receives another commit.
+reviews:
+  enabled: false
+  ultrareview: manual
+  auto_ultrareview: disabled

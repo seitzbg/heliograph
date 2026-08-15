@@ -146,6 +146,7 @@ func TestMemStoreAvailabilityAll(t *testing.T) {
 func TestMemStoreSeriesAll(t *testing.T) {
 	t0 := time.Unix(1_700_000_000, 0)
 	s := NewMem(100)
+	catalog := []string{"a", "b"}
 	add := func(name string, off time.Duration) {
 		s.Add([]scheduler.Outcome{{Target: probe.Target{Name: name}, When: t0.Add(off), Computed: sample.Compute(2, []float64{.01, .02})}})
 	}
@@ -156,7 +157,7 @@ func TestMemStoreSeriesAll(t *testing.T) {
 	add("b", 3*time.Minute)
 
 	// cutoff at t0+1m: strictly-after keeps a@2m and b@3m only.
-	got, _, err := s.SeriesAll(context.Background(), "", t0.Add(1*time.Minute), 0) // 0 = unbounded
+	got, _, err := s.SeriesAll(context.Background(), "", catalog, t0.Add(1*time.Minute), 0) // 0 = unbounded
 	if err != nil {
 		t.Fatalf("SeriesAll: %v", err)
 	}
@@ -168,7 +169,7 @@ func TestMemStoreSeriesAll(t *testing.T) {
 	}
 
 	// zero cutoff -> everything, oldest->newest per target.
-	all, _, _ := s.SeriesAll(context.Background(), "", time.Time{}, 0)
+	all, _, _ := s.SeriesAll(context.Background(), "", catalog, time.Time{}, 0)
 	if len(all["a"]) != 3 {
 		t.Fatalf("a full len = %d, want 3", len(all["a"]))
 	}
@@ -179,9 +180,33 @@ func TestMemStoreSeriesAll(t *testing.T) {
 	}
 
 	// cutoff past everything -> no targets in the map.
-	none, _, _ := s.SeriesAll(context.Background(), "", t0.Add(1*time.Hour), 0)
+	none, _, _ := s.SeriesAll(context.Background(), "", catalog, t0.Add(1*time.Hour), 0)
 	if len(none) != 0 {
 		t.Errorf("past-cutoff map len = %d, want 0", len(none))
+	}
+
+	// A supplied application catalog excludes historical rows for removed targets.
+	configured, _, err := s.SeriesAll(context.Background(), "", []string{"a"}, time.Time{}, 0)
+	if err != nil {
+		t.Fatalf("SeriesAll configured catalog: %v", err)
+	}
+	if len(configured["a"]) != 3 {
+		t.Errorf("configured a rounds = %d, want 3", len(configured["a"]))
+	}
+	if _, ok := configured["b"]; ok {
+		t.Error("configured catalog returned removed target b")
+	}
+
+	// An absent/empty live catalog means no configured targets, not "discover everything from
+	// history". Both store implementations follow this contract so removed rows cannot leak back.
+	for name, empty := range map[string][]string{"nil": nil, "empty": {}} {
+		emptyResult, _, err := s.SeriesAll(context.Background(), "", empty, time.Time{}, 0)
+		if err != nil {
+			t.Fatalf("SeriesAll %s catalog: %v", name, err)
+		}
+		if len(emptyResult) != 0 {
+			t.Errorf("SeriesAll %s catalog returned %d historical target(s), want 0", name, len(emptyResult))
+		}
 	}
 }
 
@@ -191,13 +216,14 @@ func TestMemStoreSeriesAll(t *testing.T) {
 func TestMemStoreSeriesAllGlobalBound(t *testing.T) {
 	s := NewMem(1000)
 	base := time.Unix(1_700_000_000, 0).UTC()
-	for _, tgt := range []string{"a", "b", "c"} {
+	catalog := []string{"a", "b", "c"}
+	for _, tgt := range catalog {
 		for i := 0; i < 100; i++ {
 			s.Add([]scheduler.Outcome{{Target: probe.Target{Name: tgt, Host: "h"}, When: base.Add(time.Duration(i) * time.Second)}})
 		}
 	}
 	// maxTotal=30 across 3 targets -> each keeps its 10 newest; truncated.
-	got, truncated, err := s.SeriesAll(context.Background(), "", base.Add(-time.Second), 30)
+	got, truncated, err := s.SeriesAll(context.Background(), "", catalog, base.Add(-time.Second), 30)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -217,7 +243,7 @@ func TestMemStoreSeriesAllGlobalBound(t *testing.T) {
 	if total > 30 {
 		t.Fatalf("bounded total = %d, want <= 30", total)
 	}
-	if _, tr, _ := s.SeriesAll(context.Background(), "", base.Add(-time.Second), 0); tr {
+	if _, tr, _ := s.SeriesAll(context.Background(), "", catalog, base.Add(-time.Second), 0); tr {
 		t.Fatal("maxTotal=0 (unbounded) must not truncate")
 	}
 }

@@ -10,10 +10,12 @@ All notable changes to **Heliograph** are recorded here. The format follows
 - **Webhook/Slack/Discord notifiers now abandon permanent (HTTP 4xx) failures** instead of retrying
   them through the whole backoff budget. A 4xx (bad payload, auth, wrong URL) can never succeed on
   retry, so it is counted as failed on the first attempt — mirroring the email notifier's 5xx /
-  AUTH-not-offered handling. 408 Request Timeout and 429 Too Many Requests stay transient (retried).
+  AUTH-not-offered handling. The state-dependent 408 Request Timeout, 421 Misdirected Request,
+  423 Locked, 425 Too Early, and 429 Too Many Requests stay transient (retried); 409 Conflict does
+  not, because replaying the same payload cannot resolve an application conflict.
 - **Rename a Config-tab target or group in place.** The Edit form's Name field is now editable; a
-  changed name rekeys the node, preserving its subtree, weight and sibling position (previously
-  rename meant remove + re-add).
+  changed name rekeys the node, preserving its complete imported schema and visible sibling position
+  even when sibling weights tie (previously rename meant remove + re-add).
 - **Clearer, scrollable Config modals.** Each field's label now sits above a full-width control
   instead of labels and inputs flowing inline and wrapping, and a modal taller than the viewport
   scrolls internally so Save stays reachable; save errors show inline in the open modal.
@@ -36,18 +38,36 @@ All notable changes to **Heliograph** are recorded here. The format follows
   drives the bar's Log in / Admin state on every tab).
 
 ### Fixed
-- **Config-tab tree edge cases.** An emptied folder (its last child removed or moved out) stays a
-  folder instead of rendering as a phantom leaf offering a host-target edit form; dropping a node
-  onto the folder it is already in is a no-op instead of a pointless re-append + save; and collapse
-  state for removed/renamed/moved folders is pruned so a future folder that reuses a path no longer
-  starts silently collapsed.
-- **Admin logins survive a collector restart.** The session-signing key was random per process, so
-  every restart invalidated all cookies and logged admins out. It is now derived deterministically
-  from `SMOKED_ADMIN_PASSWORD` (domain-separated SHA-256), so sessions persist across restarts;
-  changing the password still rotates the key and invalidates old sessions.
-- **The status line no longer sticks on "connecting…" on the Config/Vantages tabs.** Only the
-  Overview/Graphs refresh loops updated it, so landing on an admin tab left it stuck; those tabs now
-  refresh it from a light `/api/targets` probe (on entry and every 15s).
+- **Config edits and tree operations are non-destructive.** The form now changes only the fields it
+  owns, preserving imported `title`, `ip`, `pings`, `step`, `alertee`, weight, children, and unknown
+  future fields. Dropping on a sibling folder moves into it; rename keeps tied-weight order; a
+  hostless group whose last child moves/removes is pruned rather than sent as invalid config; and
+  imported node keys containing `/` are rejected because browser paths use `/` structurally.
+- **Admin sessions use an independent signing secret.** Set `SMOKED_ADMIN_SESSION_KEY` to 32 random
+  bytes encoded as 64 hex characters (for example, `openssl rand -hex 32`) for restart-persistent
+  sessions. Without it, the collector generates a secure process-local key and warns that restart
+  will log admins out. The signing key is no longer derived from `SMOKED_ADMIN_PASSWORD`, so a stolen
+  cookie cannot be used as a fast offline password verifier.
+- **Admin/login probes no longer paint stale state.** Auth probes are generation-ordered;
+  network/5xx responses preserve the last confirmed state; logout claims success only after the
+  cookie-clearing 204; and older in-flight probes cannot overwrite a newer login/logout result.
+- **Remote ingest closes the reload gap for legacy agents.** Every accepted report now carries the
+  hub snapshot's computed target identity even when the agent omitted a fingerprint, so the locked
+  commit rejects a target redefined during validation. Commit-time drops are included in response
+  accounting, while valid idempotent replays remain accepted.
+- **Bulk graph reads use the configured target catalog.** `/api/series/all` feeds its indexed lateral
+  top-N query from live configured targets (filtered by vantage), eliminating both raw-history
+  `DISTINCT target` scans and excluding historical rows for removed targets.
+- **Continuous aggregates have an application-owned schema version.** Startup validates the exact
+  relation identity, complete ordered columns/types, Timescale source/settings, bucket, grouping,
+  and aggregate expressions before adopting an older or restored view, then records the version
+  against its relation OID. A same-named but semantically stale view is rebuilt.
+- **Image promotion is preventive and verified per tag.** CI first copies the scanned OCI archive to
+  a staging tag with `skopeo --preserve-digests`, verifies and attests it, then promotes from its
+  immutable digest reference. Every branch/release/SHA tag is preservation-gated and inspected; a
+  staging or attestation failure occurs before those release aliases change.
+- **The Config/Vantages status line stays live without crossing routes.** Those tabs probe
+  `/api/targets` on entry and every 15s, and a late response is ignored after the user navigates away.
 
 ## [1.0.2] - 2026-08-14
 
@@ -60,7 +80,7 @@ data-path and probe-timing fixes. The `v1.0.1` tag was cut from the same tree bu
 supersedes v1.0.1** with no functional difference. Detail below.
 
 ### Added
-- **Config-tab tree: keyboard control, ARIA semantics, cross-folder drag, and add-into-folder (#37 follow-ups).** The Config tab's target tree now implements the WAI-ARIA `tree` pattern — `role="tree"`/`treeitem`/`group`, `aria-expanded` on folders, `aria-selected` on the active node, and a single roving `tabindex`. It is fully keyboard-operable: Up/Down move between visible rows, Left collapses a folder (or steps to its parent), Right expands (or steps into the first child), Home/End jump to the ends, and **Alt+Up / Alt+Down reorder the focused node among its siblings** (persisting via the same weight path as drag). Folders can now be **collapsed/expanded** (a twist chevron, or the arrow keys). A node can be **dragged into a different folder**, not just reordered within its current one — dropping onto a folder moves it inside, onto a row moves it beside — and both affected sibling groups are re-sequenced; dropping a folder into its own descendant is refused. Each folder gains a **"+"** affordance that adds a new target **into** that folder (a nested path), alongside the unchanged top-level add. The move/add/reorder/guard logic lives in pure, unit-tested helpers (`moveNode`, `addNodeAtPath`, `moveInList`, `cfgVisibleRows`, `cfgTreeKey`).
+- **Config-tab tree: keyboard control, ARIA semantics, cross-folder drag, and add-into-folder (#37 follow-ups).** The Config tab's target tree now implements the WAI-ARIA `tree` pattern — `role="tree"`/`treeitem`/`group`, `aria-expanded` on folders, `aria-selected` on the active node, and a single roving `tabindex`. It is fully keyboard-operable: Up/Down move between visible rows, Left collapses a folder (or steps to its parent), Right expands (or steps into the first child), Home/End jump to the ends, and **Alt+Up / Alt+Down reorder the focused node among its siblings** (persisting via the same weight path as drag). Folders can now be **collapsed/expanded** (a twist chevron, or the arrow keys). A node can be **dragged into a different folder**, not just reordered within its current one — dropping onto a folder moves it inside, onto a row moves it beside — and both affected sibling groups are re-sequenced; dropping a folder into its own descendant is refused. Each folder gains a **"+"** affordance that adds a new target **into** that folder (a nested path), alongside the unchanged top-level add. The move/add/reorder/guard logic lives in pure, unit-tested helpers (`moveNode`, `addNodeAtPath`, `moveInList`, `cfgVisibleRows`, `cfgTreeKey`). (The same-parent folder-drop edge case was corrected in Unreleased.)
 - **Config-tab tree UI for database targets, with drag-to-reorder.** The Config tab now renders database-managed targets as a nested tree (YAML targets are not shown here; they remain file-managed). Each target can be dragged to reorder among siblings (a reorder updates `weight` via the admin API, persisted without SIGHUP), edited, or removed at any depth with a path-aware form showing probe/host/params/vantages. Top-level add is unchanged. Cross-folder move and keyboard-accessible reorder are explicit follow-ups.
 - **Author-defined menu order (`weight`).** Any config node (YAML or DB fragment) can carry an
   optional `weight:` (int); siblings sort by `(weight, name)` instead of strict A–Z — a negative
@@ -114,10 +134,11 @@ supersedes v1.0.1** with no functional difference. Detail below.
   twice — once in `build-image` (scanned + SBOM'd, read-only) and again in `publish-image` (pushed +
   attested) — so the blocking Trivy scan gated a *different* build than the one released, and a cache
   miss or moving `apk` repo could make them differ. `build-image` now builds **one** OCI archive,
-  scans and SBOMs that exact artifact, and hands it to `publish-image`, which pushes the same bytes
-  verbatim with `skopeo` (digest-preserving) and **asserts the published digest equals the scanned
-  digest** before attaching the provenance attestation. The read-only PR build / write-only non-PR
-  publish split is unchanged. (CODE_REVIEW M1.)
+  scans and SBOMs that exact artifact, and hands it to `publish-image`, which pushes it with
+  `skopeo` and checks the published digest before attaching the provenance attestation. The
+  Unreleased follow-up turns that post-push detection into a pre-promotion `--preserve-digests`
+  gate and verifies every tag. The read-only PR build / write-only non-PR publish split is
+  unchanged. (CODE_REVIEW M1.)
 - **Trivy vulnerability suppressions use `.trivyignore.yaml` with real expiry.** The allowlist was a
   flat `.trivyignore` documenting a `CVE-… exp:<date>` syntax that Trivy silently ignores — a
   suppression a maintainer added would never actually expire (or, for the pseudo-syntax, never apply).
@@ -207,9 +228,10 @@ supersedes v1.0.1** with no functional difference. Detail below.
   per target, so the database's scan+sort scaled with every row in the window even though the JSON
   response was capped. `SeriesAll` now reads each target's newest rounds through an indexed per-target
   `LIMIT` — a `CROSS JOIN LATERAL` walking the `(target, vantage, ts)` index — under a global budget
-  of `min(perTarget, budget/targets)`, so the work is proportional to what is returned (~perTarget
-  rows per target) rather than to the full window. Measured on 1.5M rows / 300 targets, this cut a
-  48-hour bulk read from ~584 ms to ~142 ms and its buffer reads ~4.7×. The response carries
+  of `min(perTarget, budget/targets)`. This bounded the per-target fetch but still discovered targets
+  from raw history; the Unreleased configured-catalog follow-up removes those remaining `DISTINCT`
+  scans. Measured on 1.5M rows / 300 targets, the initial lateral change cut a 48-hour bulk read from
+  ~584 ms to ~142 ms and its buffer reads ~4.7×. The response carries
   `truncated` only when a target genuinely had older rounds dropped (fixing a false flag at the exact
   per-target cap).
 - **Startup and reload now warn about alert recipients with no enabled notifier.** An alert `to` or a

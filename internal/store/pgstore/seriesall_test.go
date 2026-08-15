@@ -39,7 +39,7 @@ func TestSeriesAllTruncationBoundary(t *testing.T) {
 	seedRounds(s, "exact", base, 3) // exactly at cap -> must NOT be truncated (L3)
 	seedRounds(s, "over", base, 4)  // above cap -> truncated, newest 3 kept (M5)
 
-	out, truncated, err := s.SeriesAll(ctx, "", base.Add(-time.Second), 0)
+	out, truncated, err := s.SeriesAll(ctx, "", []string{"under", "exact", "over"}, base.Add(-time.Second), 0)
 	if err != nil {
 		t.Fatalf("SeriesAll: %v", err)
 	}
@@ -77,7 +77,7 @@ func TestSeriesAllExactCapNotTruncated(t *testing.T) {
 	base := time.Unix(1_700_000_000, 0).UTC()
 	seedRounds(s, "cap", base, 3) // exactly perTarget
 
-	out, truncated, err := s.SeriesAll(ctx, "", base.Add(-time.Second), 0)
+	out, truncated, err := s.SeriesAll(ctx, "", []string{"cap"}, base.Add(-time.Second), 0)
 	if err != nil {
 		t.Fatalf("SeriesAll: %v", err)
 	}

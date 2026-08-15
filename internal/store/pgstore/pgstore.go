@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"regexp"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -173,12 +174,51 @@ var downsampleStmts = []string{
 	`SELECT add_retention_policy('samples', INTERVAL '30 days', if_not_exists => TRUE)`,
 }
 
+const aggregateSchemaVersion = 1
+
+type aggregateSpec struct {
+	name   string
+	bucket string
+}
+
+var aggregateSpecs = []aggregateSpec{
+	{name: "samples_hourly", bucket: "hour"},
+	{name: "samples_daily", bucket: "day"},
+}
+
+var aggregateColumns = []struct {
+	name, dataType string
+}{
+	{"bucket", "timestamp with time zone"},
+	{"target", "text"},
+	{"vantage", "text"},
+	{"median_avg", "double precision"},
+	{"median_min", "double precision"},
+	{"median_max", "double precision"},
+	{"loss_frac", "double precision"},
+	{"rounds", "bigint"},
+	{"median_rounds", "bigint"},
+}
+
+const aggregateVersionSchema = `
+CREATE TABLE IF NOT EXISTS heliograph_aggregate_versions (
+	aggregate_name text PRIMARY KEY,
+	version        integer NOT NULL,
+	relation_oid   oid NOT NULL
+)`
+
 // EnableDownsampling creates the hourly and daily continuous aggregates (median
 // avg/min/max + loss per target per vantage per bucket — the coarse tiers a
 // long-range view reads, akin to SmokePing's RRAs; daily feeds the 400d range),
 // their refresh policies, and a 30-day retention policy on the raw samples.
 // Idempotent.
 func (s *PGStore) EnableDownsampling(ctx context.Context) error {
+	// The marker ties an application schema version to the exact relation OID. If a view is
+	// dropped/recreated out of band, its OID changes and startup validates its catalog definition
+	// before trusting it. A dump/restore similarly takes the safe validation path once.
+	if _, err := s.pool.Exec(ctx, aggregateVersionSchema); err != nil {
+		return fmt.Errorf("pgstore: create aggregate version catalog: %w", err)
+	}
 	existed, err := s.aggregateExists(ctx)
 	if err != nil {
 		return err
@@ -191,6 +231,9 @@ func (s *PGStore) EnableDownsampling(ctx context.Context) error {
 		if _, err := s.pool.Exec(ctx, q); err != nil {
 			return fmt.Errorf("pgstore: downsampling: %w", err)
 		}
+	}
+	if err := s.markAggregateVersions(ctx); err != nil {
+		return err
 	}
 	// On first creation (fresh DB) or after a shape-change recreate, the aggregates start
 	// empty and the refresh policies only cover the trailing 3d (hourly) / 30d (daily) — so
@@ -213,7 +256,8 @@ func (s *PGStore) EnableDownsampling(ctx context.Context) error {
 func (s *PGStore) aggregateExists(ctx context.Context) (bool, error) {
 	var ok bool
 	if err := s.pool.QueryRow(ctx,
-		`SELECT to_regclass('samples_hourly') IS NOT NULL AND to_regclass('samples_daily') IS NOT NULL`).Scan(&ok); err != nil {
+		`SELECT to_regclass(format('%I.%I', current_schema(), 'samples_hourly')) IS NOT NULL
+		     AND to_regclass(format('%I.%I', current_schema(), 'samples_daily')) IS NOT NULL`).Scan(&ok); err != nil {
 		return false, fmt.Errorf("pgstore: check aggregates: %w", err)
 	}
 	return ok, nil
@@ -243,14 +287,13 @@ func (s *PGStore) backfillAggregates(ctx context.Context) error {
 }
 
 // migrateAggregates drops the existing continuous aggregates when EITHER view's stored shape no
-// longer matches the current definition, so the recreate below can rebuild them. A view is stale
-// when it lacks the vantage dimension (federation) or the median_rounds column (CODE_REVIEW #6 /
-// P2-6). Both samples_hourly AND samples_daily are validated: an earlier version checked only
-// hourly, so a current hourly paired with an incompatible daily (e.g. an older or hand-created daily
-// missing vantage) was never rebuilt and the 400-day daily graph kept blending vantages / reporting
-// mis-weighted medians while startup looked healthy (CODE_REVIEW M7). One-time per change: after the
-// recreate both views carry the columns and the guard is false forever after (a fresh DB has no
-// views yet — no-op; an absent view is created by EnableDownsampling, not "stale" here).
+// longer matches the current definition, so the recreate below can rebuild them. Shape includes
+// the complete ordered column/type list, Timescale continuous-aggregate identity and source,
+// materialized_only setting, bucket width, grouping dimensions, and aggregate expressions. Once
+// validated, the exact relation OID is recorded with aggregateSchemaVersion; future definition
+// changes bump that version, while an out-of-band drop/recreate changes the OID and forces semantic
+// validation again. This replaces the old two-column-name heuristic, which could accept a view that
+// exposed vantage and median_rounds while using the wrong bucket, grouping, or statistics.
 //
 // A TimescaleDB continuous aggregate's SELECT/GROUP BY can't be altered in place, so this
 // drop+recreate is unavoidable — but on an existing DB it irreversibly loses every daily
@@ -263,29 +306,35 @@ func (s *PGStore) backfillAggregates(ctx context.Context) error {
 // backfills the rebuilt views).
 func (s *PGStore) migrateAggregates(ctx context.Context) (bool, error) {
 	stale := false
-	for _, view := range []string{"samples_hourly", "samples_daily"} {
+	var needsMark []string
+	for _, spec := range aggregateSpecs {
+		view := spec.name
 		var hasView bool
-		if err := s.pool.QueryRow(ctx, `SELECT to_regclass($1) IS NOT NULL`, view).Scan(&hasView); err != nil {
+		if err := s.pool.QueryRow(ctx,
+			`SELECT to_regclass(format('%I.%I', current_schema(), $1::text)) IS NOT NULL`, view).Scan(&hasView); err != nil {
 			return false, fmt.Errorf("pgstore: check aggregate %s: %w", view, err)
 		}
 		if !hasView {
 			continue // absent (not stale): EnableDownsampling's CREATE IF NOT EXISTS builds it fresh
 		}
-		var hasVantage, hasMedianRounds bool
-		if err := s.pool.QueryRow(ctx, `
-			SELECT bool_or(column_name='vantage'), bool_or(column_name='median_rounds')
-			  FROM information_schema.columns WHERE table_name=$1`, view).Scan(&hasVantage, &hasMedianRounds); err != nil {
-			return false, fmt.Errorf("pgstore: check aggregate columns %s: %w", view, err)
+		current, versioned, err := s.aggregateCurrent(ctx, spec)
+		if err != nil {
+			return false, err
 		}
-		if !hasVantage || !hasMedianRounds {
-			stale = true // a present view with the wrong shape — rebuild the pair
+		if !current {
+			stale = true
+		} else if !versioned {
+			needsMark = append(needsMark, view)
 		}
 	}
 	if !stale {
+		if err := s.markAggregateNames(ctx, needsMark); err != nil {
+			return false, err
+		}
 		return false, nil
 	}
 	slog.Warn("pgstore: rebuilding continuous aggregates to match the current definition " +
-		"(vantage dimension and/or median_rounds); daily rollup buckets older than the raw " +
+		"(schema version, columns, bucket, grouping, or expressions); daily rollup buckets older than the raw " +
 		"retention window cannot be rebuilt and will be lost (one-time migration)")
 	for _, q := range []string{
 		`DROP MATERIALIZED VIEW IF EXISTS samples_daily CASCADE`,
@@ -295,7 +344,157 @@ func (s *PGStore) migrateAggregates(ctx context.Context) (bool, error) {
 			return false, fmt.Errorf("pgstore: migrate aggregates: %w", err)
 		}
 	}
+	if _, err := s.pool.Exec(ctx,
+		`DELETE FROM heliograph_aggregate_versions WHERE aggregate_name = ANY($1::text[])`,
+		[]string{"samples_hourly", "samples_daily"}); err != nil {
+		return false, fmt.Errorf("pgstore: clear aggregate versions: %w", err)
+	}
 	return true, nil
+}
+
+// aggregateCurrent validates the catalog shape for spec. A matching version tied to this exact
+// relation OID is authoritative for the SELECT semantics; an unmarked relation (including one
+// restored into a new database or created by an older Heliograph) is bootstrapped only after its
+// normalized Timescale view_definition passes the semantic checks below.
+func (s *PGStore) aggregateCurrent(ctx context.Context, spec aggregateSpec) (current, versioned bool, err error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT column_name, data_type
+		  FROM information_schema.columns
+		 WHERE table_schema = current_schema() AND table_name = $1
+		 ORDER BY ordinal_position`, spec.name)
+	if err != nil {
+		return false, false, fmt.Errorf("pgstore: check aggregate columns %s: %w", spec.name, err)
+	}
+	var columns [][2]string
+	for rows.Next() {
+		var name, dataType string
+		if err := rows.Scan(&name, &dataType); err != nil {
+			rows.Close()
+			return false, false, fmt.Errorf("pgstore: scan aggregate columns %s: %w", spec.name, err)
+		}
+		columns = append(columns, [2]string{name, dataType})
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return false, false, fmt.Errorf("pgstore: read aggregate columns %s: %w", spec.name, err)
+	}
+	rows.Close()
+	if len(columns) != len(aggregateColumns) {
+		return false, false, nil
+	}
+	for i, want := range aggregateColumns {
+		if columns[i][0] != want.name || columns[i][1] != want.dataType {
+			return false, false, nil
+		}
+	}
+
+	var definition string
+	var materializedOnly bool
+	err = s.pool.QueryRow(ctx, `
+		SELECT view_definition, materialized_only
+		  FROM timescaledb_information.continuous_aggregates
+		 WHERE view_schema = current_schema() AND view_name = $1
+		   AND hypertable_schema = current_schema() AND hypertable_name = 'samples'`, spec.name).
+		Scan(&definition, &materializedOnly)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, false, nil // same-named regular view/materialized view, not our cagg
+	}
+	if err != nil {
+		return false, false, fmt.Errorf("pgstore: read aggregate definition %s: %w", spec.name, err)
+	}
+	if materializedOnly {
+		return false, false, nil
+	}
+
+	if err := s.pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM heliograph_aggregate_versions
+			 WHERE aggregate_name = $1 AND version = $2
+			   AND relation_oid = to_regclass(format('%I.%I', current_schema(), $1::text))::oid
+		)`, spec.name, aggregateSchemaVersion).Scan(&versioned); err != nil {
+		return false, false, fmt.Errorf("pgstore: read aggregate version %s: %w", spec.name, err)
+	}
+	if versioned {
+		return true, true, nil
+	}
+	return aggregateDefinitionCurrent(definition, spec.bucket), false, nil
+}
+
+func (s *PGStore) markAggregateVersions(ctx context.Context) error {
+	names := make([]string, 0, len(aggregateSpecs))
+	for _, spec := range aggregateSpecs {
+		names = append(names, spec.name)
+	}
+	return s.markAggregateNames(ctx, names)
+}
+
+func (s *PGStore) markAggregateNames(ctx context.Context, names []string) error {
+	for _, name := range names {
+		if _, err := s.pool.Exec(ctx, `
+			INSERT INTO heliograph_aggregate_versions (aggregate_name, version, relation_oid)
+			VALUES ($1, $2, to_regclass(format('%I.%I', current_schema(), $1::text))::oid)
+			ON CONFLICT (aggregate_name) DO UPDATE
+			SET version = EXCLUDED.version, relation_oid = EXCLUDED.relation_oid`, name, aggregateSchemaVersion); err != nil {
+			return fmt.Errorf("pgstore: record aggregate version %s: %w", name, err)
+		}
+	}
+	return nil
+}
+
+// aggregateDefinitionCurrent performs the one-time compatibility check for an unversioned
+// aggregate. Timescale exposes PostgreSQL's normalized SELECT text, which can vary in harmless
+// qualification, whitespace, parentheses, and inserted casts between versions. Strip those forms
+// and compare the complete SELECT/FROM/GROUP BY shape. Exact matching matters here: accepting a
+// definition merely because it contains every required aggregate would also accept a WHERE filter
+// and permanently version incomplete rollups.
+func aggregateDefinitionCurrent(definition, bucket string) bool {
+	n := normalizeAggregateDefinition(definition)
+	selectPart, groupPart, ok := strings.Cut(n, "groupby")
+	if !ok {
+		return false
+	}
+	buckets := []string{"'" + bucket + "'"}
+	switch bucket {
+	case "hour":
+		buckets = append(buckets, "'1hour'", "'01:00:00'")
+	case "day":
+		buckets = append(buckets, "'1day'", "'24:00:00'")
+	}
+	for _, literal := range buckets {
+		token := "time_bucket" + literal + ",ts"
+		wantSelect := "select" + token + "asbucket,target,vantage," +
+			"avgmedian_secondsasmedian_avg," +
+			"minmedian_secondsasmedian_min," +
+			"maxmedian_secondsasmedian_max," +
+			"avgloss/nullifpings,0asloss_frac," +
+			"count*asrounds," +
+			"countmedian_secondsasmedian_rounds" +
+			"fromsamples"
+		if selectPart == wantSelect && groupPart == token+",target,vantage" {
+			return true
+		}
+	}
+	return false
+}
+
+var aggregateQualifierRE = regexp.MustCompile(`[a-z_][a-z0-9_$]*\.`)
+
+func normalizeAggregateDefinition(definition string) string {
+	n := strings.ToLower(definition)
+	n = strings.ReplaceAll(n, `"`, "")
+	// pg_get_viewdef may schema/table-qualify columns and time_bucket depending on search_path and
+	// PostgreSQL/Timescale versions. Strip identifier qualifiers before whitespace disappears so a
+	// prefix such as "SELECT public." cannot be consumed as one identifier.
+	n = aggregateQualifierRE.ReplaceAllString(n, "")
+	n = strings.Join(strings.Fields(n), "")
+	for _, cast := range []string{
+		"::doubleprecision", "::timestampwithtimezone", "::timestampwithouttimezone",
+		"::float", "::smallint", "::integer", "::bigint", "::interval", "::text",
+	} {
+		n = strings.ReplaceAll(n, cast, "")
+	}
+	n = strings.NewReplacer("(", "", ")", "", ";", "").Replace(n)
+	return n
 }
 
 // nanToNil converts NaN -> nil so lost/median gaps are stored as SQL NULL.
@@ -832,38 +1031,43 @@ var maxSeriesAllPerTarget = 20_000
 // tick. Targets with no rounds after cutoff are absent from the map. Each target is
 // capped to its newest maxSeriesAllPerTarget rounds. A query/scan error is returned
 // (not swallowed) so the API answers 503, not a false-empty grid.
-func (s *PGStore) SeriesAll(ctx context.Context, vantage string, cutoff time.Time, maxTotal int) (map[string][]scheduler.Outcome, bool, error) {
+func (s *PGStore) SeriesAll(ctx context.Context, vantage string, targets []string, cutoff time.Time, maxTotal int) (map[string][]scheduler.Outcome, bool, error) {
 	v := store.VantageOrDefault(vantage)
+	// Deduplicate the application-owned configured catalog before using its size for the fair share
+	// and feeding it to unnest. This replaces both raw-table DISTINCT target passes: database work is
+	// now bounded by configured targets × (perTarget+1), independent of historical rows in the window.
+	seen := make(map[string]bool, len(targets))
+	catalog := make([]string, 0, len(targets))
+	for _, target := range targets {
+		if target != "" && !seen[target] {
+			seen[target] = true
+			catalog = append(catalog, target)
+		}
+	}
+	if len(catalog) == 0 {
+		return map[string][]scheduler.Outcome{}, false, nil
+	}
 	// Bound the query fairly BEFORE it runs: cap each target at min(maxSeriesAllPerTarget,
-	// maxTotal/targets), so the server never sorts an unbounded windowed set and the client never
+	// maxTotal/configured-targets), so the server never sorts an unbounded windowed set and the client never
 	// builds an unbounded map for a many-target request, while every target keeps its newest rounds
-	// (CODE_REVIEW M5 — the deeper, store-query bound on top of the per-target cap). The distinct-
-	// target count and the fetch are separate reads, so the split is approximate under concurrent
-	// writes — fine for a DoS bound.
+	// (CODE_REVIEW M5 — the deeper, store-query bound on top of the per-target cap).
 	perTarget := maxSeriesAllPerTarget
 	if maxTotal > 0 {
-		var nTargets int
-		if err := s.pool.QueryRow(ctx,
-			`SELECT count(DISTINCT target) FROM samples WHERE vantage=$1 AND ts > $2`, v, cutoff.UTC()).Scan(&nTargets); err != nil {
-			s.onErr(err)
-			return nil, false, err
-		}
-		if nTargets > 0 {
-			if fair := maxTotal / nTargets; fair < perTarget {
-				perTarget = fair
-				if perTarget < 1 {
-					perTarget = 1
-				}
+		if fair := maxTotal / len(catalog); fair < perTarget {
+			perTarget = fair
+			if perTarget < 1 {
+				perTarget = 1
 			}
 		}
 	}
 	// Read each target's newest rounds through an indexed per-target LIMIT — a CROSS JOIN LATERAL
-	// over the distinct targets — so the database walks at most perTarget+1 rows per target on the
+	// over the configured target catalog — so the database walks at most perTarget+1 rows per target on the
 	// (target, vantage, ts) index instead of scanning and row_number()-ranking the ENTIRE windowed
 	// set as before. The old window query touched every row matching (vantage, cutoff) and sorted
-	// them all just to keep the newest N of each; the lateral makes the work proportional to what is
-	// actually returned, so a wide 48-hour bulk request can't force an unbounded scan/sort on this
-	// unauthenticated read (CODE_REVIEW M5). The outer ORDER BY returns each target oldest->newest.
+	// them all just to keep the newest N of each; the lateral bounds work by configured catalog size
+	// and per-target fetch limit, so a wide 48-hour request can't force an unbounded raw-window
+	// scan/sort on this unauthenticated read (CODE_REVIEW M5). The outer ORDER BY returns each target
+	// oldest->newest.
 	//
 	// Fetch perTarget+1: the extra "sentinel" row, when it comes back, is proof the target has MORE
 	// than perTarget rounds and was therefore genuinely clipped. That is how truncation is detected
@@ -873,15 +1077,15 @@ func (s *PGStore) SeriesAll(ctx context.Context, vantage string, cutoff time.Tim
 	fetch := perTarget + 1
 	rows, err := s.pool.Query(ctx,
 		`SELECT s.ts, s.target, s.probe, s.host, s.vantage, s.pings, s.loss, s.median_seconds, s.rtts_seconds, s.err, s.duration_ms
-		   FROM (SELECT DISTINCT target FROM samples WHERE vantage=$1 AND ts > $2) t
+		   FROM unnest($3::text[]) AS t(target)
 		   CROSS JOIN LATERAL (
 		         SELECT ts, target, probe, host, vantage, pings, loss, median_seconds, rtts_seconds, err, duration_ms
 		           FROM samples
 		          WHERE target = t.target AND vantage = $1 AND ts > $2
 		          ORDER BY ts DESC
-		          LIMIT $3
+		          LIMIT $4
 		   ) s
-		   ORDER BY s.target, s.ts`, v, cutoff.UTC(), fetch)
+		   ORDER BY s.target, s.ts`, v, cutoff.UTC(), catalog, fetch)
 	if err != nil {
 		s.onErr(err)
 		return nil, false, err

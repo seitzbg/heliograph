@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -472,11 +473,23 @@ func main() {
 			}
 			slog.Info("agent endpoints enabled at /agent/v1/assignment, /agent/v1/results")
 			srv.AdminPassword = os.Getenv("SMOKED_ADMIN_PASSWORD")
-			// Derive the session-signing key from the password so admin logins survive a restart
-			// (a per-process random key logged everyone out on every restart). Empty password =>
-			// no key, admin routes stay off. See api.DeriveAdminKey.
+			// Keep session signing independent from the human login password. A stable 32-byte
+			// SMOKED_ADMIN_SESSION_KEY lets cookies survive restarts; without one, use a safe
+			// per-process random key and warn that restart persistence is unavailable.
 			if srv.AdminPassword != "" {
-				srv.AdminKey = api.DeriveAdminKey(srv.AdminPassword)
+				if encoded := os.Getenv("SMOKED_ADMIN_SESSION_KEY"); encoded != "" {
+					key, err := api.ParseAdminSessionKey(encoded)
+					if err != nil {
+						fatal("invalid SMOKED_ADMIN_SESSION_KEY", err)
+					}
+					srv.AdminKey = key
+				} else {
+					srv.AdminKey = make([]byte, 32)
+					if _, err := rand.Read(srv.AdminKey); err != nil {
+						fatal("admin session key", err)
+					}
+					slog.Warn("admin sessions will be invalidated on collector restart; set SMOKED_ADMIN_SESSION_KEY to a persistent 64-character random hex secret")
+				}
 			}
 			if srv.AdminPassword == "" {
 				slog.Warn("admin key-management API disabled: set SMOKED_ADMIN_PASSWORD to enable /api/admin/vantages")
@@ -893,10 +906,10 @@ func (rt *runtime) eval(out []scheduler.Outcome) {
 	}
 }
 
-// fingerprintStale reports whether a locally-measured outcome was measured under a target
-// definition a reload has since replaced: its non-empty fingerprint no longer matches the live
-// target's. An empty fingerprint — a path predating stamping — is never stale, matching the
-// ingest side's transitional rule.
+// fingerprintStale reports whether an outcome was measured under a target definition a reload has
+// since replaced: its non-empty fingerprint no longer matches the live target's. An empty
+// fingerprint — an internal path predating stamping — is never stale; current local rounds and all
+// handler-accepted remote rounds are stamped before they reach this boundary.
 func (rt *runtime) fingerprintStale(o scheduler.Outcome) bool {
 	return o.Fingerprint != "" && rt.targetFP[o.Target.Name] != o.Fingerprint
 }
@@ -937,7 +950,9 @@ func (rt *runtime) storeLocal(st store.Store, out []scheduler.Outcome) {
 // no swapRuntime can redefine a target — closing the window in which a reload landing after the
 // handler's snapshot validation could store a round under a since-redefined target (CODE_REVIEW M4).
 // It is the ingest-path analog of storeLocal, but uses the ResultIngester so a replayed round is
-// deduplicated (returning only the newly-inserted rounds, which are the only ones alert-evaluated).
+// deduplicated (only newly-inserted rounds are alert-evaluated). The returned slice is `kept`, not
+// `inserted`: the API counts a valid idempotent replay as accepted, while still reporting rounds
+// dropped here because a reload changed their target identity.
 func (rt *runtime) commitRemote(ctx context.Context, ing store.ResultIngester, out []scheduler.Outcome) ([]scheduler.Outcome, error) {
 	kept := make([]scheduler.Outcome, 0, len(out))
 	for _, o := range out {
@@ -966,7 +981,7 @@ func (rt *runtime) commitRemote(ctx context.Context, ing store.ResultIngester, o
 		return nil, err
 	}
 	rt.eval(inserted)
-	return inserted, nil
+	return kept, nil
 }
 
 // swapRuntime atomically installs nrt as the live runtime, carrying alert firing

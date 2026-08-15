@@ -613,10 +613,10 @@ func (n *WebhookNotifier) deliver(d delivery) {
 
 // tryOnce sends one delivery. It returns ok=true on a 2xx; otherwise ok=false with permanent
 // marking a failure no retry can rescue — a build error (a URL validated at startup should never
-// reach here) or a 4xx client rejection (bad payload, auth, wrong URL), excluding 408 Request
-// Timeout and 429 Too Many Requests, which are transient. Everything else (transport error, 3xx,
-// 5xx) is transient and retried. Mirrors email's permanentSendError, inverted for HTTP: an SMTP
-// 5xx is permanent, an HTTP 4xx is.
+// reach here) or a 4xx client rejection (bad payload, auth, wrong URL), excluding the explicitly
+// retryable routing/timeout/lock/rate-limit statuses classified by permanentHTTPStatus. Everything
+// else (transport error, 3xx, 5xx) is transient and retried. Mirrors email's permanentSendError,
+// inverted for HTTP: an SMTP 5xx is permanent, an HTTP 4xx normally is.
 func (n *WebhookNotifier) tryOnce(d delivery) (ok, permanent bool) {
 	ctx, cancel := context.WithTimeout(n.baseCtx, n.timeout)
 	defer cancel()
@@ -642,11 +642,18 @@ func (n *WebhookNotifier) tryOnce(d delivery) (ok, permanent bool) {
 	return true, false
 }
 
-// permanentHTTPStatus reports whether an HTTP status will never succeed on retry: a 4xx client
-// error (bad request / auth / not-found), except 408 Request Timeout and 429 Too Many Requests,
-// which are transient and worth retrying.
+// permanentHTTPStatus reports whether an HTTP status is a non-retryable client rejection. The
+// same idempotent webhook delivery is worth retrying after a timeout (408), connection-routing
+// correction (421), temporary resource lock (423), early-data rejection (425), or rate limit
+// (429). A 409 remains permanent here: replaying the identical payload cannot resolve an
+// application-level conflict without caller intervention.
 func permanentHTTPStatus(code int) bool {
-	if code == http.StatusRequestTimeout || code == http.StatusTooManyRequests {
+	switch code {
+	case http.StatusRequestTimeout,
+		http.StatusMisdirectedRequest,
+		http.StatusLocked,
+		http.StatusTooEarly,
+		http.StatusTooManyRequests:
 		return false
 	}
 	return code >= 400 && code < 500

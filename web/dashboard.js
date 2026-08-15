@@ -240,6 +240,46 @@
     return 'error';
   }
 
+  // adminSessionState maps only authoritative session-probe responses to a visible account state.
+  // Network failures and 5xx responses are UNKNOWN, not "logged out": claiming logout without a
+  // confirmed 401 can leave the HttpOnly cookie active while giving the user a false security cue.
+  function adminSessionState(status) {
+    if (status === 204) return 'in';
+    if (status === 401) return 'out';
+    if (status === 404) return 'disabled';
+    return 'unknown';
+  }
+
+  // createAdminStateController serializes async session probes and explicit logout transitions.
+  // Only the newest probe may paint the account bar; unknown responses leave its last confirmed
+  // state alone, and a logout transition is authoritative only after the clearing POST returns 204.
+  // Keeping this small state machine outside init() makes request reordering/failure testable.
+  function createAdminStateController(apply) {
+    let generation = 0;
+    return {
+      beginProbe() { return ++generation; },
+      resolveProbe(gen, status) {
+        if (gen !== generation) return false;
+        const state = adminSessionState(status);
+        if (state === 'unknown') return false;
+        apply(state);
+        return true;
+      },
+      confirmLogout(status) {
+        if (status !== 204) return false;
+        generation++; // invalidate every session probe started before the cookie was cleared
+        apply('out');
+        return true;
+      },
+    };
+  }
+
+  // A Config/Vantages reachability probe may update the shared status line only while the view
+  // that launched it still owns that line. Kept pure so a deferred-response navigation is covered.
+  function statusProbeOwnsView(expectedView, activeView) {
+    return expectedView === activeView;
+  }
+
   // relTime renders a short "time ago" for a last-seen instant. `then` is ms-epoch or an
   // RFC3339 string; null/empty/zero/unparseable is "never". `now` defaults to Date.now().
   function relTime(then, now) {
@@ -357,10 +397,9 @@
     const walk = (ch, prefix) => cfgSortSiblings(ch).map((name) => {
       const node = ch[name] || {};
       const path = prefix ? prefix + '/' + name : name;
-      // A node is a folder if it carries a `children` map — even an empty one. Removing or moving
-      // out a folder's last child leaves `children: {}` behind; keying folder-ness off "has a
-      // children map" (not "has ≥1 child") keeps such an emptied folder a folder instead of
-      // silently collapsing it into a phantom leaf (leaves never carry a children map).
+      // A node is a folder if it carries a `children` map — even an empty one. Mutations prune an
+      // invalid empty hostless group, but defensively preserving explicit folder identity here
+      // avoids rendering imported/stale `children: {}` as a phantom editable host leaf.
       const isFolder = !!(node.children && typeof node.children === 'object');
       const kids = isFolder && Object.keys(node.children).length ? walk(node.children, path) : [];
       return { name, node, path, isFolder, weight: node.weight || 0, children: kids };
@@ -396,24 +435,41 @@
     const d = cfgClone(doc); const loc = cfgNodeAt(d, path);
     if (loc && Object.prototype.hasOwnProperty.call(loc.parent, loc.key)) {
       const old = loc.parent[loc.key] || {};
-      const merged = Object.assign({}, node);
-      if ('weight' in old) merged.weight = old.weight;          // preserve order
-      if (old.children) merged.children = old.children;         // preserve subtree
+      // The form owns only these fields. Start from the complete existing node so imported fields
+      // it does not expose (title/ip/pings/step/alertee and future extensions) survive an edit, but
+      // delete the owned fields first so clearing one in the form really removes it / restores
+      // inheritance rather than retaining the old value.
+      const merged = Object.assign({}, old);
+      for (const k of ['probe', 'host', 'params', 'vantages', 'alerts']) delete merged[k];
+      Object.assign(merged, node);
       loc.parent[loc.key] = merged;
     }
     return d;
   }
+  // Remove hostless grouping nodes that became empty after a remove/move. Such a node cannot pass
+  // server validation or round-trip through Node.children,omitempty, so keeping it would make the
+  // otherwise-valid tree mutation fail with 400. A node with a host remains a real target even when
+  // its last child moves out.
+  function cfgPruneEmptyGroups(ch) {
+    for (const name of Object.keys(ch || {})) {
+      const node = ch[name];
+      if (!node || !node.children || typeof node.children !== 'object') continue;
+      cfgPruneEmptyGroups(node.children);
+      if (!node.host && Object.keys(node.children).length === 0) delete ch[name];
+    }
+  }
   function removeNodeAtPath(doc, path) {
     const d = cfgClone(doc); const loc = cfgNodeAt(d, path);
     if (loc) delete loc.parent[loc.key];
+    cfgPruneEmptyGroups(d.targets && d.targets.children);
     return d;
   }
-  // renameNodeAtPath rekeys the node at `path` to `newName` within its parent, preserving the
-  // node's value (its subtree, weight and every field) and its position among siblings — the
-  // parent map is rebuilt in place with just the key swapped, so order holds even when siblings
-  // share a weight (where name is the sort tiebreaker). A no-op when the name is unchanged or the
-  // path is stale (returns the clone); throws on a sibling name collision. `newName` must be a
-  // single segment — the caller rejects "/" (the structural path separator) before calling.
+  // renameNodeAtPath rekeys the node at `path` to `newName` within its parent, preserving its
+  // subtree, every non-order field, and visible position among siblings. Existing weights stay
+  // untouched when they already preserve that position; only an alphabetical crossing within a
+  // weight tie triggers sibling re-sequencing. A no-op when the name is unchanged or the path is
+  // stale (returns the clone); throws on a sibling name collision. `newName` must be one segment —
+  // the caller rejects "/" (the structural path separator) before calling.
   function renameNodeAtPath(doc, path, newName) {
     const d = cfgClone(doc); const loc = cfgNodeAt(d, path);
     if (!loc || !Object.prototype.hasOwnProperty.call(loc.parent, loc.key)) return d; // stale UI
@@ -422,9 +478,17 @@
       const pp = path.split('/').slice(0, -1).join('/');
       throw new Error('a target named "' + newName + '" already exists' + (pp ? ' in "' + pp + '"' : ' at the top level'));
     }
-    const entries = Object.keys(loc.parent).map((k) => [k === loc.key ? newName : k, loc.parent[k]]);
-    for (const k of Object.keys(loc.parent)) delete loc.parent[k];
-    for (const [k, v] of entries) Object.defineProperty(loc.parent, k, { value: v, enumerable: true, writable: true, configurable: true });
+    // Sorting is (weight,name), not insertion order. Capture the visible order before the rekey and
+    // then assign unambiguous sequential weights, otherwise a tied weight lets the NEW name move the
+    // row alphabetically despite this helper's position-preservation contract.
+    const order = cfgSortSiblings(loc.parent).map((k) => k === loc.key ? newName : k);
+    const value = loc.parent[loc.key];
+    delete loc.parent[loc.key];
+    Object.defineProperty(loc.parent, newName, { value, enumerable: true, writable: true, configurable: true });
+    if (cfgSortSiblings(loc.parent).some((name, i) => name !== order[i])) {
+      const weights = reweightSiblings(order);
+      for (const name of order) loc.parent[name].weight = weights[name];
+    }
     return d;
   }
   // cfgEnsureChildrenAt is like cfgChildrenAt but CREATES the `children` map on any existing
@@ -494,7 +558,20 @@
       const sw = reweightSiblings(srcOrder);
       for (const n of srcOrder) if (srcParent[n]) srcParent[n].weight = sw[n];
     }
+    cfgPruneEmptyGroups(d.targets && d.targets.children);
     return d;
+  }
+
+  // The row under the pointer determines the drag destination. Dropping ON a folder always means
+  // move into it, including when source and folder are siblings; dropping on a leaf means reorder /
+  // move before that leaf in its parent. Keyboard Alt+Arrow remains the unambiguous way to reorder
+  // a folder itself among siblings.
+  function cfgDropDestination(from, targetPath, targetIsFolder) {
+    if (!from || targetPath === from) return null;
+    const parentOf = (p) => p.split('/').slice(0, -1).join('/');
+    const destParent = targetIsFolder ? targetPath : parentOf(targetPath);
+    if (destParent === from || destParent.startsWith(from + '/')) return null;
+    return { destParent, kind: targetIsFolder ? 'into' : 'before' };
   }
   // moveInList returns a NEW array with `name` shifted by `delta` slots (clamped to the ends) —
   // the pure core of the Alt+Up / Alt+Down keyboard reorder. The caller feeds the result to
@@ -625,7 +702,7 @@
     ].join('\n');
   }
 
-  window.Dash = { RANGES, RANGE_ORDER, parseRoute, mergeSeries, gridSince, fetchJSON, zoomResolution, pixelToTime, sharedYMax, buildTree, underPath, targetStatus, pickSeries, vantageList, orderVantages, defaultFocus, keepFocus, vantageColorVar, adminMode, relTime, listTargets, addTarget, editTarget, removeTarget, buildTargetNode, buildGroupNode, labelHTML, collectingNote, agentYaml, agentCompose, cfgTree, reweightSiblings, reorderSiblings, editNodeAtPath, removeNodeAtPath, renameNodeAtPath, addNodeAtPath, moveNode, moveInList, cfgVisibleRows, cfgTreeKey };
+  window.Dash = { RANGES, RANGE_ORDER, parseRoute, mergeSeries, gridSince, fetchJSON, zoomResolution, pixelToTime, sharedYMax, buildTree, underPath, targetStatus, pickSeries, vantageList, orderVantages, defaultFocus, keepFocus, vantageColorVar, adminMode, adminSessionState, createAdminStateController, statusProbeOwnsView, relTime, listTargets, addTarget, editTarget, removeTarget, buildTargetNode, buildGroupNode, labelHTML, collectingNote, agentYaml, agentCompose, cfgTree, reweightSiblings, reorderSiblings, editNodeAtPath, removeNodeAtPath, renameNodeAtPath, addNodeAtPath, moveNode, moveInList, cfgDropDestination, cfgVisibleRows, cfgTreeKey };
 
   // ---------------------------------------------------------------- init (DOM) --
   function init() {
@@ -1535,11 +1612,15 @@
       $('adminAcct').classList.toggle('hidden', state !== 'in');
       $('adminLoginBtn').classList.toggle('hidden', state !== 'out');
     }
+    const adminState = Dash.createAdminStateController(setAdminBar);
     async function refreshAdminState() {
-      let st = 0;
-      try { st = (await fetch('/api/admin/session', { cache: 'no-store' })).status; } catch (e) { st = 0; }
-      setAdminBar(st === 204 ? 'in' : st === 404 ? 'disabled' : 'out');
-      return st;
+      const gen = adminState.beginProbe();
+      let st;
+      try { st = (await fetch('/api/admin/session', { cache: 'no-store' })).status; }
+      catch (e) { return 0; } // unknown: preserve the last confirmed state
+      // A newer probe/login/logout invalidates this result for callers as well as for the bar.
+      // Returning its stale 204/401 would let the login flow act on a state the controller rejected.
+      return adminState.resolveProbe(gen, st) ? st : 0;
     }
     function rerenderActiveAdminTab() {
       if (!$('viewConfig').classList.contains('hidden')) renderConfig();
@@ -1562,16 +1643,20 @@
       if (lr.status !== 204) { $('adminLoginErr').textContent = 'Login failed (HTTP ' + lr.status + ').'; return; }
       // Secure-cookie probe: on plain-HTTP LAN the Secure cookie won't stick, so a 204 login is
       // followed by a 401 session — surface that rather than silently staying logged out.
-      if (await refreshAdminState() !== 204) {
+      const sessionStatus = await refreshAdminState();
+      if (sessionStatus === 401) {
         $('adminLoginErr').textContent = "Login didn't persist — the admin session needs a secure context (HTTPS via the proxy, or localhost). You are on " + location.origin + '.';
         return;
       }
+      if (sessionStatus !== 204) { $('adminLoginErr').textContent = 'Signed in, but the session could not be verified. Retry when the collector is reachable.'; return; }
       closeAdminLogin();
       rerenderActiveAdminTab();
     });
     $('adminLogoutBtn').addEventListener('click', async () => {
-      try { await fetch('/api/admin/logout', { method: 'POST' }); } catch (e) { /* ignore */ }
-      await refreshAdminState();
+      let lr;
+      try { lr = await fetch('/api/admin/logout', { method: 'POST' }); }
+      catch (e) { window.alert('Log out failed — the admin session may still be active.'); return; }
+      if (!adminState.confirmLogout(lr.status)) { window.alert('Log out failed (HTTP ' + lr.status + ') — the admin session may still be active.'); return; }
       rerenderActiveAdminTab();
     });
     refreshAdminState(); // set the bar's admin control on load, independent of the current tab
@@ -1843,24 +1928,18 @@
     // tested Dash.cfgTree ordering) turns a (drag, target-row) pair into a destination parent +
     // index, then the mutation itself goes through the tested Dash.moveNode, which reweights
     // BOTH affected sibling groups and refuses to drop a folder into its own subtree. Rules:
-    //   • target in the SAME group  -> reorder before the target row (the original behaviour,
-    //     now also covering folder targets at that level),
-    //   • target is a folder in ANOTHER group -> move INTO it (appended),
-    //   • target is a leaf in another group    -> move into the leaf's parent, before the leaf.
+    //   • target is a folder (same group or another) -> move INTO it (appended),
+    //   • target is a leaf -> reorder/move into the leaf's parent, before the leaf.
     // Saves through the same optimistic-version saveDoc PUT used everywhere else.
     (function cfgDnd() {
       const host = $('cfgTree');
       let dragPath = null;
       function dropPlan(from, targetPath, targetIsFolder) {
-        if (!from || targetPath === from) return null;
+        const dest = Dash.cfgDropDestination(from, targetPath, targetIsFolder);
+        if (!dest) return null;
         const dragParent = cfgParentOf(from);
         const dragName = from.split('/').pop();
-        let destParent, kind;
-        if (cfgParentOf(targetPath) === dragParent) { destParent = dragParent; kind = 'before'; }
-        else if (targetIsFolder) { destParent = targetPath; kind = 'into'; }
-        else { destParent = cfgParentOf(targetPath); kind = 'before'; }
-        // Descendant/self guard (mirrors Dash.moveNode) so an invalid drop shows no drop cue.
-        if (destParent === from || destParent.startsWith(from + '/')) return null;
+        const { destParent, kind } = dest;
         let index, noop = false;
         if (kind === 'into') {
           // Dropping a node onto the folder it is already directly in changes nothing — no-op
@@ -1958,11 +2037,12 @@
     // Status-line owner for the admin tabs. Overview/Graphs update #statusText inside their own
     // refresh loops; Config/Vantages don't, so without this the line stays stuck on the initial
     // "connecting…". A light /api/targets probe reflects collector reachability there.
-    async function pingStatus() {
+    async function pingStatus(expectedView) {
       try {
         const targets = (await fetchJSON('/api/targets')).targets || [];
+        if (!Dash.statusProbeOwnsView(expectedView, currentView())) return;
         $('statusText').textContent = targets.length + ' targets · updated ' + new Date().toLocaleTimeString();
-      } catch (e) { $('statusText').textContent = 'collector unreachable — showing last known'; }
+      } catch (e) { if (Dash.statusProbeOwnsView(expectedView, currentView())) $('statusText').textContent = 'collector unreachable — showing last known'; }
     }
     function route() {
       // Never leave a one-time key in the DOM across navigations: clear any open reveal.
@@ -1974,8 +2054,8 @@
       else if (r.view === 'graphs') { gridScope = r.path || ''; setTabs('graphs'); show('viewGraphs'); renderScope(); renderTree(); renderGridPanels(); refreshGrid(); }
       else if (r.view === 'stack') { setTabs('stack'); show('viewStack'); renderStack(r.name); }
       else if (r.view === 'zoom') { setTabs('zoom'); show('viewZoom'); renderZoom(r.name, r.range); }
-      else if (r.view === 'vantages') { setTabs('vantages'); show('viewVantages'); renderVantages(); pingStatus(); }
-      else if (r.view === 'config') { setTabs('config'); show('viewConfig'); renderConfig(); pingStatus(); }
+      else if (r.view === 'vantages') { setTabs('vantages'); show('viewVantages'); renderVantages(); pingStatus('vantages'); }
+      else if (r.view === 'config') { setTabs('config'); show('viewConfig'); renderConfig(); pingStatus('config'); }
       $('statusText').textContent = (r.view === 'stack' || r.view === 'zoom') ? r.name : $('statusText').textContent;
       window.scrollTo(0, 0);
     }
@@ -2085,7 +2165,8 @@
     let rt; window.addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(rerender, 140); });
     setInterval(() => { if (currentView() === 'graphs') refreshGrid(); }, 5000);
     setInterval(() => { if (currentView() === 'overview') refreshOverview(); }, 15000);
-    setInterval(() => { const v = currentView(); if (v === 'config' || v === 'vantages') pingStatus(); }, 15000);
+    setInterval(() => { const v = currentView(); if (v === 'config' || v === 'vantages') pingStatus(v); }, 15000);
+    setInterval(refreshAdminState, 60000); // keep the global indicator honest as a 12h session expires
     setInterval(() => { const v = currentView(); if (v === 'stack') renderStack(curTarget); else if (v === 'zoom' && !(zoomState && zoomState.custom)) { const r = parseRoute(location.hash); renderZoom(r.name, r.range); } }, 30000);
 
     themeLabel();
