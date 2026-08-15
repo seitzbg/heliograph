@@ -176,8 +176,8 @@ Phase-6 items all ship in the single **v1.0** line.
 
 ## Hardening & UI backlog (from the 2026-08-14 code review + session)
 
-Earlier merges: #34 vantage docker-compose generator · #35 band-panel "collecting…" message ·
-#36 author-defined menu order (weight) · #37 Config-tab tree + drag-reorder · #38 hardening
+Earlier merges: #34 vantage docker-compose generator · #35 band-panel "collecting…" message
+· #36 author-defined menu order (weight) · #37 Config-tab tree + drag-reorder · #38 hardening
 (M6 spool-alloc bound, M2 now-blocking Caddy scan, M8 build-time version injection).
 
 The original 2026-08-14 items shipped in **v1.0.2**; the review of that release and its admin-top-bar

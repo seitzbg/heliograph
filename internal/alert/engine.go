@@ -490,6 +490,15 @@ func NewWebhookNotifierConfig(url string, client *http.Client, cfg WebhookConfig
 	if client == nil {
 		client = &http.Client{}
 	}
+	// Never follow redirects. A webhook delivery is a POST to one fixed URL; the default client
+	// silently chases a 3xx to its final response, so a 302→200 is recorded as a delivered
+	// success (never retried) and a 307/308 re-POSTs the alert body to the redirect target — an
+	// untrusted host. Clone the caller's client (it may be shared with the Slack/Discord
+	// notifiers, so we must not mutate it) and surface the 3xx as the response itself, classified
+	// as a transient non-2xx by permanentHTTPStatus like any other.
+	rc := *client
+	rc.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	client = &rc
 	if cfg.Workers <= 0 {
 		cfg.Workers = 4
 	}

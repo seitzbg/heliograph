@@ -108,6 +108,41 @@ func TestWebhookAbandonsPermanent4xx(t *testing.T) {
 	}
 }
 
+// A webhook that answers with a redirect must NOT be followed. The default http.Client chases a
+// 302 to its final 200 and records a phantom "delivered" (so a misdirected endpoint is never
+// retried), and a 307/308 re-POSTs the alert body to the redirect target — an untrusted host. The
+// notifier must instead see the 3xx itself, treat it as a transient non-2xx, and never hit the
+// redirect target.
+func TestWebhookDoesNotFollowRedirect(t *testing.T) {
+	var target atomic.Int32
+	tsrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		target.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer tsrv.Close()
+
+	var attempts atomic.Int32
+	rsrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts.Add(1)
+		http.Redirect(w, r, tsrv.URL, http.StatusFound) // 302 -> would land on the 200 above
+	}))
+	defer rsrv.Close()
+
+	n := NewWebhookNotifierConfig(rsrv.URL, nil, WebhookConfig{Workers: 1, QueueSize: 8, MaxAttempts: 3, BaseBackoff: time.Millisecond, Timeout: time.Second})
+	n.Notify(Event{Target: "t", Vantage: "local", Alert: "loss", Firing: true, RTTms: 1, When: time.Unix(1_700_000_000, 0)})
+	n.Close(context.Background())
+
+	if got := target.Load(); got != 0 {
+		t.Errorf("redirect target hit %d times; a webhook POST body must never be forwarded to a redirect", got)
+	}
+	if got := attempts.Load(); got != 3 {
+		t.Errorf("attempts = %d, want 3 (a 302 is a transient non-2xx, retried to the attempt budget)", got)
+	}
+	if st := n.Stats(); st.Delivered != 0 {
+		t.Errorf("delivered = %d, want 0 (a 302 is not a successful delivery)", st.Delivered)
+	}
+}
+
 func TestPermanentHTTPStatus(t *testing.T) {
 	tests := []struct {
 		code      int
