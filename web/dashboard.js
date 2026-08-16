@@ -1270,7 +1270,10 @@
       if (z.series && z.series.unsupported) { drawNote(z.canvas, 'needs the TimescaleDB store (-dsn -downsample)', 360); return; }
       if (!z.series || !z.series.buckets || z.series.buckets.length < 2) { drawNote(z.canvas, collectingNote(z.band ? 'band' : 'raw', z.res), 360); return; }
       const overlays = z.byV ? buildOverlays(z.byV, z.vantages, z.focus) : undefined;
-      Smoke.render(z.canvas, z.series, { height: 360, band: z.band, xlabels: z.xlabels, t0: z.t0, t1: z.t1, overlays });
+      // A custom drag-zoom range always shows absolute times (z.xlabels is already rangeLabels).
+      // A fixed range honors the "absolute time" toggle, same as the grid/stack via renderInto.
+      const xlabels = !z.custom && timeAbsolute && z.t0 != null ? rangeLabels(z.t0, z.t1) : z.xlabels;
+      Smoke.render(z.canvas, z.series, { height: 360, band: z.band, xlabels, t0: z.t0, t1: z.t1, overlays });
     }
     // renderZoomChips renders (or clears) the #zoomVantages legend/selector from the
     // currently-open zoomState's byV (no refetch — mirrors renderStackChips).
@@ -2221,7 +2224,13 @@
     (async () => {
       try {
         const v = (await fetchJSON('/api/version')).version;
-        if (v) $('appFooter').textContent = 'Heliograph ' + v;
+        if (!v) return;
+        // Link the version to its source: the exact commit for a git-describe build
+        // (…-g<sha>), the release page for a clean tag, else the repo root.
+        const repo = 'https://github.com/seitzbg/heliograph';
+        const sha = (v.match(/-g([0-9a-f]+)$/) || [])[1];
+        const href = sha ? repo + '/commit/' + sha : (/^v[0-9]/.test(v) ? repo + '/releases/tag/' + encodeURIComponent(v) : repo);
+        $('appFooter').innerHTML = 'Heliograph <a href="' + href + '" target="_blank" rel="noopener noreferrer">' + esc(v) + '</a>';
       } catch (e) { /* leave the default footer */ }
     })();
 

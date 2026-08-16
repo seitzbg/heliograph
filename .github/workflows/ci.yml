@@ -312,9 +312,12 @@ jobs:
             type=ref,event=branch
             type=ref,event=tag
             type=sha,format=short
-            # :latest tracks the default-branch head (a continuous alias of :main), not releases —
-            # docker5 rolls forward on every merge. enable only on main so a PR/tag build never moves it.
-            type=raw,value=latest,enable={{is_default_branch}}
+            # :latest tracks the default-branch head (a continuous alias of :main), and a release
+            # tag push also refreshes it so :latest carries the clean vX.Y.Z build version right
+            # after a release (a git-describe on `main` runs before the tag exists, so a main-only
+            # :latest would lag one version). Any non-PR event (main push or v* tag) moves it; a PR
+            # build never does.
+            type=raw,value=latest,enable=${{ github.event_name != 'pull_request' }}
       - name: Log in to GHCR
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
