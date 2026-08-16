@@ -87,7 +87,10 @@
   // The floor is `min(<min>px, 100%)`, not a bare `<min>px`, so a viewport narrower than the
   // minimum collapses to a single full-width track instead of overflowing horizontally.
   function gridTemplateFor(cols, min, gap) {
-    const floor = 'min(' + min + 'px, 100%)';
+    // `min` is a CSS length (e.g. '22.5rem') so the floor scales with the user's font size, not a
+    // fixed pixel count; clamped to 100% so a viewport narrower than the minimum collapses to one
+    // full-width track instead of overflowing. `gap` stays px (layout spacing, not text-relative).
+    const floor = 'min(' + min + ', 100%)';
     const n = Math.floor(Number(cols));
     if (!(n > 0)) return 'repeat(auto-fit, minmax(' + floor + ', 1fr))';
     return 'repeat(auto-fill, minmax(max(' + floor + ', (100% - ' + (n - 1) * gap + 'px) / ' + n + '), 1fr))';
@@ -1018,30 +1021,34 @@
     // always absolute regardless. Persisted per browser.
     let timeAbsolute = false;
     try { timeAbsolute = localStorage.getItem('graphTime') === 'absolute'; } catch (e) {}
-    // Graphs-per-row: 'auto' fits as many as the min width allows; a fixed N caps columns
-    // but never shrinks a graph below GRAPH_MIN (wraps to fewer instead). Persisted per browser.
-    const GRAPH_MIN = 360, GRAPH_GAP = 18;
+    // Graphs-per-row: 'auto' fits as many as the min width allows; a fixed N caps columns but never
+    // shrinks a graph below the minimum (wraps to fewer instead). The minimum is expressed in rem
+    // (font-relative) so graphs scale with the user's text size, not a fixed pixel count; graphMinPx
+    // resolves it to CSS px for the how-many-fit math. Persisted per browser.
+    const GRAPH_MIN_REM = 22.5, GRAPH_GAP = 18; // 22.5rem == 360px at the default 16px root
+    const graphMinPx = () => GRAPH_MIN_REM * (parseFloat(getComputedStyle(document.documentElement).fontSize) || 16);
     // Only the values the seg buttons offer are valid; a stale or hand-edited localStorage entry
     // (e.g. "5" -> a layout no button represents, "Infinity" -> invalid CSS) falls back to 'auto'.
-    const GRID_COL_OPTIONS = new Set(['auto', '2', '3', '4', '6']);
+    const GRID_COL_OPTIONS = new Set(['auto', '1', '2', '3', '4', '6']);
     let gridCols = 'auto';
     try { const s = localStorage.getItem('graphCols'); if (GRID_COL_OPTIONS.has(s)) gridCols = s; } catch (e) {}
     function applyGridCols() {
-      const g = $('graphGrid'); if (g) g.style.gridTemplateColumns = gridTemplateFor(gridCols, GRAPH_MIN, GRAPH_GAP);
+      const g = $('graphGrid'); if (g) g.style.gridTemplateColumns = gridTemplateFor(gridCols, GRAPH_MIN_REM + 'rem', GRAPH_GAP);
       updateColsPicker();
     }
     // updateColsPicker keeps the Columns picker honest at the current browser width: it hides the
     // count buttons that can't fit (clicking them does nothing — the grid just wraps to fewer), and
-    // hides the picker entirely when even 3 columns won't fit, since Auto is then the only sensible
-    // choice. It also re-syncs aria-pressed so a selection hidden by a resize re-presses when it fits
-    // again. No-op while the Graphs view is hidden (the grid has no width to measure).
+    // hides the picker entirely when even 2 columns won't fit, since 'Auto' is then the only layout
+    // and there is no distinct choice to offer. When 2 fit, 'Auto' (== 2) and '1' (one big graph)
+    // are genuinely different, so the picker stays. It also re-syncs aria-pressed so a selection
+    // hidden by a resize re-presses when it fits again. No-op while the Graphs view is hidden.
     function updateColsPicker() {
       const g = $('graphGrid'), seg = $('colsSeg'), label = $('colsLabel');
       if (!g || !seg || !label) return;
       const w = g.clientWidth;
       if (!w) return;
-      const maxFit = maxColumnsFor(w, GRAPH_MIN, GRAPH_GAP);
-      const show = maxFit > 2; // no picker unless more than 2 columns can fit
+      const maxFit = maxColumnsFor(w, graphMinPx(), GRAPH_GAP);
+      const show = maxFit >= 2; // no picker unless at least 2 columns fit (Auto vs 1 is a real choice)
       seg.style.display = show ? '' : 'none';
       label.style.display = show ? '' : 'none';
       if (!show) return;
