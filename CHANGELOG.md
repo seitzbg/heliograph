@@ -6,6 +6,15 @@ All notable changes to **Heliograph** are recorded here. The format follows
 
 ## [Unreleased]
 
+## [1.0.4] - 2026-08-16
+
+Post-1.0.3 UI and release-tooling work (#62–#70): the build version now shows in the dashboard
+footer, the Graphs axes gain an absolute/relative time toggle, and the graphs-per-row picker is
+smarter — a single-column option, `rem`-based (font-relative) sizing, and it stays visible on
+narrower/high-DPI screens. It also completes the narrow-viewport overflow fix with a headless-browser
+regression test, reconciles the admin session-lifetime docs, publishes the image as `:latest`, and
+refreshes the README with full-width screenshots. Detail below.
+
 ### Added
 - **Build version in the dashboard footer.** The footer now reads `Heliograph <version>` — the
   git-describe build string (latest tag + commits + short SHA for a `main`/`latest` build, or the
@@ -1181,7 +1190,8 @@ the smoke-graph look, a fast/parallel poller, and probes as plugins.
 - Full re-implementation reference / code map maintained outside the repo at
   `~/.claude/plans/smokeping-codemap/`.
 
-[Unreleased]: https://github.com/seitzbg/heliograph/compare/v1.0.3...main
+[Unreleased]: https://github.com/seitzbg/heliograph/compare/v1.0.4...main
+[1.0.4]: https://github.com/seitzbg/heliograph/compare/v1.0.3...v1.0.4
 [1.0.3]: https://github.com/seitzbg/heliograph/compare/v1.0.2...v1.0.3
 [1.0.2]: https://github.com/seitzbg/heliograph/compare/v1.0.0...v1.0.2
 [1.0.0]: https://github.com/seitzbg/heliograph/releases/tag/v1.0.0
