@@ -28,10 +28,14 @@ All notable changes to **Heliograph** are recorded here. The format follows
 - **The collector image is now published as `:latest`** (a continuous alias of the default-branch
   head, alongside the existing `:main` and per-release `:vX.Y.Z` tags). The docs and the generated
   agent Compose reference `ghcr.io/seitzbg/heliograph:latest`.
-- **The Graphs "Columns" picker only offers counts that fit.** At the current browser width it hides
-  the column counts that can't fit (they would only wrap to fewer — clicking did nothing), and hides
-  the whole picker when even 3 columns won't fit, since `Auto` is then the only sensible choice. It
-  re-evaluates on window resize.
+- **The Graphs "Columns" picker adapts to the window and offers a single-column view.** It now
+  includes a **`1`** option (one full-width graph) and hides the counts that can't fit at the current
+  width (they would only wrap to fewer). The picker shows whenever at least two columns fit — on a
+  laptop where `Auto` gives two, `1` is still a distinct choice — and hides only when one column is
+  all that fits. It re-evaluates on window resize.
+- **Graph minimum width is font-relative (`rem`), not a fixed pixel count.** The per-graph minimum is
+  now `22.5rem` (== 360px at the default 16px root) so graphs scale with the reader's font-size
+  setting instead of staying a fixed size.
 
 ### Fixed
 - **Narrow/phone-width Graphs no longer force a horizontal page scroll.** The mobile

@@ -698,17 +698,18 @@ check('cfgTreeKey: ignores unrelated keys and empty rows', () => {
   assert.equal(D.cfgTreeKey([], 'Web', 'ArrowDown', false), null);
 });
 
-check('gridTemplateFor: auto (and non-positive) -> auto-fit tracks, floor clamped to 100%', () => {
-  assert.equal(D.gridTemplateFor('auto', 360, 18), 'repeat(auto-fit, minmax(min(360px, 100%), 1fr))');
-  assert.equal(D.gridTemplateFor(0, 360, 18), 'repeat(auto-fit, minmax(min(360px, 100%), 1fr))');
-  assert.equal(D.gridTemplateFor('nonsense', 360, 18), 'repeat(auto-fit, minmax(min(360px, 100%), 1fr))');
+check('gridTemplateFor: auto (and non-positive) -> auto-fit tracks; the min is a font-relative rem, floor clamped to 100%', () => {
+  assert.equal(D.gridTemplateFor('auto', '22.5rem', 18), 'repeat(auto-fit, minmax(min(22.5rem, 100%), 1fr))');
+  assert.equal(D.gridTemplateFor(0, '22.5rem', 18), 'repeat(auto-fit, minmax(min(22.5rem, 100%), 1fr))');
+  assert.equal(D.gridTemplateFor('nonsense', '22.5rem', 18), 'repeat(auto-fit, minmax(min(22.5rem, 100%), 1fr))');
 });
 check('gridTemplateFor: a fixed N caps columns; the floor is clamped to 100% so narrow viewports do not overflow', () => {
   // N tracks + (N-1) gaps; the max() floor makes auto-fill wrap to fewer when they will not fit,
   // and min(...,100%) collapses to a single full-width track below the minimum instead of overflowing.
-  assert.equal(D.gridTemplateFor(4, 360, 18), 'repeat(auto-fill, minmax(max(min(360px, 100%), (100% - 54px) / 4), 1fr))');
-  assert.equal(D.gridTemplateFor('2', 360, 18), 'repeat(auto-fill, minmax(max(min(360px, 100%), (100% - 18px) / 2), 1fr))');
-  assert.equal(D.gridTemplateFor(6, 360, 18), 'repeat(auto-fill, minmax(max(min(360px, 100%), (100% - 90px) / 6), 1fr))');
+  assert.equal(D.gridTemplateFor(1, '22.5rem', 18), 'repeat(auto-fill, minmax(max(min(22.5rem, 100%), (100% - 0px) / 1), 1fr))'); // one full-width graph
+  assert.equal(D.gridTemplateFor(4, '22.5rem', 18), 'repeat(auto-fill, minmax(max(min(22.5rem, 100%), (100% - 54px) / 4), 1fr))');
+  assert.equal(D.gridTemplateFor('2', '22.5rem', 18), 'repeat(auto-fill, minmax(max(min(22.5rem, 100%), (100% - 18px) / 2), 1fr))');
+  assert.equal(D.gridTemplateFor(6, '22.5rem', 18), 'repeat(auto-fill, minmax(max(min(22.5rem, 100%), (100% - 90px) / 6), 1fr))');
 });
 
 check('maxColumnsFor: how many min-width columns fit at a given width', () => {
