@@ -92,10 +92,10 @@ Prebuilt images are published to the [GitHub Container Registry](https://github.
 by CI on every push to `main` (and tagged releases):
 
 ```sh
-docker pull ghcr.io/seitzbg/heliograph:main
+docker pull ghcr.io/seitzbg/heliograph:latest
 # Bind loopback only: the dashboard + read API are UNAUTHENTICATED, so never publish them on a
 # reachable interface without a reverse proxy (TLS + auth) in front — see Federation deployment below.
-docker run --rm -p 127.0.0.1:8087:8087 ghcr.io/seitzbg/heliograph:main \
+docker run --rm -p 127.0.0.1:8087:8087 ghcr.io/seitzbg/heliograph:latest \
   -serve -addr :8087 -webdir /web
 #   -> open http://localhost:8087/
 ```
@@ -123,7 +123,7 @@ services:
       retries: 10
 
   smoked:
-    image: ghcr.io/seitzbg/heliograph:main
+    image: ghcr.io/seitzbg/heliograph:latest
     depends_on:
       timescaledb:
         condition: service_healthy

@@ -370,6 +370,7 @@ func main() {
 
 	if *serve && ctx.Err() == nil {
 		srv := api.New(st, *webdir)
+		srv.Version = version
 		srv.Rounds = roundStats
 		// Expose extra operational counters on /metrics so they are scrapeable, not
 		// merely logged: the store's persistent-write failures, and the webhook delivery

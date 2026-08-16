@@ -404,7 +404,7 @@ check('agentYaml: quotes are escaped so a hostile-ish name stays well-formed YAM
 });
 check('agentCompose: runnable compose that mounts agent.yaml and carries no secret', () => {
   const c = D.agentCompose();
-  assert.match(c, /image: ghcr\.io\/seitzbg\/heliograph:main/);
+  assert.match(c, /image: ghcr\.io\/seitzbg\/heliograph:latest/);
   assert.match(c, /entrypoint: \["smoke-agent"\]/);
   assert.match(c, /command: \["-config", "\/etc\/heliograph\/agent\.yaml"\]/);
   assert.match(c, /\.\/agent\.yaml:\/etc\/heliograph\/agent\.yaml:ro/);   // the mount ties the two files together
