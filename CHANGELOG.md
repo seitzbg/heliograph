@@ -20,6 +20,17 @@ All notable changes to **Heliograph** are recorded here. The format follows
   the whole picker when even 3 columns won't fit, since `Auto` is then the only sensible choice. It
   re-evaluates on window resize.
 
+### Fixed
+- **Narrow/phone-width Graphs no longer force a horizontal page scroll.** The mobile
+  `.graphs-layout` column is now `minmax(0, 1fr)` (not a bare `1fr`, whose min-content floor let the
+  grid outgrow the viewport before the per-graph `min(360px, 100%)` clamp could apply), and the
+  top-bar tab strip scrolls inside its own width instead of pushing the page. Verified in a headless
+  browser at 320px (document width == viewport, grid within its container). Completes the 1.0.3
+  narrow-overflow fix, which only addressed the per-graph track.
+- **Admin session-lifetime docs/UI now match the feature.** The login modal no longer hard-states a
+  12-hour session (it says "the hub's configured lifetime, 12 hours by default"); `.env.example` and
+  the federation guide now document `SMOKED_ADMIN_SESSION_TTL` alongside the password and signing key.
+
 ## [1.0.3] - 2026-08-15
 
 The next release after v1.0.2, gathering the post-1.0.2 UI and hardening work (#50–#60): a

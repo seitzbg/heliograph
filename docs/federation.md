@@ -109,7 +109,9 @@ revoked vantage "nyc"
 **GUI** (the Vantages tab): set `SMOKED_ADMIN_PASSWORD` on the hub to enable the
 admin panel. Also set `SMOKED_ADMIN_SESSION_KEY` to 32 random bytes encoded as 64 hex
 characters (`openssl rand -hex 32`) if sessions should survive collector restarts; without it,
-the hub uses a secure ephemeral signing key and logs sessions out on restart. Log in, then
+the hub uses a secure ephemeral signing key and logs sessions out on restart. A login lasts 12
+hours by default — set `SMOKED_ADMIN_SESSION_TTL` to any Go duration (`24h`, `168h`, `30m`, …,
+minimum `1m`) to change it. Log in, then
 **add** (reveals the key once — as a copyable/downloadable
 `agent.yaml` and a ready-to-run `docker-compose.yaml`, toggled in the dialog), **list**
 (name, created, last-seen, target count), **regenerate** (rotate), and **revoke**.
@@ -195,7 +197,8 @@ spool_dir: /var/lib/smoke-agent/spool
 - **Admin key-management** (CLI has none — it's hub-shell-trusted; the API + GUI
   panel require `SMOKED_ADMIN_PASSWORD`, fail-closed when unset). Session cookies are signed by
   the independent `SMOKED_ADMIN_SESSION_KEY`; omitting it uses a process-local key, while rotation
-  invalidates every existing admin session.
+  invalidates every existing admin session. `SMOKED_ADMIN_SESSION_TTL` sets how long a login stays
+  valid (default 12h, minimum 1m).
 - `local` is reserved: you can't mint a `local` key, and a `local`-authenticated
   agent is rejected.
 
