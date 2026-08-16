@@ -102,6 +102,16 @@
     return Math.max(1, Math.floor((width + gap) / (min + gap)));
   }
 
+  // rangeLabels builds four absolute-time x-axis labels spanning [t0, t1]: clock time (HH:MM) for
+  // spans under ~1.5 days, calendar day ("Aug 6") for longer ones. Used for a custom drag-zoom
+  // range and when the Graphs "absolute time" toggle is on; the relative alternative is each
+  // range's static `xl` (e.g. -3h / -2h / -1h / now).
+  function rangeLabels(t0, t1) {
+    const span = t1 - t0;
+    const fmt = (t) => { const d = new Date(t); return span < 36 * H ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : d.toLocaleDateString([], { month: 'short', day: 'numeric' }); };
+    return [fmt(t0), fmt(t0 + span / 3), fmt(t0 + 2 * span / 3), fmt(t1)];
+  }
+
   // fetchJSON GETs a JSON endpoint and REJECTS a non-2xx response instead of decoding
   // its body (#2). The API returns JSON error bodies with HTTP 503 when storage is
   // unavailable; decoding those as ordinary data turned a transient failure into an
@@ -725,7 +735,7 @@
     ].join('\n');
   }
 
-  window.Dash = { RANGES, RANGE_ORDER, parseRoute, mergeSeries, gridSince, gridTemplateFor, maxColumnsFor, fetchJSON, zoomResolution, pixelToTime, sharedYMax, buildTree, underPath, targetStatus, pickSeries, vantageList, orderVantages, defaultFocus, keepFocus, vantageColorVar, adminMode, adminSessionState, createAdminStateController, statusProbeOwnsView, relTime, listTargets, addTarget, editTarget, removeTarget, buildTargetNode, buildGroupNode, labelHTML, collectingNote, agentYaml, agentCompose, cfgTree, reweightSiblings, reorderSiblings, editNodeAtPath, removeNodeAtPath, renameNodeAtPath, addNodeAtPath, moveNode, moveInList, cfgDropDestination, cfgVisibleRows, cfgTreeKey };
+  window.Dash = { RANGES, RANGE_ORDER, parseRoute, mergeSeries, gridSince, gridTemplateFor, maxColumnsFor, rangeLabels, fetchJSON, zoomResolution, pixelToTime, sharedYMax, buildTree, underPath, targetStatus, pickSeries, vantageList, orderVantages, defaultFocus, keepFocus, vantageColorVar, adminMode, adminSessionState, createAdminStateController, statusProbeOwnsView, relTime, listTargets, addTarget, editTarget, removeTarget, buildTargetNode, buildGroupNode, labelHTML, collectingNote, agentYaml, agentCompose, cfgTree, reweightSiblings, reorderSiblings, editNodeAtPath, removeNodeAtPath, renameNodeAtPath, addNodeAtPath, moveNode, moveInList, cfgDropDestination, cfgVisibleRows, cfgTreeKey };
 
   // ---------------------------------------------------------------- init (DOM) --
   function init() {
@@ -770,7 +780,10 @@
       const lastT = s.buckets[s.buckets.length - 1].t;
       const t1 = Math.max(Date.now(), Number.isFinite(lastT) ? lastT : 0);
       const t0 = R.windowMs ? t1 - R.windowMs : undefined;
-      Smoke.render(canvas, s, { height, band: R.mode === 'band', xlabels: R.xl, t0, t1: t0 == null ? undefined : t1, yMax, overlays });
+      // Relative labels (each range's static xl, e.g. -3h/now) by default; absolute wall-clock
+      // (rangeLabels) when the Graphs "absolute time" toggle is on and we have a real window.
+      const xlabels = timeAbsolute && t0 != null ? rangeLabels(t0, t1) : R.xl;
+      Smoke.render(canvas, s, { height, band: R.mode === 'band', xlabels, t0, t1: t0 == null ? undefined : t1, yMax, overlays });
     }
     function metaHtml(s) {
       const st = Smoke.seriesStats(s); const lcls = st.lossAvg > 2 ? 'bad' : st.lossAvg > 0.5 ? 'warn' : '';
@@ -1000,6 +1013,11 @@
     // In unison mode the visible set shares one Y-axis max (sharedYMax) so the small
     // multiples are comparable; scoping to a subtree rescales to just that subtree.
     let unisonScale = false; // default: each panel auto-scales to its own data; the toggle shares a Y-axis
+    // Graph x-axis time labels: false = relative (each range's static xl, e.g. -3h/now); true =
+    // absolute wall-clock (rangeLabels). Read by renderInto (grid + detail stack); a drag-zoom is
+    // always absolute regardless. Persisted per browser.
+    let timeAbsolute = false;
+    try { timeAbsolute = localStorage.getItem('graphTime') === 'absolute'; } catch (e) {}
     // Graphs-per-row: 'auto' fits as many as the min width allows; a fixed N caps columns
     // but never shrinks a graph below GRAPH_MIN (wraps to fewer instead). Persisted per browser.
     const GRAPH_MIN = 360, GRAPH_GAP = 18;
@@ -1256,11 +1274,7 @@
       host.innerHTML = vchipsHtml(zoomVantages, zoomFocus, (v) => lastMedian(byV && byV[v]));
     }
     // Four axis labels for an arbitrary [t0,t1]: clock times for short spans, dates for long.
-    function rangeLabels(t0, t1) {
-      const span = t1 - t0;
-      const fmt = (t) => { const d = new Date(t); return span < 36 * H ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : d.toLocaleDateString([], { month: 'short', day: 'numeric' }); };
-      return [fmt(t0), fmt(t0 + span / 3), fmt(t0 + 2 * span / 3), fmt(t1)];
-    }
+    // rangeLabels is defined at module scope (shared with the grid/stack absolute-time toggle).
     async function renderZoom(name, range) {
       const gen = ++zoomGen; // captured before any await — invalidates any earlier in-flight zoom call (renderZoom or zoomTo), same name/range or not
       curTarget = name; curRange = range; const R = RANGES[range];
@@ -2186,6 +2200,8 @@
     })();
     $('zoomReset').addEventListener('click', () => { if (curTarget && curRange) renderZoom(curTarget, curRange); });
     $('unisonToggle').addEventListener('change', (e) => { unisonScale = e.target.checked; renderGridPanels(); });
+    $('timeToggle').checked = timeAbsolute; // reflect the persisted choice on load
+    $('timeToggle').addEventListener('change', (e) => { timeAbsolute = e.target.checked; try { localStorage.setItem('graphTime', timeAbsolute ? 'absolute' : 'relative'); } catch (err) {} rerender(); });
     $('colsSeg').addEventListener('click', (e) => { const b = e.target.closest('button'); if (!b) return; gridCols = b.dataset.cols; try { localStorage.setItem('graphCols', gridCols); } catch (err) {} document.querySelectorAll('#colsSeg button').forEach((x) => x.setAttribute('aria-pressed', String(x === b))); applyGridCols(); });
     // reflect the persisted columns choice on load, then apply it to the grid
     document.querySelectorAll('#colsSeg button').forEach((x) => x.setAttribute('aria-pressed', String(x.dataset.cols === gridCols)));

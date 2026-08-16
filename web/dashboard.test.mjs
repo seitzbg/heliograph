@@ -722,5 +722,17 @@ check('maxColumnsFor: how many min-width columns fit at a given width', () => {
   assert.equal(D.maxColumnsFor(2250, 360, 18), 6); // 6*360 + 5*18
 });
 
+check('rangeLabels: four labels; clock time for short spans, calendar dates for long ones', () => {
+  const HR = 3600 * 1000, DAY = 86400 * 1000, t1 = 1_700_000_000_000;
+  const short = D.rangeLabels(t1 - 3 * HR, t1); // 3h span
+  assert.equal(short.length, 4);
+  assert.ok(short.every((l) => l.includes(':')), 'short-span labels should be clock times: ' + short.join(', '));
+  const long = D.rangeLabels(t1 - 10 * DAY, t1); // 10d span
+  assert.equal(long.length, 4);
+  assert.ok(long.every((l) => !l.includes(':') && /[A-Za-z]/.test(l)), 'long-span labels should be calendar dates: ' + long.join(', '));
+  // The endpoints are the exact bounds; the middle two are the 1/3 and 2/3 marks.
+  assert.notEqual(short[0], short[3]);
+});
+
 if (failed) { console.error(`\n${failed} test(s) failed`); process.exit(1); }
 console.log('\nall dashboard tests passed');
