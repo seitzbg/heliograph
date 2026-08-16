@@ -6,6 +6,16 @@ All notable changes to **Heliograph** are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed
+- **The "absolute time" toggle now applies to the zoom drill-down too.** Clicking a graph to zoom a
+  fixed range honors the toggle (absolute wall-clock vs relative `-3h`/`now`), matching the grid and
+  the per-target detail stack; a custom drag-zoom range still always shows absolute times.
+- **The footer build version links to its source** — the exact commit for a `main`/`latest` build,
+  or the release page for a clean tag.
+- **`:latest` is also refreshed on release tags**, so right after cutting `vX.Y.Z` the `:latest`
+  image carries that clean version (a `git describe` on `main` runs before the tag exists, so a
+  main-only `:latest` lagged one version).
+
 ## [1.0.4] - 2026-08-16
 
 Post-1.0.3 UI and release-tooling work (#62–#70): the build version now shows in the dashboard
