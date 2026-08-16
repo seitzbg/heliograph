@@ -31,6 +31,13 @@ All notable changes to **Heliograph** are recorded here. The format follows
   12-hour session (it says "the hub's configured lifetime, 12 hours by default"); `.env.example` and
   the federation guide now document `SMOKED_ADMIN_SESSION_TTL` alongside the password and signing key.
 
+### Tests
+- **Browser-layout regression test** (`web/layout.test.mjs`, new CI `layout-test` job) renders the
+  real dashboard against the demo collector in headless Chromium and asserts the Graphs view does
+  not overflow narrow (320/360px) viewports — the class of bug the DOM-less unit tests can't see,
+  which shipped once. Playwright is the first (dev-only) npm dependency; the existing unit tests
+  still run under plain `node`.
+
 ## [1.0.3] - 2026-08-15
 
 The next release after v1.0.2, gathering the post-1.0.2 UI and hardening work (#50–#60): a

@@ -85,6 +85,32 @@ jobs:
       - run: node web/dashboard.test.mjs
       - run: node web/smoke.render.test.mjs
 
+  # Browser-layout regression test. The DOM-less `frontend` unit tests can only check the CSS
+  # strings the dashboard generates, not how they lay out — a phone-width horizontal-overflow bug
+  # shipped once past them (see CHANGELOG 1.0.3 + its follow-up). This job renders the real
+  # dashboard against the demo collector in headless Chromium and asserts the Graphs view does not
+  # overflow narrow viewports. Needs Go (to serve) and a browser, so it is its own job.
+  layout-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+      - name: Build smoked
+        run: go build -o smoked ./cmd/smoked
+      - name: Install Playwright + Chromium
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+      - name: Layout regression test
+        run: SMOKED_BIN=./smoked node web/layout.test.mjs
+
   # Dependency vulnerability scan. BLOCKING (CODE_REVIEW M6): "green CI" must mean the vuln DB was
   # actually reached and clean — a scan that can't run is a gap, not a pass, so it reds the pipeline
   # rather than being silently ignored. The tool is pinned (not @latest) so the scan is reproducible.

@@ -1,0 +1,14 @@
+{
+  "name": "heliograph-web",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Dashboard web assets and their tests. The unit tests (dashboard.test.mjs, smoke.render.test.mjs) run under plain `node` with no dependencies; the layout regression test uses Playwright to catch CSS/layout bugs a DOM-less runner cannot.",
+  "type": "module",
+  "scripts": {
+    "test:unit": "node web/dashboard.test.mjs && node web/smoke.render.test.mjs",
+    "test:layout": "node web/layout.test.mjs"
+  },
+  "devDependencies": {
+    "playwright": "1.55.0"
+  }
+}

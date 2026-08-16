@@ -26,3 +26,6 @@ go.work.sum
 *.swp
 .idea/
 .vscode/
+
+# npm deps for the browser layout test (playwright); package-lock.json is tracked
+/node_modules/
