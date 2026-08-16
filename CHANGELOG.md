@@ -7,6 +7,9 @@ All notable changes to **Heliograph** are recorded here. The format follows
 ## [Unreleased]
 
 ### Added
+- **Build version in the dashboard footer.** The footer now reads `Heliograph <version>` — the
+  git-describe build string (latest tag + commits + short SHA for a `main`/`latest` build, or the
+  exact tag for a release), served from a new `GET /api/version`.
 - **Absolute-time axis toggle on the Graphs view.** An **"absolute time"** checkbox in the legend
   switches the per-graph x-axis from relative labels (`-3h` … `now`) to absolute wall-clock times —
   clock time (e.g. `08:02 PM`) for short ranges, calendar dates (`Aug 6`) for multi-day ones. It
@@ -22,6 +25,9 @@ All notable changes to **Heliograph** are recorded here. The format follows
   match (the graphs now span the full width instead of a narrow left column).
 
 ### Changed
+- **The collector image is now published as `:latest`** (a continuous alias of the default-branch
+  head, alongside the existing `:main` and per-release `:vX.Y.Z` tags). The docs and the generated
+  agent Compose reference `ghcr.io/seitzbg/heliograph:latest`.
 - **The Graphs "Columns" picker only offers counts that fit.** At the current browser width it hides
   the column counts that can't fit (they would only wrap to fewer — clicking did nothing), and hides
   the whole picker when even 3 columns won't fit, since `Auto` is then the only sensible choice. It

@@ -66,6 +66,35 @@ func TestCapSeriesAll(t *testing.T) {
 	}
 }
 
+func TestVersionEndpoint(t *testing.T) {
+	// The configured build version is reported verbatim.
+	srv := New(store.NewMem(10), "")
+	srv.Version = "v1.0.3-5-gabc1234"
+	rec := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(rec, httptest.NewRequest("GET", "/api/version", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var got struct {
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Version != "v1.0.3-5-gabc1234" {
+		t.Errorf("version = %q, want the configured build version", got.Version)
+	}
+
+	// An unversioned build (empty Version) falls back to "dev" rather than an empty string.
+	srv2 := New(store.NewMem(10), "")
+	rec2 := httptest.NewRecorder()
+	srv2.Routes().ServeHTTP(rec2, httptest.NewRequest("GET", "/api/version", nil))
+	_ = json.Unmarshal(rec2.Body.Bytes(), &got)
+	if got.Version != "dev" {
+		t.Errorf("unset version = %q, want \"dev\"", got.Version)
+	}
+}
+
 func TestRollupHidesInternalError(t *testing.T) {
 	srv := New(errRollupStore{store.NewMem(10)}, "")
 	rec := httptest.NewRecorder()

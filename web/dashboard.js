@@ -719,7 +719,7 @@
       '# Save next to agent.yaml (the other tab), then:  docker compose up -d',
       'services:',
       '  smoke-agent:',
-      '    image: ghcr.io/seitzbg/heliograph:main',
+      '    image: ghcr.io/seitzbg/heliograph:latest',
       '    entrypoint: ["smoke-agent"]',
       '    command: ["-config", "/etc/heliograph/agent.yaml"]',
       '    volumes:',
@@ -2208,6 +2208,15 @@
     applyGridCols();
     // Re-evaluate which counts fit (and whether the picker shows) whenever the window resizes.
     window.addEventListener('resize', updateColsPicker);
+
+    // Footer build version (git-describe: latest tag + short SHA for a main/latest build, or the
+    // exact tag for a release). Best-effort — a failed fetch leaves the plain "Heliograph".
+    (async () => {
+      try {
+        const v = (await fetchJSON('/api/version')).version;
+        if (v) $('appFooter').textContent = 'Heliograph ' + v;
+      } catch (e) { /* leave the default footer */ }
+    })();
 
     // ---- config-tree menu events ----
     $('navTree').addEventListener('click', (e) => { const row = e.target.closest('.row'); if (row) activateRow(row, !!e.target.closest('[data-twist]')); });

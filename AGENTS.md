@@ -116,7 +116,7 @@ docker build -t heliograph:dev .                          # collector image (Doc
 docker build -f Caddy.Dockerfile -t heliograph-caddy .    # bundled reverse proxy (xcaddy + DNS plugins)
 ```
 
-Prebuilt collector images are published to `ghcr.io/seitzbg/heliograph:main` by CI. A minimal
+Prebuilt collector images are published to `ghcr.io/seitzbg/heliograph:latest` by CI. A minimal
 Compose stack (collector + TimescaleDB) and the `federation` profile (bundled Caddy, TLS, per-vantage
 keys) live in [`docker-compose.yml`](docker-compose.yml) / [`README.md`](README.md#docker-compose).
 The read API and dashboard are **unauthenticated** — bind loopback and front with a reverse proxy for

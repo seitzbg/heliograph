@@ -312,6 +312,9 @@ jobs:
             type=ref,event=branch
             type=ref,event=tag
             type=sha,format=short
+            # :latest tracks the default-branch head (a continuous alias of :main), not releases —
+            # docker5 rolls forward on every merge. enable only on main so a PR/tag build never moves it.
+            type=raw,value=latest,enable={{is_default_branch}}
       - name: Log in to GHCR
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:

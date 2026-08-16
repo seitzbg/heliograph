@@ -46,6 +46,9 @@ var (
 type Server struct {
 	store  store.Store
 	webDir string
+	// Version is the collector's build version (git-describe: latest tag + commits + short SHA,
+	// or "dev" for an unversioned build). Surfaced at GET /api/version for the dashboard footer.
+	Version string
 	// Rounds, if set, adds collector round-level metrics (duration, size, error
 	// count) to /metrics. Optional; nil in tests and pure-API use.
 	Rounds *RoundStats
@@ -189,6 +192,7 @@ func (srv *Server) activeLatest(vantage string) ([]scheduler.Outcome, error) {
 
 func (srv *Server) Routes() *http.ServeMux {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/version", srv.version)
 	mux.HandleFunc("GET /api/probes", srv.probes)
 	mux.HandleFunc("GET /api/probes/schema", srv.probeSchema)
 	mux.HandleFunc("GET /api/charts", srv.charts)
@@ -257,6 +261,15 @@ func readVantage(w http.ResponseWriter, r *http.Request) (string, bool) {
 
 func (srv *Server) probes(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, map[string]any{"probes": probe.Registered()})
+}
+
+// version reports the collector's build version for the dashboard footer.
+func (srv *Server) version(w http.ResponseWriter, _ *http.Request) {
+	v := srv.Version
+	if v == "" {
+		v = "dev"
+	}
+	writeJSON(w, map[string]any{"version": v})
 }
 
 // probeSchema emits each probe's config variables as JSON Schema (draft 2020-12),
