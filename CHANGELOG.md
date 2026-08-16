@@ -6,6 +6,13 @@ All notable changes to **Heliograph** are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **Absolute-time axis toggle on the Graphs view.** An **"absolute time"** checkbox in the legend
+  switches the per-graph x-axis from relative labels (`-3h` … `now`) to absolute wall-clock times —
+  clock time (e.g. `08:02 PM`) for short ranges, calendar dates (`Aug 6`) for multi-day ones. It
+  applies to the small-multiple grid and the per-target detail stack, and is persisted per browser;
+  a drag-to-zoom range already shows absolute times regardless.
+
 ### Docs
 - **README refreshed** — the verbose "What works today" section is now a concise, scannable
   **Features** list; the dark dashboard screenshots were regenerated at the new full-width layout
