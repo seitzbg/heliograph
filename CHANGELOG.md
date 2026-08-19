@@ -27,6 +27,10 @@ All notable changes to **Heliograph** are recorded here. The format follows
 ### Changed
 - **Playwright dev dependency bumped to 1.55.1** (from 1.55.0), clearing a high-severity npm advisory
   (GHSA-7mvr-c777-76hp) in the browser-test toolchain.
+- **CI is hardened against stalled package mirrors.** Every job now has a `timeout-minutes` ceiling so
+  a wedged step fails fast instead of hanging to GitHub's 6-hour default, and the flaky network installs
+  (`apt-get`, Playwright/Chromium) retry with backoff — turning an intermittent mirror stall into a
+  brief wait rather than a manual cancel-and-rerun.
 
 ## [1.0.5] - 2026-08-19
 
