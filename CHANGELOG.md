@@ -6,6 +6,14 @@ All notable changes to **Heliograph** are recorded here. The format follows
 
 ## [Unreleased]
 
+## [1.0.6] - 2026-08-19
+
+Post-1.0.5 review follow-ups and CI reliability (#75–#77): the demo Compose stack honors
+`SMOKED_ABSOLUTE_TIME`, the browser-layout regression now gates image publication and can no longer
+false-pass, the Columns picker keeps an honest, screen-reader-legible selection when it wraps, and the
+web suite is locale-independent. CI gains per-job timeouts and retries so a stalled package mirror
+fails fast instead of hanging, and the README screenshots are refreshed to the shipped UI. Detail below.
+
 ### Fixed
 - **The bundled Compose stack now honors `SMOKED_ABSOLUTE_TIME`.** The collector service interpolates
   `${SMOKED_ABSOLUTE_TIME:-1}` instead of a hard-coded `1`, so setting the documented value in `.env`
@@ -34,6 +42,12 @@ All notable changes to **Heliograph** are recorded here. The format follows
   a wedged step fails fast instead of hanging to GitHub's 6-hour default, and the flaky network installs
   (`apt-get`, Playwright/Chromium) retry with backoff — turning an intermittent mirror stall into a
   brief wait rather than a manual cancel-and-rerun.
+
+### Docs
+- **README dashboard screenshots regenerated from the v1.0.5 UI.** The Overview, Graphs, Config, and
+  Vantages captures now show the shipped defaults — absolute clock-time axes, the one-column option, and
+  the linked version footer — instead of the earlier interim UI. `docs/img/README.md` records the
+  repeatable capture recipe so future refreshes stay consistent.
 
 ## [1.0.5] - 2026-08-19
 
@@ -1239,7 +1253,8 @@ the smoke-graph look, a fast/parallel poller, and probes as plugins.
 - Full re-implementation reference / code map maintained outside the repo at
   `~/.claude/plans/smokeping-codemap/`.
 
-[Unreleased]: https://github.com/seitzbg/heliograph/compare/v1.0.5...main
+[Unreleased]: https://github.com/seitzbg/heliograph/compare/v1.0.6...main
+[1.0.6]: https://github.com/seitzbg/heliograph/compare/v1.0.5...v1.0.6
 [1.0.5]: https://github.com/seitzbg/heliograph/compare/v1.0.4...v1.0.5
 [1.0.4]: https://github.com/seitzbg/heliograph/compare/v1.0.3...v1.0.4
 [1.0.3]: https://github.com/seitzbg/heliograph/compare/v1.0.2...v1.0.3
