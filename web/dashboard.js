@@ -1054,8 +1054,20 @@
       if (!show) return;
       seg.querySelectorAll('button[data-cols]').forEach((b) => {
         const c = b.dataset.cols;
-        b.style.display = c === 'auto' || Number(c) <= maxFit ? '' : 'none';
-        b.setAttribute('aria-pressed', String(c === gridCols));
+        const fits = c === 'auto' || Number(c) <= maxFit;
+        const selected = c === gridCols;
+        // Hide counts that can't fit — EXCEPT the current selection, which stays visible and pressed
+        // so the picker always shows the active choice. A fixed selection wider than fits wraps to
+        // maxFit columns (auto-fill); annotate that so the control never looks unset or misleading.
+        b.style.display = fits || selected ? '' : 'none';
+        b.setAttribute('aria-pressed', String(selected));
+        if (selected && !fits) {
+          b.dataset.wraps = '1';
+          b.title = `Wraps to ${maxFit} column${maxFit === 1 ? '' : 's'} at this width`;
+        } else {
+          delete b.dataset.wraps;
+          b.removeAttribute('title');
+        }
       });
     }
     function renderGridPanels() {

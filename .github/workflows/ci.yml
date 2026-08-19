@@ -188,7 +188,7 @@ jobs:
   # publish (that is the separate, write-scoped, non-PR `publish-image` job below). The archive +
   # its digest are handed to publish-image via workflow artifacts on non-PR runs.
   build-image:
-    needs: [go-test, frontend, govulncheck, db-test]
+    needs: [go-test, frontend, govulncheck, db-test, layout-test]
     runs-on: ubuntu-latest
     permissions:
       contents: read
