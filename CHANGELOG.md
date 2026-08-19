@@ -6,6 +6,13 @@ All notable changes to **Heliograph** are recorded here. The format follows
 
 ## [Unreleased]
 
+## [1.0.5] - 2026-08-19
+
+Post-1.0.4 graph-axis and release-tooling polish (#72–#73): absolute clock-time x-axis labels become
+a uniform server default (the per-browser toggle is gone), the footer build version links to its
+source, and `:latest` is refreshed on release tags so a freshly cut version reaches the rolling image
+immediately. Detail below.
+
 ### Changed
 - **Absolute-time axis labels are now a server config default (on), not a per-browser toggle.** The
   dashboard labels every graph's x-axis with absolute clock time by default — uniformly across the
@@ -1203,7 +1210,8 @@ the smoke-graph look, a fast/parallel poller, and probes as plugins.
 - Full re-implementation reference / code map maintained outside the repo at
   `~/.claude/plans/smokeping-codemap/`.
 
-[Unreleased]: https://github.com/seitzbg/heliograph/compare/v1.0.4...main
+[Unreleased]: https://github.com/seitzbg/heliograph/compare/v1.0.5...main
+[1.0.5]: https://github.com/seitzbg/heliograph/compare/v1.0.4...v1.0.5
 [1.0.4]: https://github.com/seitzbg/heliograph/compare/v1.0.3...v1.0.4
 [1.0.3]: https://github.com/seitzbg/heliograph/compare/v1.0.2...v1.0.3
 [1.0.2]: https://github.com/seitzbg/heliograph/compare/v1.0.0...v1.0.2
