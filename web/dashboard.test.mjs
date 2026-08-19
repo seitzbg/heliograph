@@ -730,7 +730,10 @@ check('rangeLabels: four labels; clock time for short spans, calendar dates for 
   assert.ok(short.every((l) => l.includes(':')), 'short-span labels should be clock times: ' + short.join(', '));
   const long = D.rangeLabels(t1 - 10 * DAY, t1); // 10d span
   assert.equal(long.length, 4);
-  assert.ok(long.every((l) => !l.includes(':') && /[A-Za-z]/.test(l)), 'long-span labels should be calendar dates: ' + long.join(', '));
+  // Calendar dates, not clock times: the distinguishing contract is the absence of a `:` time
+  // separator (plus non-empty). Do NOT assert Latin letters — rangeLabels localizes via
+  // toLocaleDateString, so a non-Latin runner locale (e.g. ar_EG -> `٤ نوفمبر`) is valid output.
+  assert.ok(long.every((l) => l.trim() !== '' && !l.includes(':')), 'long-span labels should be calendar dates (no clock time): ' + long.join(', '));
   // The endpoints are the exact bounds; the middle two are the 1/3 and 2/3 marks.
   assert.notEqual(short[0], short[3]);
 });

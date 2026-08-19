@@ -9,6 +9,6 @@
     "test:layout": "node web/layout.test.mjs"
   },
   "devDependencies": {
-    "playwright": "1.55.0"
+    "playwright": "1.55.1"
   }
 }

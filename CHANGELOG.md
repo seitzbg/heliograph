@@ -6,6 +6,28 @@ All notable changes to **Heliograph** are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- **The bundled Compose stack now honors `SMOKED_ABSOLUTE_TIME`.** The collector service interpolates
+  `${SMOKED_ABSOLUTE_TIME:-1}` instead of a hard-coded `1`, so setting the documented value in `.env`
+  (e.g. `0` for relative axes) takes effect on `docker compose up`. `.env.example` also now marks which
+  `SMOKED_*` settings the default (non-`federation`) `up` reads, since several were mislabeled as
+  proxy-only.
+- **A failed browser-layout regression can no longer be published.** `build-image` now depends on the
+  `layout-test` job, so the narrow-viewport check gates image publication rather than running beside it;
+  the `AGENTS.md` local gate documents the browser test too.
+- **The layout regression test can no longer false-pass on a port collision.** It binds a fresh per-run
+  port and fails loudly if the collector exits before serving, instead of silently exercising whatever
+  else answers on a fixed port.
+- **The Columns picker always shows its active selection.** A stored column count too wide for the
+  current viewport stays visible and pressed — marked as wrapping to the count that fits — rather than
+  leaving the control looking unselected.
+- **The `rangeLabels` unit test is locale-independent.** It no longer requires Latin letters in
+  localized date labels, so the web suite passes on non-Latin runner locales.
+
+### Changed
+- **Playwright dev dependency bumped to 1.55.1** (from 1.55.0), clearing a high-severity npm advisory
+  (GHSA-7mvr-c777-76hp) in the browser-test toolchain.
+
 ## [1.0.5] - 2026-08-19
 
 Post-1.0.4 graph-axis and release-tooling polish (#72–#73): absolute clock-time x-axis labels become

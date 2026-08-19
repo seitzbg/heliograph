@@ -52,6 +52,14 @@ node web/smoke.render.test.mjs
 # 5. dependency vulnerability scan (pinned, not @latest, for reproducibility)
 go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
 govulncheck ./...
+
+# 6. browser layout regression test (the CI `layout-test` job — the only check that
+#    catches the narrow-viewport grid/legend/tab-bar overflow at the seam a user sees).
+#    Serves a freshly built collector and drives real Chromium.
+npm ci
+npx playwright install --with-deps chromium   # or: PLAYWRIGHT_CHANNEL=chrome to reuse system Chrome
+go build -o smoked ./cmd/smoked
+SMOKED_BIN=./smoked node web/layout.test.mjs
 ```
 
 ### Integration tests (real TimescaleDB)
