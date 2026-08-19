@@ -135,6 +135,7 @@ services:
       # drive the rest, keeping the DB password out of the command list. Each mirrors a -flag.
       SMOKED_DSN: postgres://smoke:${SMOKE_DB_PASSWORD:-smoke}@timescaledb:5432/smoke?sslmode=disable
       SMOKED_DOWNSAMPLE: "1"                            # hourly/daily aggregates for the UI
+      SMOKED_ABSOLUTE_TIME: "1"                         # graph x-axes show absolute clock time (default); "0" = relative -3h/now
       # Runs a built-in demo target set. To measure your own, mount a YAML tree and point at it:
       #   volumes: ["./config.yaml:/etc/heliograph/config.yaml:ro"]
       #   SMOKED_CONFIG: /etc/heliograph/config.yaml

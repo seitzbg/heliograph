@@ -49,6 +49,10 @@ type Server struct {
 	// Version is the collector's build version (git-describe: latest tag + commits + short SHA,
 	// or "dev" for an unversioned build). Surfaced at GET /api/version for the dashboard footer.
 	Version string
+	// AbsoluteTime controls whether the dashboard labels graph x-axes with absolute clock time
+	// (true, the default) or relative -3h/now labels. Surfaced at GET /api/version; set from
+	// -absolute-time / SMOKED_ABSOLUTE_TIME. Applies uniformly to every graph (grid, stack, zoom).
+	AbsoluteTime bool
 	// Rounds, if set, adds collector round-level metrics (duration, size, error
 	// count) to /metrics. Optional; nil in tests and pure-API use.
 	Rounds *RoundStats
@@ -269,7 +273,7 @@ func (srv *Server) version(w http.ResponseWriter, _ *http.Request) {
 	if v == "" {
 		v = "dev"
 	}
-	writeJSON(w, map[string]any{"version": v})
+	writeJSON(w, map[string]any{"version": v, "absolute_time": srv.AbsoluteTime})
 }
 
 // probeSchema emits each probe's config variables as JSON Schema (draft 2020-12),

@@ -1016,11 +1016,11 @@
     // In unison mode the visible set shares one Y-axis max (sharedYMax) so the small
     // multiples are comparable; scoping to a subtree rescales to just that subtree.
     let unisonScale = false; // default: each panel auto-scales to its own data; the toggle shares a Y-axis
-    // Graph x-axis time labels: false = relative (each range's static xl, e.g. -3h/now); true =
-    // absolute wall-clock (rangeLabels). Read by renderInto (grid + detail stack); a drag-zoom is
-    // always absolute regardless. Persisted per browser.
-    let timeAbsolute = false;
-    try { timeAbsolute = localStorage.getItem('graphTime') === 'absolute'; } catch (e) {}
+    // Graph x-axis time labels: true = absolute wall-clock (rangeLabels), false = relative (each
+    // range's static xl, e.g. -3h/now). Read by renderInto (grid + detail stack) and drawZoom; a
+    // drag-zoom is always absolute regardless. Server-configured (SMOKED_ABSOLUTE_TIME, default
+    // true) and applied uniformly — the value arrives with the /api/version boot fetch below.
+    let timeAbsolute = true;
     // Graphs-per-row: 'auto' fits as many as the min width allows; a fixed N caps columns but never
     // shrinks a graph below the minimum (wraps to fewer instead). The minimum is expressed in rem
     // (font-relative) so graphs scale with the user's text size, not a fixed pixel count; graphMinPx
@@ -2210,8 +2210,6 @@
     })();
     $('zoomReset').addEventListener('click', () => { if (curTarget && curRange) renderZoom(curTarget, curRange); });
     $('unisonToggle').addEventListener('change', (e) => { unisonScale = e.target.checked; renderGridPanels(); });
-    $('timeToggle').checked = timeAbsolute; // reflect the persisted choice on load
-    $('timeToggle').addEventListener('change', (e) => { timeAbsolute = e.target.checked; try { localStorage.setItem('graphTime', timeAbsolute ? 'absolute' : 'relative'); } catch (err) {} rerender(); });
     $('colsSeg').addEventListener('click', (e) => { const b = e.target.closest('button'); if (!b) return; gridCols = b.dataset.cols; try { localStorage.setItem('graphCols', gridCols); } catch (err) {} document.querySelectorAll('#colsSeg button').forEach((x) => x.setAttribute('aria-pressed', String(x === b))); applyGridCols(); });
     // reflect the persisted columns choice on load, then apply it to the grid
     document.querySelectorAll('#colsSeg button').forEach((x) => x.setAttribute('aria-pressed', String(x.dataset.cols === gridCols)));
@@ -2223,7 +2221,14 @@
     // exact tag for a release). Best-effort — a failed fetch leaves the plain "Heliograph".
     (async () => {
       try {
-        const v = (await fetchJSON('/api/version')).version;
+        const boot = await fetchJSON('/api/version');
+        // Absolute vs relative time labels is server-configured; apply it uniformly and re-render
+        // the current view if it differs from the default we assumed before the fetch landed.
+        if (typeof boot.absolute_time === 'boolean' && boot.absolute_time !== timeAbsolute) {
+          timeAbsolute = boot.absolute_time;
+          rerender();
+        }
+        const v = boot.version;
         if (!v) return;
         // Link the version to its source: the exact commit for a git-describe build
         // (…-g<sha>), the release page for a clean tag, else the repo root.
@@ -2231,7 +2236,7 @@
         const sha = (v.match(/-g([0-9a-f]+)$/) || [])[1];
         const href = sha ? repo + '/commit/' + sha : (/^v[0-9]/.test(v) ? repo + '/releases/tag/' + encodeURIComponent(v) : repo);
         $('appFooter').innerHTML = 'Heliograph <a href="' + href + '" target="_blank" rel="noopener noreferrer">' + esc(v) + '</a>';
-      } catch (e) { /* leave the default footer */ }
+      } catch (e) { /* leave the default footer + assumed absolute-time default */ }
     })();
 
     // ---- config-tree menu events ----

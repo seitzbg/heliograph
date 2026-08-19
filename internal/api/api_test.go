@@ -70,19 +70,24 @@ func TestVersionEndpoint(t *testing.T) {
 	// The configured build version is reported verbatim.
 	srv := New(store.NewMem(10), "")
 	srv.Version = "v1.0.3-5-gabc1234"
+	srv.AbsoluteTime = true
 	rec := httptest.NewRecorder()
 	srv.Routes().ServeHTTP(rec, httptest.NewRequest("GET", "/api/version", nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
 	var got struct {
-		Version string `json:"version"`
+		Version      string `json:"version"`
+		AbsoluteTime bool   `json:"absolute_time"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
 	if got.Version != "v1.0.3-5-gabc1234" {
 		t.Errorf("version = %q, want the configured build version", got.Version)
+	}
+	if !got.AbsoluteTime {
+		t.Errorf("absolute_time = %v, want the configured true", got.AbsoluteTime)
 	}
 
 	// An unversioned build (empty Version) falls back to "dev" rather than an empty string.
