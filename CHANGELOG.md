@@ -6,6 +6,12 @@ All notable changes to **Heliograph** are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- **CI retries now recover from a *stalled* network install, not just a failed one.** Each `apt-get` /
+  Playwright attempt is wrapped in `timeout`, so a hung package mirror becomes a failure the retry can
+  act on instead of sitting until the job timeout. The affected job ceilings were widened to cover up to
+  three timed-out retries. (Follow-up to the v1.0.6 CI hardening, which retried failures but not hangs.)
+
 ## [1.0.6] - 2026-08-19
 
 Post-1.0.5 review follow-ups and CI reliability (#75–#77): the demo Compose stack honors

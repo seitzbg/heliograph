@@ -31,7 +31,7 @@ jobs:
     runs-on: ubuntu-latest
     # Fail fast on a wedged step (e.g. a stalled apt mirror) instead of hanging to GitHub's 6-hour
     # default. Normal run is ~3 min; the ceiling only trips on an infra stall.
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -43,15 +43,16 @@ jobs:
       # skip without it — without this the most bug-prone importer path (RRA
       # stitching / tier selection) would run in NO CI job (audit M3).
       - name: Install rrdtool
-        # Retry the apt install: GitHub's package mirrors intermittently stall, which used to hang the
-        # job to the 6-hour timeout. Three attempts with backoff (plus apt's own Acquire::Retries) turns
-        # a transient mirror blip into a brief wait; only a persistent failure reds the job.
+        # Retry the apt install: GitHub's package mirrors intermittently STALL (not just fail), which
+        # used to hang the job to its timeout. `timeout` bounds each attempt so a stalled mirror becomes
+        # a failure the retry can act on — three attempts with backoff (plus apt's own Acquire::Retries)
+        # turn a transient stall into a brief wait; only a persistent failure reds the job.
         run: |
           ok=0
           for i in 1 2 3; do
-            if sudo apt-get -o Acquire::Retries=3 update && \
-               sudo apt-get install -y --no-install-recommends rrdtool; then ok=1; break; fi
-            echo "apt attempt $i failed; retrying in 15s..."; sleep 15
+            if sudo timeout 120 apt-get -o Acquire::Retries=3 update && \
+               sudo timeout 180 apt-get install -y --no-install-recommends rrdtool; then ok=1; break; fi
+            echo "apt attempt $i failed or timed out; retrying in 15s..."; sleep 15
           done
           [ "$ok" = 1 ]
       # Guard the Trivy allowlist format (CODE_REVIEW L4): every real entry must carry expired_at, so
@@ -106,7 +107,7 @@ jobs:
   # overflow narrow viewports. Needs Go (to serve) and a browser, so it is its own job.
   layout-test:
     runs-on: ubuntu-latest
-    timeout-minutes: 15   # Chromium download can be slow; normal run is ~2 min
+    timeout-minutes: 24   # normal run ~2 min; ceiling covers up to 3 timed-out Chromium-install retries
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -120,14 +121,14 @@ jobs:
       - name: Build smoked
         run: go build -o smoked ./cmd/smoked
       - name: Install Playwright + Chromium
-        # Retry: the Chromium download (and its apt deps via --with-deps) intermittently stalls on
-        # GitHub's mirrors — the same class of hang the job timeout now caps. Backoff turns a blip
-        # into a brief wait; a persistent failure still reds the job.
+        # Retry with a per-attempt `timeout`: the Chromium download (and its apt deps via --with-deps)
+        # intermittently STALLS on GitHub's mirrors; bounding each attempt turns a stall into a failure
+        # the retry can act on. Backoff turns a blip into a brief wait; a persistent failure still reds.
         run: |
           ok=0
           for i in 1 2 3; do
-            if npm ci && npx playwright install --with-deps chromium; then ok=1; break; fi
-            echo "playwright install attempt $i failed; retrying in 20s..."; sleep 20
+            if timeout 120 npm ci && timeout 240 npx playwright install --with-deps chromium; then ok=1; break; fi
+            echo "playwright install attempt $i failed or timed out; retrying in 20s..."; sleep 20
           done
           [ "$ok" = 1 ]
       - name: Layout regression test
@@ -154,7 +155,7 @@ jobs:
   # must red the pipeline, not skip silently.
   db-test:
     runs-on: ubuntu-latest
-    timeout-minutes: 15   # apt + TimescaleDB boot + serialized integration suite; normally ~3 min
+    timeout-minutes: 20   # apt + TimescaleDB boot + serialized integration suite; normally ~3 min
     env:
       SMOKE_TEST_DSN: postgres://smoke:smoke@localhost:5432/smoke?sslmode=disable
     steps:
@@ -167,13 +168,13 @@ jobs:
       # rrdtool: the `smoked import ... --history` end-to-end tests (cmd/smoked) need both a DB and
       # rrdtool. postgresql-client: pg_isready for the readiness re-check below.
       - name: Install rrdtool + psql client
-        # Retry the apt install (stalled mirrors were the recurring db-test hang; see go-test above).
+        # Retry with a per-attempt `timeout` (stalled mirrors were the recurring db-test hang; see go-test).
         run: |
           ok=0
           for i in 1 2 3; do
-            if sudo apt-get -o Acquire::Retries=3 update && \
-               sudo apt-get install -y --no-install-recommends rrdtool postgresql-client; then ok=1; break; fi
-            echo "apt attempt $i failed; retrying in 15s..."; sleep 15
+            if sudo timeout 120 apt-get -o Acquire::Retries=3 update && \
+               sudo timeout 180 apt-get install -y --no-install-recommends rrdtool postgresql-client; then ok=1; break; fi
+            echo "apt attempt $i failed or timed out; retrying in 15s..."; sleep 15
           done
           [ "$ok" = 1 ]
       # Run TimescaleDB as a manual container (not a GH Actions service) so we can pass
@@ -359,13 +360,13 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Install skopeo
-        # Retry the apt install (stalled mirrors were the recurring hang; see go-test above).
+        # Retry with a per-attempt `timeout` (stalled mirrors were the recurring hang; see go-test).
         run: |
           ok=0
           for i in 1 2 3; do
-            if sudo apt-get -o Acquire::Retries=3 update && \
-               sudo apt-get install -y --no-install-recommends skopeo; then ok=1; break; fi
-            echo "apt attempt $i failed; retrying in 15s..."; sleep 15
+            if sudo timeout 120 apt-get -o Acquire::Retries=3 update && \
+               sudo timeout 180 apt-get install -y --no-install-recommends skopeo; then ok=1; break; fi
+            echo "apt attempt $i failed or timed out; retrying in 15s..."; sleep 15
           done
           [ "$ok" = 1 ]
       # First copy to the reusable candidate tag. The publish-image concurrency group above makes
