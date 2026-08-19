@@ -1063,10 +1063,15 @@
         b.setAttribute('aria-pressed', String(selected));
         if (selected && !fits) {
           b.dataset.wraps = '1';
-          b.title = `Wraps to ${maxFit} column${maxFit === 1 ? '' : 's'} at this width`;
+          const note = `wraps to ${maxFit} column${maxFit === 1 ? '' : 's'} at this width`;
+          b.title = note[0].toUpperCase() + note.slice(1);
+          // The dashed outline + title are visual-only; give assistive tech an accessible name that
+          // states the effective (wrapped) count, so a screen reader isn't told "6" while 2 render.
+          b.setAttribute('aria-label', `${c} columns — ${note}`);
         } else {
           delete b.dataset.wraps;
           b.removeAttribute('title');
+          b.removeAttribute('aria-label');
         }
       });
     }

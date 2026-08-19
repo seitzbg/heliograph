@@ -17,10 +17,13 @@ All notable changes to **Heliograph** are recorded here. The format follows
   the `AGENTS.md` local gate documents the browser test too.
 - **The layout regression test can no longer false-pass on a port collision.** It binds a fresh per-run
   port and fails loudly if the collector exits before serving, instead of silently exercising whatever
-  else answers on a fixed port.
+  else answers on a fixed port. The bare `node web/layout.test.mjs` path now compiles the collector to a
+  temp binary up front rather than `go run` — whose still-running compiler let a bind failure surface too
+  late to catch — and the child is watched through the browser assertions as a backstop.
 - **The Columns picker always shows its active selection.** A stored column count too wide for the
   current viewport stays visible and pressed — marked as wrapping to the count that fits — rather than
-  leaving the control looking unselected.
+  leaving the control looking unselected. Assistive technology now hears an accessible label stating the
+  effective wrapped count, so a screen reader is no longer told "6" while two columns render.
 - **The `rangeLabels` unit test is locale-independent.** It no longer requires Latin letters in
   localized date labels, so the web suite passes on non-Latin runner locales.
 
