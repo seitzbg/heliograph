@@ -70,6 +70,7 @@ services:
       SMOKED_DSN: "postgres://smoke:smoke@timescaledb:5432/smoke?sslmode=disable"
       SMOKED_DOWNSAMPLE: "1"                        # hourly continuous aggregate for the UI's Hourly mode
       SMOKED_RESOLVE_IPS: "1"                       # show each target's IP in the graph title (pinned/literal/resolved)
+      SMOKED_ABSOLUTE_TIME: "1"                     # graph x-axes show absolute clock time (default); "0" = relative -3h/now
     ports:
       # Published on localhost only: the API is unauthenticated and query-heavy, so it
       # must not be reachable on all host interfaces. For access beyond this host, run a

@@ -36,3 +36,34 @@ func TestEnvBool(t *testing.T) {
 		t.Errorf("envBool(unset) = true, want false")
 	}
 }
+
+// envBoolOr is envBool with a non-false default: unset/unparseable yields the default, a set value
+// parses via strconv.ParseBool. Used for flags that default true (e.g. -absolute-time).
+func TestEnvBoolOr(t *testing.T) {
+	const key = "SMOKED_TEST_ENVBOOLOR"
+	cases := []struct {
+		val  string
+		def  bool
+		want bool
+	}{
+		{"", true, true},   // unset -> default
+		{"", false, false}, // unset -> default
+		{"0", true, false}, // explicit override of a true default
+		{"false", true, false},
+		{"1", false, true}, // explicit override of a false default
+		{"true", false, true},
+		{"garbage", true, true}, // unparseable -> default
+		{"garbage", false, false},
+	}
+	for _, c := range cases {
+		if c.val == "" {
+			os.Unsetenv(key)
+		} else {
+			t.Setenv(key, c.val)
+		}
+		if got := envBoolOr(key, c.def); got != c.want {
+			t.Errorf("envBoolOr(%q, def=%v) = %v, want %v", c.val, c.def, got, c.want)
+		}
+	}
+	os.Unsetenv(key)
+}

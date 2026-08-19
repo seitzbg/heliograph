@@ -7,9 +7,12 @@ All notable changes to **Heliograph** are recorded here. The format follows
 ## [Unreleased]
 
 ### Changed
-- **The "absolute time" toggle now applies to the zoom drill-down too.** Clicking a graph to zoom a
-  fixed range honors the toggle (absolute wall-clock vs relative `-3h`/`now`), matching the grid and
-  the per-target detail stack; a custom drag-zoom range still always shows absolute times.
+- **Absolute-time axis labels are now a server config default (on), not a per-browser toggle.** The
+  dashboard labels every graph's x-axis with absolute clock time by default — uniformly across the
+  grid, the per-target detail stack, and the zoom drill-down (a custom drag-zoom was already
+  absolute). The legend's "absolute time" checkbox is removed; set `SMOKED_ABSOLUTE_TIME=0` (or
+  `-absolute-time=false`) to switch the whole dashboard back to relative `-3h`/`now` labels. The
+  effective setting is served at `GET /api/version`.
 - **The footer build version links to its source** — the exact commit for a `main`/`latest` build,
   or the release page for a clean tag.
 - **`:latest` is also refreshed on release tags**, so right after cutting `vX.Y.Z` the `:latest`

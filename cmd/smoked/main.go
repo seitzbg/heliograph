@@ -80,6 +80,20 @@ func envBool(name string) bool {
 	return b
 }
 
+// envBoolOr is envBool with a non-false default: an unset or unparseable env var yields `def`,
+// so a flag can default true while still being overridable via `environment:` (e.g. set to 0).
+func envBoolOr(name string, def bool) bool {
+	v := os.Getenv(name)
+	if v == "" {
+		return def
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		return def
+	}
+	return b
+}
+
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "vantage" {
 		os.Exit(vantageCmd(os.Args[2:]))
@@ -103,6 +117,7 @@ func main() {
 	dsn := flag.String("dsn", os.Getenv("SMOKED_DSN"), "TimescaleDB/PostgreSQL DSN (or set SMOKED_DSN); if set, persist there instead of in-memory")
 	downsample := flag.Bool("downsample", envBool("SMOKED_DOWNSAMPLE"), "with -dsn: enable the hourly continuous aggregate + retention policies (or set SMOKED_DOWNSAMPLE=1)")
 	resolveIPs := flag.Bool("resolve-ips", envBool("SMOKED_RESOLVE_IPS"), "show each target's IP in the graph title (or set SMOKED_RESOLVE_IPS=1): a pinned `ip:`, else a literal-IP host, else the resolved hostname (best-effort, refreshed on reload)")
+	absoluteTime := flag.Bool("absolute-time", envBoolOr("SMOKED_ABSOLUTE_TIME", true), "label graph x-axes with absolute clock time (default); set SMOKED_ABSOLUTE_TIME=0 (or -absolute-time=false) for relative -3h/now labels")
 	requireFingerprint := flag.Bool("require-fingerprint", false, "reject agent results that carry no measurement fingerprint (strict mode); default accepts them for pre-fingerprint agents. Flip on once every vantage's agent is upgraded (watch heliograph_agent_missing_fingerprint_total)")
 	configPath := flag.String("config", os.Getenv("SMOKED_CONFIG"), "path to a YAML config file, or a directory holding default.yaml + conf.d/*.yaml (or set SMOKED_CONFIG); replaces the built-in demo targets")
 	webhook := flag.String("webhook", os.Getenv("SMOKED_WEBHOOK_URL"), "generic JSON webhook URL (or set SMOKED_WEBHOOK_URL) for alerts named 'to: [webhook]'")
@@ -371,6 +386,7 @@ func main() {
 	if *serve && ctx.Err() == nil {
 		srv := api.New(st, *webdir)
 		srv.Version = version
+		srv.AbsoluteTime = *absoluteTime
 		srv.Rounds = roundStats
 		// Expose extra operational counters on /metrics so they are scrapeable, not
 		// merely logged: the store's persistent-write failures, and the webhook delivery
