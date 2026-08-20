@@ -6,6 +6,12 @@ All notable changes to **Heliograph** are recorded here. The format follows
 
 ## [Unreleased]
 
+## [1.0.8] - 2026-08-20
+
+Graph the NTP clock **offset** as a smoke graph — the NTP probe's `measure: offset` mode plots the
+server's clock offset over time (band = measurement jitter, line = the offset), which taught the smoke
+renderer a signed, zero-baselined y-axis. Detail below.
+
 ### Added
 - **NTP clock offset as a smoke graph.** The NTP probe gains `measure: rtt|offset` (per target). In
   `offset` mode the graphed series is the server's **clock offset** rather than the query RTT — the
@@ -1284,7 +1290,8 @@ the smoke-graph look, a fast/parallel poller, and probes as plugins.
 - Full re-implementation reference / code map maintained outside the repo at
   `~/.claude/plans/smokeping-codemap/`.
 
-[Unreleased]: https://github.com/seitzbg/heliograph/compare/v1.0.7...main
+[Unreleased]: https://github.com/seitzbg/heliograph/compare/v1.0.8...main
+[1.0.8]: https://github.com/seitzbg/heliograph/compare/v1.0.7...v1.0.8
 [1.0.7]: https://github.com/seitzbg/heliograph/compare/v1.0.6...v1.0.7
 [1.0.6]: https://github.com/seitzbg/heliograph/compare/v1.0.5...v1.0.6
 [1.0.5]: https://github.com/seitzbg/heliograph/compare/v1.0.4...v1.0.5
