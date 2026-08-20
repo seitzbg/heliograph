@@ -122,10 +122,11 @@ targets:
           host: 127.0.0.1
 
     Time:
-      probe: NTP           # SNTP over UDP/123: the smoke graph is query RTT; each leaf's graph
-      children:            # also shows the server's clock offset and stratum as stats.
-        pool.ntp.org:
-          host: pool.ntp.org
+      probe: NTP           # SNTP over UDP/123. `measure` picks what the smoke graph plots:
+      children:            #   rtt (default)  = query round-trip time, 0-based like any probe
+        pool.ntp.org:      #   offset         = the server's clock offset, a signed graph with a
+          host: pool.ntp.org  #                 zero baseline (the other value + stratum show as stats)
         cloudflare:
           title: Cloudflare NTP
           host: time.cloudflare.com
+          params: { measure: offset }   # graph this server's clock offset instead of RTT

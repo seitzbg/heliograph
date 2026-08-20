@@ -25,7 +25,7 @@ function recordingCanvas() {
     setTransform() {}, clearRect() {}, fillRect() { log.fillRects++; },
     beginPath() { cur = []; }, moveTo(x, y) { cur.push({ op: 'M', x, y }); }, lineTo(x, y) { cur.push({ op: 'L', x, y }); }, closePath() {},
     fill() { log.fills++; log.fillPaths.push(cur.slice()); }, stroke() { log.strokes++; log.strokePaths.push(cur.slice()); },
-    save() {}, restore() {}, translate() {}, rotate() {}, fillText() {}, strokeRect() {}, rect() {}, clip() {},
+    save() {}, restore() {}, translate() {}, rotate() {}, fillText() {}, strokeRect() {}, rect() {}, clip() {}, setLineDash() {},
     set globalAlpha(v) { log.alphas.push(v); }, get globalAlpha() { return 1; },
     set fillStyle(v) {}, get fillStyle() { return ''; },
     set strokeStyle(v) {}, get strokeStyle() { return ''; },
@@ -341,6 +341,38 @@ check('overlay median line pens up across its own cadence gap, independent of th
   const overlayPath = log.strokePaths.find((p) => p.length === 3);
   assert.ok(overlayPath, 'overlay path (3 points) was recorded');
   assert.equal(overlayPath.filter((p) => p.op === 'M').length, 2, 'the gap starts a fresh subpath (pen-up)');
+});
+
+// A series whose samples cross zero (an NTP clock offset). median alternates +0.08 / -0.08.
+function signedSeries() {
+  const buckets = [];
+  for (let i = 0; i < 4; i++) {
+    buckets.push({ centered: [-0.1, -0.05, 0.05, 0.1], samples: [-0.1, -0.05, 0.05, 0.1], lost: 0, median: i % 2 === 0 ? 0.08 : -0.08, pings: 4 });
+  }
+  return { buckets, N: 4 };
+}
+// The median base line is the longest recorded stroke; its points are in bucket order.
+function medianLine(log) { return log.strokePaths.reduce((a, b) => (b.length > a.length ? b : a), []); }
+
+// opts.signed gives a zero-centered axis: a negative median maps WITHIN the plot and a positive one
+// sits above it. Geometry: height 200 -> mT 10, ph 168, plot bottom 178.
+check('signed axis maps negatives within the plot, positive above negative', () => {
+  const { canvas, log } = recordingCanvas();
+  Smoke.render(canvas, signedSeries(), { height: 200, signed: true });
+  const ml = medianLine(log);
+  assert.equal(ml.length, 4, 'median base line has one point per bucket');
+  const yPos = ml[0].y, yNeg = ml[1].y; // bucket0 median +0.08, bucket1 median -0.08
+  assert.ok(yPos < yNeg, `positive offset should sit above negative (yPos ${yPos} < yNeg ${yNeg})`);
+  assert.ok(yNeg < 176, `negative offset must not be clamped to the plot floor (yNeg ${yNeg} < ~178)`);
+});
+
+// Without opts.signed the axis is 0-based (latency): the same negative samples clamp to the floor,
+// proving latency graphs are unchanged and only an explicitly-signed series gets the new axis.
+check('non-signed axis clamps negatives to the floor (latency unchanged)', () => {
+  const { canvas, log } = recordingCanvas();
+  Smoke.render(canvas, signedSeries(), { height: 200 }); // signed omitted
+  const ml = medianLine(log);
+  assert.ok(ml[1].y >= 177, `negative median should clamp to the ~178 floor on a 0-based axis, got ${ml[1].y}`);
 });
 
 if (failed) { console.error(`\n${failed} test(s) failed`); process.exit(1); }

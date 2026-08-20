@@ -90,11 +90,12 @@ type Server struct {
 	// TargetMeta, if set, returns each target's display-only metadata (title override + the
 	// IP to show in the graph title). nil means the field is omitted.
 	TargetMeta func() map[string]TargetMeta
-	// NTPStat, if set, returns the most recent clock offset (seconds) and stratum measured for an
-	// NTP target (ok=false for non-NTP targets or before the first measurement). /api/targets
-	// surfaces it so the dashboard shows offset + stratum as stats. nil = the fields are omitted
+	// NTPStat, if set, returns the most recent clock offset (seconds), stratum, and graphed metric
+	// ("rtt"/"offset") measured for an NTP target (ok=false for non-NTP targets or before the first
+	// measurement). /api/targets surfaces it so the dashboard shows offset + stratum as stats (and,
+	// on an offset-graphing panel, hides the now-redundant offset stat). nil = the fields are omitted
 	// (no NTP probe registered / pure API tests). Wired to ntpprobe.LatestFor in main.
-	NTPStat func(target string) (offsetSec float64, stratum uint8, ok bool)
+	NTPStat func(target string) (offsetSec float64, stratum uint8, measure string, ok bool)
 	// Configured, if set, returns the full configured target catalog (all vantages), so
 	// /api/targets lists a target even when it has no stored row for the requested vantage
 	// yet — e.g. a remote-only target the hub never probes locally (CODE_REVIEW #3 / P1-3).
@@ -309,8 +310,11 @@ type targetDTO struct {
 	// NTPOffsetMs + Stratum are NTP-only display stats (clock offset in ms, server stratum). They
 	// are not latencies, so they never enter the RTT/loss pipeline; they come from the probe's
 	// latest-value registry via Server.NTPStat. Omitted for non-NTP targets and before first data.
+	// NTPMeasure ("rtt"/"offset") is the target's graphed metric, so the UI can hide the redundant
+	// offset stat on a panel already graphing offset.
 	NTPOffsetMs *float64 `json:"ntp_offset_ms,omitempty"`
 	Stratum     *int     `json:"stratum,omitempty"`
+	NTPMeasure  string   `json:"ntp_measure,omitempty"`
 	// NoData marks a configured target that has no stored round for the requested
 	// vantage yet — e.g. a remote-only target before its agent reports. Such a target
 	// is listed (so it appears in the tree and its deep link resolves) but carries no
@@ -333,7 +337,7 @@ const recentStatusWindow = 30 * time.Minute
 // latestDTO builds a target DTO from a stored latest round, attaching the target's vantage
 // set, display metadata, and windowed recent loss (for the status dot). Shared by the live
 // and catalog-driven listings.
-func latestDTO(o scheduler.Outcome, tv map[string][]string, meta map[string]TargetMeta, recent map[string]float64, ntp func(string) (float64, uint8, bool)) targetDTO {
+func latestDTO(o scheduler.Outcome, tv map[string][]string, meta map[string]TargetMeta, recent map[string]float64, ntp func(string) (float64, uint8, string, bool)) targetDTO {
 	dto := targetDTO{
 		Name:    o.Target.Name,
 		Probe:   o.ProbeName,
@@ -359,10 +363,10 @@ func latestDTO(o scheduler.Outcome, tv map[string][]string, meta map[string]Targ
 		dto.RecentLossPct = &rl
 	}
 	if ntp != nil {
-		if offSec, stratum, ok := ntp(o.Target.Name); ok {
+		if offSec, stratum, measure, ok := ntp(o.Target.Name); ok {
 			offMs := offSec * 1000
 			st := int(stratum)
-			dto.NTPOffsetMs, dto.Stratum = &offMs, &st
+			dto.NTPOffsetMs, dto.Stratum, dto.NTPMeasure = &offMs, &st, measure
 		}
 	}
 	return dto

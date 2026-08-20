@@ -77,7 +77,7 @@ func TestNTPMeasuresRTTAndOffset(t *testing.T) {
 		}
 	}
 
-	offSec, stratum, ok := LatestFor("ntp-sync")
+	offSec, stratum, _, ok := LatestFor("ntp-sync")
 	if !ok {
 		t.Fatal("no offset recorded for a synchronized (stratum 2) server")
 	}
@@ -86,6 +86,33 @@ func TestNTPMeasuresRTTAndOffset(t *testing.T) {
 	}
 	if d := time.Duration(offSec * float64(time.Second)); d < skew-200*time.Millisecond || d > skew+200*time.Millisecond {
 		t.Errorf("offset = %v, want ~%v (server skewed +%v)", d, skew, skew)
+	}
+}
+
+// In measure=offset mode the smoke SAMPLES are the clock offsets (signed seconds), not RTTs, so
+// the graph plots offset over time. A server skewed +5s must produce samples near +5s.
+func TestNTPOffsetModeGraphsOffset(t *testing.T) {
+	const skew = 5 * time.Second
+	port := ntpServer(t, 2, skew)
+	p, _ := probe.New("NTP", nil)
+	target := probe.Target{Name: "ntp-offmode", Host: "127.0.0.1", Params: map[string]string{
+		"port": strconv.Itoa(port), "measure": "offset",
+	}}
+
+	res, err := p.Measure(context.Background(), target, 3)
+	if err != nil {
+		t.Fatalf("Measure: %v", err)
+	}
+	if len(res.Samples) != 3 {
+		t.Fatalf("want 3 offset samples, got %d", len(res.Samples))
+	}
+	for _, s := range res.Samples {
+		if d := time.Duration(s * float64(time.Second)); d < skew-200*time.Millisecond || d > skew+200*time.Millisecond {
+			t.Errorf("offset-mode sample = %v, want ~%v (the clock offset, not RTT)", d, skew)
+		}
+	}
+	if _, _, measure, ok := LatestFor("ntp-offmode"); !ok || measure != "offset" {
+		t.Errorf("registry measure = %q (ok=%v), want \"offset\"", measure, ok)
 	}
 }
 
@@ -103,7 +130,7 @@ func TestNTPUnsyncedServerRecordsNoOffset(t *testing.T) {
 	if len(res.Samples) != 2 {
 		t.Fatalf("stratum-16 server is reachable; want 2 RTT samples, got %d", len(res.Samples))
 	}
-	if _, _, ok := LatestFor("ntp-unsynced"); ok {
+	if _, _, _, ok := LatestFor("ntp-unsynced"); ok {
 		t.Error("stratum-16 (unsynchronized) reply must not record an offset")
 	}
 }

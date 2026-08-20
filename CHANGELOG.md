@@ -6,6 +6,16 @@ All notable changes to **Heliograph** are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **NTP clock offset as a smoke graph.** The NTP probe gains `measure: rtt|offset` (per target). In
+  `offset` mode the graphed series is the server's **clock offset** rather than the query RTT — the
+  smoke band is the per-round measurement jitter and the median line is the offset over time, so drift,
+  correction steps, and sync noise read at a glance (the RTT line was near-flat and dull). This taught
+  the smoke renderer a **signed y-axis**: a series that can go negative gets a zero-centered range with
+  a dashed zero baseline and no 1&nbsp;ms floor, while every latency graph (values ≥ 0) is byte-for-byte
+  unchanged. On an offset panel the offset stat is dropped as redundant (it's the graph); RTT and
+  stratum remain. Config with `params: { measure: offset }`.
+
 ## [1.0.7] - 2026-08-20
 
 Adds the **NTP probe** — the eighth built-in probe and the last roadmap feature — which graphs an NTP

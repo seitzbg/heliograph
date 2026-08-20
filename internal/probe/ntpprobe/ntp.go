@@ -29,20 +29,25 @@ const packetSize = 48
 
 type ntpProbe struct {
 	port    string
-	version uint8 // NTP version written into the request (3 or 4)
+	version uint8  // NTP version written into the request (3 or 4)
+	measure string // "rtt" (graph query round-trip) or "offset" (graph clock offset)
 }
 
 func init() {
 	probe.Register("NTP", "NTP query", map[string]probe.VarSpec{
 		"port":    {Doc: "NTP server port", Default: "123", Scope: probe.TargetVar, Kind: probe.KindPort},
 		"version": {Doc: "NTP protocol version to send", Default: "4", Scope: probe.ProbeVar, Enum: []string{"3", "4"}},
+		"measure": {Doc: "value graphed as the smoke series: rtt (query round-trip) or offset (clock offset, signed)", Default: "rtt", Scope: probe.TargetVar, Enum: []string{"rtt", "offset"}},
 	}, func(cfg map[string]string) (probe.Probe, error) {
-		p := &ntpProbe{port: "123", version: 4}
+		p := &ntpProbe{port: "123", version: 4, measure: "rtt"}
 		if v := cfg["port"]; v != "" {
 			p.port = v
 		}
 		if cfg["version"] == "3" {
 			p.version = 3
+		}
+		if cfg["measure"] == "offset" {
+			p.measure = "offset"
 		}
 		return p, nil
 	})
@@ -59,6 +64,9 @@ func (p *ntpProbe) Measure(ctx context.Context, t probe.Target, pings int) (prob
 		version = 4
 	}
 
+	measure := t.Param("measure", p.measure)
+	wantOffset := measure == "offset"
+
 	var samples []float64
 	// Fair per-ping share of the round budget so an unresponsive server is queried all
 	// `pings` times instead of the first request eating the whole round (correct loss).
@@ -68,17 +76,25 @@ func (p *ntpProbe) Measure(ctx context.Context, t probe.Target, pings int) (prob
 			return probe.Result{Samples: samples}, err
 		}
 		actx, cancel := probe.AttemptContext(ctx, perPing)
-		rtt, offset, stratum, ok := p.exchange(actx, server, version)
+		rtt, offset, hasOffset, stratum, ok := p.exchange(actx, server, version)
 		cancel()
 		if !ok {
 			continue // no/invalid reply => lost
 		}
-		samples = append(samples, rtt.Seconds())
-		// Offset is meaningful only from a synchronized server (stratum 1..15); stratum 0
-		// (kiss-o'-death) and 16+ (unsynchronized) still count as a reachable RTT sample but
-		// carry no usable offset, so we record reachability without a misleading offset.
-		if stratum >= 1 && stratum <= 15 {
-			latestReg.set(t.Name, offset.Seconds(), stratum)
+		if wantOffset {
+			// Graph the clock offset. A reply whose timestamps we couldn't read (hasOffset
+			// false) yields no usable offset -> counts as a lost sample this round.
+			if hasOffset {
+				samples = append(samples, offset.Seconds())
+			}
+		} else {
+			samples = append(samples, rtt.Seconds())
+		}
+		// Record the offset + stratum for the panel stats. Offset is meaningful only from a
+		// synchronized server (stratum 1..15); stratum 0 (kiss-o'-death) and 16+ (unsynchronized)
+		// still count as a reachable sample but carry no usable offset.
+		if hasOffset && stratum >= 1 && stratum <= 15 {
+			latestReg.set(t.Name, offset.Seconds(), stratum, measure)
 		}
 	}
 	return probe.Result{Samples: samples}, nil
@@ -87,11 +103,11 @@ func (p *ntpProbe) Measure(ctx context.Context, t probe.Target, pings int) (prob
 // exchange performs one SNTP client/server round trip. It returns the round-trip time,
 // the estimated clock offset, the server stratum, and ok=false for any transport error or
 // malformed/ non-server reply (counted as a lost ping by the caller).
-func (p *ntpProbe) exchange(ctx context.Context, server string, version uint8) (rtt, offset time.Duration, stratum uint8, ok bool) {
+func (p *ntpProbe) exchange(ctx context.Context, server string, version uint8) (rtt, offset time.Duration, hasOffset bool, stratum uint8, ok bool) {
 	var d net.Dialer
 	conn, err := d.DialContext(ctx, "udp", server)
 	if err != nil {
-		return 0, 0, 0, false
+		return 0, 0, false, 0, false
 	}
 	defer conn.Close()
 	if dl, hasDL := ctx.Deadline(); hasDL {
@@ -104,18 +120,18 @@ func (p *ntpProbe) exchange(ctx context.Context, server string, version uint8) (
 
 	t1 := time.Now()
 	if _, err := conn.Write(req); err != nil {
-		return 0, 0, 0, false
+		return 0, 0, false, 0, false
 	}
 	resp := make([]byte, packetSize)
 	n, err := conn.Read(resp)
 	t4 := time.Now()
 	if err != nil || n < packetSize {
-		return 0, 0, 0, false
+		return 0, 0, false, 0, false
 	}
 	// Reject anything that is not a server reply (mode 4). A mode-4 packet with a bogus
 	// origin is still accepted for RTT — a reachability probe cares that the server answered.
 	if mode := resp[0] & 0x07; mode != 4 {
-		return 0, 0, 0, false
+		return 0, 0, false, 0, false
 	}
 	stratum = resp[1]
 
@@ -133,12 +149,13 @@ func (p *ntpProbe) exchange(ctx context.Context, server string, version uint8) (
 			rtt = rawRTT - think
 		}
 	}
-	// offset = ((t2 - t1) + (t3 - t4)) / 2  (RFC 4330). Only meaningful when the server set its
-	// timestamps; a zeroed t2/t3 leaves offset at 0 and the caller ignores it via the stratum gate.
+	// offset = ((t2 - t1) + (t3 - t4)) / 2  (RFC 4330). Computable only when the server set its
+	// timestamps; hasOffset stays false for a zeroed t2/t3 so the caller neither graphs nor records it.
 	if !t2.IsZero() && !t3.IsZero() {
 		offset = (t2.Sub(t1) + t3.Sub(t4)) / 2
+		hasOffset = true
 	}
-	return rtt, offset, stratum, true
+	return rtt, offset, hasOffset, stratum, true
 }
 
 // ntpTime decodes an 8-byte NTP timestamp (seconds since 1900 + a 32-bit fraction) into a
@@ -163,6 +180,8 @@ func ntpTime(b []byte) time.Time {
 type ntpLatest struct {
 	offsetSec float64
 	stratum   uint8
+	measure   string // the target's graphed metric ("rtt" or "offset"); lets the UI hide the
+	// redundant offset stat on a panel that already graphs offset.
 }
 
 var latestReg = &registry{m: map[string]ntpLatest{}}
@@ -172,17 +191,17 @@ type registry struct {
 	m  map[string]ntpLatest
 }
 
-func (r *registry) set(target string, offsetSec float64, stratum uint8) {
+func (r *registry) set(target string, offsetSec float64, stratum uint8, measure string) {
 	r.mu.Lock()
-	r.m[target] = ntpLatest{offsetSec: offsetSec, stratum: stratum}
+	r.m[target] = ntpLatest{offsetSec: offsetSec, stratum: stratum, measure: measure}
 	r.mu.Unlock()
 }
 
-// LatestFor returns the most recent clock offset (in seconds) and stratum recorded for an NTP
-// target, or ok=false if none has been measured yet. Wired into the API as Server.NTPStat.
-func LatestFor(target string) (offsetSec float64, stratum uint8, ok bool) {
+// LatestFor returns the most recent clock offset (seconds), stratum, and graphed metric recorded for
+// an NTP target, or ok=false if none has been measured yet. Wired into the API as Server.NTPStat.
+func LatestFor(target string) (offsetSec float64, stratum uint8, measure string, ok bool) {
 	latestReg.mu.RLock()
 	v, ok := latestReg.m[target]
 	latestReg.mu.RUnlock()
-	return v.offsetSec, v.stratum, ok
+	return v.offsetSec, v.stratum, v.measure, ok
 }
