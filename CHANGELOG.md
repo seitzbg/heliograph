@@ -6,6 +6,15 @@ All notable changes to **Heliograph** are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **NTP probe.** A native SNTP probe (no external `ntpdate`/`chronyc`) that queries an NTP server over
+  UDP/123 and graphs the request round-trip time as an ordinary smoke graph — RTT + loss like every
+  other probe. It also surfaces the server's **clock offset** and **stratum**: these aren't latencies,
+  so rather than distort a min→median→max plot they render as stats beside median/loss on the target's
+  panel (offset in ms, plus the stratum). Config it with `probe: NTP` (params: `port`, default 123;
+  `version`, 3 or 4). Unsynchronized servers (stratum 0/16+) still register reachability + RTT but no
+  offset. The eighth built-in probe; the schema self-publishes at `/api/probes/schema`.
+
 ### Fixed
 - **CI retries now recover from a *stalled* network install, not just a failed one.** Each `apt-get` /
   Playwright attempt is wrapped in `timeout`, so a hung package mirror becomes a failure the retry can

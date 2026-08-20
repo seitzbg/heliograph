@@ -14,6 +14,7 @@ probes:            # probe-instance (probe-level) settings
   HTTP: {}
   SSH: {}
   IRTT: {}         # needs the irtt binary + an irtt server on the target
+  NTP: {}          # SNTP query (UDP/123); graphs RTT + shows the server's clock offset & stratum
 
 alerts:            # named alert definitions (attach to targets via `alerts:`)
   loss:            # a matcher-style alert with hysteresis
@@ -119,3 +120,12 @@ targets:
       children:
         localhost:
           host: 127.0.0.1
+
+    Time:
+      probe: NTP           # SNTP over UDP/123: the smoke graph is query RTT; each leaf's graph
+      children:            # also shows the server's clock offset and stratum as stats.
+        pool.ntp.org:
+          host: pool.ntp.org
+        cloudflare:
+          title: Cloudflare NTP
+          host: time.cloudflare.com

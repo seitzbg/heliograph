@@ -910,6 +910,23 @@
     // the grid DOM panel. displayLabel builds it via the shared labelHTML.
     const titleByName = new Map(), ipByName = new Map();
     function displayLabel(name) { return labelHTML(name, titleByName.get(name), ipByName.get(name)); }
+    // ntpByName mirrors the maps above (same /api/targets responses): NTP targets carry a clock
+    // offset (ms) + stratum, which the smoke graph can't show (a signed near-zero value has no place
+    // on a min→median→max latency plot), so they render as stats beside median/loss. Absent = a
+    // non-NTP target or one with no NTP reading yet.
+    const ntpByName = new Map();
+    function ntpStatsHtml(name) {
+      const n = ntpByName.get(name);
+      if (!n) return '';
+      const a = Math.abs(n.off), mag = a >= 100 ? a.toFixed(0) : a >= 1 ? a.toFixed(1) : a.toFixed(2);
+      const off = (n.off >= 0 ? '+' : '−') + mag + ' ms'; // U+2212 minus, matching the axis labels
+      return '<span class="stat"><span class="k">offset</span><span class="v">' + off + '</span></span>' +
+             '<span class="stat"><span class="k">stratum</span><span class="v">' + n.stratum + '</span></span>';
+    }
+    function setNtp(t) {
+      if (typeof t.ntp_offset_ms === 'number') ntpByName.set(t.name, { off: t.ntp_offset_ms, stratum: t.stratum });
+      else ntpByName.delete(t.name);
+    }
     // ensureVantages backfills vantagesByTarget for a detail view reached before
     // refreshGrid has populated it (e.g. a deep link to #target=...): a no-op once the
     // grid has run, otherwise one /api/targets fetch to seed the map. `name` is accepted
@@ -919,7 +936,7 @@
       if (vantagesByTarget.size) return;
       try {
         const targets = (await fetchJSON('/api/targets')).targets || [];
-        for (const t of targets) { vantagesByTarget.set(t.name, vantageList(t)); probeByName.set(t.name, t.probe); titleByName.set(t.name, t.title); ipByName.set(t.name, t.ip); }
+        for (const t of targets) { vantagesByTarget.set(t.name, vantageList(t)); probeByName.set(t.name, t.probe); titleByName.set(t.name, t.title); ipByName.set(t.name, t.ip); setNtp(t); }
       } catch (e) { /* transient: vantagesFor falls back to ['local'] */ }
     }
     function ensurePanel(t) {
@@ -951,7 +968,8 @@
     function gridMeta(p, s) {
       const st = Smoke.seriesStats(s); const lcls = st.lossAvg > 2 ? 'bad' : st.lossAvg > 0.5 ? 'warn' : '';
       p.meta.innerHTML = '<span class="stat"><span class="k">median</span><span class="v">' + fmt(st.medAvg, 1) + ' ms</span></span>' +
-        '<span class="stat"><span class="k">loss</span><span class="v ' + lcls + '">' + fmt(st.lossAvg, 2) + ' %</span></span>';
+        '<span class="stat"><span class="k">loss</span><span class="v ' + lcls + '">' + fmt(st.lossAvg, 2) + ' %</span></span>' +
+        ntpStatsHtml(p.el.dataset.target);
     }
     let gridBusy = false, gridLoaded = false; // gridLoaded: the first full-window fetch has landed
     async function refreshGrid() {
@@ -968,7 +986,7 @@
         // forever. It stays reachable via the tree; its real series shows in the detail view,
         // which focuses the target's own vantage (CODE_REVIEW #3 / P1-3).
         statusByTarget.clear(); vantagesByTarget.clear();
-        for (const t of targets) { statusByTarget.set(t.name, targetStatus(t)); vantagesByTarget.set(t.name, vantageList(t)); probeByName.set(t.name, t.probe); titleByName.set(t.name, t.title); ipByName.set(t.name, t.ip); }
+        for (const t of targets) { statusByTarget.set(t.name, targetStatus(t)); vantagesByTarget.set(t.name, vantageList(t)); probeByName.set(t.name, t.probe); titleByName.set(t.name, t.title); ipByName.set(t.name, t.ip); setNtp(t); }
         treeNames = targets.map((t) => t.name);
         const gridTargets = targets.filter((t) => !t.no_data);
         // Reconcile ONLY against an authoritative target list (the fetch above succeeded):

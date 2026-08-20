@@ -44,6 +44,9 @@ import (
 	_ "github.com/seitzbg/heliograph/internal/probe/fping"
 	_ "github.com/seitzbg/heliograph/internal/probe/httpprobe"
 	_ "github.com/seitzbg/heliograph/internal/probe/irttprobe"
+	// Named (not blank): its init() registers the "NTP" probe, and main wires
+	// its per-target offset/stratum accessor into the API (srv.NTPStat).
+	ntpprobe "github.com/seitzbg/heliograph/internal/probe/ntpprobe"
 	_ "github.com/seitzbg/heliograph/internal/probe/pingprobe"
 	_ "github.com/seitzbg/heliograph/internal/probe/sshprobe"
 	_ "github.com/seitzbg/heliograph/internal/probe/tcpconnect"
@@ -435,6 +438,9 @@ func main() {
 		// probes locally — so it appears in the tree and its deep link resolves (P1-3).
 		srv.Configured = func() []model.Monitor { return current.Load().monitors }
 		srv.TargetMeta = func() map[string]api.TargetMeta { return current.Load().targetMeta }
+		// NTP probe offset/stratum, surfaced by /api/targets as display stats. The registry is
+		// package-level in ntpprobe, so this accessor stays valid across config reloads.
+		srv.NTPStat = ntpprobe.LatestFor
 		// Federation: only with a DB (the vantage key store is TimescaleDB-backed). The
 		// agent routes (below) light up unconditionally here; the admin key-management API
 		// additionally requires a configured admin password (fail-closed — no password

@@ -42,9 +42,10 @@ config), and the **Vantages** panel manages federation agent keys — both behin
 
 ## Features
 
-- **Seven probes** — `Ping` (native ICMP, no `fping`/`setcap`), `TCPConnect`, `DNS`, `HTTP`
-  (time-to-first-byte), and `SSH` (banner) are pure Go; `FPing` and `IRTT` wrap their CLIs. New
-  probes self-register through a small `Probe` interface.
+- **Eight probes** — `Ping` (native ICMP, no `fping`/`setcap`), `TCPConnect`, `DNS`, `HTTP`
+  (time-to-first-byte), `SSH` (banner), and `NTP` (SNTP query — graphs RTT and shows the server's
+  clock offset + stratum) are pure Go; `FPing` and `IRTT` wrap their CLIs. New probes self-register
+  through a small `Probe` interface.
 - **Signature smoke graphs**, rebuilt on HTML canvas — nested percentile bands (jitter) darkening
   toward a loss-colored median line, computed from the real per-round distribution, light/dark
   theme-aware.
@@ -282,6 +283,7 @@ internal/
     httpprobe/   native HTTP TTFB probe (net/http + httptrace)
     sshprobe/    native SSH banner-timing probe
     irttprobe/   irtt(1) UDP round-trip/jitter wrapper (+ parser test)
+    ntpprobe/    native SNTP probe — RTT sample + clock offset/stratum registry (+ tests)
   sample/        median / loss / centered-smoke-array math (+ tests)
   scheduler/     parallel worker pool, per-target timeout, phase-aligned NextDelay (+ tests)
   config/        YAML target-tree loader + inheritance resolver (+ tests)
