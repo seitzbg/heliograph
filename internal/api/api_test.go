@@ -1221,3 +1221,61 @@ func TestSeriesNoWindowVantageParam(t *testing.T) {
 		t.Errorf("vantage=nyc (no window): code=%d rounds=%v, want 200/[50ms] (nyc only), not local", code, rs)
 	}
 }
+
+// An NTP target's clock offset + stratum come from Server.NTPStat (the probe's latest-value
+// registry), NOT the RTT/loss pipeline. /api/targets must surface them for NTP targets and omit
+// them for targets NTPStat has no reading for (non-NTP, or before the first measurement).
+func TestTargetsSurfacesNTPOffsetAndStratum(t *testing.T) {
+	st := store.NewMem(10)
+	st.Add([]scheduler.Outcome{
+		{Target: probe.Target{Name: "ntp1", Host: "h"}, ProbeName: "NTP",
+			Computed: sample.Compute(2, []float64{0.001, 0.002}), When: time.Unix(1_700_000_000, 0)},
+		{Target: probe.Target{Name: "web1", Host: "h"}, ProbeName: "HTTP",
+			Computed: sample.Compute(2, []float64{0.01, 0.02}), When: time.Unix(1_700_000_000, 0)},
+	})
+	srv := New(st, "")
+	srv.Active = func() map[string]bool { return map[string]bool{"ntp1": true, "web1": true} }
+	srv.NTPStat = func(target string) (float64, uint8, bool) {
+		if target == "ntp1" {
+			return -0.0009, 2, true // -0.9 ms, stratum 2
+		}
+		return 0, 0, false // web1 (and anything else) has no NTP reading
+	}
+
+	rec := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(rec, httptest.NewRequest("GET", "/api/targets", nil))
+	var tj struct {
+		Targets []struct {
+			Name        string   `json:"name"`
+			NTPOffsetMs *float64 `json:"ntp_offset_ms"`
+			Stratum     *int     `json:"stratum"`
+		} `json:"targets"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &tj); err != nil {
+		t.Fatalf("targets json: %v", err)
+	}
+	got := map[string]struct {
+		off *float64
+		st  *int
+	}{}
+	for _, d := range tj.Targets {
+		got[d.Name] = struct {
+			off *float64
+			st  *int
+		}{d.NTPOffsetMs, d.Stratum}
+	}
+
+	ntp, ok := got["ntp1"]
+	if !ok || ntp.off == nil || ntp.st == nil {
+		t.Fatalf("ntp1 missing offset/stratum: %+v", ntp)
+	}
+	if *ntp.off != -0.9 { // -0.0009 s -> -0.9 ms
+		t.Errorf("ntp1 ntp_offset_ms = %v, want -0.9", *ntp.off)
+	}
+	if *ntp.st != 2 {
+		t.Errorf("ntp1 stratum = %d, want 2", *ntp.st)
+	}
+	if web := got["web1"]; web.off != nil || web.st != nil {
+		t.Errorf("web1 (no NTP reading) must omit offset/stratum, got %+v", web)
+	}
+}
