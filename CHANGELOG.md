@@ -6,6 +6,12 @@ All notable changes to **Heliograph** are recorded here. The format follows
 
 ## [Unreleased]
 
+## [1.0.7] - 2026-08-20
+
+Adds the **NTP probe** — the eighth built-in probe and the last roadmap feature — which graphs an NTP
+server's query round-trip time and shows its clock offset + stratum as stats. Plus a CI reliability
+follow-up so a stalled package mirror fails fast instead of hanging. Detail below.
+
 ### Added
 - **NTP probe.** A native SNTP probe (no external `ntpdate`/`chronyc`) that queries an NTP server over
   UDP/123 and graphs the request round-trip time as an ordinary smoke graph — RTT + loss like every
@@ -1268,7 +1274,8 @@ the smoke-graph look, a fast/parallel poller, and probes as plugins.
 - Full re-implementation reference / code map maintained outside the repo at
   `~/.claude/plans/smokeping-codemap/`.
 
-[Unreleased]: https://github.com/seitzbg/heliograph/compare/v1.0.6...main
+[Unreleased]: https://github.com/seitzbg/heliograph/compare/v1.0.7...main
+[1.0.7]: https://github.com/seitzbg/heliograph/compare/v1.0.6...v1.0.7
 [1.0.6]: https://github.com/seitzbg/heliograph/compare/v1.0.5...v1.0.6
 [1.0.5]: https://github.com/seitzbg/heliograph/compare/v1.0.4...v1.0.5
 [1.0.4]: https://github.com/seitzbg/heliograph/compare/v1.0.3...v1.0.4
