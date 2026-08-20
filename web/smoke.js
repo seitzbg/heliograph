@@ -57,6 +57,24 @@ window.Smoke = (function () {
     return Math.max(1, p * 1.18);
   }
 
+  // robustRange returns the [yMin, yMax] the y-axis should span. A latency series (signed=false) is
+  // 0-based and floored at 1ms — identical to robustMax, so every existing graph renders unchanged.
+  // A SIGNED series (NTP clock offset; explicitly flagged by the caller, since it can be legitimately
+  // all-positive) always gets a tight range that includes zero, padded, with NO 1ms floor — so a
+  // µs-scale offset fills the plot instead of collapsing to a sliver. Uses the 3.5th/96.5th
+  // percentiles so a single outlier doesn't set the scale, matching robustMax's high tail.
+  function robustRange(s, signed) {
+    const all = [];
+    for (const b of s.buckets) for (const v of b.samples) all.push(v);
+    if (!all.length) return signed ? [-1e-3, 1e-3] : [0, 1];
+    all.sort((a, b) => a - b);
+    const q = (f) => all[Math.min(all.length - 1, Math.max(0, Math.floor(all.length * f)))];
+    const hi = q(0.965), lo = q(0.035);
+    if (!signed) return [0, Math.max(1, hi * 1.18)]; // latency: unchanged (0-based, 1ms floor)
+    const pad = Math.max((hi - lo) * 0.15, 1e-4);    // offset: include zero, pad both ends, no floor
+    return [Math.min(0, lo - pad), Math.max(0, hi + pad)];
+  }
+
   function niceStep(range, target) {
     const raw = range / target,
       mag = Math.pow(10, Math.floor(Math.log10(raw)));
@@ -132,11 +150,22 @@ window.Smoke = (function () {
     // keys off the deepest bucket so a given shade always means the same depth.
     let maxHalf = 0;
     for (let i = 0; i < n; i++) maxHalf = Math.max(maxHalf, Math.floor(bucketPings(s.buckets[i]) / 2));
-    // widen the y-scale so overlaid vantages aren't clipped (unless the caller pinned yMax)
-    let yMax = opts.yMax || robustMax(s);
-    if (!opts.yMax && opts.overlays && opts.overlays.length) {
-      for (const o of opts.overlays) if (o && o.series) yMax = Math.max(yMax, robustMax(o.series));
+    // Y range. Latency series stay 0-based (yMin 0); a SIGNED series (NTP offset) gets a
+    // zero-centered range with a baseline. A pinned yMax (unison grid) is honored only for
+    // non-negative data — a signed series always uses its own range so negatives aren't clipped.
+    const signed = !!opts.signed;
+    let [yMin, yMax] = robustRange(s, signed);
+    if (opts.yMax != null && !signed) { yMin = 0; yMax = opts.yMax; }
+    // widen for overlaid vantages (unless a pinned latency max already fixed the scale)
+    if (!(opts.yMax != null && !signed) && opts.overlays && opts.overlays.length) {
+      for (const o of opts.overlays) if (o && o.series) {
+        const [oLo, oHi] = robustRange(o.series, signed);
+        yMin = Math.min(yMin, oLo); yMax = Math.max(yMax, oHi);
+      }
     }
+    if (yMax <= yMin) yMax = yMin + 1; // guard a degenerate (flat) range
+    const signedAxis = yMin < 0;
+    const ySpan = yMax - yMin;
     // X by wall-clock time when a domain (t0/t1 epoch ms) and per-bucket `.t` are
     // supplied: short data floats at its true position and gaps land at the right
     // place. Without them (smoke-poc.html) fall back to even array-index spacing.
@@ -150,7 +179,9 @@ window.Smoke = (function () {
     // wall-clock time->x for overlay series, which carry their own buckets/timestamps
     // (not indexed alongside the focused series' bk/n). Valid only in useTime mode.
     const Xt = (t) => mL + pw * clamp01((t - opts.t0) / (opts.t1 - opts.t0));
-    const Y = (v) => mT + ph * (1 - Math.min(v, yMax) / yMax);
+    // Clamp to [yMin, yMax] so an out-of-scale sample sits on the frame instead of drawing past it
+    // (matches the previous top-clamp for latency; adds the bottom for signed offset axes).
+    const Y = (v) => mT + ph * (1 - (Math.max(yMin, Math.min(v, yMax)) - yMin) / ySpan);
     const colW = Math.ceil(pw / (n - 1)) + 1;
 
     // A time gap wider than the inferred cadence breaks lines/bands, so a collector/DB
@@ -161,15 +192,22 @@ window.Smoke = (function () {
     ctx.fillStyle = V.plotBg;
     ctx.fillRect(mL, mT, pw, ph);
 
-    const step = niceStep(yMax, 4);
+    const step = niceStep(ySpan, 4);
+    // Signed axes (offset) label with an explicit sign and decimals matched to the (often µs-scale)
+    // step; a non-negative axis keeps the exact historical latency formatting so those graphs are
+    // unchanged. The gridline start snaps to a nice multiple at or below yMin.
+    const decs = step < 0.1 ? 2 : step < 1 ? 1 : 0;
+    const fmtTick = signed
+      ? (g) => (signedAxis && g > 1e-9 ? '+' : g < -1e-9 ? '−' : '') + Math.abs(g).toFixed(decs)
+      : (g) => (g >= 100 ? g.toFixed(0) : g.toFixed(g < 10 ? 1 : 0));
     ctx.font = '10px ui-monospace, Menlo, monospace';
     ctx.textBaseline = 'middle';
-    for (let g = 0; g <= yMax + 0.001; g += step) {
+    for (let g = Math.ceil(yMin / step) * step; g <= yMax + step * 0.001; g += step) {
       const y = Y(g);
       ctx.strokeStyle = V.grid; ctx.lineWidth = 1;
       ctx.beginPath(); ctx.moveTo(mL, Math.round(y) + 0.5); ctx.lineTo(mL + pw, Math.round(y) + 0.5); ctx.stroke();
       ctx.fillStyle = V.axis; ctx.textAlign = 'right';
-      ctx.fillText(g >= 100 ? g.toFixed(0) : g.toFixed(g < 10 ? 1 : 0), mL - 6, y);
+      ctx.fillText(fmtTick(g), mL - 6, y);
     }
     ctx.save(); ctx.translate(11, mT + ph / 2); ctx.rotate(-Math.PI / 2);
     ctx.textAlign = 'center'; ctx.fillStyle = V.axis; ctx.fillText('ms', 0, 0); ctx.restore();
@@ -254,6 +292,16 @@ window.Smoke = (function () {
         }
         ctx.stroke();
       }
+    }
+
+    // zero baseline — only on a signed (offset) axis, where 0 = perfectly in sync. Drawn over the
+    // band but under the median so the offset line reads against it. Dashed + faint to stay subordinate.
+    if (signedAxis && yMax > 0) {
+      const yz = Math.round(Y(0)) + 0.5;
+      ctx.save();
+      ctx.setLineDash([4, 3]); ctx.strokeStyle = V.axis; ctx.globalAlpha = 0.65; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(mL, yz); ctx.lineTo(mL + pw, yz); ctx.stroke();
+      ctx.restore();
     }
 
     // median base line

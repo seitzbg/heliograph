@@ -1235,11 +1235,11 @@ func TestTargetsSurfacesNTPOffsetAndStratum(t *testing.T) {
 	})
 	srv := New(st, "")
 	srv.Active = func() map[string]bool { return map[string]bool{"ntp1": true, "web1": true} }
-	srv.NTPStat = func(target string) (float64, uint8, bool) {
+	srv.NTPStat = func(target string) (float64, uint8, string, bool) {
 		if target == "ntp1" {
-			return -0.0009, 2, true // -0.9 ms, stratum 2
+			return -0.0009, 2, "rtt", true // -0.9 ms, stratum 2, graphing rtt
 		}
-		return 0, 0, false // web1 (and anything else) has no NTP reading
+		return 0, 0, "", false // web1 (and anything else) has no NTP reading
 	}
 
 	rec := httptest.NewRecorder()

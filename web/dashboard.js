@@ -774,7 +774,7 @@
     // small multiples share a scale (unison); omitted, each graph auto-scales to its own data.
     // overlays (optional) — extra per-vantage median-only context lines (Task 3); see
     // buildOverlays. Absent/undefined ⇒ identical output to before overlays existed.
-    function renderInto(canvas, s, R, height, yMax, overlays) {
+    function renderInto(canvas, s, R, height, yMax, overlays, signed) {
       if (s && s.unsupported) { drawNote(canvas, 'needs the TimescaleDB store (-dsn -downsample)', height); return; }
       if (!s || s.buckets.length < 2) { drawNote(canvas, collectingNote(R.mode, R.res), height); return; }
       // Fixed wall-clock domain [now-windowMs, now]. t1 extends to the newest sample if
@@ -786,8 +786,10 @@
       // Relative labels (each range's static xl, e.g. -3h/now) by default; absolute wall-clock
       // (rangeLabels) when the Graphs "absolute time" toggle is on and we have a real window.
       const xlabels = timeAbsolute && t0 != null ? rangeLabels(t0, t1) : R.xl;
-      Smoke.render(canvas, s, { height, band: R.mode === 'band', xlabels, t0, t1: t0 == null ? undefined : t1, yMax, overlays });
+      Smoke.render(canvas, s, { height, band: R.mode === 'band', xlabels, t0, t1: t0 == null ? undefined : t1, yMax, overlays, signed });
     }
+    // An NTP target graphing clock offset needs the signed (zero-centered, no-floor) y-axis.
+    function ntpSigned(name) { const nt = ntpByName.get(name); return !!nt && nt.measure === 'offset'; }
     function metaHtml(s) {
       const st = Smoke.seriesStats(s); const lcls = st.lossAvg > 2 ? 'bad' : st.lossAvg > 0.5 ? 'warn' : '';
       return '<span class="stat"><span class="k">median avg</span><span class="v">' + fmt(st.medAvg, 1) + ' ms</span></span>' +
@@ -918,13 +920,18 @@
     function ntpStatsHtml(name) {
       const n = ntpByName.get(name);
       if (!n) return '';
-      const a = Math.abs(n.off), mag = a >= 100 ? a.toFixed(0) : a >= 1 ? a.toFixed(1) : a.toFixed(2);
-      const off = (n.off >= 0 ? '+' : '−') + mag + ' ms'; // U+2212 minus, matching the axis labels
-      return '<span class="stat"><span class="k">offset</span><span class="v">' + off + '</span></span>' +
-             '<span class="stat"><span class="k">stratum</span><span class="v">' + n.stratum + '</span></span>';
+      let html = '';
+      // A panel graphing offset already shows it as the series (and the median stat), so the offset
+      // stat would be redundant — show only stratum there. An rtt-graphing panel shows offset here.
+      if (n.measure !== 'offset') {
+        const a = Math.abs(n.off), mag = a >= 100 ? a.toFixed(0) : a >= 1 ? a.toFixed(1) : a.toFixed(2);
+        const off = (n.off >= 0 ? '+' : '−') + mag + ' ms'; // U+2212 minus, matching the axis labels
+        html += '<span class="stat"><span class="k">offset</span><span class="v">' + off + '</span></span>';
+      }
+      return html + '<span class="stat"><span class="k">stratum</span><span class="v">' + n.stratum + '</span></span>';
     }
     function setNtp(t) {
-      if (typeof t.ntp_offset_ms === 'number') ntpByName.set(t.name, { off: t.ntp_offset_ms, stratum: t.stratum });
+      if (typeof t.ntp_offset_ms === 'number') ntpByName.set(t.name, { off: t.ntp_offset_ms, stratum: t.stratum, measure: t.ntp_measure });
       else ntpByName.delete(t.name);
     }
     // ensureVantages backfills vantagesByTarget for a detail view reached before
@@ -1101,7 +1108,7 @@
         if (show) vis.push(p);
       }
       const yMax = unisonScale ? sharedYMax(vis.map((p) => p.series)) : undefined;
-      for (const p of vis) renderInto(p.canvas, p.series, RANGES['3h'], 170, yMax);
+      for (const p of vis) renderInto(p.canvas, p.series, RANGES['3h'], 170, yMax, undefined, ntpSigned(p.el.dataset.target));
       updateColsPicker(); // the grid now has a measurable width (e.g. first paint on view entry)
     }
 
@@ -1220,11 +1227,11 @@
         if (focused && !focused.unsupported && focused.buckets.length >= 2) {
           c.meta.innerHTML = metaHtml(focused) + (c.failed ? ' <span class="reslabel">· last known</span>' : '');
         } else { c.meta.innerHTML = ''; }
-        renderInto(c.canvas, focused, c.R, 170, undefined, overlays);
+        renderInto(c.canvas, focused, c.R, 170, undefined, overlays, ntpSigned(curTarget));
       } else {
         const s = c.series;
         if (s && !s.unsupported && s.buckets.length >= 2) c.meta.innerHTML = metaHtml(s) + (c.failed ? ' <span class="reslabel">· last known</span>' : '');
-        renderInto(c.canvas, s, c.R, 170);
+        renderInto(c.canvas, s, c.R, 170, undefined, undefined, ntpSigned(curTarget));
       }
     }
     // renderStackChips renders (or, for a single-vantage target, clears) the #stackVantages
@@ -1308,7 +1315,7 @@
       // A custom drag-zoom range always shows absolute times (z.xlabels is already rangeLabels).
       // A fixed range honors the "absolute time" toggle, same as the grid/stack via renderInto.
       const xlabels = !z.custom && timeAbsolute && z.t0 != null ? rangeLabels(z.t0, z.t1) : z.xlabels;
-      Smoke.render(z.canvas, z.series, { height: 360, band: z.band, xlabels, t0: z.t0, t1: z.t1, overlays });
+      Smoke.render(z.canvas, z.series, { height: 360, band: z.band, xlabels, t0: z.t0, t1: z.t1, overlays, signed: ntpSigned(curTarget) });
     }
     // renderZoomChips renders (or clears) the #zoomVantages legend/selector from the
     // currently-open zoomState's byV (no refetch — mirrors renderStackChips).
