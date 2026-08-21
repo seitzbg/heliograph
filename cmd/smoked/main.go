@@ -39,17 +39,12 @@ import (
 	"github.com/seitzbg/heliograph/internal/store/pgstore"
 	"github.com/seitzbg/heliograph/internal/vantage"
 
-	// Register probe plugins (blank imports run their init() -> probe.Register).
-	_ "github.com/seitzbg/heliograph/internal/probe/dns"
-	_ "github.com/seitzbg/heliograph/internal/probe/fping"
-	_ "github.com/seitzbg/heliograph/internal/probe/httpprobe"
-	_ "github.com/seitzbg/heliograph/internal/probe/irttprobe"
-	// Named (not blank): its init() registers the "NTP" probe, and main wires
-	// its per-target offset/stratum accessor into the API (srv.NTPStat).
+	// Register every built-in probe via the shared list both binaries use, so the hub and the
+	// vantage agent can't drift apart (CODE_REVIEW M2).
+	_ "github.com/seitzbg/heliograph/internal/probe/allprobes"
+	// Named (not blank): main wires its per-target offset/stratum accessor into the API
+	// (srv.NTPStat). Registration itself comes via allprobes above.
 	ntpprobe "github.com/seitzbg/heliograph/internal/probe/ntpprobe"
-	_ "github.com/seitzbg/heliograph/internal/probe/pingprobe"
-	_ "github.com/seitzbg/heliograph/internal/probe/sshprobe"
-	_ "github.com/seitzbg/heliograph/internal/probe/tcpconnect"
 )
 
 // version is the smoked release version. Unset in an unversioned build (a plain `go build`

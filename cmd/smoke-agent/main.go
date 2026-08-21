@@ -24,15 +24,9 @@ import (
 	"github.com/seitzbg/heliograph/internal/agent"
 	"github.com/seitzbg/heliograph/internal/probe"
 
-	// Register probe plugins (blank imports run their init() -> probe.Register),
-	// so probe.New resolves every probe kind the hub might assign this agent.
-	_ "github.com/seitzbg/heliograph/internal/probe/dns"
-	_ "github.com/seitzbg/heliograph/internal/probe/fping"
-	_ "github.com/seitzbg/heliograph/internal/probe/httpprobe"
-	_ "github.com/seitzbg/heliograph/internal/probe/irttprobe"
-	_ "github.com/seitzbg/heliograph/internal/probe/pingprobe"
-	_ "github.com/seitzbg/heliograph/internal/probe/sshprobe"
-	_ "github.com/seitzbg/heliograph/internal/probe/tcpconnect"
+	// Register every probe plugin the hub might assign this agent, via the shared list both
+	// binaries use — so the hub and agent can't drift apart (CODE_REVIEW M2).
+	_ "github.com/seitzbg/heliograph/internal/probe/allprobes"
 )
 
 // version is the smoke-agent release version. Unset in an unversioned build (a plain `go build`
