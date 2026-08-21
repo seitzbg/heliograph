@@ -283,7 +283,8 @@ internal/
     httpprobe/   native HTTP TTFB probe (net/http + httptrace)
     sshprobe/    native SSH banner-timing probe
     irttprobe/   irtt(1) UDP round-trip/jitter wrapper (+ parser test)
-    ntpprobe/    native SNTP probe — RTT sample + clock offset/stratum registry (+ tests)
+    ntpprobe/    native SNTP probe — graphs RTT or signed clock offset (measure), stratum stat (+ tests)
+    allprobes/   blank-imports every probe so both binaries register the same set (+ parity test)
   sample/        median / loss / centered-smoke-array math (+ tests)
   scheduler/     parallel worker pool, per-target timeout, phase-aligned NextDelay (+ tests)
   config/        YAML target-tree loader + inheritance resolver (+ tests)

@@ -744,6 +744,15 @@
   function init() {
     const $ = (id) => document.getElementById(id);
     const fmt = (v, d) => (v == null || isNaN(v)) ? '--' : v.toFixed(d);
+    // fmtMs formats a millisecond median stat. Latency keeps one decimal (unchanged). A signed
+    // (offset) panel scales its decimals to the magnitude so a sub-0.1ms clock offset doesn't
+    // collapse to "0.0 ms" / "-0.0 ms" the way a fixed toFixed(1) does (L5).
+    const fmtMs = (v, signed) => {
+      if (v == null || isNaN(v)) return '--';
+      if (!signed) return v.toFixed(1);
+      const a = Math.abs(v);
+      return v.toFixed(a >= 1 ? 1 : a >= 0.1 ? 2 : 3);
+    };
     const enc = encodeURIComponent;
 
     // ---- data fetch for one range (raw series, or a server-windowed rollup band) ----
@@ -794,8 +803,9 @@
     function ntpSigned(name) { return metricByName.get(name) === 'offset'; }
     function metaHtml(s) {
       const st = Smoke.seriesStats(s); const lcls = st.lossAvg > 2 ? 'bad' : st.lossAvg > 0.5 ? 'warn' : '';
-      return '<span class="stat"><span class="k">median avg</span><span class="v">' + fmt(st.medAvg, 1) + ' ms</span></span>' +
-             '<span class="stat"><span class="k">median max</span><span class="v">' + fmt(st.medMax, 1) + ' ms</span></span>' +
+      const signed = ntpSigned(curTarget); // every metaHtml caller is the focused detail/zoom target
+      return '<span class="stat"><span class="k">median avg</span><span class="v">' + fmtMs(st.medAvg, signed) + ' ms</span></span>' +
+             '<span class="stat"><span class="k">median max</span><span class="v">' + fmtMs(st.medMax, signed) + ' ms</span></span>' +
              '<span class="stat"><span class="k">loss avg</span><span class="v ' + lcls + '">' + fmt(st.lossAvg, 2) + ' %</span></span>';
     }
 
@@ -982,7 +992,7 @@
     }
     function gridMeta(p, s) {
       const st = Smoke.seriesStats(s); const lcls = st.lossAvg > 2 ? 'bad' : st.lossAvg > 0.5 ? 'warn' : '';
-      p.meta.innerHTML = '<span class="stat"><span class="k">median</span><span class="v">' + fmt(st.medAvg, 1) + ' ms</span></span>' +
+      p.meta.innerHTML = '<span class="stat"><span class="k">median</span><span class="v">' + fmtMs(st.medAvg, ntpSigned(p.el.dataset.target)) + ' ms</span></span>' +
         '<span class="stat"><span class="k">loss</span><span class="v ' + lcls + '">' + fmt(st.lossAvg, 2) + ' %</span></span>' +
         ntpStatsHtml(p.el.dataset.target);
     }
