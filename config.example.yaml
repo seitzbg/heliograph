@@ -121,12 +121,18 @@ targets:
         localhost:
           host: 127.0.0.1
 
-    Time:
-      probe: NTP           # SNTP over UDP/123. `measure` picks what the smoke graph plots:
-      children:            #   rtt (default)  = query round-trip time, 0-based like any probe
-        pool.ntp.org:      #   offset         = the server's clock offset, a signed graph with a
-          host: pool.ntp.org  #                 zero baseline (the other value + stratum show as stats)
-        cloudflare:
-          title: Cloudflare NTP
-          host: time.cloudflare.com
-          params: { measure: offset }   # graph this server's clock offset instead of RTT
+    Time:                  # NTP servers (SNTP over UDP/123). `measure` picks the graphed value:
+      probe: NTP           #   rtt (default) = query round-trip time, 0-based like any probe
+      children:            #   offset        = the server's clock offset (signed, zero baseline;
+        local:             #                   the other value + stratum show as panel stats)
+          host: 127.0.0.1  # Point at YOUR NTP server (chrony/ntpd). Loopback is a safe default: it
+                           # queries nothing external, and reads as loss until you set a real host.
+        # Public NTP is opt-in, never a default: the NTP Pool ToS and vendor guidance forbid
+        # shipping pool.ntp.org as a default and require infrequent queries (the probe also backs
+        # off on a Kiss-o'-Death reply). To monitor a public server, uncomment and keep it gentle —
+        # one query per round:
+        # cloudflare:
+        #   title: Cloudflare NTP
+        #   host: time.cloudflare.com
+        #   pings: 1
+        #   params: { measure: offset }   # graph the clock offset instead of RTT
