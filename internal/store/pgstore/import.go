@@ -86,8 +86,8 @@ func (s *PGStore) importBatch(ctx context.Context, rows []ImportRow) (int64, err
 	batch := &pgx.Batch{}
 	for _, r := range rows {
 		batch.Queue(
-			`INSERT INTO samples (ts,target,probe,host,vantage,pings,loss,median_seconds,rtts_seconds,err,duration_ms)
-			 VALUES ($1,$2,$3,$4,'local',$5,$6,$7,'{}'::double precision[],NULL,NULL)
+			`INSERT INTO samples (ts,target,probe,host,vantage,pings,loss,median_seconds,rtts_seconds,err,duration_ms,metric)
+			 VALUES ($1,$2,$3,$4,'local',$5,$6,$7,'{}'::double precision[],NULL,NULL,'rtt')
 			 ON CONFLICT (target,vantage,ts) DO NOTHING`,
 			r.TS.UTC(), r.Target, r.Probe, r.Host, r.Pings, r.Loss, nanToNil(r.MedianSeconds))
 	}

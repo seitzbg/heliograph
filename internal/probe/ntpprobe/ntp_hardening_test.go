@@ -58,6 +58,50 @@ func compliantReply(stratum uint8, skew time.Duration) func(req []byte) []byte {
 	}
 }
 
+// The probe result carries the metric kind (rtt vs offset) it measured, derived from config —
+// present even when the round is fully lost, so downstream storage/serve can tag the row.
+func TestNTPResultCarriesMetricKind(t *testing.T) {
+	port := rawNTPServer(t, nil, compliantReply(2, time.Second))
+	p, _ := probe.New("NTP", nil)
+
+	off := probe.Target{Name: "k-off", Host: "127.0.0.1", Params: map[string]string{"port": strconv.Itoa(port), "measure": "offset"}}
+	if r, _ := p.Measure(context.Background(), off, 1); r.Kind != probe.MetricOffset {
+		t.Errorf("offset mode: Result.Kind = %q, want %q", r.Kind, probe.MetricOffset)
+	}
+	rtt := probe.Target{Name: "k-rtt", Host: "127.0.0.1", Params: map[string]string{"port": strconv.Itoa(port)}}
+	if r, _ := p.Measure(context.Background(), rtt, 1); r.Kind != probe.MetricRTT {
+		t.Errorf("rtt mode: Result.Kind = %q, want %q", r.Kind, probe.MetricRTT)
+	}
+	// Fully-lost offset round (nothing answers) must still report the configured kind.
+	lost := probe.Target{Name: "k-lost", Host: "127.0.0.1", Params: map[string]string{"port": "1", "measure": "offset"}}
+	if r, _ := p.Measure(context.Background(), lost, 1); r.Kind != probe.MetricOffset {
+		t.Errorf("lost offset round: Result.Kind = %q, want %q (kind is config-derived, not data-derived)", r.Kind, probe.MetricOffset)
+	}
+}
+
+// M3: a synchronized reply records the offset/stratum stat; if the SAME target later answers
+// unsynchronized (stratum 16), the stale "good clock" stat must be invalidated, not left visible.
+func TestNTPStatInvalidatedOnUnsync(t *testing.T) {
+	syncedPort := rawNTPServer(t, nil, compliantReply(2, time.Second))
+	p, _ := probe.New("NTP", nil)
+	synced := probe.Target{Name: "desync", Host: "127.0.0.1", Params: map[string]string{"port": strconv.Itoa(syncedPort)}}
+	if _, err := p.Measure(context.Background(), synced, 1); err != nil {
+		t.Fatalf("Measure(synced): %v", err)
+	}
+	if _, _, _, ok := LatestFor("desync"); !ok {
+		t.Fatal("expected an offset stat after a synchronized (stratum 2) reply")
+	}
+	// Same target name, now answering unsynchronized (stratum 16).
+	unsyncedPort := rawNTPServer(t, nil, compliantReply(16, time.Second))
+	unsynced := probe.Target{Name: "desync", Host: "127.0.0.1", Params: map[string]string{"port": strconv.Itoa(unsyncedPort)}}
+	if _, err := p.Measure(context.Background(), unsynced, 1); err != nil {
+		t.Fatalf("Measure(unsynced): %v", err)
+	}
+	if _, _, _, ok := LatestFor("desync"); ok {
+		t.Error("stale offset stat must be invalidated after an unsynchronized reply")
+	}
+}
+
 // M7: in offset mode, an unsynchronized reply (stratum 0 KoD or 16+) has no usable offset and
 // must NOT produce an offset sample — it is a lost sample this round.
 func TestNTPOffsetModeRejectsUnsynchronized(t *testing.T) {

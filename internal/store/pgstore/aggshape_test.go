@@ -37,7 +37,7 @@ func readAggregateOIDs(t *testing.T, s *PGStore) map[string]uint32 {
 func TestAggregateDefinitionCurrent(t *testing.T) {
 	hourly := `
 		SELECT time_bucket('01:00:00'::interval, samples.ts) AS bucket,
-		       samples.target, samples.vantage,
+		       samples.target, samples.vantage, samples.metric,
 		       avg(samples.median_seconds) AS median_avg,
 		       min(samples.median_seconds) AS median_min,
 		       max(samples.median_seconds) AS median_max,
@@ -47,7 +47,7 @@ func TestAggregateDefinitionCurrent(t *testing.T) {
 		       count(samples.median_seconds) AS median_rounds
 		FROM samples
 		GROUP BY (time_bucket('01:00:00'::interval, samples.ts)),
-		         samples.target, samples.vantage;`
+		         samples.target, samples.vantage, samples.metric;`
 	if !aggregateDefinitionCurrent(hourly, "hour") {
 		t.Fatal("current Timescale-style hourly definition was rejected")
 	}
@@ -57,12 +57,12 @@ func TestAggregateDefinitionCurrent(t *testing.T) {
 	}
 
 	daily := `
-		SELECT time_bucket('1 day', ts) AS bucket, target, vantage,
+		SELECT time_bucket('1 day', ts) AS bucket, target, vantage, metric,
 		       avg(median_seconds) AS median_avg, min(median_seconds) AS median_min,
 		       max(median_seconds) AS median_max,
 		       avg(loss::float / NULLIF(pings, 0)) AS loss_frac,
 		       count(*) AS rounds, count(median_seconds) AS median_rounds
-		FROM samples GROUP BY time_bucket('1 day', ts), target, vantage`
+		FROM samples GROUP BY time_bucket('1 day', ts), target, vantage, metric`
 	if !aggregateDefinitionCurrent(daily, "day") {
 		t.Fatal("current source-style daily definition was rejected")
 	}
@@ -74,11 +74,13 @@ func TestAggregateDefinitionCurrent(t *testing.T) {
 		"wrong median count":   strings.Replace(hourly, "count(samples.median_seconds) AS median_rounds", "count(*) AS median_rounds", 1),
 		"filtered rows":        strings.Replace(hourly, "FROM samples", "FROM samples WHERE samples.vantage = 'local'", 1),
 		"missing vantage group": strings.Replace(hourly,
-			"samples.target, samples.vantage;", "samples.target;", 1),
+			"samples.target, samples.vantage, samples.metric;", "samples.target, samples.metric;", 1),
+		"missing metric group": strings.Replace(hourly,
+			"samples.target, samples.vantage, samples.metric;", "samples.target, samples.vantage;", 1),
 		"target expression group": strings.Replace(hourly,
-			"samples.target, samples.vantage;", "lower(samples.target), samples.vantage;", 1),
+			"samples.target, samples.vantage, samples.metric;", "lower(samples.target), samples.vantage, samples.metric;", 1),
 		"extra grouping dimension": strings.Replace(hourly,
-			"samples.target, samples.vantage;", "samples.probe, samples.target, samples.vantage;", 1),
+			"samples.target, samples.vantage, samples.metric;", "samples.probe, samples.target, samples.vantage, samples.metric;", 1),
 	} {
 		t.Run(name, func(t *testing.T) {
 			if aggregateDefinitionCurrent(definition, "hour") {

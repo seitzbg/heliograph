@@ -21,6 +21,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/seitzbg/heliograph/internal/probe"
 	"github.com/seitzbg/heliograph/internal/scheduler"
 	"github.com/seitzbg/heliograph/internal/store"
 )
@@ -92,6 +93,13 @@ SELECT create_hypertable('samples', 'ts', if_not_exists => TRUE);
 ALTER TABLE samples ADD COLUMN IF NOT EXISTS vantage text NOT NULL DEFAULT 'local';
 CREATE UNIQUE INDEX IF NOT EXISTS samples_target_vantage_ts ON samples (target, vantage, ts);
 DROP INDEX IF EXISTS samples_target_ts;
+-- Tag each round with the metric its median/samples mean: 'rtt' (round-trip time; every probe
+-- but NTP-offset) or 'offset' (a signed clock offset). Older rows predate the distinction and
+-- carry no kind, so they backfill to 'rtt' — the only safe universal default (a pre-migration
+-- offset-mode NTP target's history is therefore treated as rtt and won't merge into the new
+-- offset series). New rows are tagged from the probe. A target keeps one metric per ts, so the
+-- (target,vantage,ts) identity is unchanged.
+ALTER TABLE samples ADD COLUMN IF NOT EXISTS metric text NOT NULL DEFAULT 'rtt';
 `
 
 func (s *PGStore) migrate(ctx context.Context) error {
@@ -135,6 +143,7 @@ var downsampleStmts = []string{
 	 SELECT time_bucket('1 hour', ts) AS bucket,
 	        target,
 	        vantage,
+	        metric,
 	        avg(median_seconds) AS median_avg,
 	        min(median_seconds) AS median_min,
 	        max(median_seconds) AS median_max,
@@ -142,7 +151,7 @@ var downsampleStmts = []string{
 	        count(*) AS rounds,
 	        count(median_seconds) AS median_rounds
 	 FROM samples
-	 GROUP BY bucket, target, vantage
+	 GROUP BY bucket, target, vantage, metric
 	 WITH NO DATA`,
 	`SELECT add_continuous_aggregate_policy('samples_hourly',
 	        start_offset => INTERVAL '3 days',
@@ -154,6 +163,7 @@ var downsampleStmts = []string{
 	 SELECT time_bucket('1 day', ts) AS bucket,
 	        target,
 	        vantage,
+	        metric,
 	        avg(median_seconds) AS median_avg,
 	        min(median_seconds) AS median_min,
 	        max(median_seconds) AS median_max,
@@ -161,7 +171,7 @@ var downsampleStmts = []string{
 	        count(*) AS rounds,
 	        count(median_seconds) AS median_rounds
 	 FROM samples
-	 GROUP BY bucket, target, vantage
+	 GROUP BY bucket, target, vantage, metric
 	 WITH NO DATA`,
 	// Refresh the trailing 30 days of daily buckets hourly, so each day is
 	// materialized well before the 30-day raw retention drops its source rows —
@@ -174,7 +184,7 @@ var downsampleStmts = []string{
 	`SELECT add_retention_policy('samples', INTERVAL '30 days', if_not_exists => TRUE)`,
 }
 
-const aggregateSchemaVersion = 1
+const aggregateSchemaVersion = 2
 
 type aggregateSpec struct {
 	name   string
@@ -192,6 +202,7 @@ var aggregateColumns = []struct {
 	{"bucket", "timestamp with time zone"},
 	{"target", "text"},
 	{"vantage", "text"},
+	{"metric", "text"},
 	{"median_avg", "double precision"},
 	{"median_min", "double precision"},
 	{"median_max", "double precision"},
@@ -462,7 +473,7 @@ func aggregateDefinitionCurrent(definition, bucket string) bool {
 	}
 	for _, literal := range buckets {
 		token := "time_bucket" + literal + ",ts"
-		wantSelect := "select" + token + "asbucket,target,vantage," +
+		wantSelect := "select" + token + "asbucket,target,vantage,metric," +
 			"avgmedian_secondsasmedian_avg," +
 			"minmedian_secondsasmedian_min," +
 			"maxmedian_secondsasmedian_max," +
@@ -470,7 +481,7 @@ func aggregateDefinitionCurrent(definition, bucket string) bool {
 			"count*asrounds," +
 			"countmedian_secondsasmedian_rounds" +
 			"fromsamples"
-		if selectPart == wantSelect && groupPart == token+",target,vantage" {
+		if selectPart == wantSelect && groupPart == token+",target,vantage,metric" {
 			return true
 		}
 	}
@@ -564,13 +575,13 @@ func buildBatch(outcomes []scheduler.Outcome) *pgx.Batch {
 		}
 		batch.Queue(
 			`INSERT INTO samples
-			   (ts, target, probe, host, vantage, pings, loss, median_seconds, rtts_seconds, err, duration_ms)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+			   (ts, target, probe, host, vantage, pings, loss, median_seconds, rtts_seconds, err, duration_ms, metric)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
 			 ON CONFLICT (target, vantage, ts) DO NOTHING`,
 			o.When.UTC(), o.Target.Name, o.ProbeName, o.Target.Host, store.VantageOf(o),
 			o.Computed.Pings, o.Computed.Loss, nanToNil(o.Computed.Median),
 			centeredToDB(o.Computed.Centered), errText,
-			float64(o.Duration.Microseconds())/1000.0,
+			float64(o.Duration.Microseconds())/1000.0, store.MetricOf(o),
 		)
 	}
 	return batch
@@ -667,7 +678,7 @@ func (s *PGStore) Keys() ([]string, error) {
 // Agent-ingested rounds from other vantages are reached via LatestAll(vantage).
 func (s *PGStore) Latest(key string) (scheduler.Outcome, bool) {
 	row := s.pool.QueryRow(s.ctx,
-		`SELECT ts, target, probe, host, vantage, pings, loss, median_seconds, rtts_seconds, err, duration_ms
+		`SELECT ts, target, probe, host, vantage, pings, loss, median_seconds, rtts_seconds, err, duration_ms, metric
 		   FROM samples WHERE target=$1 AND vantage=$2 ORDER BY ts DESC LIMIT 1`, key, store.DefaultVantage)
 	o, err := scanOutcome(row)
 	if err != nil {
@@ -690,7 +701,7 @@ func (s *PGStore) History(key string) ([]scheduler.Outcome, error) {
 // so ?vantage=nyc returns nyc's recent rounds rather than local (CODE_REVIEW #7 / P2-7).
 func (s *PGStore) HistoryVantage(ctx context.Context, target, vantage string) ([]scheduler.Outcome, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT ts, target, probe, host, vantage, pings, loss, median_seconds, rtts_seconds, err, duration_ms
+		`SELECT ts, target, probe, host, vantage, pings, loss, median_seconds, rtts_seconds, err, duration_ms, metric
 		   FROM samples WHERE target=$1 AND vantage=$2 ORDER BY ts DESC LIMIT $3`, target, store.VantageOrDefault(vantage), s.histCap)
 	if err != nil {
 		s.onErr(err)
@@ -731,10 +742,11 @@ func scanOutcome(row scannable) (scheduler.Outcome, error) {
 	)
 	if err := row.Scan(
 		&o.When, &o.Target.Name, &o.ProbeName, &o.Target.Host, &o.Vantage,
-		&o.Computed.Pings, &o.Computed.Loss, &median, &centered, &errText, &durationMs,
+		&o.Computed.Pings, &o.Computed.Loss, &median, &centered, &errText, &durationMs, &o.Metric,
 	); err != nil {
 		return o, err
 	}
+	o.Metric = probe.NormalizeMetric(o.Metric)
 	if durationMs != nil {
 		o.Duration = msToDuration(*durationMs)
 	}
@@ -787,7 +799,7 @@ func (s *PGStore) Rollup(ctx context.Context, target, vantage, resolution string
 	// until means "through now", so a long-range view doesn't transfer every retained
 	// bucket and a drag-zoom fetches only its sub-range. Placeholders are numbered from
 	// the args length so either bound can be absent.
-	q := `SELECT bucket, median_avg, median_min, median_max, loss_frac, rounds, median_rounds
+	q := `SELECT bucket, median_avg, median_min, median_max, loss_frac, rounds, median_rounds, metric
 	        FROM ` + view + ` WHERE target=$1 AND vantage=$2`
 	args := []any{target, store.VantageOrDefault(vantage)}
 	if !since.IsZero() {
@@ -816,9 +828,10 @@ func (s *PGStore) Rollup(ctx context.Context, target, vantage, resolution string
 			p                      store.RollupPoint
 			mAvg, mMin, mMax, loss *float64
 		)
-		if err := rows.Scan(&p.Bucket, &mAvg, &mMin, &mMax, &loss, &p.Rounds, &p.MedianRounds); err != nil {
+		if err := rows.Scan(&p.Bucket, &mAvg, &mMin, &mMax, &loss, &p.Rounds, &p.MedianRounds, &p.Metric); err != nil {
 			return nil, err
 		}
+		p.Metric = probe.NormalizeMetric(p.Metric)
 		p.MedianAvg = nanIfNil(mAvg)
 		p.MedianMin = nanIfNil(mMin)
 		p.MedianMax = nanIfNil(mMax)
@@ -882,7 +895,7 @@ var maxRangeRounds = 150_000
 // whole window instead of just the last histCap rounds.
 func (s *PGStore) HistorySince(ctx context.Context, target, vantage string, cutoff time.Time) ([]scheduler.Outcome, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT ts, target, probe, host, vantage, pings, loss, median_seconds, rtts_seconds, err, duration_ms
+		`SELECT ts, target, probe, host, vantage, pings, loss, median_seconds, rtts_seconds, err, duration_ms, metric
 		   FROM samples WHERE target=$1 AND vantage=$2 AND ts >= $3 ORDER BY ts DESC LIMIT $4`,
 		target, store.VantageOrDefault(vantage), cutoff.UTC(), maxRangeRounds)
 	if err != nil {
@@ -916,7 +929,7 @@ func (s *PGStore) HistorySince(ctx context.Context, target, vantage string, cuto
 // row-cap backstop as HistorySince.
 func (s *PGStore) HistoryBetween(ctx context.Context, target, vantage string, from, to time.Time) ([]scheduler.Outcome, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT ts, target, probe, host, vantage, pings, loss, median_seconds, rtts_seconds, err, duration_ms
+		`SELECT ts, target, probe, host, vantage, pings, loss, median_seconds, rtts_seconds, err, duration_ms, metric
 		   FROM samples WHERE target=$1 AND vantage=$2 AND ts >= $3 AND ts <= $4 ORDER BY ts DESC LIMIT $5`,
 		target, store.VantageOrDefault(vantage), from.UTC(), to.UTC(), maxRangeRounds)
 	if err != nil {
@@ -950,7 +963,7 @@ func (s *PGStore) HistoryBetween(ctx context.Context, target, vantage string, fr
 // success.
 func (s *PGStore) LatestAll(vantage string) (map[string]scheduler.Outcome, error) {
 	rows, err := s.pool.Query(s.ctx,
-		`SELECT DISTINCT ON (target) ts, target, probe, host, vantage, pings, loss, median_seconds, rtts_seconds, err, duration_ms
+		`SELECT DISTINCT ON (target) ts, target, probe, host, vantage, pings, loss, median_seconds, rtts_seconds, err, duration_ms, metric
 		   FROM samples WHERE vantage=$1 ORDER BY target, ts DESC`, store.VantageOrDefault(vantage))
 	if err != nil {
 		s.onErr(err)
@@ -1076,10 +1089,10 @@ func (s *PGStore) SeriesAll(ctx context.Context, vantage string, targets []strin
 	// (CODE_REVIEW L3).
 	fetch := perTarget + 1
 	rows, err := s.pool.Query(ctx,
-		`SELECT s.ts, s.target, s.probe, s.host, s.vantage, s.pings, s.loss, s.median_seconds, s.rtts_seconds, s.err, s.duration_ms
+		`SELECT s.ts, s.target, s.probe, s.host, s.vantage, s.pings, s.loss, s.median_seconds, s.rtts_seconds, s.err, s.duration_ms, s.metric
 		   FROM unnest($3::text[]) AS t(target)
 		   CROSS JOIN LATERAL (
-		         SELECT ts, target, probe, host, vantage, pings, loss, median_seconds, rtts_seconds, err, duration_ms
+		         SELECT ts, target, probe, host, vantage, pings, loss, median_seconds, rtts_seconds, err, duration_ms, metric
 		           FROM samples
 		          WHERE target = t.target AND vantage = $1 AND ts > $2
 		          ORDER BY ts DESC

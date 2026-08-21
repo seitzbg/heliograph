@@ -24,10 +24,31 @@ type Target struct {
 	Params map[string]string // per-target overrides (port, packetsize, ...)
 }
 
-// Result is what a probe returns for one round: the received RTTs in seconds.
-// Order does not matter; lost pings are simply absent.
+// MetricRTT and MetricOffset name what a probe's Samples mean: round-trip time (the default for
+// every probe) or a signed clock offset (NTP measure=offset). The kind is threaded from the probe
+// onto the Outcome and stored per row, so a target that switches metric doesn't merge two meanings
+// into one series, and RTT-only consumers (latency alerts, the RTT Prometheus gauge, the
+// latency/jitter charts) don't misread a signed offset as latency.
+const (
+	MetricRTT    = "rtt"
+	MetricOffset = "offset"
+)
+
+// NormalizeMetric maps a raw kind (from a probe result, config, or the wire) to a known metric,
+// defaulting anything unrecognized — including "" — to MetricRTT.
+func NormalizeMetric(kind string) string {
+	if kind == MetricOffset {
+		return MetricOffset
+	}
+	return MetricRTT
+}
+
+// Result is what a probe returns for one round: the received samples in seconds. Order does not
+// matter; lost pings are simply absent. Kind names what the samples mean — MetricRTT when empty
+// (every probe but NTP-offset), MetricOffset for a signed clock-offset series.
 type Result struct {
 	Samples []float64
+	Kind    string
 }
 
 // VarSpec describes one config variable a probe accepts. This is how each probe

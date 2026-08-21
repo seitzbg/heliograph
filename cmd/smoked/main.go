@@ -933,7 +933,7 @@ func (rt *runtime) eval(out []scheduler.Outcome) {
 			continue
 		}
 		events := rt.engine.Evaluate(o.Target.Name, store.VantageOf(o), names,
-			o.Computed.LossFraction()*100, o.Computed.Median, o.When)
+			o.Computed.LossFraction()*100, alertRTT(o), o.When)
 		rt.engine.Dispatch(events, rt.alerteeByTarget[o.Target.Name]...)
 	}
 }
@@ -1124,9 +1124,21 @@ func applyConfig(cfgStore *configstore.Store, current *atomic.Pointer[runtime], 
 // warmMeta is the current target identity used to decide which stored history may seed a
 // target's alert window: only rounds matching the current host+probe and cadence count.
 type warmMeta struct {
-	host  string
-	probe string
-	step  time.Duration
+	host   string
+	probe  string
+	step   time.Duration
+	metric string // the target's current metric; a round of a different kind breaks the suffix
+}
+
+// alertRTT is the value a round contributes to the RTT/latency alert window: its median, but only
+// for an rtt-metric round. A signed clock offset (offset-mode NTP) is not latency, so it must never
+// trip a CheckLatency/type:rtt matcher — it contributes NaN, which those matchers treat as
+// "unknown, hold". Loss alerts are unaffected (loss is passed separately and is metric-agnostic).
+func alertRTT(o scheduler.Outcome) float64 {
+	if store.MetricOf(o) == probe.MetricOffset {
+		return math.NaN()
+	}
+	return o.Computed.Median
 }
 
 // warmStartLookback bounds how far back a remote vantage's warm-start history read goes.
@@ -1145,7 +1157,7 @@ func warmStartAlerts(ctx context.Context, engine *alert.Engine, monitors []model
 		if len(m.Alerts) == 0 {
 			continue
 		}
-		meta := warmMeta{host: m.Host, probe: m.ProbeKind, step: m.Step}
+		meta := warmMeta{host: m.Host, probe: m.ProbeKind, step: m.Step, metric: probe.NormalizeMetric(m.Params["measure"])}
 		for _, v := range m.Vantages {
 			var hist []scheduler.Outcome
 			var err error
@@ -1170,7 +1182,7 @@ func warmStartAlerts(ctx context.Context, engine *alert.Engine, monitors []model
 			rtt := make([]float64, len(suffix))
 			for i, o := range suffix {
 				loss[i] = o.Computed.LossFraction() * 100
-				rtt[i] = o.Computed.Median // NaN for a lost round
+				rtt[i] = alertRTT(o) // median for an rtt round; NaN for a lost or offset round
 			}
 			engine.SeedWindow(m.Name, v, m.Alerts, loss, rtt)
 		}
@@ -1190,14 +1202,15 @@ func recentContiguous(hist []scheduler.Outcome, m warmMeta, now time.Time) []sch
 	if gap <= 0 {
 		gap = 2 * time.Minute // unknown cadence: a conservative fallback
 	}
+	metric := probe.NormalizeMetric(m.metric)
 	last := hist[len(hist)-1] // History returns oldest->newest
-	if now.Sub(last.When) > gap || last.Target.Host != m.host || last.ProbeName != m.probe {
+	if now.Sub(last.When) > gap || last.Target.Host != m.host || last.ProbeName != m.probe || store.MetricOf(last) != metric {
 		return nil
 	}
 	start := len(hist) - 1
 	for start > 0 {
 		cur, prev := hist[start], hist[start-1]
-		if prev.Target.Host != m.host || prev.ProbeName != m.probe || cur.When.Sub(prev.When) > gap {
+		if prev.Target.Host != m.host || prev.ProbeName != m.probe || store.MetricOf(prev) != metric || cur.When.Sub(prev.When) > gap {
 			break
 		}
 		start--

@@ -84,7 +84,7 @@ func (p *ntpProbe) Measure(ctx context.Context, t probe.Target, pings int) (prob
 	perPing, interDelay := probe.PerPingBudgetWithDelay(ctx, pings, p.interval)
 	for i := 0; i < pings; i++ {
 		if err := ctx.Err(); err != nil {
-			return probe.Result{Samples: samples}, err
+			return probe.Result{Samples: samples, Kind: measure}, err
 		}
 		actx, cancel := probe.AttemptContext(ctx, perPing)
 		rtt, offset, hasOffset, stratum, ok := p.exchange(actx, server, version)
@@ -93,7 +93,9 @@ func (p *ntpProbe) Measure(ctx context.Context, t probe.Target, pings int) (prob
 			if stratum == 0 {
 				// Kiss-o'-Death: the server is explicitly telling the client to stop (RFC 4330
 				// §8). Back off — send no more this round — and don't count it as a usable
-				// sample; the missing samples read as loss, which is the honest signal.
+				// sample; the missing samples read as loss, which is the honest signal. Its clock
+				// is unusable, so any previously recorded offset/stratum stat is now stale.
+				latestReg.clear(t.Name)
 				break
 			}
 			// Offset is meaningful only from a synchronized server (stratum 1..15) with usable,
@@ -111,6 +113,10 @@ func (p *ntpProbe) Measure(ctx context.Context, t probe.Target, pings int) (prob
 			}
 			if synced {
 				latestReg.set(t.Name, offset.Seconds(), stratum, measure)
+			} else {
+				// A received-but-unsynchronized reply means the previously recorded offset/stratum
+				// is no longer valid — clear it rather than leave a stale "good clock" stat (M3).
+				latestReg.clear(t.Name)
 			}
 		}
 		// Pace the round: honor the inter-query delay whether or not the reply was usable, so a
@@ -119,12 +125,12 @@ func (p *ntpProbe) Measure(ctx context.Context, t probe.Target, pings int) (prob
 		if interDelay > 0 && i < pings-1 {
 			select {
 			case <-ctx.Done():
-				return probe.Result{Samples: samples}, ctx.Err()
+				return probe.Result{Samples: samples, Kind: measure}, ctx.Err()
 			case <-time.After(interDelay):
 			}
 		}
 	}
-	return probe.Result{Samples: samples}, nil
+	return probe.Result{Samples: samples, Kind: measure}, nil
 }
 
 // exchange performs one SNTP client/server round trip. It returns the round-trip time,
@@ -239,6 +245,14 @@ type registry struct {
 func (r *registry) set(target string, offsetSec float64, stratum uint8, measure string) {
 	r.mu.Lock()
 	r.m[target] = ntpLatest{offsetSec: offsetSec, stratum: stratum, measure: measure}
+	r.mu.Unlock()
+}
+
+// clear drops a target's latest offset/stratum so a server that has gone unsynchronized (or a
+// removed target) stops showing a stale "good clock" reading. A no-op if nothing was recorded.
+func (r *registry) clear(target string) {
+	r.mu.Lock()
+	delete(r.m, target)
 	r.mu.Unlock()
 }
 
