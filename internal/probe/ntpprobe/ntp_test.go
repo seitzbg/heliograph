@@ -36,8 +36,9 @@ func ntpServer(t *testing.T, stratum uint8, skew time.Duration) int {
 			resp := make([]byte, packetSize)
 			resp[0] = byte(4<<3) | 0x04 // LI=0, VN=4, Mode=4 (server)
 			resp[1] = stratum
-			putNTP(resp[32:40], now) // receive timestamp (t2)
-			putNTP(resp[40:48], now) // transmit timestamp (t3)
+			copy(resp[24:32], buf[40:48]) // echo client transmit ts as originate (t1) — a compliant server
+			putNTP(resp[32:40], now)      // receive timestamp (t2)
+			putNTP(resp[40:48], now)      // transmit timestamp (t3)
 			_, _ = pc.WriteTo(resp, addr)
 		}
 	}()

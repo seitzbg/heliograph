@@ -10,9 +10,11 @@
 package ntpprobe
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"net"
+	"strconv"
 	"sync"
 	"time"
 
@@ -28,18 +30,20 @@ const ntpUnixEpochDelta = 2208988800
 const packetSize = 48
 
 type ntpProbe struct {
-	port    string
-	version uint8  // NTP version written into the request (3 or 4)
-	measure string // "rtt" (graph query round-trip) or "offset" (graph clock offset)
+	port     string
+	version  uint8         // NTP version written into the request (3 or 4)
+	measure  string        // "rtt" (graph query round-trip) or "offset" (graph clock offset)
+	interval time.Duration // min gap between the N queries in a round (anti-burst)
 }
 
 func init() {
 	probe.Register("NTP", "NTP query", map[string]probe.VarSpec{
-		"port":    {Doc: "NTP server port", Default: "123", Scope: probe.TargetVar, Kind: probe.KindPort},
-		"version": {Doc: "NTP protocol version to send", Default: "4", Scope: probe.ProbeVar, Enum: []string{"3", "4"}},
-		"measure": {Doc: "value graphed as the smoke series: rtt (query round-trip) or offset (clock offset, signed)", Default: "rtt", Scope: probe.TargetVar, Enum: []string{"rtt", "offset"}},
+		"port":        {Doc: "NTP server port", Default: "123", Scope: probe.TargetVar, Kind: probe.KindPort},
+		"version":     {Doc: "NTP protocol version to send", Default: "4", Scope: probe.ProbeVar, Enum: []string{"3", "4"}},
+		"measure":     {Doc: "value graphed as the smoke series: rtt (query round-trip) or offset (clock offset, signed)", Default: "rtt", Scope: probe.TargetVar, Enum: []string{"rtt", "offset"}},
+		"interval_ms": {Doc: "milliseconds between the N queries in a round (paces the burst; RFC 4330 / NTP Pool ToS)", Default: "100", Scope: probe.ProbeVar, Kind: probe.KindPositiveInt},
 	}, func(cfg map[string]string) (probe.Probe, error) {
-		p := &ntpProbe{port: "123", version: 4, measure: "rtt"}
+		p := &ntpProbe{port: "123", version: 4, measure: "rtt", interval: 100 * time.Millisecond}
 		if v := cfg["port"]; v != "" {
 			p.port = v
 		}
@@ -48,6 +52,11 @@ func init() {
 		}
 		if cfg["measure"] == "offset" {
 			p.measure = "offset"
+		}
+		if v := cfg["interval_ms"]; v != "" {
+			if ms, err := strconv.Atoi(v); err == nil {
+				p.interval = time.Duration(ms) * time.Millisecond
+			}
 		}
 		return p, nil
 	})
@@ -68,9 +77,11 @@ func (p *ntpProbe) Measure(ctx context.Context, t probe.Target, pings int) (prob
 	wantOffset := measure == "offset"
 
 	var samples []float64
-	// Fair per-ping share of the round budget so an unresponsive server is queried all
-	// `pings` times instead of the first request eating the whole round (correct loss).
-	perPing := probe.PerPingBudget(ctx, pings)
+	// Fair per-ping share of the round budget so an unresponsive server is queried all `pings`
+	// times instead of the first request eating the whole round (correct loss). The inter-query
+	// delay is reserved from the budget before dividing (it sleeps outside the per-attempt
+	// context), so a large interval_ms can't starve the attempts — see PerPingBudgetWithDelay.
+	perPing, interDelay := probe.PerPingBudgetWithDelay(ctx, pings, p.interval)
 	for i := 0; i < pings; i++ {
 		if err := ctx.Err(); err != nil {
 			return probe.Result{Samples: samples}, err
@@ -78,23 +89,39 @@ func (p *ntpProbe) Measure(ctx context.Context, t probe.Target, pings int) (prob
 		actx, cancel := probe.AttemptContext(ctx, perPing)
 		rtt, offset, hasOffset, stratum, ok := p.exchange(actx, server, version)
 		cancel()
-		if !ok {
-			continue // no/invalid reply => lost
-		}
-		if wantOffset {
-			// Graph the clock offset. A reply whose timestamps we couldn't read (hasOffset
-			// false) yields no usable offset -> counts as a lost sample this round.
-			if hasOffset {
-				samples = append(samples, offset.Seconds())
+		if ok {
+			if stratum == 0 {
+				// Kiss-o'-Death: the server is explicitly telling the client to stop (RFC 4330
+				// §8). Back off — send no more this round — and don't count it as a usable
+				// sample; the missing samples read as loss, which is the honest signal.
+				break
 			}
-		} else {
-			samples = append(samples, rtt.Seconds())
+			// Offset is meaningful only from a synchronized server (stratum 1..15) with usable,
+			// origin-verified timestamps; stratum 16+ (unsynchronized) is reachable but carries
+			// no usable clock offset.
+			synced := hasOffset && stratum >= 1 && stratum <= 15
+			if wantOffset {
+				// Graph the clock offset. Only a synchronized reply yields one; anything else
+				// (unsynchronized, unverifiable timestamps) is a lost sample this round.
+				if synced {
+					samples = append(samples, offset.Seconds())
+				}
+			} else {
+				samples = append(samples, rtt.Seconds())
+			}
+			if synced {
+				latestReg.set(t.Name, offset.Seconds(), stratum, measure)
+			}
 		}
-		// Record the offset + stratum for the panel stats. Offset is meaningful only from a
-		// synchronized server (stratum 1..15); stratum 0 (kiss-o'-death) and 16+ (unsynchronized)
-		// still count as a reachable sample but carry no usable offset.
-		if hasOffset && stratum >= 1 && stratum <= 15 {
-			latestReg.set(t.Name, offset.Seconds(), stratum, measure)
+		// Pace the round: honor the inter-query delay whether or not the reply was usable, so a
+		// responsive server is not hit with a back-to-back burst. Skipped after the final ping
+		// (and after a KoD, which breaks above).
+		if interDelay > 0 && i < pings-1 {
+			select {
+			case <-ctx.Done():
+				return probe.Result{Samples: samples}, ctx.Err()
+			case <-time.After(interDelay):
+			}
 		}
 	}
 	return probe.Result{Samples: samples}, nil
@@ -119,6 +146,11 @@ func (p *ntpProbe) exchange(ctx context.Context, server string, version uint8) (
 	req[0] = byte(version<<3) | 0x03
 
 	t1 := time.Now()
+	// Stamp the request's transmit timestamp (bytes 40..47). A compliant server copies it back as
+	// its originate timestamp (bytes 24..31); checking that echo ties the reply to THIS request
+	// and rejects stray/replayed/spoofed packets (RFC 5905 client checks). Its byte value is the
+	// association nonce — the offset math below uses t1 as a local time.Time, independent of this.
+	putNTPTime(req[40:48], t1)
 	if _, err := conn.Write(req); err != nil {
 		return 0, 0, false, 0, false
 	}
@@ -149,13 +181,26 @@ func (p *ntpProbe) exchange(ctx context.Context, server string, version uint8) (
 			rtt = rawRTT - think
 		}
 	}
-	// offset = ((t2 - t1) + (t3 - t4)) / 2  (RFC 4330). Computable only when the server set its
-	// timestamps; hasOffset stays false for a zeroed t2/t3 so the caller neither graphs nor records it.
-	if !t2.IsZero() && !t3.IsZero() {
+	// offset = ((t2 - t1) + (t3 - t4)) / 2  (RFC 4330). Publish it (hasOffset) only for a reply
+	// we can trust as a genuine clock reading: the origin must echo our transmit timestamp, and
+	// the server timestamps must be present and sanely ordered (t3 >= t2). A zeroed, reversed, or
+	// unverifiable reply still yields an RTT reachability sample but no clock offset.
+	originOK := bytes.Equal(resp[24:32], req[40:48])
+	if originOK && !t2.IsZero() && !t3.IsZero() && !t3.Before(t2) {
 		offset = (t2.Sub(t1) + t3.Sub(t4)) / 2
 		hasOffset = true
 	}
 	return rtt, offset, hasOffset, stratum, true
+}
+
+// putNTPTime writes t as an 8-byte NTP timestamp (seconds since 1900 + a 32-bit fraction), the
+// inverse of ntpTime. Used to stamp the request's transmit timestamp so the server echoes it
+// back as the originate timestamp for the client origin check in exchange.
+func putNTPTime(b []byte, t time.Time) {
+	secs := uint32(t.Unix() + ntpUnixEpochDelta)
+	frac := uint32((int64(t.Nanosecond()) << 32) / 1e9)
+	binary.BigEndian.PutUint32(b[0:4], secs)
+	binary.BigEndian.PutUint32(b[4:8], frac)
 }
 
 // ntpTime decodes an 8-byte NTP timestamp (seconds since 1900 + a 32-bit fraction) into a
