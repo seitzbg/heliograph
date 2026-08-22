@@ -2,11 +2,13 @@
 // measures how long an NTP server takes to answer a client request, and — as a
 // side channel — the server's clock offset and stratum. Registered as "NTP".
 //
-// The round-trip time of each SNTPv4 client/server exchange is the sample fed to
-// the normal RTT+loss pipeline, so an NTP target draws an ordinary smoke graph.
-// Clock offset and stratum are NOT latencies, so they do not ride the sample
-// pipeline; they are recorded per target in a small latest-value registry that the
-// dashboard reads to show them as stats beside median/loss. See latestReg below.
+// In the default `measure: rtt` mode the round-trip time of each SNTPv4 exchange is
+// the sample fed to the normal sample+loss pipeline, so an NTP target draws an
+// ordinary smoke graph. In `measure: offset` mode the signed clock offset is the
+// sample instead, drawing a zero-baselined signed graph through the same pipeline.
+// Stratum, and the companion latest offset/stratum stat the dashboard shows beside
+// median/loss, are not latencies and stay out of that pipeline entirely — they are
+// recorded per target in a small latest-value registry. See latestReg below.
 package ntpprobe
 
 import (
@@ -232,10 +234,12 @@ func ntpTime(b []byte) time.Time {
 
 // --- latest-offset registry -------------------------------------------------
 //
-// Offset/stratum are not latencies, so they never enter the RTT sample pipeline. Instead the
-// probe records the most recent value per target here, and the API reads it via LatestFor to show
-// offset + stratum as dashboard stats. Package-level (not per-instance) so it survives a config
-// reload that rebuilds the probe instance, and so a single accessor wired once in main stays valid.
+// This holds the companion latest offset/stratum STAT the dashboard shows beside median/loss —
+// distinct from the graphed series. In `measure: offset` mode the offset is also fed through the
+// sample pipeline as the graphed series (see Measure); the latest-stat copy kept here, and the
+// stratum, never ride that pipeline. The API reads this via LatestFor. Package-level (not
+// per-instance) so it survives a config reload that rebuilds the probe instance, and so a single
+// accessor wired once in main stays valid.
 
 type ntpLatest struct {
 	offsetSec float64
