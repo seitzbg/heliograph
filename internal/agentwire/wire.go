@@ -47,6 +47,14 @@ type RoundReport struct {
 	// drops the round if they differ; empty is accepted transitionally (old agent).
 	Fingerprint string  `json:"fingerprint,omitempty"`
 	DurationMs  float64 `json:"duration_ms,omitempty"`
+	// NTPOffsetMs and Stratum carry the NTP probe's companion clock stat — the latest offset
+	// (milliseconds) and stratum for this target as measured at this vantage. The graphed series
+	// still travels in RTTs (round-trip, or a signed offset in offset mode); these ride alongside
+	// so the hub can show a remote NTP server's clock stat per vantage. Both are pointers and
+	// omitempty: a non-NTP round, an unsynchronized clock, or a pre-stat agent omits them, and the
+	// hub then shows no clock stat for that vantage rather than a stale or wrong one (CODE_REVIEW M2).
+	NTPOffsetMs *float64 `json:"ntp_offset_ms,omitempty"`
+	Stratum     *int     `json:"stratum,omitempty"`
 }
 
 // ResultsRequest is the request body for POST /agent/v1/results.

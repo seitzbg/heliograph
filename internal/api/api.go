@@ -94,8 +94,13 @@ type Server struct {
 	// ("rtt"/"offset") measured for an NTP target (ok=false for non-NTP targets or before the first
 	// measurement). /api/targets surfaces it so the dashboard shows offset + stratum as stats (and,
 	// on an offset-graphing panel, hides the now-redundant offset stat). nil = the fields are omitted
-	// (no NTP probe registered / pure API tests). Wired to ntpprobe.LatestFor in main.
+	// (no NTP probe registered / pure API tests). Wired to ntpprobe.LatestFor in main. NTPStat is the
+	// HUB's own (local-vantage) reading; a remote vantage's reading comes from remoteNTP instead.
 	NTPStat func(target string) (offsetSec float64, stratum uint8, measure string, ok bool)
+	// remoteNTP holds each remote vantage's latest NTP clock stat, fed by agent RoundReports on
+	// ingest and read by /api/targets for a non-local vantage. Keyed by (vantage, target) so a
+	// remote reading is never attributed to the hub or another vantage (CODE_REVIEW M2/M3).
+	remoteNTP remoteNTPStats
 	// Configured, if set, returns the full configured target catalog (all vantages), so
 	// /api/targets lists a target even when it has no stored row for the requested vantage
 	// yet — e.g. a remote-only target the hub never probes locally (CODE_REVIEW #3 / P1-3).
@@ -410,12 +415,12 @@ func (srv *Server) targets(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	// srv.NTPStat is the hub's own clock-offset registry, so it is only valid for the local
-	// vantage. For a remote vantage, pass no registry: a remote NTP outcome must never be
-	// decorated with the hub's local clock reading (M3).
+	// The clock-stat source depends on the vantage: the hub's own registry (srv.NTPStat) for the
+	// local vantage, the per-vantage store fed by RoundReports for a remote one. Never cross the
+	// two — a remote NTP panel must show that vantage's server, not the hub's local reading (M2/M3).
 	ntpStat := srv.NTPStat
 	if v != store.DefaultVantage {
-		ntpStat = nil
+		ntpStat = srv.remoteNTP.lookupFor(v)
 	}
 	latest, err := srv.activeLatest(v)
 	if err != nil {

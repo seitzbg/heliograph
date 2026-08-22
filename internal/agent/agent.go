@@ -29,6 +29,13 @@ type Options struct {
 	FlushMax  int // max rounds per push
 
 	SpoolDir string // on-disk store-and-forward directory ("" = in-memory only)
+
+	// NTPStat, if set, returns the NTP probe's latest clock stat (offset seconds, stratum,
+	// graphed measure) for a target measured in this process, or ok=false when there is none.
+	// The binary wires it to ntpprobe.LatestFor; each NTP round then carries its companion
+	// offset/stratum to the hub so a remote vantage's clock stat is visible there (CODE_REVIEW M2).
+	// Left nil in tests and non-NTP setups — the round then omits the stat.
+	NTPStat func(target string) (offsetSec float64, stratum uint8, measure string, ok bool)
 }
 
 // Validate rejects an Options that would make an unusable or dangerous agent — the
@@ -196,7 +203,7 @@ func (a *Agent) measureLoop(ctx context.Context) {
 		if len(due) > 0 {
 			disp.Go(ctx, due,
 				func(o scheduler.Outcome) {
-					a.buf.add(reportFromOutcome(o))
+					a.buf.add(reportFromOutcome(o, a.opts.NTPStat))
 				},
 				func(bs scheduler.BatchStat) {
 					slog.Debug("measure batch complete", "targets", bs.Ran, "errors", bs.Errs,
@@ -421,13 +428,15 @@ func (a *Agent) finalFlush(ttl time.Duration) {
 // pipeline's result) into the wire RoundReport sent to the hub. The hub
 // re-derives loss/median/centered via sample.Compute from RTTs, so only the
 // raw received samples (Computed.Sorted) travel over the wire, not the
-// agent's own derived stats.
-func reportFromOutcome(o scheduler.Outcome) agentwire.RoundReport {
+// agent's own derived stats. ntpStat, when set, supplies the NTP companion
+// clock stat for an NTP outcome; nil (or a non-NTP outcome, or an
+// unsynchronized clock) leaves the offset/stratum fields absent.
+func reportFromOutcome(o scheduler.Outcome, ntpStat func(string) (float64, uint8, string, bool)) agentwire.RoundReport {
 	errStr := ""
 	if o.Err != nil {
 		errStr = o.Err.Error()
 	}
-	return agentwire.RoundReport{
+	rr := agentwire.RoundReport{
 		Target:      o.Target.Name,
 		TS:          o.When.UTC().Format(time.RFC3339Nano),
 		Pings:       o.Computed.Pings,
@@ -436,4 +445,17 @@ func reportFromOutcome(o scheduler.Outcome) agentwire.RoundReport {
 		Fingerprint: o.Fingerprint,
 		DurationMs:  float64(o.Duration.Microseconds()) / 1000,
 	}
+	// Attach the NTP companion clock stat for an NTP outcome, read from the probe's own
+	// latest-value registry in this process. Only a synchronized round has one; a non-NTP
+	// outcome or an unsynchronized/unreachable clock leaves the fields nil, so the hub shows
+	// no stat for this vantage rather than a stale one (M2). measure is the hub's to decide
+	// (it knows the assignment's metric), so it is not sent.
+	if ntpStat != nil && o.ProbeName == "NTP" {
+		if offSec, stratum, _, ok := ntpStat(o.Target.Name); ok {
+			offMs := offSec * 1000
+			st := int(stratum)
+			rr.NTPOffsetMs, rr.Stratum = &offMs, &st
+		}
+	}
+	return rr
 }
