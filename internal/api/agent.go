@@ -95,18 +95,11 @@ func validSamples(rtts []float64, durationMs float64, signed bool) bool {
 	return true
 }
 
-// assignmentMetric is the metric an assigned target produces, per the authenticated assignment:
-// probe.MetricOffset only for an NTP target whose resolved measure (per-target params, else the
-// probe-level default) is "offset"; every other target is probe.MetricRTT.
+// assignmentMetric is the metric an assigned target produces, per the authenticated assignment —
+// the same probe.MetricFor resolution the hub's own scheduler and read API use, so a target reads
+// the same metric wherever it is measured.
 func assignmentMetric(m model.Monitor, probeCfgs map[string]map[string]string) string {
-	if m.ProbeKind != "NTP" {
-		return probe.MetricRTT
-	}
-	measure := m.Params["measure"]
-	if measure == "" {
-		measure = probeCfgs["NTP"]["measure"]
-	}
-	return probe.NormalizeMetric(measure)
+	return probe.MetricFor(m.ProbeKind, m.Params, probeCfgs[m.ProbeKind])
 }
 
 // withinSkew reports whether ts is within the accepted [now-maxPastSkew, now+maxFutureSkew]

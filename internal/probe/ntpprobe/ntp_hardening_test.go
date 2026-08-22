@@ -102,6 +102,61 @@ func TestNTPStatInvalidatedOnUnsync(t *testing.T) {
 	}
 }
 
+// M7 (round 2): a leap-indicator alarm (LI=3) means the server's own clock is unsynchronized, so
+// even a low-stratum, well-timestamped reply is not a trustworthy time source — no offset sample or
+// stat, though RTT reachability still counts.
+func TestNTPLeapAlarmRejectsOffset(t *testing.T) {
+	leapAlarm := func(req []byte) []byte {
+		now := time.Now().Add(time.Second)
+		resp := make([]byte, packetSize)
+		resp[0] = byte(3<<6) | byte(4<<3) | 0x04 // LI=3 (alarm), VN=4, Mode=4 (server)
+		resp[1] = 2                              // stratum 2 — otherwise "synchronized"
+		copy(resp[24:32], req[40:48])            // echo origin
+		putNTP(resp[32:40], now)
+		putNTP(resp[40:48], now)
+		return resp
+	}
+	port := rawNTPServer(t, nil, leapAlarm)
+	p, _ := probe.New("NTP", nil)
+
+	off := probe.Target{Name: "leap-off", Host: "127.0.0.1", Params: map[string]string{"port": strconv.Itoa(port), "measure": "offset"}}
+	res, _ := p.Measure(context.Background(), off, 2)
+	if len(res.Samples) != 0 {
+		t.Errorf("LI=3 offset-mode samples = %d, want 0 (clock unsynchronized)", len(res.Samples))
+	}
+	if _, _, _, ok := LatestFor("leap-off"); ok {
+		t.Error("LI=3 reply must not record an offset stat")
+	}
+	rtt := probe.Target{Name: "leap-rtt", Host: "127.0.0.1", Params: map[string]string{"port": strconv.Itoa(port)}}
+	res2, _ := p.Measure(context.Background(), rtt, 2)
+	if len(res2.Samples) != 2 {
+		t.Errorf("LI=3 RTT-mode samples = %d, want 2 (still reachable)", len(res2.Samples))
+	}
+}
+
+// M3 (round 2): after a server stops answering entirely (no reply), a round that produces no
+// synchronized sample must clear the stale offset/stratum stat — not leave a "good clock" reading
+// visible through the outage.
+func TestNTPStatClearedAfterNoReplyRound(t *testing.T) {
+	goodPort := rawNTPServer(t, nil, compliantReply(2, time.Second))
+	p, _ := probe.New("NTP", nil)
+	good := probe.Target{Name: "gone", Host: "127.0.0.1", Params: map[string]string{"port": strconv.Itoa(goodPort)}}
+	if _, err := p.Measure(context.Background(), good, 1); err != nil {
+		t.Fatalf("Measure(good): %v", err)
+	}
+	if _, _, _, ok := LatestFor("gone"); !ok {
+		t.Fatal("expected a stat after a synchronized reply")
+	}
+	// Same target now points at a closed port: every ping is a no-reply (connection refused).
+	gone := probe.Target{Name: "gone", Host: "127.0.0.1", Params: map[string]string{"port": "1"}}
+	if _, err := p.Measure(context.Background(), gone, 2); err != nil {
+		t.Fatalf("Measure(gone): %v", err)
+	}
+	if _, _, _, ok := LatestFor("gone"); ok {
+		t.Error("stale offset/stratum stat must clear after a no-reply round")
+	}
+}
+
 // M7: in offset mode, an unsynchronized reply (stratum 0 KoD or 16+) has no usable offset and
 // must NOT produce an offset sample — it is a lost sample this round.
 func TestNTPOffsetModeRejectsUnsynchronized(t *testing.T) {

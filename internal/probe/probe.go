@@ -43,6 +43,21 @@ func NormalizeMetric(kind string) string {
 	return MetricRTT
 }
 
+// MetricFor resolves what a target's samples mean from its configuration: MetricOffset only for an
+// NTP target whose effective `measure` is "offset", where a per-target param overrides the
+// probe-level default; every other probe/target is MetricRTT. This is the ONE place the rtt-vs-offset
+// config resolution lives, so the scheduler, the federation ingest, and the read API all agree.
+func MetricFor(probeKind string, targetParams, probeParams map[string]string) string {
+	if probeKind != "NTP" {
+		return MetricRTT
+	}
+	measure := targetParams["measure"]
+	if measure == "" {
+		measure = probeParams["measure"]
+	}
+	return NormalizeMetric(measure)
+}
+
 // Result is what a probe returns for one round: the received samples in seconds. Order does not
 // matter; lost pings are simply absent. Kind names what the samples mean — MetricRTT when empty
 // (every probe but NTP-offset), MetricOffset for a signed clock-offset series.
