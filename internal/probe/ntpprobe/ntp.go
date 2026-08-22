@@ -82,6 +82,16 @@ func (p *ntpProbe) Measure(ctx context.Context, t probe.Target, pings int) (prob
 	// delay is reserved from the budget before dividing (it sleeps outside the per-attempt
 	// context), so a large interval_ms can't starve the attempts — see PerPingBudgetWithDelay.
 	perPing, interDelay := probe.PerPingBudgetWithDelay(ctx, pings, p.interval)
+	// A round that ends without a single synchronized reply — every ping lost/unsynchronized/KoD,
+	// or the round cancelled — means any previously recorded offset/stratum is stale. Clear it on
+	// every exit path so a server that goes unreachable or loses sync stops showing a "good clock"
+	// stat (M3). A synchronized ping sets this and updates the stat via latestReg.set below.
+	syncedThisRound := false
+	defer func() {
+		if !syncedThisRound {
+			latestReg.clear(t.Name)
+		}
+	}()
 	for i := 0; i < pings; i++ {
 		if err := ctx.Err(); err != nil {
 			return probe.Result{Samples: samples, Kind: measure}, err
@@ -92,10 +102,8 @@ func (p *ntpProbe) Measure(ctx context.Context, t probe.Target, pings int) (prob
 		if ok {
 			if stratum == 0 {
 				// Kiss-o'-Death: the server is explicitly telling the client to stop (RFC 4330
-				// §8). Back off — send no more this round — and don't count it as a usable
-				// sample; the missing samples read as loss, which is the honest signal. Its clock
-				// is unusable, so any previously recorded offset/stratum stat is now stale.
-				latestReg.clear(t.Name)
+				// §8). Back off — send no more this round — and don't count it as a usable sample;
+				// the missing samples read as loss. The deferred clear drops any stale stat.
 				break
 			}
 			// Offset is meaningful only from a synchronized server (stratum 1..15) with usable,
@@ -113,10 +121,7 @@ func (p *ntpProbe) Measure(ctx context.Context, t probe.Target, pings int) (prob
 			}
 			if synced {
 				latestReg.set(t.Name, offset.Seconds(), stratum, measure)
-			} else {
-				// A received-but-unsynchronized reply means the previously recorded offset/stratum
-				// is no longer valid — clear it rather than leave a stale "good clock" stat (M3).
-				latestReg.clear(t.Name)
+				syncedThisRound = true
 			}
 		}
 		// Pace the round: honor the inter-query delay whether or not the reply was usable, so a
@@ -172,6 +177,9 @@ func (p *ntpProbe) exchange(ctx context.Context, server string, version uint8) (
 		return 0, 0, false, 0, false
 	}
 	stratum = resp[1]
+	// Leap indicator = the top two bits. LI=3 is the alarm condition: the server's own clock is
+	// not synchronized, so its timestamps are not a trustworthy time source even at a low stratum.
+	leapAlarm := resp[0]>>6 == 3
 
 	// Receive timestamp (t2) at bytes 32..39, transmit timestamp (t3) at 40..47.
 	t2 := ntpTime(resp[32:40])
@@ -188,11 +196,12 @@ func (p *ntpProbe) exchange(ctx context.Context, server string, version uint8) (
 		}
 	}
 	// offset = ((t2 - t1) + (t3 - t4)) / 2  (RFC 4330). Publish it (hasOffset) only for a reply
-	// we can trust as a genuine clock reading: the origin must echo our transmit timestamp, and
-	// the server timestamps must be present and sanely ordered (t3 >= t2). A zeroed, reversed, or
-	// unverifiable reply still yields an RTT reachability sample but no clock offset.
+	// we can trust as a genuine clock reading: the origin must echo our transmit timestamp, the
+	// server must not be in the leap alarm state, and the server timestamps must be present and
+	// sanely ordered (t3 >= t2). A zeroed, reversed, alarmed, or unverifiable reply still yields an
+	// RTT reachability sample but no clock offset.
 	originOK := bytes.Equal(resp[24:32], req[40:48])
-	if originOK && !t2.IsZero() && !t3.IsZero() && !t3.Before(t2) {
+	if originOK && !leapAlarm && !t2.IsZero() && !t3.IsZero() && !t3.Before(t2) {
 		offset = (t2.Sub(t1) + t3.Sub(t4)) / 2
 		hasOffset = true
 	}

@@ -477,7 +477,7 @@ func TestSwapRuntimeSeedsNewlyAlertedTarget(t *testing.T) {
 		engine:   alert.NewEngine(alertDef, map[string]alert.Notifier{"cap": cap}),
 		monitors: []model.Monitor{monAlerted}, alertsByTarget: map[string][]string{"t": {"loss"}}, targetFP: map[string]string{"t": "fp"},
 	}
-	seed := func(r *runtime) { warmStartAlerts(context.Background(), r.engine, r.monitors, st, now) }
+	seed := func(r *runtime) { warmStartAlerts(context.Background(), r.engine, r.monitors, r.metricByName, st, now) }
 	swapRuntime(&current, &mu, nrt, seed)
 
 	// Window seeded with the 1 prior breaching round; one more now meets X=2 → fires immediately.

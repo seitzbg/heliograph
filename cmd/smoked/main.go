@@ -304,7 +304,7 @@ func main() {
 	// the new engine from durable history for targets it can't inherit (redefined or newly
 	// alerted), then InheritStateFrom overwrites the seed for same-identity targets (#4).
 	seedFn = func(nrt *runtime) {
-		warmStartAlerts(ctx, nrt.engine, nrt.monitors, st, time.Now())
+		warmStartAlerts(ctx, nrt.engine, nrt.monitors, nrt.metricByName, st, time.Now())
 	}
 
 	// SIGHUP reloads the config; on error the running config is kept (a bad edit can't take the
@@ -341,7 +341,7 @@ func main() {
 	// Boot uses this directly; a SIGHUP/API reload runs the same seed via seedFn inside
 	// swapRuntime and then carries unchanged windows/state via InheritStateFrom.
 	if rt := current.Load(); rt.engine != nil {
-		warmStartAlerts(ctx, rt.engine, rt.monitors, st, time.Now())
+		warmStartAlerts(ctx, rt.engine, rt.monitors, rt.metricByName, st, time.Now())
 	}
 
 	roundStats := &api.RoundStats{}
@@ -433,6 +433,7 @@ func main() {
 		// probes locally — so it appears in the tree and its deep link resolves (P1-3).
 		srv.Configured = func() []model.Monitor { return current.Load().monitors }
 		srv.TargetMeta = func() map[string]api.TargetMeta { return current.Load().targetMeta }
+		srv.EffectiveMetric = func(target string) string { return current.Load().metricByName[target] }
 		// NTP probe offset/stratum, surfaced by /api/targets as display stats. The registry is
 		// package-level in ntpprobe, so this accessor stays valid across config reloads.
 		srv.NTPStat = ntpprobe.LatestFor
@@ -906,6 +907,11 @@ type runtime struct {
 	// targetMeta is each target's display-only metadata (title override + IP to show in the
 	// title), recomputed on every build so it refreshes on SIGHUP reload.
 	targetMeta map[string]api.TargetMeta
+	// metricByName is each target's effective metric (rtt/offset) resolved from the current config
+	// (probe-level default + per-target override). The API reads it for the signed-axis choice and
+	// for filtering series/rollup, so a config change takes effect at once and a probe-level default
+	// is honored even before a target has stored data (CODE_REVIEW round 2, M5/M6).
+	metricByName map[string]string
 }
 
 // eval runs the alert engine over a round's outcomes and dispatches notifications.
@@ -1146,13 +1152,13 @@ const warmStartLookback = 24 * time.Hour
 // the matching vantage: the hub's own "local" via History, every remote vantage via
 // HistorySince, so a remote outage warm-starts too (P2-5). Best-effort: a (target,vantage)
 // with no history, a read error, or a store that can't range-read remote vantages is skipped.
-func warmStartAlerts(ctx context.Context, engine *alert.Engine, monitors []model.Monitor, st store.Store, now time.Time) {
+func warmStartAlerts(ctx context.Context, engine *alert.Engine, monitors []model.Monitor, metricByName map[string]string, st store.Store, now time.Time) {
 	rh, _ := st.(store.RangeHistorier)
 	for _, m := range monitors {
 		if len(m.Alerts) == 0 {
 			continue
 		}
-		meta := warmMeta{host: m.Host, probe: m.ProbeKind, step: m.Step, metric: probe.NormalizeMetric(m.Params["measure"])}
+		meta := warmMeta{host: m.Host, probe: m.ProbeKind, step: m.Step, metric: probe.NormalizeMetric(metricByName[m.Name])}
 		for _, v := range m.Vantages {
 			var hist []scheduler.Outcome
 			var err error
@@ -1355,12 +1361,14 @@ func buildRuntime(configPath string, demoPings int, demoStep, timeout time.Durat
 	// Per-target measurement fingerprint over the full monitor set (all vantages), so eval can
 	// verify a completing outcome still matches its target's current identity (CODE_REVIEW #4).
 	targetFP := make(map[string]string, len(fullMonitors))
+	metricByName := make(map[string]string, len(fullMonitors))
 	for _, m := range fullMonitors {
 		targetFP[m.Name] = federation.Fingerprint(m, probeCfgs[m.ProbeKind])
+		metricByName[m.Name] = probe.MetricFor(m.ProbeKind, m.Params, probeCfgs[m.ProbeKind])
 	}
 	return &runtime{jobs: jobs, monitors: fullMonitors, probeCfgs: probeCfgs, engine: engine,
 		alertsByTarget: alertsByTarget, alerteeByTarget: alerteeByTarget, targetFP: targetFP,
-		targetMeta: buildTargetMeta(fullMonitors, resolveIPs)}, nil
+		targetMeta: buildTargetMeta(fullMonitors, resolveIPs), metricByName: metricByName}, nil
 }
 
 // buildTargetMeta computes each target's display metadata: its title override (always) and

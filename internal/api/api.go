@@ -104,6 +104,12 @@ type Server struct {
 	// target catalog for /api/series/all; that endpoint returns 503 when Configured is nil rather
 	// than falling back to raw-history target discovery.
 	Configured func() []model.Monitor
+	// EffectiveMetric, if set, returns a target's metric ("rtt"/"offset") resolved from the CURRENT
+	// runtime config — the probe-level `measure` default plus any per-target override. It is the
+	// authoritative source for the signed-axis choice and for filtering a target's series/rollup to
+	// one metric, so a config change takes effect immediately and a probe-level default is honored
+	// even before the target has any stored round. nil falls back to the stored round's kind.
+	EffectiveMetric func(target string) string
 	// VantageAuth, if set, gates the agent routes (requireAgent) behind an API-key check
 	// against the vantage key store. nil means the agent routes are not registered at
 	// all — fail-closed, same pattern as the admin API's AdminPassword gate.
@@ -442,16 +448,22 @@ func (srv *Server) targets(w http.ResponseWriter, r *http.Request) {
 		for _, m := range srv.Configured() {
 			if o, ok := byName[m.Name]; ok {
 				dto := latestDTO(o, tv, meta, recent, srv.NTPStat)
-				// A per-target `measure` is the authoritative current metric, so it wins over the
-				// stored round's kind right after a config change (before the next round lands).
-				if cm := configuredMetric(m.Params); cm != "" {
+				// The effective config metric (probe-level default + per-target override) is
+				// authoritative: it wins over the stored round's kind right after a config change and
+				// honors a probe-level default. Falls back to the per-target param when no resolver
+				// is wired (bare setups/tests).
+				if em := srv.effectiveMetric(m.Name); em != "" {
+					dto.Metric = em
+				} else if cm := configuredMetric(m.Params); cm != "" {
 					dto.Metric = cm
 				}
 				out = append(out, dto)
 				continue
 			}
 			dto := targetDTO{Name: m.Name, Probe: m.ProbeKind, NoData: true, Metric: probe.MetricRTT}
-			if cm := configuredMetric(m.Params); cm != "" {
+			if em := srv.effectiveMetric(m.Name); em != "" {
+				dto.Metric = em
+			} else if cm := configuredMetric(m.Params); cm != "" {
 				dto.Metric = cm
 			}
 			if vs := tv[m.Name]; len(vs) > 0 {
@@ -821,7 +833,7 @@ func (srv *Server) series(w http.ResponseWriter, r *http.Request) {
 			}
 			hist = h
 		}
-		rounds, metric := currentMetricSeries(hist)
+		rounds, metric := currentMetricSeries(hist, srv.effectiveMetric(key))
 		writeJSON(w, map[string]any{"target": key, "metric": metric, "rounds": roundsDTO(rounds)})
 		return
 	}
@@ -867,26 +879,38 @@ func (srv *Server) series(w http.ResponseWriter, r *http.Request) {
 		}
 		hist = h
 	}
-	rounds, metric := currentMetricSeries(hist)
+	rounds, metric := currentMetricSeries(hist, srv.effectiveMetric(key))
 	writeJSON(w, map[string]any{"target": key, "metric": metric, "rounds": roundsDTO(rounds)})
 }
 
-// currentMetricSeries drops rounds whose metric differs from the newest round's — a target that
-// changed `measure` must not graph two meanings (rtt seconds and signed offset seconds) on one
-// axis. Returns the filtered rounds (oldest->newest) and the current metric (rtt when empty), which
-// the handler echoes so the client can pick the matching axis without a second lookup.
-func currentMetricSeries(hist []scheduler.Outcome) ([]scheduler.Outcome, string) {
-	if len(hist) == 0 {
-		return hist, probe.MetricRTT
+// currentMetricSeries drops rounds whose metric differs from the target's current metric — a target
+// that changed `measure` must not graph two meanings (rtt seconds and signed offset seconds) on one
+// axis. `current` is the effective config metric when known (so a switch takes effect immediately);
+// "" falls back to the newest stored round's metric. Returns the filtered rounds (oldest->newest)
+// and the metric used, which the handler echoes so the client picks the matching axis.
+func currentMetricSeries(hist []scheduler.Outcome, current string) ([]scheduler.Outcome, string) {
+	if current == "" {
+		if len(hist) == 0 {
+			return hist, probe.MetricRTT
+		}
+		current = store.MetricOf(hist[len(hist)-1]) // History is oldest->newest
 	}
-	metric := store.MetricOf(hist[len(hist)-1]) // History is oldest->newest
 	out := make([]scheduler.Outcome, 0, len(hist))
 	for _, o := range hist {
-		if store.MetricOf(o) == metric {
+		if store.MetricOf(o) == current {
 			out = append(out, o)
 		}
 	}
-	return out, metric
+	return out, current
+}
+
+// effectiveMetric returns the target's config-resolved metric, or "" when no resolver is wired
+// (tests, or a bare setup) — the caller then falls back to the stored round's kind.
+func (srv *Server) effectiveMetric(target string) string {
+	if srv.EffectiveMetric != nil {
+		return srv.EffectiveMetric(target)
+	}
+	return ""
 }
 
 // roundsDTO converts a target's rounds (oldest->newest) into the wire shape shared by
@@ -1043,7 +1067,7 @@ func (srv *Server) seriesAll(w http.ResponseWriter, r *http.Request) {
 	targets := make(map[string]any, len(all))
 	total := 0
 	for name, hist := range all {
-		rounds, metric := currentMetricSeries(hist)
+		rounds, metric := currentMetricSeries(hist, srv.effectiveMetric(name))
 		total += len(rounds)
 		targets[name] = map[string]any{"metric": metric, "rounds": roundsDTO(rounds)}
 	}
@@ -1140,11 +1164,16 @@ func (srv *Server) rollup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// A target that changed `measure` has buckets of both kinds (the aggregate groups by metric);
-	// keep only the current one (the newest bucket's) so the long-range view matches the raw
-	// series' axis and never mixes rtt and offset. Rollup returns buckets ordered by time asc.
-	current := probe.MetricRTT
-	if len(points) > 0 {
-		current = points[len(points)-1].Metric
+	// keep only the current one so the long-range view matches the raw series' axis and never mixes
+	// rtt and offset. Prefer the effective config metric (a switch takes effect at once, and a bucket
+	// holding both kinds has no defined order); fall back to the newest bucket's metric. Rollup
+	// returns buckets ordered by time asc.
+	current := srv.effectiveMetric(key)
+	if current == "" {
+		current = probe.MetricRTT
+		if len(points) > 0 {
+			current = points[len(points)-1].Metric
+		}
 	}
 	buckets := make([]rollupDTO, 0, len(points))
 	for _, p := range points {
