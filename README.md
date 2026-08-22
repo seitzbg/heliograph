@@ -43,33 +43,24 @@ config), and the **Vantages** panel manages federation agent keys — both behin
 
 ## Features
 
-- **Eight built-in probes** — ICMP (native `Ping` or `FPing`), `TCPConnect`, `DNS`, `HTTP`, `SSH`,
-  `IRTT`, and `NTP` (query round-trip or the server's clock offset). Most are pure Go; a couple wrap
-  a CLI. Adding one is a single self-registering file. See [Probes](#probes) for the full list.
-- **Signature smoke graphs**, rebuilt on HTML canvas — nested percentile bands (jitter) darkening
-  toward a loss-colored median line, computed from the real per-round distribution, light/dark
-  theme-aware.
-- **Fast, parallel poller** — a bounded worker pool probes every target concurrently, each under
-  its own timeout and on its own schedule; one slow or hung target never blocks the rest.
-- **TimescaleDB storage** — one row per round in a `samples` hypertable keeps the raw sample array
-  (loss as SQL `NULL`), so bands reflect the true distribution. Hourly/daily continuous aggregates
-  serve long time ranges; an in-memory store backs dev and tests.
-- **Live dashboard** — an Overview that ranks the worst targets by loss/latency/jitter with
-  per-target availability, plus a filterable per-target graph grid (four time ranges, adjustable
-  columns, drag-to-zoom), served same-origin.
-- **Alerting** — hysteresis loss/latency matchers and a right-anchored pattern DSL, edge-triggered
-  firing/resolved with priority inhibition and per-target recipients. Notifiers: log, webhook,
-  Slack, Discord, and email (SMTP).
-- **Inheritable config** — a YAML target tree where `probe`/`step`/`params`/`alerts` cascade to
+- **Smoke graphs from the real distribution.** One row per round in a TimescaleDB `samples`
+  hypertable keeps the whole sample array (loss stored as SQL `NULL`), so the percentile bands show
+  what actually happened rather than a smoothed average. Hourly and daily continuous aggregates
+  cover long time ranges; an in-memory store backs dev and tests.
+- **Fast parallel polling.** A bounded worker pool probes every target concurrently, each under its
+  own timeout and schedule, so one slow or hung target never holds up the rest.
+- **Eight built-in probes**, from native ICMP to NTP clock offset. See [Probes](#probes).
+- **Alerting.** Hysteresis loss/latency matchers and a right-anchored pattern DSL, edge-triggered
+  with priority inhibition and per-target recipients. Notifiers: log, webhook, Slack, Discord, email.
+- **Inheritable config.** A YAML target tree where `probe`/`step`/`params`/`alerts` cascade to
   children and each leaf is schema-validated; load it from a file or a `conf.d/` directory, or edit
-  it live in the browser from a DB-backed **Config** tab merged with the YAML.
-- **Federation** — remote `smoke-agent` vantages report to the hub over HTTPS with per-vantage API
-  keys, adding a per-vantage median overlay on every graph, a Vantages admin panel, and a bundled
-  Caddy reverse proxy. See the [federation guide](docs/federation.md).
-- **JSON API** — probes and their JSON Schema, per-target series, worst-N charts, and availability
-  (`/api/series`, `/api/charts`, `/api/sla`, `/api/probes/schema`, …).
-- **SmokePing importer** — migrate an existing install's target config and RRD history with
-  `smoked import smokeping`.
+  it live from a DB-backed Config tab.
+- **Multi-vantage federation.** Remote `smoke-agent` collectors report to the hub and overlay a
+  median line per vantage on every graph. See [Beyond parity](#beyond-parity).
+- **JSON API and migration.** Everything the dashboard reads is plain JSON (`/api/series`,
+  `/api/charts`, `/api/sla`, `/api/probes/schema`, …), and `smoked import smokeping` brings over an
+  existing install's targets; add `--history` (with a DSN and `rrdtool`) to also backfill its RRD
+  history.
 
 ## Probes
 
