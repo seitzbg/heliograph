@@ -1279,3 +1279,104 @@ func TestTargetsSurfacesNTPOffsetAndStratum(t *testing.T) {
 		t.Errorf("web1 (no NTP reading) must omit offset/stratum, got %+v", web)
 	}
 }
+
+// M3: the catalog is authoritative for a target's probe identity. When a name is reused for a
+// different probe (or its kind is changed in place), a lingering NTP round stored under that name
+// must not surface as probe="NTP" nor drag the old clock offset/stratum onto the new panel — the
+// NTP registry is keyed by target name only and cannot tell the two apart on its own.
+func TestTargetsProbeIdentityFollowsCurrentCatalog(t *testing.T) {
+	st := store.NewMem(10)
+	st.Add([]scheduler.Outcome{
+		{Target: probe.Target{Name: "clock", Host: "h"}, ProbeName: "NTP",
+			Computed: sample.Compute(2, []float64{0.001, 0.002}), When: time.Unix(1_700_000_000, 0)},
+	})
+	srv := New(st, "")
+	srv.Active = func() map[string]bool { return map[string]bool{"clock": true} }
+	// Current config: the name is now an HTTP target, even though the newest stored round is NTP.
+	srv.Configured = func() []model.Monitor {
+		return []model.Monitor{{Name: "clock", ProbeKind: "HTTP"}}
+	}
+	// The stale NTP registry still returns a reading for the name.
+	srv.NTPStat = func(target string) (float64, uint8, string, bool) {
+		return -0.0009, 2, "rtt", true
+	}
+
+	rec := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(rec, httptest.NewRequest("GET", "/api/targets", nil))
+	var tj struct {
+		Targets []struct {
+			Name        string   `json:"name"`
+			Probe       string   `json:"probe"`
+			NTPOffsetMs *float64 `json:"ntp_offset_ms"`
+			Stratum     *int     `json:"stratum"`
+		} `json:"targets"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &tj); err != nil {
+		t.Fatalf("targets json: %v", err)
+	}
+	if len(tj.Targets) != 1 {
+		t.Fatalf("want 1 target, got %d (%+v)", len(tj.Targets), tj.Targets)
+	}
+	d := tj.Targets[0]
+	if d.Probe != "HTTP" {
+		t.Errorf("probe = %q, want HTTP (current catalog), not the stored round's kind", d.Probe)
+	}
+	if d.NTPOffsetMs != nil || d.Stratum != nil {
+		t.Errorf("a target now configured non-NTP must not carry NTP offset/stratum, got off=%v stratum=%v",
+			d.NTPOffsetMs, d.Stratum)
+	}
+}
+
+// M3: Server.NTPStat is the hub's LOCAL clock-offset registry — it reflects only rounds the hub
+// measured itself. A remote vantage's NTP outcome must not be decorated with the hub's local
+// reading; only the local-vantage listing may carry it.
+func TestTargetsNTPStatOnlyDecoratesLocalVantage(t *testing.T) {
+	st := store.NewMem(10)
+	st.Add([]scheduler.Outcome{
+		{Target: probe.Target{Name: "clock", Host: "h"}, ProbeName: "NTP",
+			Computed: sample.Compute(2, []float64{0.001, 0.002}), When: time.Unix(1_700_000_000, 0)}, // local
+		{Target: probe.Target{Name: "clock", Host: "h"}, ProbeName: "NTP",
+			Computed: sample.Compute(2, []float64{0.003, 0.004}), When: time.Unix(1_700_000_000, 0), Vantage: "nyc"}, // remote
+	})
+	srv := New(st, "")
+	srv.Active = func() map[string]bool { return map[string]bool{"clock": true} }
+	srv.Configured = func() []model.Monitor {
+		return []model.Monitor{{Name: "clock", ProbeKind: "NTP", Vantages: []string{"local", "nyc"}}}
+	}
+	srv.TargetVantages = func() map[string][]string { return map[string][]string{"clock": {"local", "nyc"}} }
+	// The registry is the HUB's local reading — valid only for the local vantage.
+	srv.NTPStat = func(target string) (float64, uint8, string, bool) {
+		return -0.0009, 2, "rtt", true
+	}
+
+	offsetFor := func(url string) *float64 {
+		rec := httptest.NewRecorder()
+		srv.Routes().ServeHTTP(rec, httptest.NewRequest("GET", url, nil))
+		if rec.Code != 200 {
+			t.Fatalf("%s status=%d", url, rec.Code)
+		}
+		var tj struct {
+			Targets []struct {
+				Name        string   `json:"name"`
+				NTPOffsetMs *float64 `json:"ntp_offset_ms"`
+			} `json:"targets"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &tj); err != nil {
+			t.Fatalf("%s json: %v", url, err)
+		}
+		for _, d := range tj.Targets {
+			if d.Name == "clock" {
+				return d.NTPOffsetMs
+			}
+		}
+		t.Fatalf("%s: clock target missing", url)
+		return nil
+	}
+
+	if off := offsetFor("/api/targets"); off == nil || *off != -0.9 {
+		t.Errorf("local vantage must carry the hub's clock offset, got %v", off)
+	}
+	if off := offsetFor("/api/targets?vantage=nyc"); off != nil {
+		t.Errorf("remote vantage must NOT be decorated with the hub's local clock offset, got %v", *off)
+	}
+}
