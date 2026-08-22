@@ -630,3 +630,72 @@ func TestReservedVantageForbidden(t *testing.T) {
 		}
 	})
 }
+
+// End-to-end M2: an NTP round measured at a remote vantage carries its companion clock stat
+// (offset + stratum) over the wire; the hub stores it per-vantage and /api/targets?vantage=
+// surfaces it, while the hub's local vantage — which never measured this clock — shows nothing. A
+// later round that omits the stat (the clock went unsynchronized) clears the remote reading, so a
+// panel never keeps showing a stale one.
+func TestRemoteNTPStatTransportsAndClears(t *testing.T) {
+	st := store.NewMem(10)
+	srv := &Server{
+		store:       st,
+		VantageAuth: fakeAuth{name: "nyc", ok: true},
+		Assignment: func(v string) ([]model.Monitor, map[string]map[string]string, string) {
+			return []model.Monitor{{Name: "clock", ProbeKind: "NTP", Host: "h", Pings: 2, Step: time.Minute, Vantages: []string{"nyc"}}}, nil, "sha256:v1"
+		},
+		Active: func() map[string]bool { return map[string]bool{"clock": true} },
+		Configured: func() []model.Monitor {
+			return []model.Monitor{{Name: "clock", ProbeKind: "NTP", Vantages: []string{"nyc"}}}
+		},
+		TargetVantages: func() map[string][]string { return map[string][]string{"clock": {"nyc"}} },
+	}
+
+	offsetAt := func(url string) *float64 {
+		rec := httptest.NewRecorder()
+		srv.Routes().ServeHTTP(rec, httptest.NewRequest("GET", url, nil))
+		if rec.Code != 200 {
+			t.Fatalf("%s status=%d", url, rec.Code)
+		}
+		var tj struct {
+			Targets []struct {
+				Name        string   `json:"name"`
+				NTPOffsetMs *float64 `json:"ntp_offset_ms"`
+			} `json:"targets"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &tj); err != nil {
+			t.Fatalf("%s json: %v", url, err)
+		}
+		for _, d := range tj.Targets {
+			if d.Name == "clock" {
+				return d.NTPOffsetMs
+			}
+		}
+		t.Fatalf("%s: clock target missing", url)
+		return nil
+	}
+
+	ts1 := time.Now().UTC().Add(-2 * time.Minute).Format(time.RFC3339Nano)
+	ts2 := time.Now().UTC().Add(-1 * time.Minute).Format(time.RFC3339Nano)
+
+	// A synchronized remote round: offset -0.9 ms, stratum 2.
+	if w := postResults(t, srv, fmt.Sprintf(
+		`{"results":[{"target":"clock","ts":%q,"pings":2,"rtts":[0.001,0.002],"ntp_offset_ms":-0.9,"stratum":2}]}`, ts1)); w.Code != 200 {
+		t.Fatalf("ingest status=%d body=%s", w.Code, w.Body)
+	}
+	if off := offsetAt("/api/targets?vantage=nyc"); off == nil || *off != -0.9 {
+		t.Fatalf("remote vantage must surface the transported clock offset, got %v", off)
+	}
+	if off := offsetAt("/api/targets"); off != nil {
+		t.Fatalf("local vantage must not show a remote-only clock's offset, got %v", *off)
+	}
+
+	// A later round without the stat (unsynchronized) clears the remote reading.
+	if w := postResults(t, srv, fmt.Sprintf(
+		`{"results":[{"target":"clock","ts":%q,"pings":2,"rtts":[0.0015,0.0025]}]}`, ts2)); w.Code != 200 {
+		t.Fatalf("second ingest status=%d body=%s", w.Code, w.Body)
+	}
+	if off := offsetAt("/api/targets?vantage=nyc"); off != nil {
+		t.Fatalf("a no-stat round must clear the remote offset, got %v", *off)
+	}
+}

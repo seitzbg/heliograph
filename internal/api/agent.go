@@ -215,6 +215,17 @@ func (srv *Server) agentResults(w http.ResponseWriter, r *http.Request) {
 			o.Err = errors.New(rd.Err)
 		}
 		outcomes = append(outcomes, o)
+		// Carry the NTP companion clock stat for this vantage. A synchronized round reports offset +
+		// stratum; an unsynchronized/unreachable round, or a pre-stat agent, reports neither, so
+		// clear it then — a remote NTP panel shows the current reading or nothing, never a stale one
+		// (CODE_REVIEW M2). Best-effort and per-vantage, mirroring the hub's own local registry.
+		if m.ProbeKind == "NTP" {
+			if rd.NTPOffsetMs != nil && rd.Stratum != nil && *rd.Stratum >= 0 && *rd.Stratum <= 255 {
+				srv.remoteNTP.set(v, m.Name, *rd.NTPOffsetMs/1000, uint8(*rd.Stratum), metric)
+			} else {
+				srv.remoteNTP.clear(v, m.Name)
+			}
+		}
 	}
 	accepted := len(outcomes)
 	if len(outcomes) > 0 {

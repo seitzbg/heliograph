@@ -64,10 +64,12 @@ config), and the **Vantages** panel manages federation agent keys — both behin
 
 ## Probes
 
-A probe measures one target, one ping at a time, and hands back the round-trip times it saw. The
-collector does the rest — median, loss (a missing sample *is* the loss), and the percentile bands.
-Each probe is a self-registering plugin under `internal/probe/`, so a new one is a single small file
-and needs no changes to the core.
+A probe measures one target, one ping at a time, and hands back the per-ping samples it took —
+round-trip times for most probes, or a signed clock offset when NTP runs in `measure: offset` mode.
+The collector does the rest — median, loss (a missing sample *is* the loss), and the percentile
+bands. Each probe is a self-registering plugin under `internal/probe/`, so adding one is mostly a
+single small file; the one shared edit is its blank import (and matching parity-test entry) in
+`internal/probe/allprobes`, which both the hub and the vantage agent load so either can run it.
 
 Eight ship with Heliograph:
 

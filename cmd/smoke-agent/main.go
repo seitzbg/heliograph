@@ -23,6 +23,7 @@ import (
 
 	"github.com/seitzbg/heliograph/internal/agent"
 	"github.com/seitzbg/heliograph/internal/probe"
+	"github.com/seitzbg/heliograph/internal/probe/ntpprobe"
 
 	// Register every probe plugin the hub might assign this agent, via the shared list both
 	// binaries use — so the hub and agent can't drift apart (CODE_REVIEW M2).
@@ -275,6 +276,9 @@ func main() {
 		BufferCap: cfg.Buffer,
 		FlushMax:  cfg.FlushMax,
 		SpoolDir:  cfg.SpoolDir,
+		// Carry each NTP round's companion clock stat (offset/stratum) to the hub, so a remote
+		// vantage's NTP server shows a real clock reading there instead of the hub's own (M2).
+		NTPStat: ntpprobe.LatestFor,
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
