@@ -59,7 +59,8 @@ config), and the **Vantages** panel manages federation agent keys — both behin
   median line per vantage on every graph. See [Beyond parity](#beyond-parity).
 - **JSON API and migration.** Everything the dashboard reads is plain JSON (`/api/series`,
   `/api/charts`, `/api/sla`, `/api/probes/schema`, …), and `smoked import smokeping` brings over an
-  existing install's targets and RRD history.
+  existing install's targets; add `--history` (with a DSN and `rrdtool`) to also backfill its RRD
+  history.
 
 ## Probes
 
