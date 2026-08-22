@@ -4,10 +4,10 @@ import "testing"
 
 func TestMetricFor(t *testing.T) {
 	cases := []struct {
-		name       string
-		kind       string
-		tp, pp     map[string]string
-		want       string
+		name   string
+		kind   string
+		tp, pp map[string]string
+		want   string
 	}{
 		{"non-NTP is rtt", "FPing", nil, nil, MetricRTT},
 		{"NTP default rtt", "NTP", nil, nil, MetricRTT},
