@@ -6,6 +6,56 @@ All notable changes to **Heliograph** are recorded here. The format follows
 
 ## [Unreleased]
 
+## [1.0.9] - 2026-08-21
+
+Harden the NTP probe and keep clock offset and latency apart everywhere. Every round now records
+whether its samples are round-trip times or a signed clock offset, so offset data is no longer
+stored, alerted on, charted, or scraped as if it were latency; a server that declares itself
+unsynchronized no longer graphs as a healthy clock; the example config no longer contacts public
+NTP by default; and NTP now works at remote vantages.
+
+### Added
+- **NTP at remote vantages.** `smoke-agent` registers the NTP probe — both binaries now pull the
+  probe set from one shared list, so the hub and agent can't drift apart — so an NTP target assigned
+  to a vantage is measured instead of dropped as `unknown probe "NTP"`. Offset-mode targets send
+  their signed samples over the federation wire.
+- **`heliograph_ntp_offset_seconds`** — an offset-mode target's clock offset gets its own Prometheus
+  gauge, so `/metrics` no longer mislabels it as a round-trip time.
+- **`interval_ms`** on the NTP probe, to pace the requests within a round.
+- **A dedicated Probes section** in the README, describing what each of the eight probes measures.
+
+### Changed
+- **Safe NTP defaults.** The example config points its NTP target at loopback instead of public
+  NTP; `pool.ntp.org` / Cloudflare are a commented, one-request-per-round opt-in, per the NTP Pool
+  terms and vendor guidance. The probe paces its own requests and stops on a Kiss-o'-Death reply.
+- **A metric kind is stored with every round.** rtt vs offset is now a column on the `samples`
+  table and is carried through the continuous aggregates, the read API, alerts, charts, and
+  federation, so the two meanings are never averaged into one series, rollup, or alert window. The
+  signed-axis choice comes from the effective config (probe-level default plus per-target override),
+  so it survives a restart and a target that has no data yet.
+
+### Fixed
+- **Clock offset is not latency.** A signed offset can no longer trip a latency alert, rank on the
+  Latency/jitter charts, or export under the RTT median gauge.
+- **An unsynchronized server no longer reads as a healthy clock.** Stratum 0 (Kiss-o'-Death),
+  stratum 16+, a leap-indicator alarm (`LI=3`), and a reply that fails the origin/timestamp checks
+  all record RTT reachability but no clock offset; the offset/stratum stat clears when a server
+  stops answering or loses sync.
+- **Offset request/response validation.** The NTP request stamps a transmit timestamp and requires
+  the reply to echo it, and rejects zeroed or reversed server timestamps, before publishing an
+  offset.
+- **Microsecond offsets are readable** — axis labels and panel stats keep enough precision for
+  sub-millisecond offsets instead of rounding to `0.00`, and an all-negative offset series reports
+  its real maximum rather than a fabricated `0`.
+- **The browser layout test** no longer leaves its self-compiled binary behind on a bare run.
+
+### Upgrade note
+Adding the metric column bumps the continuous-aggregate schema, so on the first start after
+upgrading, the hourly/daily rollups are dropped and rebuilt from the last 30 days of raw samples —
+**rollup buckets older than the 30-day raw retention are lost, once.** Existing NTP offset history
+predates the metric column and backfills as `rtt`, so it drops off the now-offset panels; fresh
+offset data accumulates from the upgrade.
+
 ## [1.0.8] - 2026-08-20
 
 Graph the NTP clock **offset** as a smoke graph — the NTP probe's `measure: offset` mode plots the
@@ -1290,7 +1340,8 @@ the smoke-graph look, a fast/parallel poller, and probes as plugins.
 - Full re-implementation reference / code map maintained outside the repo at
   `~/.claude/plans/smokeping-codemap/`.
 
-[Unreleased]: https://github.com/seitzbg/heliograph/compare/v1.0.8...main
+[Unreleased]: https://github.com/seitzbg/heliograph/compare/v1.0.9...main
+[1.0.9]: https://github.com/seitzbg/heliograph/compare/v1.0.8...v1.0.9
 [1.0.8]: https://github.com/seitzbg/heliograph/compare/v1.0.7...v1.0.8
 [1.0.7]: https://github.com/seitzbg/heliograph/compare/v1.0.6...v1.0.7
 [1.0.6]: https://github.com/seitzbg/heliograph/compare/v1.0.5...v1.0.6
