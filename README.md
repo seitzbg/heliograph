@@ -4,10 +4,11 @@
 &nbsp;[![Release](https://img.shields.io/github/v/release/seitzbg/heliograph?label=release)](https://github.com/seitzbg/heliograph/releases)
 &nbsp;[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-**Read the network in smoke and light** — a modern, non-Perl reimplementation of
-[SmokePing](https://oss.oetiker.ch/smokeping/) in Go on TimescaleDB. It reproduces SmokePing's
-features and its signature **smoke graphs** with a fast, parallel, plugin-based poller, and goes
-beyond parity with multi-vantage **federation** and database-sourced configuration.
+**Read the network in smoke and light.** Heliograph is a from-scratch reimplementation of
+[SmokePing](https://oss.oetiker.ch/smokeping/) in Go, backed by TimescaleDB. It keeps the parts of
+SmokePing worth keeping — the **smoke graphs** and the pluggable probe model — drops the Perl and the
+RRD files, and adds multi-vantage **federation** and a database-backed config you can edit from the
+browser.
 
 > A *heliograph* is a signaling instrument that flashes messages across long distances — and it has
 > *graph* right in the name. Fitting for a tool whose remote **vantages** signal what they see and
@@ -42,10 +43,9 @@ config), and the **Vantages** panel manages federation agent keys — both behin
 
 ## Features
 
-- **Eight probes** — `Ping` (native ICMP, no `fping`/`setcap`), `TCPConnect`, `DNS`, `HTTP`
-  (time-to-first-byte), `SSH` (banner), and `NTP` (SNTP query — graphs either the query RTT or the
-  server's **clock offset** as a signed, zero-baselined smoke graph, `measure: rtt|offset`) are pure
-  Go; `FPing` and `IRTT` wrap their CLIs. New probes self-register through a small `Probe` interface.
+- **Eight built-in probes** — ICMP (native `Ping` or `FPing`), `TCPConnect`, `DNS`, `HTTP`, `SSH`,
+  `IRTT`, and `NTP` (query round-trip or the server's clock offset). Most are pure Go; a couple wrap
+  a CLI. Adding one is a single self-registering file. See [Probes](#probes) for the full list.
 - **Signature smoke graphs**, rebuilt on HTML canvas — nested percentile bands (jitter) darkening
   toward a loss-colored median line, computed from the real per-round distribution, light/dark
   theme-aware.
@@ -70,6 +70,30 @@ config), and the **Vantages** panel manages federation agent keys — both behin
   (`/api/series`, `/api/charts`, `/api/sla`, `/api/probes/schema`, …).
 - **SmokePing importer** — migrate an existing install's target config and RRD history with
   `smoked import smokeping`.
+
+## Probes
+
+A probe measures one target, one ping at a time, and hands back the round-trip times it saw. The
+collector does the rest — median, loss (a missing sample *is* the loss), and the percentile bands.
+Each probe is a self-registering plugin under `internal/probe/`, so a new one is a single small file
+and needs no changes to the core.
+
+Eight ship with Heliograph:
+
+| Probe | What it times | Notes |
+|-------|---------------|-------|
+| `Ping` | ICMP echo round-trip | Pure Go (`golang.org/x/net/icmp`). Uses an unprivileged datagram socket where the OS allows it, and falls back to a raw socket otherwise — no `fping`, no `setcap`. |
+| `FPing` | ICMP echo round-trip | Wraps the `fping(8)` binary, the way classic SmokePing does. Kept for parity; needs `fping` on `PATH` and `NET_RAW`/setcap. Reach for `Ping` first. |
+| `TCPConnect` | TCP handshake completion | Pure Go. Set `port` per target. Runs unprivileged and works against anything listening on a port. |
+| `DNS` | Query resolution time | Pure Go (`miekg/dns`). `lookup` a name of `recordtype` (A, AAAA, MX, …) against the target resolver, over udp or tcp. |
+| `HTTP` | Time to first byte | Pure Go (`net/http` + `httptrace`). Stops at the first response byte, so it times the server rather than the size of the body. |
+| `SSH` | Time to the server banner | Pure Go. Measures how long the SSH server takes to send its identification string — a cheap liveness and latency check that never authenticates. |
+| `IRTT` | UDP round-trip + one-way jitter | Wraps the `irtt(1)` client and needs an `irtt` server on the far end. The most precise latency/jitter source when you control both ends. |
+| `NTP` | SNTP round-trip, or clock offset | Pure Go SNTP over UDP/123. `measure: rtt` (default) graphs the query round-trip; `measure: offset` graphs the server's clock offset as a signed, zero-baselined smoke graph, with stratum shown alongside. It paces its own requests, backs off on a Kiss-o'-Death reply, and checks that each response echoes the request it answers before trusting an offset. |
+
+Settings that apply to a probe kind go under `probes:` in the config; a single target overrides them
+in its own `params:`. Both are schema-checked at load time, and the live schema is served at
+`/api/probes/schema`.
 
 ## Run it
 
