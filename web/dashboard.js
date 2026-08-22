@@ -788,8 +788,10 @@
       const xlabels = timeAbsolute && t0 != null ? rangeLabels(t0, t1) : R.xl;
       Smoke.render(canvas, s, { height, band: R.mode === 'band', xlabels, t0, t1: t0 == null ? undefined : t1, yMax, overlays, signed });
     }
-    // An NTP target graphing clock offset needs the signed (zero-centered, no-floor) y-axis.
-    function ntpSigned(name) { const nt = ntpByName.get(name); return !!nt && nt.measure === 'offset'; }
+    // An NTP target graphing clock offset needs the signed (zero-centered, no-floor) y-axis. The
+    // metric comes from /api/targets' config-derived `metric` (metricByName), NOT the live offset
+    // stat — so the signed axis survives a restart or a target that hasn't synced yet (M6).
+    function ntpSigned(name) { return metricByName.get(name) === 'offset'; }
     function metaHtml(s) {
       const st = Smoke.seriesStats(s); const lcls = st.lossAvg > 2 ? 'bad' : st.lossAvg > 0.5 ? 'warn' : '';
       return '<span class="stat"><span class="k">median avg</span><span class="v">' + fmt(st.medAvg, 1) + ' ms</span></span>' +
@@ -917,13 +919,16 @@
     // on a min→median→max latency plot), so they render as stats beside median/loss. Absent = a
     // non-NTP target or one with no NTP reading yet.
     const ntpByName = new Map();
+    // metricByName holds every target's config-derived metric ('rtt' | 'offset') from /api/targets,
+    // present even with no live NTP reading — the source of truth for the signed-axis choice.
+    const metricByName = new Map();
     function ntpStatsHtml(name) {
       const n = ntpByName.get(name);
       if (!n) return '';
       let html = '';
       // A panel graphing offset already shows it as the series (and the median stat), so the offset
       // stat would be redundant — show only stratum there. An rtt-graphing panel shows offset here.
-      if (n.measure !== 'offset') {
+      if (!ntpSigned(name)) {
         const a = Math.abs(n.off), mag = a >= 100 ? a.toFixed(0) : a >= 1 ? a.toFixed(1) : a.toFixed(2);
         const off = (n.off >= 0 ? '+' : '−') + mag + ' ms'; // U+2212 minus, matching the axis labels
         html += '<span class="stat"><span class="k">offset</span><span class="v">' + off + '</span></span>';
@@ -931,6 +936,9 @@
       return html + '<span class="stat"><span class="k">stratum</span><span class="v">' + n.stratum + '</span></span>';
     }
     function setNtp(t) {
+      // Config-derived metric drives the signed axis (present for every target, survives restart).
+      metricByName.set(t.name, t.metric === 'offset' ? 'offset' : 'rtt');
+      // The live offset/stratum stat is a separate, best-effort display value (absent until synced).
       if (typeof t.ntp_offset_ms === 'number') ntpByName.set(t.name, { off: t.ntp_offset_ms, stratum: t.stratum, measure: t.ntp_measure });
       else ntpByName.delete(t.name);
     }
@@ -1107,7 +1115,10 @@
         p.el.style.display = show ? '' : 'none';
         if (show) vis.push(p);
       }
-      const yMax = unisonScale ? sharedYMax(vis.map((p) => p.series)) : undefined;
+      // Unison shares one latency scale — but only across rtt panels. A signed offset panel uses
+      // its own zero-centered scale and would otherwise blow up the shared max (a +5s offset =>
+      // ~5000ms), flattening every real latency panel (M4).
+      const yMax = unisonScale ? sharedYMax(vis.filter((p) => !ntpSigned(p.el.dataset.target)).map((p) => p.series)) : undefined;
       for (const p of vis) renderInto(p.canvas, p.series, RANGES['3h'], 170, yMax, undefined, ntpSigned(p.el.dataset.target));
       updateColsPicker(); // the grid now has a measurable width (e.g. first paint on view entry)
     }

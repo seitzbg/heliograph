@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/seitzbg/heliograph/internal/probe"
 	"github.com/seitzbg/heliograph/internal/scheduler"
 )
 
@@ -52,6 +53,12 @@ func VantageOrDefault(v string) string {
 	return v
 }
 
+// MetricOf returns the outcome's stored metric kind, normalized so an unset/unknown value becomes
+// probe.MetricRTT. Both stores write it through here so the default lives in one place.
+func MetricOf(o scheduler.Outcome) string {
+	return probe.NormalizeMetric(o.Metric)
+}
+
 // Store is the sink the collector writes each round's outcomes to, and the API
 // reads series back from.
 type Store interface {
@@ -90,6 +97,7 @@ type RollupPoint struct {
 	LossFrac     float64
 	Rounds       int
 	MedianRounds int
+	Metric       string // probe.MetricRTT or probe.MetricOffset; buckets are grouped by it
 }
 
 // Rollupper is implemented by stores that support downsampled reads (the hourly

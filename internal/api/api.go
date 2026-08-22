@@ -293,9 +293,14 @@ type targetDTO struct {
 	Name string `json:"name"`
 	// Title is the display-name override (falls back to Name in the UI); IP is the address
 	// to show in the graph title (pinned or resolved). Both display-only, omitted when unset.
-	Title    string   `json:"title,omitempty"`
-	IP       string   `json:"ip,omitempty"`
-	Probe    string   `json:"probe"`
+	Title string `json:"title,omitempty"`
+	IP    string `json:"ip,omitempty"`
+	Probe string `json:"probe"`
+	// Metric names what median_ms means: "rtt" (round-trip time; every probe but NTP-offset) or
+	// "offset" (a signed clock offset). Config-derived (per-target `measure`, else the stored
+	// round's kind), so the UI's signed-axis choice survives a restart or a target with no live
+	// NTP stat — unlike ntp_measure, which comes from the process-local registry. Always set.
+	Metric   string   `json:"metric"`
 	MedianMs *float64 `json:"median_ms"`
 	Loss     int      `json:"loss"`
 	Pings    int      `json:"pings"`
@@ -334,6 +339,20 @@ type TargetMeta struct {
 // nav dot keys on sustained loss rather than one lossy round.
 const recentStatusWindow = 30 * time.Minute
 
+// configuredMetric returns the metric a target's per-target params pin — probe.MetricOffset or
+// probe.MetricRTT when `measure` is set, or "" when it is not (the caller then falls back to the
+// stored round's kind, or rtt). NTP is the only probe that sets `measure`; every other probe
+// leaves it unset and is rtt.
+func configuredMetric(params map[string]string) string {
+	if params == nil {
+		return ""
+	}
+	if m, ok := params["measure"]; ok && m != "" {
+		return probe.NormalizeMetric(m)
+	}
+	return ""
+}
+
 // latestDTO builds a target DTO from a stored latest round, attaching the target's vantage
 // set, display metadata, and windowed recent loss (for the status dot). Shared by the live
 // and catalog-driven listings.
@@ -341,6 +360,7 @@ func latestDTO(o scheduler.Outcome, tv map[string][]string, meta map[string]Targ
 	dto := targetDTO{
 		Name:    o.Target.Name,
 		Probe:   o.ProbeName,
+		Metric:  store.MetricOf(o),
 		Loss:    o.Computed.Loss,
 		Pings:   o.Computed.Pings,
 		LossPct: o.Computed.LossFraction() * 100,
@@ -362,7 +382,10 @@ func latestDTO(o scheduler.Outcome, tv map[string][]string, meta map[string]Targ
 	if rl, ok := recent[o.Target.Name]; ok {
 		dto.RecentLossPct = &rl
 	}
-	if ntp != nil {
+	// Only an NTP round carries offset/stratum. The registry is keyed by target name only, so a
+	// target that was renamed onto an old NTP target's name (or changed from NTP to HTTP/DNS)
+	// would otherwise show the previous NTP stats — gate on the current round's probe kind (M3).
+	if ntp != nil && o.ProbeName == "NTP" {
 		if offSec, stratum, measure, ok := ntp(o.Target.Name); ok {
 			offMs := offSec * 1000
 			st := int(stratum)
@@ -418,10 +441,19 @@ func (srv *Server) targets(w http.ResponseWriter, r *http.Request) {
 		// otherwise emit a no-data entry carrying the target's vantage set (CODE_REVIEW #3).
 		for _, m := range srv.Configured() {
 			if o, ok := byName[m.Name]; ok {
-				out = append(out, latestDTO(o, tv, meta, recent, srv.NTPStat))
+				dto := latestDTO(o, tv, meta, recent, srv.NTPStat)
+				// A per-target `measure` is the authoritative current metric, so it wins over the
+				// stored round's kind right after a config change (before the next round lands).
+				if cm := configuredMetric(m.Params); cm != "" {
+					dto.Metric = cm
+				}
+				out = append(out, dto)
 				continue
 			}
-			dto := targetDTO{Name: m.Name, Probe: m.ProbeKind, NoData: true}
+			dto := targetDTO{Name: m.Name, Probe: m.ProbeKind, NoData: true, Metric: probe.MetricRTT}
+			if cm := configuredMetric(m.Params); cm != "" {
+				dto.Metric = cm
+			}
 			if vs := tv[m.Name]; len(vs) > 0 {
 				dto.Vantages = vs
 			} else if len(m.Vantages) > 0 {
@@ -520,12 +552,15 @@ func (srv *Server) charts(w http.ResponseWriter, r *http.Request) {
 		var key float64
 		switch by {
 		case "median":
-			if e.MedianMs == nil {
-				continue // no latency to rank a fully-lost target by
+			// The Latency board ranks round-trip time; a signed clock offset is not latency, so an
+			// offset-mode target is excluded (its "median" is a µs offset that would rank as a
+			// spuriously fast/slow host). Loss ranking below stays metric-agnostic.
+			if e.MedianMs == nil || store.MetricOf(o) == probe.MetricOffset {
+				continue // no latency to rank a fully-lost / offset target by
 			}
 			key = *e.MedianMs
 		case "stddev":
-			if e.StdDevMs == nil {
+			if e.StdDevMs == nil || store.MetricOf(o) == probe.MetricOffset {
 				continue
 			}
 			key = *e.StdDevMs
@@ -786,7 +821,8 @@ func (srv *Server) series(w http.ResponseWriter, r *http.Request) {
 			}
 			hist = h
 		}
-		writeJSON(w, map[string]any{"target": key, "rounds": roundsDTO(hist)})
+		rounds, metric := currentMetricSeries(hist)
+		writeJSON(w, map[string]any{"target": key, "metric": metric, "rounds": roundsDTO(rounds)})
 		return
 	}
 	var hist []scheduler.Outcome
@@ -831,7 +867,26 @@ func (srv *Server) series(w http.ResponseWriter, r *http.Request) {
 		}
 		hist = h
 	}
-	writeJSON(w, map[string]any{"target": key, "rounds": roundsDTO(hist)})
+	rounds, metric := currentMetricSeries(hist)
+	writeJSON(w, map[string]any{"target": key, "metric": metric, "rounds": roundsDTO(rounds)})
+}
+
+// currentMetricSeries drops rounds whose metric differs from the newest round's — a target that
+// changed `measure` must not graph two meanings (rtt seconds and signed offset seconds) on one
+// axis. Returns the filtered rounds (oldest->newest) and the current metric (rtt when empty), which
+// the handler echoes so the client can pick the matching axis without a second lookup.
+func currentMetricSeries(hist []scheduler.Outcome) ([]scheduler.Outcome, string) {
+	if len(hist) == 0 {
+		return hist, probe.MetricRTT
+	}
+	metric := store.MetricOf(hist[len(hist)-1]) // History is oldest->newest
+	out := make([]scheduler.Outcome, 0, len(hist))
+	for _, o := range hist {
+		if store.MetricOf(o) == metric {
+			out = append(out, o)
+		}
+	}
+	return out, metric
 }
 
 // roundsDTO converts a target's rounds (oldest->newest) into the wire shape shared by
@@ -988,8 +1043,9 @@ func (srv *Server) seriesAll(w http.ResponseWriter, r *http.Request) {
 	targets := make(map[string]any, len(all))
 	total := 0
 	for name, hist := range all {
-		total += len(hist)
-		targets[name] = map[string]any{"rounds": roundsDTO(hist)}
+		rounds, metric := currentMetricSeries(hist)
+		total += len(rounds)
+		targets[name] = map[string]any{"metric": metric, "rounds": roundsDTO(rounds)}
 	}
 	if truncated {
 		slog.Warn("series/all response truncated to the global round budget",
@@ -1083,8 +1139,18 @@ func (srv *Server) rollup(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"rollup unavailable"}`, http.StatusServiceUnavailable)
 		return
 	}
+	// A target that changed `measure` has buckets of both kinds (the aggregate groups by metric);
+	// keep only the current one (the newest bucket's) so the long-range view matches the raw
+	// series' axis and never mixes rtt and offset. Rollup returns buckets ordered by time asc.
+	current := probe.MetricRTT
+	if len(points) > 0 {
+		current = points[len(points)-1].Metric
+	}
 	buckets := make([]rollupDTO, 0, len(points))
 	for _, p := range points {
+		if p.Metric != current {
+			continue
+		}
 		buckets = append(buckets, rollupDTO{
 			Bucket:       p.Bucket.UTC().Format("2006-01-02T15:04:05Z"),
 			MedianAvgMs:  msPtr(p.MedianAvg),
@@ -1095,7 +1161,7 @@ func (srv *Server) rollup(w http.ResponseWriter, r *http.Request) {
 			MedianRounds: p.MedianRounds,
 		})
 	}
-	writeJSON(w, map[string]any{"target": key, "resolution": res, "buckets": buckets})
+	writeJSON(w, map[string]any{"target": key, "resolution": res, "metric": current, "buckets": buckets})
 }
 
 // metrics exposes the latest per-target values in Prometheus text format so
@@ -1115,6 +1181,8 @@ func (srv *Server) metrics(w http.ResponseWriter, _ *http.Request) {
 	var b strings.Builder
 	b.WriteString("# HELP heliograph_probe_median_seconds Median round-trip time of the most recent round.\n")
 	b.WriteString("# TYPE heliograph_probe_median_seconds gauge\n")
+	b.WriteString("# HELP heliograph_ntp_offset_seconds Most recent NTP clock offset in seconds (signed; offset-mode NTP targets only).\n")
+	b.WriteString("# TYPE heliograph_ntp_offset_seconds gauge\n")
 	b.WriteString("# HELP heliograph_probe_loss_ratio Fraction of pings lost in the most recent round (0..1).\n")
 	b.WriteString("# TYPE heliograph_probe_loss_ratio gauge\n")
 	b.WriteString("# HELP heliograph_probe_up 1 if the most recent round got at least one reply, else 0.\n")
@@ -1126,7 +1194,14 @@ func (srv *Server) metrics(w http.ResponseWriter, _ *http.Request) {
 	for _, o := range latest {
 		lbl := fmt.Sprintf(`{target=%q,probe=%q}`, escapeLabel(o.Target.Name), escapeLabel(o.ProbeName))
 		median := o.Computed.Median
-		if math.IsNaN(median) {
+		// A signed clock offset is not a round-trip time, so it never rides the RTT median gauge
+		// (whose HELP says "round-trip time") — it goes to an offset-specific gauge instead. Loss,
+		// up, duration and staleness below are metric-agnostic and stay for every target.
+		if store.MetricOf(o) == probe.MetricOffset {
+			if !math.IsNaN(median) {
+				fmt.Fprintf(&b, "heliograph_ntp_offset_seconds%s %g\n", lbl, median)
+			}
+		} else if math.IsNaN(median) {
 			fmt.Fprintf(&b, "heliograph_probe_median_seconds%s NaN\n", lbl)
 		} else {
 			fmt.Fprintf(&b, "heliograph_probe_median_seconds%s %g\n", lbl, median)

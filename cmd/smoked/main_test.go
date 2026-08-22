@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -31,6 +32,36 @@ import (
 
 // warm-start must seed only the recent, cadence-contiguous, same-host/probe suffix — never
 // stale or semantically-different history, which could fire a false alert at boot (#6).
+// M4: a signed clock offset must never be fed to a latency matcher — alertRTT returns the median
+// for an rtt round but NaN for an offset round (a +5s offset must not look like 5000ms latency).
+func TestAlertRTTIgnoresOffset(t *testing.T) {
+	rtt := scheduler.Outcome{Metric: probe.MetricRTT, Computed: sample.Compute(2, []float64{0.02, 0.02})}
+	if v := alertRTT(rtt); v < 0.015 || v > 0.025 {
+		t.Errorf("rtt round: alertRTT = %v, want ~0.02", v)
+	}
+	off := scheduler.Outcome{Metric: probe.MetricOffset, Computed: sample.Compute(2, []float64{5, 5})}
+	if v := alertRTT(off); !math.IsNaN(v) {
+		t.Errorf("offset round: alertRTT = %v, want NaN (must not trip a latency alert)", v)
+	}
+}
+
+// M5: after a target changes measure, warm-start must not seed one metric's window from the other.
+// recentContiguous truncates at the metric boundary, keeping only the current-metric suffix.
+func TestRecentContiguousBreaksOnMetricChange(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	m := warmMeta{host: "h", probe: "NTP", step: time.Minute, metric: probe.MetricOffset}
+	rnd := func(ago time.Duration, metric string) scheduler.Outcome {
+		return scheduler.Outcome{Target: probe.Target{Name: "t", Host: "h"}, ProbeName: "NTP", Metric: metric, When: now.Add(-ago)}
+	}
+	hist := []scheduler.Outcome{
+		rnd(3*time.Minute, probe.MetricRTT), rnd(2*time.Minute, probe.MetricRTT), // pre-switch
+		rnd(time.Minute, probe.MetricOffset), rnd(0, probe.MetricOffset), // current
+	}
+	if got := recentContiguous(hist, m, now); len(got) != 2 {
+		t.Errorf("metric change should truncate to the 2 current (offset) rounds, got %d", len(got))
+	}
+}
+
 func TestRecentContiguous(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0).UTC()
 	m := warmMeta{host: "h", probe: "FPing", step: time.Minute}

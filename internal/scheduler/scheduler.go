@@ -42,6 +42,10 @@ type Outcome struct {
 	Duration    time.Duration
 	Vantage     string // where this round was measured; "" means the hub (store.DefaultVantage)
 	Fingerprint string // opaque tag copied from the Job (empty for local hub jobs)
+	// Metric names what Computed's values mean: probe.MetricRTT (round-trip time; every probe but
+	// NTP-offset) or probe.MetricOffset (a signed clock offset). Stored per row so history isn't
+	// merged across a metric change and RTT-only consumers don't misread an offset as latency.
+	Metric string
 }
 
 // roundBudget sizes a target's round timeout. A probe measures Pings samples
@@ -81,6 +85,7 @@ func runOne(ctx context.Context, j Job) Outcome {
 		When:        start,
 		Duration:    time.Since(start),
 		Fingerprint: j.Fingerprint,
+		Metric:      probe.NormalizeMetric(res.Kind),
 	}
 }
 
