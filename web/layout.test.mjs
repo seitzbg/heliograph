@@ -14,7 +14,7 @@
 //   (set SMOKED_BIN=/path/to/smoked to skip the `go run` compile; CI passes the prebuilt binary)
 
 import { spawn, execFileSync } from 'node:child_process';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { chromium } from 'playwright';
@@ -59,12 +59,27 @@ const died = () => {
 // check can latch onto a decoy and return before the freshly compiled collector even tries (and
 // fails) to bind — a false green. A prebuilt binary is the server itself, so a bind failure exits the
 // child promptly and the childExit guard below catches it.
+// tmpBinDir is the mkdtemp dir holding a self-compiled collector (bare-run path only); the `finally`
+// below removes it. Tracked at module scope so both the success path and an early failure clean up.
+let tmpBinDir = null;
 function resolveBin() {
   if (SMOKED_BIN) return SMOKED_BIN;
-  const bin = join(mkdtempSync(join(tmpdir(), 'smoked-layout-')), 'smoked');
+  tmpBinDir = mkdtempSync(join(tmpdir(), 'smoked-layout-'));
+  const bin = join(tmpBinDir, 'smoked');
   console.log('compiling smoked ->', bin);
-  execFileSync('go', ['build', '-o', bin, './cmd/smoked'], { stdio: 'inherit' });
+  try {
+    execFileSync('go', ['build', '-o', bin, './cmd/smoked'], { stdio: 'inherit' });
+  } catch (e) {
+    // A failed build happens BEFORE the main try/finally is entered, so clean up here too rather
+    // than leak the ~19MB temp binary/dir on every bare invocation (L2).
+    cleanupTmpBin();
+    throw e;
+  }
   return bin;
+}
+
+function cleanupTmpBin() {
+  if (tmpBinDir) { rmSync(tmpBinDir, { recursive: true, force: true }); tmpBinDir = null; }
 }
 
 // Start the collector serving the demo target set (in-memory store, no -dsn).
@@ -186,6 +201,7 @@ try {
   if (browser) await browser.close();
   stopping = true; // our own SIGTERM below is an expected exit, not an early death
   smoked.kill('SIGTERM');
+  cleanupTmpBin(); // remove the self-compiled binary + its temp dir (no-op on the SMOKED_BIN path)
 }
 
 if (failed) { console.error(`\n${failed} layout check(s) failed`); process.exit(1); }

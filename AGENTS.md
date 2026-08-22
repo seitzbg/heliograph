@@ -137,7 +137,9 @@ See the **Layout** section of [`README.md`](README.md#layout) for the annotated 
 - `cmd/smoked/` — hub/collector binary (serve, `vantage`, `config`/`import` subcommands).
 - `cmd/smoke-agent/` — remote-vantage collector binary.
 - `internal/probe/` — the `Probe` plugin contract; each probe self-registers via `init()` in its
-  subpackage (`fping`, `pingprobe`, `tcpconnect`, `dns`, `httpprobe`, `sshprobe`, `irttprobe`).
+  subpackage (`fping`, `pingprobe`, `tcpconnect`, `dns`, `httpprobe`, `sshprobe`, `irttprobe`,
+  `ntpprobe`). Both binaries pull in the full set through `internal/probe/allprobes` (blank-imported
+  by `smoked` and `smoke-agent`), so the hub and vantage agent can't drift to different probe sets.
 - `internal/sample/` — median / loss / centered-smoke-array math (the smoke-graph input).
 - `internal/scheduler/` — parallel worker pool with per-target timeouts.
 - `internal/store/` + `internal/store/pgstore/` — `store.Store` interface, in-memory + TimescaleDB.

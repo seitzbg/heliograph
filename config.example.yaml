@@ -14,7 +14,7 @@ probes:            # probe-instance (probe-level) settings
   HTTP: {}
   SSH: {}
   IRTT: {}         # needs the irtt binary + an irtt server on the target
-  NTP: {}          # SNTP query (UDP/123); graphs RTT + shows the server's clock offset & stratum
+  NTP: {}          # SNTP query (UDP/123); per-target `measure` graphs RTT (default) or clock offset; stratum shown as a stat
 
 alerts:            # named alert definitions (attach to targets via `alerts:`)
   loss:            # a matcher-style alert with hysteresis

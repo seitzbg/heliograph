@@ -249,6 +249,30 @@ check('seriesStats weights median by median_rounds, loss by total rounds', () =>
   assert.ok(st.lossAvg > 40 && st.lossAvg < 55, `loss avg ${st.lossAvg} should be ~49% (total-round-weighted)`);
 });
 
+// L6: an all-negative offset series has a real (negative) maximum median — medMax must be that
+// value, not a fabricated 0 (mmax initialized to 0 makes Math.max(0, -x) return 0).
+check('seriesStats medMax is the real max for an all-negative (offset) series', () => {
+  const s = Smoke.fromApiRollup({
+    resolution: '1h',
+    buckets: [
+      { bucket: '2026-08-06T00:00:00Z', median_avg_ms: -0.4, median_min_ms: -0.5, median_max_ms: -0.3, loss_pct: 0, rounds: 10, median_rounds: 10 },
+      { bucket: '2026-08-06T01:00:00Z', median_avg_ms: -0.2, median_min_ms: -0.3, median_max_ms: -0.1, loss_pct: 0, rounds: 10, median_rounds: 10 },
+    ],
+  });
+  const st = Smoke.seriesStats(s);
+  assert.ok(st.medMax < 0, `medMax ${st.medMax} must be the real negative max (~-0.2), not a fabricated 0`);
+  assert.ok(Math.abs(st.medMax - (-0.2)) < 1e-9, `medMax ${st.medMax} should be -0.2`);
+});
+
+// A fully-lost series still reports medMax = NaN (no median existed), unchanged by the L6 fix.
+check('seriesStats medMax is NaN when every bucket was fully lost', () => {
+  const s = Smoke.fromApiRollup({
+    resolution: '1h',
+    buckets: [{ bucket: '2026-08-06T00:00:00Z', median_avg_ms: null, loss_pct: 100, rounds: 10, median_rounds: 0 }],
+  });
+  assert.ok(Number.isNaN(Smoke.seriesStats(s).medMax), 'medMax must stay NaN for an all-lost series');
+});
+
 // --- overlay mode: extra per-vantage median-only lines, y-scale spans all ---
 
 // A single-sample-per-bucket series built directly from median values (own timestamps),

@@ -112,7 +112,10 @@ window.Smoke = (function () {
     // by TOTAL rounds; the median by the rounds that actually produced a median (not fully
     // lost). During an outage the two differ, and weighting the median by total rounds would
     // let one surviving round in a mostly-lost bucket count as a full bucket's median (P2-6).
-    let mwsum = 0, mmax = 0, mw = 0, lsum = 0, wsum = 0;
+    // mmax starts at -Infinity, not 0: an all-negative (clock-offset) series has a real negative
+    // maximum, and a 0 seed would fabricate medMax=0 via Math.max(0, negative). mmax is only read
+    // when mw>0, i.e. after at least one real median updated it, so -Infinity never escapes (L6).
+    let mwsum = 0, mmax = -Infinity, mw = 0, lsum = 0, wsum = 0;
     for (const b of s.buckets) {
       const lossW = b.rounds || 1;
       const medW = b.medianRounds != null ? b.medianRounds : lossW;
@@ -196,7 +199,11 @@ window.Smoke = (function () {
     // Signed axes (offset) label with an explicit sign and decimals matched to the (often µs-scale)
     // step; a non-negative axis keeps the exact historical latency formatting so those graphs are
     // unchanged. The gridline start snaps to a nice multiple at or below yMin.
-    const decs = step < 0.1 ? 2 : step < 1 ? 1 : 0;
+    // Decimals track the nice step so a µs-scale offset step (e.g. 0.002 ms) still gets distinct
+    // labels instead of every tick rounding to 0.00; capped at 3 so latency-scale steps stay tidy
+    // (L5). Only the signed (offset) axis uses this — the non-negative latency axis keeps its exact
+    // historical formatting, so those graphs are unchanged.
+    const decs = step >= 1 ? 0 : Math.min(3, Math.ceil(-Math.log10(step)));
     const fmtTick = signed
       ? (g) => (signedAxis && g > 1e-9 ? '+' : g < -1e-9 ? '−' : '') + Math.abs(g).toFixed(decs)
       : (g) => (g >= 100 ? g.toFixed(0) : g.toFixed(g < 10 ? 1 : 0));

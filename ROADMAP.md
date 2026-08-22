@@ -152,9 +152,10 @@ Phase-6 items all ship in the single **v1.0** line.
   `net.ipv4.ping_group_range` sysctl), raw-socket fallback (`CAP_NET_RAW`). Ships alongside
   `FPing` rather than replacing it — the external binary and `setcap` dance stay for users who
   keep using `FPing`, but new deployments can drop both by using `Ping` instead. *(Small–medium.)*
-- 🚧 **NTP probe** (planned; 2026-08-12) — a new probe kind measuring NTP server responsiveness: an
-  SNTP request/response round-trip (and optionally clock offset / stratum), self-registering like the
-  other native probes, no external binary. *(Small.)*
+- ✅ **NTP probe** (shipped v1.0.7; offset graphing v1.0.8) — a native SNTP probe (no external
+  binary), self-registering like the other probes. `measure: rtt` graphs the query round-trip;
+  `measure: offset` graphs the server's clock offset as a signed series; stratum + the other value
+  show as panel stats. Kiss-o'-Death backoff and origin-verified offsets followed in hardening.
 - ✅ **On-disk agent store-and-forward** — the agent persists its buffer to disk (opt-in `spool_dir`) so a vantage restart — including a hard crash — loses at most ~1s of unpushed rounds instead of the whole buffer; append-only CRC-framed segments mirror the in-memory buffer, crash-safe replay on startup, `flock` against shared dirs, degrade-to-memory on I/O error.
 - ✅ **Cut the release** — **v1.0.0** (2026-08-11): everything built to date ships under a single
   1.0 line (the earlier "single-node v1.0 / federation v2.0" split was collapsed, since nothing had
@@ -213,7 +214,8 @@ follow-up found several edge cases, now fixed in **Unreleased**:
   golang.org/x/net|x/text|grpc` floors are interim patches over a stale pinned base — drop them once
   `caddy:2.11-alpine` (or a newer Caddy release) ships the fixes natively, and bump the digest instead.
 
-The next planned **feature** is the NTP probe (Phase 6, above).
+The NTP probe (the last Phase 6 feature) has shipped. The remaining Phase 6 items above are the
+native `Ping` probe (retire the `FPing` binary + `setcap`) and the maintenance follow-ups.
 
 ## Notes / decisions
 - Stack: Go collector · TimescaleDB (raw samples; bands via SQL quantiles) · REST+JSON API ·
