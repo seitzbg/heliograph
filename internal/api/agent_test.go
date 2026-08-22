@@ -562,9 +562,16 @@ func TestValidSamples(t *testing.T) {
 		{"too-large duration", []float64{0.01}, maxDurationMs + 1, false},
 	}
 	for _, tc := range cases {
-		if got := validSamples(tc.rtts, tc.duration); got != tc.want {
+		if got := validSamples(tc.rtts, tc.duration, false); got != tc.want {
 			t.Errorf("%s: validSamples=%v want %v", tc.name, got, tc.want)
 		}
+	}
+	// signed=true (offset metric) additionally accepts negative samples within magnitude bounds.
+	if !validSamples([]float64{-0.001, 0.002}, 0, true) {
+		t.Error("signed validSamples must accept a negative offset sample")
+	}
+	if validSamples([]float64{-(maxRTTSeconds + 1)}, 0, true) {
+		t.Error("signed validSamples must still reject an absurdly large negative magnitude")
 	}
 }
 

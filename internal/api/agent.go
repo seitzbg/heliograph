@@ -71,19 +71,42 @@ const (
 	maxPastSkew = 30 * 24 * time.Hour
 )
 
-// validSamples reports whether every RTT and the duration are finite, non-negative, and
-// within the documented upper bounds. A round with any bad value is dropped whole rather
-// than silently partially accepted.
-func validSamples(rtts []float64, durationMs float64) bool {
+// validSamples reports whether every sample and the duration are finite and within the documented
+// magnitude bounds. A round with any bad value is dropped whole rather than silently partially
+// accepted. RTT samples must be non-negative; a signed metric (offset-mode NTP) legitimately
+// carries negative values, so signed=true allows them down to -maxRTTSeconds — the sign allowance
+// is scoped to the authenticated assignment's metric, never the agent's self-report.
+func validSamples(rtts []float64, durationMs float64, signed bool) bool {
 	if math.IsNaN(durationMs) || math.IsInf(durationMs, 0) || durationMs < 0 || durationMs > maxDurationMs {
 		return false
 	}
 	for _, v := range rtts {
-		if math.IsNaN(v) || math.IsInf(v, 0) || v < 0 || v > maxRTTSeconds {
+		if math.IsNaN(v) || math.IsInf(v, 0) || v > maxRTTSeconds {
+			return false
+		}
+		if signed {
+			if v < -maxRTTSeconds {
+				return false
+			}
+		} else if v < 0 {
 			return false
 		}
 	}
 	return true
+}
+
+// assignmentMetric is the metric an assigned target produces, per the authenticated assignment:
+// probe.MetricOffset only for an NTP target whose resolved measure (per-target params, else the
+// probe-level default) is "offset"; every other target is probe.MetricRTT.
+func assignmentMetric(m model.Monitor, probeCfgs map[string]map[string]string) string {
+	if m.ProbeKind != "NTP" {
+		return probe.MetricRTT
+	}
+	measure := m.Params["measure"]
+	if measure == "" {
+		measure = probeCfgs["NTP"]["measure"]
+	}
+	return probe.NormalizeMetric(measure)
 }
 
 // withinSkew reports whether ts is within the accepted [now-maxPastSkew, now+maxFutureSkew]
@@ -132,9 +155,11 @@ func (srv *Server) agentResults(w http.ResponseWriter, r *http.Request) {
 	// large batch spanning only a handful of distinct targets, so per-round hashing would
 	// redo the same sha256 thousands of times.
 	wantFP := make(map[string]string, len(monitors))
+	metricByTarget := make(map[string]string, len(monitors))
 	for _, m := range monitors {
 		allowed[m.Name] = m
 		wantFP[m.Name] = federation.Fingerprint(m, probeCfgs[m.ProbeKind])
+		metricByTarget[m.Name] = assignmentMetric(m, probeCfgs)
 	}
 	outcomes := make([]scheduler.Outcome, 0, len(req.Results))
 	dropped, mismatched, noFP := 0, 0, 0
@@ -155,7 +180,8 @@ func (srv *Server) agentResults(w http.ResponseWriter, r *http.Request) {
 			dropped++
 			continue
 		}
-		if !withinSkew(ts, now) || !validSamples(rd.RTTs, rd.DurationMs) {
+		metric := metricByTarget[rd.Target]
+		if !withinSkew(ts, now) || !validSamples(rd.RTTs, rd.DurationMs, metric == probe.MetricOffset) {
 			dropped++
 			continue
 		}
@@ -182,6 +208,7 @@ func (srv *Server) agentResults(w http.ResponseWriter, r *http.Request) {
 			Target:    probe.Target{Name: m.Name, Host: m.Host},
 			ProbeName: m.ProbeKind,
 			Computed:  sample.Compute(rd.Pings, rd.RTTs),
+			Metric:    metric, // from the authenticated assignment, not the agent's self-report
 			When:      ts.UTC(),
 			Duration:  time.Duration(rd.DurationMs * float64(time.Millisecond)),
 			Vantage:   v,
