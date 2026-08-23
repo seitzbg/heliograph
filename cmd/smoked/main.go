@@ -239,6 +239,24 @@ func main() {
 			fatal("config store", cerr)
 		}
 		defer cfgStore.Close()
+
+		// One-time migration (idempotent): stamp id = <flattened path> onto any existing
+		// DB-config target node that doesn't have one yet, so its id matches the string the
+		// store already keys its history under — existing prod rows survive with zero
+		// rewrite. Must run before the first runtime build below reads dbFragment. A version
+		// conflict means another smoked instance raced this and migrated first; benign.
+		if migrated, merr := configstore.MigrateStampIDs(context.Background(), cfgStore); merr != nil {
+			if errors.Is(merr, configstore.ErrConflict) {
+				slog.Info("config id migration: lost race to another instance, skipping")
+			} else {
+				slog.Warn("config id migration failed", "err", merr)
+			}
+		} else if migrated {
+			slog.Info("config id migration: stamped birth-path ids on existing DB targets")
+		} else {
+			slog.Info("config id migration: nothing to stamp")
+		}
+
 		dbFragment = func() ([]byte, error) {
 			doc, _, err := cfgStore.Get(context.Background())
 			return doc, err
