@@ -6,6 +6,8 @@ All notable changes to **Heliograph** are recorded here. The format follows
 
 ## [Unreleased]
 
+## [1.0.11] - 2026-08-23
+
 Stable target identity, documented and hardened. A target's history now follows a stable, server-
 managed `id` rather than its position in the tree, so moving or renaming a node keeps its graph —
 and this release closes the follow-up gaps in how that identity interacts with imports, the
@@ -1412,7 +1414,8 @@ the smoke-graph look, a fast/parallel poller, and probes as plugins.
 - Full re-implementation reference / code map maintained outside the repo at
   `~/.claude/plans/smokeping-codemap/`.
 
-[Unreleased]: https://github.com/seitzbg/heliograph/compare/v1.0.10...main
+[Unreleased]: https://github.com/seitzbg/heliograph/compare/v1.0.11...main
+[1.0.11]: https://github.com/seitzbg/heliograph/compare/v1.0.10...v1.0.11
 [1.0.10]: https://github.com/seitzbg/heliograph/compare/v1.0.9...v1.0.10
 [1.0.9]: https://github.com/seitzbg/heliograph/compare/v1.0.8...v1.0.9
 [1.0.8]: https://github.com/seitzbg/heliograph/compare/v1.0.7...v1.0.8
