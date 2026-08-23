@@ -50,7 +50,7 @@ func (s *rollupSpyStore) Rollup(_ context.Context, target, _ /*vantage*/, _ /*re
 // zoomed view renders blank. The spy returns data only for the frozen id, so this fails (empty
 // buckets) until the handler resolves the key.
 func TestRollupResolvesMovedTargetPath(t *testing.T) {
-	const id = "Resolvers/dns1"      // stable storage identity, frozen at birth == pre-move path
+	const id = "Resolvers/dns1"       // stable storage identity, frozen at birth == pre-move path
 	const newPath = "Datacenter/dns1" // current display path after the move
 
 	spy := &rollupSpyStore{MemStore: store.NewMem(100), dataID: id}

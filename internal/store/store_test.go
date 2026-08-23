@@ -317,7 +317,7 @@ func TestMemStoreKeysByIDAcrossMove(t *testing.T) {
 			When:   time.Now(), Computed: sample.Computed{Pings: 1},
 		}
 	}
-	s.Add([]scheduler.Outcome{mk("Resolvers/dns1")}) // before the move
+	s.Add([]scheduler.Outcome{mk("Resolvers/dns1")})  // before the move
 	s.Add([]scheduler.Outcome{mk("Datacenter/dns1")}) // after the move: same ID, new display path
 	h, err := s.History("stable-1")
 	if err != nil {
