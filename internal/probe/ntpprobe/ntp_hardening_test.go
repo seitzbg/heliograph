@@ -88,7 +88,7 @@ func TestNTPStatInvalidatedOnUnsync(t *testing.T) {
 	if _, err := p.Measure(context.Background(), synced, 1); err != nil {
 		t.Fatalf("Measure(synced): %v", err)
 	}
-	if _, _, _, ok := LatestFor("desync"); !ok {
+	if _, _, _, ok := LatestFor("desync", "127.0.0.1"); !ok {
 		t.Fatal("expected an offset stat after a synchronized (stratum 2) reply")
 	}
 	// Same target name, now answering unsynchronized (stratum 16).
@@ -97,7 +97,7 @@ func TestNTPStatInvalidatedOnUnsync(t *testing.T) {
 	if _, err := p.Measure(context.Background(), unsynced, 1); err != nil {
 		t.Fatalf("Measure(unsynced): %v", err)
 	}
-	if _, _, _, ok := LatestFor("desync"); ok {
+	if _, _, _, ok := LatestFor("desync", "127.0.0.1"); ok {
 		t.Error("stale offset stat must be invalidated after an unsynchronized reply")
 	}
 }
@@ -124,7 +124,7 @@ func TestNTPLeapAlarmRejectsOffset(t *testing.T) {
 	if len(res.Samples) != 0 {
 		t.Errorf("LI=3 offset-mode samples = %d, want 0 (clock unsynchronized)", len(res.Samples))
 	}
-	if _, _, _, ok := LatestFor("leap-off"); ok {
+	if _, _, _, ok := LatestFor("leap-off", "127.0.0.1"); ok {
 		t.Error("LI=3 reply must not record an offset stat")
 	}
 	rtt := probe.Target{Name: "leap-rtt", Host: "127.0.0.1", Params: map[string]string{"port": strconv.Itoa(port)}}
@@ -144,7 +144,7 @@ func TestNTPStatClearedAfterNoReplyRound(t *testing.T) {
 	if _, err := p.Measure(context.Background(), good, 1); err != nil {
 		t.Fatalf("Measure(good): %v", err)
 	}
-	if _, _, _, ok := LatestFor("gone"); !ok {
+	if _, _, _, ok := LatestFor("gone", "127.0.0.1"); !ok {
 		t.Fatal("expected a stat after a synchronized reply")
 	}
 	// Same target now points at a closed port: every ping is a no-reply (connection refused).
@@ -152,7 +152,7 @@ func TestNTPStatClearedAfterNoReplyRound(t *testing.T) {
 	if _, err := p.Measure(context.Background(), gone, 2); err != nil {
 		t.Fatalf("Measure(gone): %v", err)
 	}
-	if _, _, _, ok := LatestFor("gone"); ok {
+	if _, _, _, ok := LatestFor("gone", "127.0.0.1"); ok {
 		t.Error("stale offset/stratum stat must clear after a no-reply round")
 	}
 }
@@ -242,7 +242,7 @@ func TestNTPOffsetRequiresOriginEcho(t *testing.T) {
 	if len(res.Samples) != 0 {
 		t.Errorf("wrong-origin offset-mode samples = %d, want 0", len(res.Samples))
 	}
-	if _, _, _, ok := LatestFor("noecho-off"); ok {
+	if _, _, _, ok := LatestFor("noecho-off", "127.0.0.1"); ok {
 		t.Error("wrong-origin reply must not record an offset stat")
 	}
 
@@ -252,7 +252,7 @@ func TestNTPOffsetRequiresOriginEcho(t *testing.T) {
 	if len(res2.Samples) != 2 {
 		t.Errorf("wrong-origin RTT-mode samples = %d, want 2 (still reachable)", len(res2.Samples))
 	}
-	if _, _, _, ok := LatestFor("noecho-rtt"); ok {
+	if _, _, _, ok := LatestFor("noecho-rtt", "127.0.0.1"); ok {
 		t.Error("wrong-origin reply must not record an offset stat in RTT mode either")
 	}
 }

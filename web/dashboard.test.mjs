@@ -759,5 +759,31 @@ check('rangeLabels: four labels; clock time for short spans, calendar dates for 
   assert.notEqual(short[0], short[3]);
 });
 
+// tkey (CODE_REVIEW L8): a target's stable routing/identity key is its server id when set, else the
+// display path. The dashboard routes/caches/keys panels by this — dual-keyed with the path — so an
+// open tab or bookmark survives the target being moved in the config tree.
+check('tkey: prefers the stable id, falls back to the display path', () => {
+  assert.equal(D.tkey({ id: 'uuid-1', name: 'grp/leaf' }), 'uuid-1'); // UUID-backed target routes by id
+  assert.equal(D.tkey({ id: 'a/b', name: 'a/b' }), 'a/b');            // migrated target: id == path
+  assert.equal(D.tkey({ name: 'a/b' }), 'a/b');                       // no id (bare setup / series-all join)
+  assert.equal(D.tkey({ id: '', name: 'a/b' }), 'a/b');              // empty id is not a key
+});
+
+// ntpStatHtml (CODE_REVIEW M2): the NTP companion clock stat shown beside median/loss, in the grid
+// AND — the M2 fix — a detail view's focused vantage. On an rtt-graphing panel it shows offset +
+// stratum; on an offset-graphing panel (signed) the offset is redundant (it IS the series), so only
+// stratum shows. No reading -> empty string.
+check('ntpStatHtml: offset+stratum on an rtt panel, stratum-only when signed, empty when absent', () => {
+  assert.equal(D.ntpStatHtml(null, false), '');           // no reading -> nothing
+  assert.equal(D.ntpStatHtml(undefined, true), '');
+  const rtt = D.ntpStatHtml({ off: -0.9, stratum: 2 }, false);
+  assert.match(rtt, /offset/); assert.match(rtt, /−0\.90 ms/); assert.match(rtt, /stratum/); assert.match(rtt, />2</);
+  const pos = D.ntpStatHtml({ off: 12.5, stratum: 3 }, false);
+  assert.match(pos, /\+12\.5 ms/); // >=1 ms -> one decimal, explicit +
+  // Signed (offset-graphing) panel: the redundant offset stat is hidden, only stratum remains.
+  const signed = D.ntpStatHtml({ off: -0.9, stratum: 2 }, true);
+  assert.ok(!/offset/.test(signed), 'offset stat must be hidden on a signed panel'); assert.match(signed, /stratum/);
+});
+
 if (failed) { console.error(`\n${failed} test(s) failed`); process.exit(1); }
 console.log('\nall dashboard tests passed');

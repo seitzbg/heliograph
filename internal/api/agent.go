@@ -160,11 +160,62 @@ func (srv *Server) agentResults(w http.ResponseWriter, r *http.Request) {
 		wantFP[m.ID] = federation.Fingerprint(m, probeCfgs[m.ProbeKind])
 		metricByTarget[m.ID] = assignmentMetric(m, probeCfgs)
 	}
+	// Rolling-upgrade fallback: a pre-#94 agent doesn't understand AssignmentTarget.ID and
+	// reports RoundReport.Target = Name (its display path). Before a move ID==Name so the id-keyed
+	// map already matches; after a move Name becomes the new path while ID stays the frozen birth
+	// path, so such a round would be dropped as unassigned. byCurrentName lets an id-miss fall back
+	// to the target's current display path.
+	//
+	// Collision handling: a target's display path can equal a DIFFERENT target's stable id (a
+	// birth-path id that another target has since been created/moved onto). Such a name is recorded
+	// in ambiguousName and kept OUT of byCurrentName, because a bare token can't tell "target X's
+	// stable id" from "target Y's current path". For a fingerprint-bearing round the gate below still
+	// sorts it out (only two targets sharing a fingerprint AND this exact path/id overlap is
+	// unresolvable — and then the measurements are identical anyway). For a fingerprint-LESS round
+	// (a pre-fingerprint agent, which reports by path) the token is unattributable, so it is dropped
+	// rather than misattributed to the id owner (CODE_REVIEW M9(B) follow-up).
+	byCurrentName := make(map[string]model.Monitor, len(monitors))
+	ambiguousName := map[string]bool{}
+	for _, m := range monitors {
+		if m.Name == m.ID {
+			continue // id-keyed entry already covers this target
+		}
+		if _, isID := allowed[m.Name]; isID {
+			ambiguousName[m.Name] = true // this display path is also another target's stable id
+			continue
+		}
+		byCurrentName[m.Name] = m
+	}
 	outcomes := make([]scheduler.Outcome, 0, len(req.Results))
 	dropped, mismatched, noFP := 0, 0, 0
+	// Remote NTP stat updates are collected here and applied only AFTER the durable commit below,
+	// and only for targets whose round was actually committed — so a round dropped by the commit-time
+	// identity recheck (a reload landing between the snapshot validation above and the write) can't
+	// publish a clock stat that was never stored (CODE_REVIEW M3). Keyed by stable id; the latest
+	// round in the batch wins, preserving the previous last-write-wins behavior.
+	type ntpUpdate struct {
+		offsetSec float64
+		stratum   uint8
+		measure   string
+		host      string
+		clear     bool
+	}
+	pendingNTP := map[string]ntpUpdate{}
 	now := time.Now()
 	for _, rd := range req.Results {
 		m, ok := allowed[rd.Target]
+		if ok && rd.Fingerprint == "" && ambiguousName[rd.Target] {
+			// The token is both this target's stable id and a different target's current path, and a
+			// fingerprint-less round carries nothing to disambiguate the two, so it can't be safely
+			// attributed to the id owner — drop it (it also isn't in byCurrentName). A fingerprint-
+			// bearing round keeps the id-owner match and is checked by the gate below (M9(B) follow-up).
+			ok = false
+		}
+		if !ok {
+			// Old-agent fallback: the round may be keyed by the target's current display path
+			// rather than its stable id (CODE_REVIEW M9(B)).
+			m, ok = byCurrentName[rd.Target]
+		}
 		if !ok {
 			dropped++
 			continue
@@ -179,7 +230,7 @@ func (srv *Server) agentResults(w http.ResponseWriter, r *http.Request) {
 			dropped++
 			continue
 		}
-		metric := metricByTarget[rd.Target]
+		metric := metricByTarget[m.ID] // keyed by stable id — rd.Target may be a display-path alias
 		if !withinSkew(ts, now) || !validSamples(rd.RTTs, rd.DurationMs, metric == probe.MetricOffset) {
 			dropped++
 			continue
@@ -198,7 +249,7 @@ func (srv *Server) agentResults(w http.ResponseWriter, r *http.Request) {
 				dropped++
 				continue
 			}
-		case rd.Fingerprint != wantFP[rd.Target]:
+		case rd.Fingerprint != wantFP[m.ID]:
 			dropped++
 			mismatched++
 			continue
@@ -219,21 +270,22 @@ func (srv *Server) agentResults(w http.ResponseWriter, r *http.Request) {
 			// agent omitted its fingerprint. Missing-agent provenance is already counted separately;
 			// carrying the snapshot fingerprint closes the reload-before-commit race for lenient
 			// agents just as it does for current agents (CODE_REVIEW M2/M4).
-			Fingerprint: wantFP[rd.Target],
+			Fingerprint: wantFP[m.ID],
 		}
 		if rd.Err != "" {
 			o.Err = errors.New(rd.Err)
 		}
 		outcomes = append(outcomes, o)
-		// Carry the NTP companion clock stat for this vantage. A synchronized round reports offset +
-		// stratum; an unsynchronized/unreachable round, or a pre-stat agent, reports neither, so
-		// clear it then — a remote NTP panel shows the current reading or nothing, never a stale one
-		// (CODE_REVIEW M2). Best-effort and per-vantage, mirroring the hub's own local registry.
+		// Record the NTP companion clock stat for this vantage, applied post-commit below. A
+		// synchronized round reports offset + stratum; an unsynchronized/unreachable round, or a
+		// pre-stat agent, reports neither, so the stat is cleared then — a remote NTP panel shows the
+		// current reading or nothing, never a stale one (CODE_REVIEW M2). The stat is tagged with the
+		// target's current host so a later read rejects it once the target is repointed (M3).
 		if m.ProbeKind == "NTP" {
 			if rd.NTPOffsetMs != nil && rd.Stratum != nil && *rd.Stratum >= 0 && *rd.Stratum <= 255 {
-				srv.remoteNTP.set(v, m.ID, *rd.NTPOffsetMs/1000, uint8(*rd.Stratum), metric)
+				pendingNTP[m.ID] = ntpUpdate{offsetSec: *rd.NTPOffsetMs / 1000, stratum: uint8(*rd.Stratum), measure: metric, host: m.Host}
 			} else {
-				srv.remoteNTP.clear(v, m.ID)
+				pendingNTP[m.ID] = ntpUpdate{clear: true}
 			}
 		}
 	}
@@ -249,18 +301,17 @@ func (srv *Server) agentResults(w http.ResponseWriter, r *http.Request) {
 		// by the store and excluded, so it can't re-advance alert hysteresis into a false FIRING or a
 		// duplicate notification (CODE_REVIEW #4/replay). Each outcome carries its vantage (P2-5).
 		var err error
+		var committed []scheduler.Outcome
 		if srv.IngestCommit != nil {
-			var committed []scheduler.Outcome
 			committed, err = srv.IngestCommit(r.Context(), outcomes)
 			if err == nil {
 				accepted = len(committed)
 				dropped += len(outcomes) - accepted
 			}
 		} else {
-			var inserted []scheduler.Outcome
-			if inserted, err = ing.AddResults(r.Context(), outcomes); err == nil {
-				if srv.OnIngest != nil && len(inserted) > 0 {
-					srv.OnIngest(inserted)
+			if committed, err = ing.AddResults(r.Context(), outcomes); err == nil {
+				if srv.OnIngest != nil && len(committed) > 0 {
+					srv.OnIngest(committed)
 				}
 			}
 		}
@@ -268,6 +319,18 @@ func (srv *Server) agentResults(w http.ResponseWriter, r *http.Request) {
 			slog.Error("agent ingest: write failed", "vantage", v, "err", err)
 			http.Error(w, `{"error":"store unavailable"}`, http.StatusServiceUnavailable)
 			return
+		}
+		// Apply the deferred remote NTP stat updates now, only for targets that were durably
+		// committed — a round rejected by the commit-time identity recheck never touches the
+		// displayed stat (CODE_REVIEW M3).
+		for _, o := range committed {
+			if u, ok := pendingNTP[o.Target.Key()]; ok {
+				if u.clear {
+					srv.remoteNTP.clear(v, o.Target.Key())
+				} else {
+					srv.remoteNTP.set(v, o.Target.Key(), u.offsetSec, u.stratum, u.measure, u.host)
+				}
+			}
 		}
 	}
 	if dropped > 0 {

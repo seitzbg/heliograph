@@ -652,7 +652,8 @@ func TestRemoteNTPStatTransportsAndClears(t *testing.T) {
 		},
 		Active: func() map[string]bool { return map[string]bool{"clock": true} },
 		Configured: func() []model.Monitor {
-			return []model.Monitor{{Name: "clock", ProbeKind: "NTP", Vantages: []string{"nyc"}}}
+			// Host must match the assignment's (the remote stat is now host-bound, M3).
+			return []model.Monitor{{Name: "clock", ProbeKind: "NTP", Host: "h", Vantages: []string{"nyc"}}}
 		},
 		TargetVantages: func() map[string][]string { return map[string][]string{"clock": {"nyc"}} },
 	}
@@ -757,5 +758,71 @@ func TestAssignmentCarriesIDAndIngestKeysByIt(t *testing.T) {
 	}
 	if len(hist) == 0 {
 		t.Fatalf("expected the round to be stored under the stable id %q, got none", "wid")
+	}
+}
+
+// A pre-#94 agent doesn't understand AssignmentTarget.ID and reports RoundReport.Target = Name
+// (its display path). After the hub moves a target, its Name becomes the new path while its stable
+// ID stays the frozen birth path, so an id-keyed-only allowed map would drop the old agent's round
+// as unassigned. Ingest must fall back to the current display path and still store under the stable
+// id (CODE_REVIEW M9(B)).
+func TestIngestOldAgentReportsMovedTargetByName(t *testing.T) {
+	// ID != Name: a migrated target (id == birth path "grp/leaf") that has since moved to "grp2/leaf".
+	m := model.Monitor{ID: "grp/leaf", Name: "grp2/leaf", ProbeKind: "FPing", Host: "1.1.1.1", Pings: 3, Step: time.Minute, Vantages: []string{"nyc"}}
+	probeCfgs := map[string]map[string]string{"FPing": {"binary": "/usr/sbin/fping"}}
+	ing := &fakeIngester{}
+	srv := &Server{
+		store:       ing,
+		VantageAuth: fakeAuth{name: "nyc", ok: true},
+		Assignment: func(v string) ([]model.Monitor, map[string]map[string]string, string) {
+			return []model.Monitor{m}, probeCfgs, "sha256:v1"
+		},
+	}
+	fp := federation.Fingerprint(m, probeCfgs["FPing"]) // fingerprint excludes Name, so it matches
+	// The old agent echoes the CURRENT display path ("grp2/leaf"), not the stable id ("grp/leaf").
+	body := fmt.Sprintf(`{"results":[{"target":"grp2/leaf","ts":%q,"pings":3,"rtts":[0.01,0.02,0.03],"fingerprint":%q}]}`,
+		recentTS(), fp)
+	w := postResults(t, srv, body)
+	if w.Code != 200 {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body)
+	}
+	var resp struct{ Accepted, Dropped int }
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	if resp.Accepted != 1 || resp.Dropped != 0 {
+		t.Fatalf("old-agent round under current path: counts=%+v, want accepted=1 dropped=0", resp)
+	}
+	if len(ing.got) != 1 || ing.got[0].Target.ID != "grp/leaf" {
+		t.Fatalf("round must store under stable id grp/leaf regardless of reported path, got %+v", ing.got)
+	}
+}
+
+// A target's display path can equal a DIFFERENT target's stable id (X born at path "a", since moved
+// to "b"; Y later created at path "a" with a UUID id). A fingerprint-less round reporting the
+// ambiguous token "a" carries nothing to say whether it means X's stable id or Y's current path, so
+// it must be DROPPED rather than misattributed to the id owner X (CODE_REVIEW M9(B) follow-up).
+func TestIngestDropsFingerprintlessAmbiguousToken(t *testing.T) {
+	x := model.Monitor{ID: "a", Name: "b", ProbeKind: "FPing", Host: "1.1.1.1", Pings: 3, Step: time.Minute, Vantages: []string{"nyc"}}
+	y := model.Monitor{ID: "y-uuid", Name: "a", ProbeKind: "FPing", Host: "2.2.2.2", Pings: 3, Step: time.Minute, Vantages: []string{"nyc"}}
+	ing := &fakeIngester{}
+	srv := &Server{
+		store:       ing,
+		VantageAuth: fakeAuth{name: "nyc", ok: true},
+		Assignment: func(v string) ([]model.Monitor, map[string]map[string]string, string) {
+			return []model.Monitor{x, y}, nil, "sha256:v1"
+		},
+	}
+	// Old (pre-fingerprint) agent reports the ambiguous token "a" with no fingerprint.
+	body := fmt.Sprintf(`{"results":[{"target":"a","ts":%q,"pings":3,"rtts":[0.01,0.02,0.03]}]}`, recentTS())
+	w := postResults(t, srv, body)
+	if w.Code != 200 {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body)
+	}
+	var resp struct{ Accepted, Dropped int }
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	if resp.Accepted != 0 || resp.Dropped != 1 {
+		t.Fatalf("ambiguous fingerprint-less round must be dropped: counts=%+v, want accepted=0 dropped=1", resp)
+	}
+	if len(ing.got) != 0 {
+		t.Fatalf("ambiguous round must not be stored (least of all as target %q), got %+v", "a", ing.got)
 	}
 }

@@ -59,6 +59,15 @@ targets:
   #     title: My Server          # header shows "My Server (10.0.0.5)" with -resolve-ips
   #     host: my-server.internal  # still the probe target
   #     ip: 10.0.0.5              # pinned display IP (no DNS needed)
+  #
+  # Stable identity (`id`): a target's history is stored under a stable `id`, NOT its tree path, so
+  # moving or renaming a node in the tree keeps its graph. For targets created or imported through
+  # the admin UI/`config import`, the server MINTS this id automatically (an opaque UUID) — you do
+  # not write it, and the UI does not expose it for editing. A target defined only in THIS YAML file
+  # has no minted id and falls back to its tree path as its identity, so renaming such a target in
+  # YAML starts a fresh graph. Federation note: the stable id travels in each vantage's assignment;
+  # a remote `smoke-agent` older than this feature still reports data, but MOVING a remotely-measured
+  # target should wait until that vantage's agent is upgraded, or its rounds pause until it is.
 
   children:
     # Leaf names describe the PROBE METHOD, grouped by provider. (These are ICMP pings etc.

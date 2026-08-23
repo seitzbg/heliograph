@@ -738,7 +738,29 @@
     ].join('\n');
   }
 
-  window.Dash = { RANGES, RANGE_ORDER, parseRoute, mergeSeries, gridSince, gridTemplateFor, maxColumnsFor, rangeLabels, fetchJSON, zoomResolution, pixelToTime, sharedYMax, buildTree, underPath, targetStatus, pickSeries, vantageList, orderVantages, defaultFocus, keepFocus, vantageColorVar, adminMode, adminSessionState, createAdminStateController, statusProbeOwnsView, relTime, listTargets, addTarget, editTarget, removeTarget, buildTargetNode, buildGroupNode, labelHTML, collectingNote, agentYaml, agentCompose, cfgTree, reweightSiblings, reorderSiblings, editNodeAtPath, removeNodeAtPath, renameNodeAtPath, addNodeAtPath, moveNode, moveInList, cfgDropDestination, cfgVisibleRows, cfgTreeKey };
+  // tkey is a target's STABLE routing/identity key from an /api/targets (or /api/series/all) DTO: its
+  // server-assigned id, falling back to the display path when no id is set (a bare setup, or the
+  // series/all join, which predate ids). The dashboard routes, caches, keys panels, and builds deep
+  // links by this — NOT the mutable display path — so an open tab / bookmark survives the target
+  // being moved in the config tree (CODE_REVIEW L8). The human path is shown via nameByKey, not this.
+  function tkey(t) { return (t && t.id != null && t.id !== '') ? t.id : (t && t.name); }
+
+  // ntpStatHtml renders the NTP companion clock stat (offset + stratum) shown beside median/loss.
+  // `signed` (an offset-graphing panel) hides the redundant offset — it is already the graphed series
+  // and the median stat — and shows only stratum. Empty string when there is no reading. Pure, so the
+  // grid, the per-vantage detail stat (CODE_REVIEW M2), and tests all share one formatter.
+  function ntpStatHtml(stat, signed) {
+    if (!stat) return '';
+    let html = '';
+    if (!signed) {
+      const a = Math.abs(stat.off), mag = a >= 100 ? a.toFixed(0) : a >= 1 ? a.toFixed(1) : a.toFixed(2);
+      const off = (stat.off >= 0 ? '+' : '−') + mag + ' ms'; // U+2212 minus, matching the axis labels
+      html += '<span class="stat"><span class="k">offset</span><span class="v">' + off + '</span></span>';
+    }
+    return html + '<span class="stat"><span class="k">stratum</span><span class="v">' + stat.stratum + '</span></span>';
+  }
+
+  window.Dash = { RANGES, RANGE_ORDER, parseRoute, mergeSeries, gridSince, gridTemplateFor, maxColumnsFor, rangeLabels, fetchJSON, zoomResolution, pixelToTime, sharedYMax, buildTree, underPath, targetStatus, pickSeries, vantageList, orderVantages, defaultFocus, keepFocus, vantageColorVar, adminMode, adminSessionState, createAdminStateController, statusProbeOwnsView, relTime, listTargets, addTarget, editTarget, removeTarget, buildTargetNode, buildGroupNode, labelHTML, collectingNote, agentYaml, agentCompose, cfgTree, reweightSiblings, reorderSiblings, editNodeAtPath, removeNodeAtPath, renameNodeAtPath, addNodeAtPath, moveNode, moveInList, cfgDropDestination, cfgVisibleRows, cfgTreeKey, tkey, ntpStatHtml };
 
   // ---------------------------------------------------------------- init (DOM) --
   function init() {
@@ -801,12 +823,17 @@
     // metric comes from /api/targets' config-derived `metric` (metricByName), NOT the live offset
     // stat — so the signed axis survives a restart or a target that hasn't synced yet (M6).
     function ntpSigned(name) { return metricByName.get(name) === 'offset'; }
-    function metaHtml(s) {
+    // metaHtml renders a detail/zoom cell's stat band. `vantage` is the currently-focused vantage:
+    // its NTP offset/stratum is appended (via the per-vantage stat, CODE_REVIEW M2) so a remote
+    // vantage's clock reading — or a remote-only NTP target's — is visible in the detail view, not
+    // just the local Graphs grid. curTarget is the focused target for every metaHtml caller.
+    function metaHtml(s, vantage) {
       const st = Smoke.seriesStats(s); const lcls = st.lossAvg > 2 ? 'bad' : st.lossAvg > 0.5 ? 'warn' : '';
-      const signed = ntpSigned(curTarget); // every metaHtml caller is the focused detail/zoom target
+      const signed = ntpSigned(curTarget);
       return '<span class="stat"><span class="k">median avg</span><span class="v">' + fmtMs(st.medAvg, signed) + ' ms</span></span>' +
              '<span class="stat"><span class="k">median max</span><span class="v">' + fmtMs(st.medMax, signed) + ' ms</span></span>' +
-             '<span class="stat"><span class="k">loss avg</span><span class="v ' + lcls + '">' + fmt(st.lossAvg, 2) + ' %</span></span>';
+             '<span class="stat"><span class="k">loss avg</span><span class="v ' + lcls + '">' + fmt(st.lossAvg, 2) + ' %</span></span>' +
+             ntpStatsHtmlForVantage(curTarget, vantage);
     }
 
     // ---- per-vantage overlay helpers (Task 3) ----
@@ -854,7 +881,10 @@
         if (worstBy === 'loss') { val = fmt(c.loss_pct, 1) + ' %'; cls = c.loss_pct > 2 ? 'bad' : c.loss_pct > 0.5 ? 'warn' : ''; }
         else if (worstBy === 'median') { val = fmt(c.median_ms, 1) + ' ms'; }
         else { val = '± ' + fmt(c.stddev_ms, 1) + ' ms'; }
-        return '<li><span class="n">' + (i + 1) + '</span><span class="who" data-target="' + esc(c.name) + '">' + esc(c.name) +
+        // Route by the stable id when known (idByName is seeded by the grid/detail fetches), so a
+        // click deep-links durably; fall back to the display path, which the server still resolves
+        // in-session (CODE_REVIEW L8).
+        return '<li><span class="n">' + (i + 1) + '</span><span class="who" data-target="' + esc(idByName.get(c.name) || c.name) + '">' + esc(c.name) +
           '<span class="pk">' + esc(c.probe) + '</span></span><span class="val ' + cls + '">' + val + '</span></li>';
       }).join('');
       return true;
@@ -882,7 +912,7 @@
               '<span class="track"><span class="fill" style="width:' + Math.min(100, cov) + '%"></span></span></span>';
           }
           return '<li><span class="n">' + (i + 1) + '</span>' +
-            '<span class="who" data-target="' + esc(s.name) + '">' + esc(s.name) + '<span class="pk">' + esc(s.probe) + '</span>' + (thin ? '<span class="chip">thin data</span>' : '') + '</span>' +
+            '<span class="who" data-target="' + esc(idByName.get(s.name) || s.name) + '">' + esc(s.name) + '<span class="pk">' + esc(s.probe) + '</span>' + (thin ? '<span class="chip">thin data</span>' : '') + '</span>' +
             '<span class="avail ' + acls + '"><span class="pct">' + fmt(s.availability, 2) + ' %</span><span class="frac">' + s.up_rounds + ' / ' + s.measured + ' up</span></span>' +
             covCell + '</li>';
         }).join('');
@@ -923,61 +953,122 @@
     // detail/zoom view reached by deep link can render the display label (title + IP) without
     // the grid DOM panel. displayLabel builds it via the shared labelHTML.
     const titleByName = new Map(), ipByName = new Map();
-    function displayLabel(name) { return labelHTML(name, titleByName.get(name), ipByName.get(name)); }
+    // The per-target maps above are DUAL-KEYED (see indexTarget): every value is stored under both the
+    // stable routing token tkey(t) and the display path t.name, so a lookup by either resolves — a
+    // new id-keyed deep link and a legacy path-keyed bookmark both work (CODE_REVIEW L8). nameByKey
+    // maps a token back to its current display path (so a UUID-keyed view shows the human path, never
+    // the raw id); idByName maps a display path to its stable id (so the path-built tree can put the
+    // durable id on each leaf's data-target).
+    const nameByKey = new Map(), idByName = new Map();
+    function displayLabel(token) { const path = nameByKey.get(token) || token; return labelHTML(path, titleByName.get(token), ipByName.get(token)); }
     // ntpByName mirrors the maps above (same /api/targets responses): NTP targets carry a clock
     // offset (ms) + stratum, which the smoke graph can't show (a signed near-zero value has no place
     // on a min→median→max latency plot), so they render as stats beside median/loss. Absent = a
     // non-NTP target or one with no NTP reading yet.
     const ntpByName = new Map();
+    // ntpByVantage holds a target's NTP stat for a REMOTE vantage, keyed by `${vantage}|${token}`,
+    // fed by ensureVantageStats from /api/targets?vantage=. The hub-local reading stays in ntpByName
+    // (CODE_REVIEW M2 — surface a remote vantage's clock reading in the detail view).
+    const ntpByVantage = new Map();
     // metricByName holds every target's config-derived metric ('rtt' | 'offset') from /api/targets,
     // present even with no live NTP reading — the source of truth for the signed-axis choice.
     const metricByName = new Map();
-    function ntpStatsHtml(name) {
-      const n = ntpByName.get(name);
-      if (!n) return '';
-      let html = '';
-      // A panel graphing offset already shows it as the series (and the median stat), so the offset
-      // stat would be redundant — show only stratum there. An rtt-graphing panel shows offset here.
-      if (!ntpSigned(name)) {
-        const a = Math.abs(n.off), mag = a >= 100 ? a.toFixed(0) : a >= 1 ? a.toFixed(1) : a.toFixed(2);
-        const off = (n.off >= 0 ? '+' : '−') + mag + ' ms'; // U+2212 minus, matching the axis labels
-        html += '<span class="stat"><span class="k">offset</span><span class="v">' + off + '</span></span>';
-      }
-      return html + '<span class="stat"><span class="k">stratum</span><span class="v">' + n.stratum + '</span></span>';
+    function ntpStatsHtml(token) { return ntpStatHtml(ntpByName.get(token), ntpSigned(token)); }
+    // ntpStatFor returns a target's NTP clock stat for a specific vantage: the hub-local reading
+    // (ntpByName) for the local/default vantage, or the per-vantage reading (ntpByVantage) for a
+    // remote one (CODE_REVIEW M2).
+    function ntpStatFor(token, vantage) {
+      if (!vantage || vantage === 'local') return ntpByName.get(token);
+      return ntpByVantage.get(vantage + '|' + token);
     }
+    function ntpStatsHtmlForVantage(token, vantage) { return ntpStatHtml(ntpStatFor(token, vantage), ntpSigned(token)); }
     function setNtp(t) {
+      const k = tkey(t), nm = t.name;
       // Config-derived metric drives the signed axis (present for every target, survives restart).
-      metricByName.set(t.name, t.metric === 'offset' ? 'offset' : 'rtt');
+      const metric = t.metric === 'offset' ? 'offset' : 'rtt';
+      metricByName.set(k, metric); metricByName.set(nm, metric);
       // The live offset/stratum stat is a separate, best-effort display value (absent until synced).
-      if (typeof t.ntp_offset_ms === 'number') ntpByName.set(t.name, { off: t.ntp_offset_ms, stratum: t.stratum, measure: t.ntp_measure });
-      else ntpByName.delete(t.name);
+      if (typeof t.ntp_offset_ms === 'number') { const v = { off: t.ntp_offset_ms, stratum: t.stratum, measure: t.ntp_measure }; ntpByName.set(k, v); ntpByName.set(nm, v); }
+      else { ntpByName.delete(k); ntpByName.delete(nm); }
     }
-    // ensureVantages backfills vantagesByTarget for a detail view reached before
-    // refreshGrid has populated it (e.g. a deep link to #target=...): a no-op once the
-    // grid has run, otherwise one /api/targets fetch to seed the map. `name` is accepted
-    // so Task 3's detail views can call it uniformly with the target about to render,
-    // even though seeding fetches every target's vantage set at once.
+    // indexTarget records one /api/targets DTO into every per-target map under BOTH its stable token
+    // and its display path (dual-keyed, CODE_REVIEW L8), and seeds nameByKey/idByName. Status is set
+    // by refreshGrid (its authoritative full-list scan), not here, so a deep-link seed doesn't paint
+    // dots from a partial view.
+    //
+    // Known narrow limitation: these are ONE flat namespace, so if one target's display path happens
+    // to equal a DIFFERENT target's stable id (a birth-path id another target was later created/moved
+    // onto — the same overlap the hub de-collides for ingest), the two collide and the display-only
+    // side data (status dot, signed-axis choice, title, NTP stat) for one of them can be wrong. The
+    // per-panel series is unaffected (it joins on the unique id via tkey), and routing stays correct
+    // (idByName is keyed by distinct paths). Fully separating the id/name namespaces would remove the
+    // glitch; it isn't worth the churn for a collision this pathological.
+    function indexTarget(t) {
+      const k = tkey(t), nm = t.name;
+      nameByKey.set(k, nm); nameByKey.set(nm, nm);
+      idByName.set(nm, k);
+      const vs = vantageList(t);
+      vantagesByTarget.set(k, vs); vantagesByTarget.set(nm, vs);
+      probeByName.set(k, t.probe); probeByName.set(nm, t.probe);
+      titleByName.set(k, t.title); titleByName.set(nm, t.title);
+      ipByName.set(k, t.ip); ipByName.set(nm, t.ip);
+      setNtp(t);
+    }
+    // ensureVantageStats fetches /api/targets?vantage=<v> for each REMOTE vantage in the set and fills
+    // ntpByVantage, so a detail view can show that vantage's NTP offset/stratum. Best-effort: a failed
+    // fetch just leaves no stat. The local vantage's reading already arrives via the main /api/targets
+    // fetch (ntpByName), so it is skipped. A short per-vantage TTL coalesces the redundant fetches a
+    // detail view triggers within one refresh cadence (chip clicks, zoom transitions, re-renders):
+    // each remote vantage is fetched at most once per TTL, and the 30s auto-refresh (> TTL) still
+    // refreshes the stat (CODE_REVIEW efficiency finding).
+    const vantageStatsAt = new Map(); // vantage -> ms of its last successful stats fetch
+    const VANTAGE_STAT_TTL = 25000;   // just under the 30s detail refresh cadence
+    async function ensureVantageStats(vantages) {
+      await Promise.all([...new Set(vantages || [])].map(async (v) => {
+        if (!v || v === 'local') return;
+        const at = vantageStatsAt.get(v);
+        if (at != null && (Date.now() - at) < VANTAGE_STAT_TTL) return; // reuse the recently-fetched stats
+        let targets;
+        try { targets = (await fetchJSON('/api/targets?vantage=' + enc(v))).targets || []; }
+        catch (e) { return; }
+        vantageStatsAt.set(v, Date.now());
+        for (const t of targets) {
+          const stat = (typeof t.ntp_offset_ms === 'number') ? { off: t.ntp_offset_ms, stratum: t.stratum, measure: t.ntp_measure } : null;
+          for (const key of [v + '|' + tkey(t), v + '|' + t.name]) {
+            if (stat) ntpByVantage.set(key, stat); else ntpByVantage.delete(key);
+          }
+        }
+      }));
+    }
+    // ensureVantages backfills the per-target maps for a detail view reached before refreshGrid has
+    // populated them (e.g. a deep link to #target=...): a no-op once the grid has run, otherwise one
+    // /api/targets fetch to seed them. `name` is accepted so the detail views can call it uniformly
+    // with the target about to render, even though the seed fetches every target at once.
     async function ensureVantages(name) {
       if (vantagesByTarget.size) return;
       try {
         const targets = (await fetchJSON('/api/targets')).targets || [];
-        for (const t of targets) { vantagesByTarget.set(t.name, vantageList(t)); probeByName.set(t.name, t.probe); titleByName.set(t.name, t.title); ipByName.set(t.name, t.ip); setNtp(t); }
+        for (const t of targets) indexTarget(t);
       } catch (e) { /* transient: vantagesFor falls back to ['local'] */ }
     }
     function ensurePanel(t) {
-      let p = panels.get(t.name);
+      const key = tkey(t);
+      let p = panels.get(key);
       if (p) {
         // Refresh the heading: title/ip (and probe) can change on a SIGHUP reload, so a
-        // cached panel must not keep a stale label.
+        // cached panel must not keep a stale label. Keep data-path current for grid scoping.
         p.el.querySelector('h2').innerHTML = '<span class="probe">' + esc(t.probe) + '</span> ' + labelHTML(t.name, t.title, t.ip);
+        p.el.dataset.path = t.name;
         return p;
       }
       const grid = $('graphGrid'); if (panels.size === 0) grid.innerHTML = '';
-      const el = document.createElement('div'); el.className = 'panel gpanel'; el.dataset.target = t.name;
+      // data-target is the STABLE token (so a click deep-links by id, surviving a move); data-path is
+      // the display path (so grid scoping, which matches on '/', still works) — CODE_REVIEW L8.
+      const el = document.createElement('div'); el.className = 'panel gpanel'; el.dataset.target = key; el.dataset.path = t.name;
       el.innerHTML = '<h2><span class="probe">' + esc(t.probe) + '</span> ' + labelHTML(t.name, t.title, t.ip) + '</h2><div class="meta"></div><canvas></canvas>';
       grid.appendChild(el);
       p = { el, canvas: el.querySelector('canvas'), meta: el.querySelector('.meta'), series: null };
-      panels.set(t.name, p); return p;
+      panels.set(key, p); return p;
     }
     // One bulk, incremental read for the whole grid: /api/series/all returns every
     // target's rounds newer than the watermark (or the full 3h window on the first
@@ -1011,16 +1102,18 @@
         // forever. It stays reachable via the tree; its real series shows in the detail view,
         // which focuses the target's own vantage (CODE_REVIEW #3 / P1-3).
         statusByTarget.clear(); vantagesByTarget.clear();
-        for (const t of targets) { statusByTarget.set(t.name, targetStatus(t)); vantagesByTarget.set(t.name, vantageList(t)); probeByName.set(t.name, t.probe); titleByName.set(t.name, t.title); ipByName.set(t.name, t.ip); setNtp(t); }
+        // Dual-key every per-target map by stable token AND display path (indexTarget), plus status
+        // (set here, from this authoritative full-list scan) under both keys (CODE_REVIEW L8).
+        for (const t of targets) { indexTarget(t); const st = targetStatus(t); statusByTarget.set(tkey(t), st); statusByTarget.set(t.name, st); }
         treeNames = targets.map((t) => t.name);
         const gridTargets = targets.filter((t) => !t.no_data);
         // Reconcile ONLY against an authoritative target list (the fetch above succeeded):
         // drop panels for targets no longer reported (e.g. removed on a SIGHUP reload, or a
         // target that became no-data). A failed /api/targets returned early, so a transient
         // 503 never blanks the grid (#2).
-        const live = new Set(gridTargets.map((t) => t.name));
-        for (const [name, p] of panels) {
-          if (!live.has(name)) { p.el.remove(); panels.delete(name); }
+        const live = new Set(gridTargets.map((t) => tkey(t)));
+        for (const [key, p] of panels) {
+          if (!live.has(key)) { p.el.remove(); panels.delete(key); }
         }
         const cutoffMs = Date.now() - RANGES['3h'].windowMs;
         // Incremental watermark = the oldest frontier among panels holding data, so the
@@ -1032,16 +1125,15 @@
         await Promise.all(gridTargets.map(async (t) => {
           const p = ensurePanel(t);
           let incoming = null;
-          // /api/series/all is keyed by the stable id (not the display path), so join on t.id; a
-          // moved target (id != name) would otherwise miss its own series and render blank. Fall
-          // back to t.name for a bare setup where id is unset.
-          const raw = bulk && bulk.targets && bulk.targets[t.id != null ? t.id : t.name];
+          // /api/series/all is keyed by the stable id (not the display path), so join on the stable
+          // token; a moved target (id != name) would otherwise miss its own series and render blank.
+          const raw = bulk && bulk.targets && bulk.targets[tkey(t)];
           if (raw) {
             incoming = Smoke.fromApiSeries(raw);
           } else if (!gridLoaded || !p.series) {
             // First load, or a panel the incremental read didn't cover that has no cached
-            // data yet: backfill its full window once.
-            try { const s = await fetchRange(t.name, '3h'); if (s && !s.unsupported) incoming = s; } catch (e) { /* transient */ }
+            // data yet: backfill its full window once (by the stable token, which the server resolves).
+            try { const s = await fetchRange(tkey(t), '3h'); if (s && !s.unsupported) incoming = s; } catch (e) { /* transient */ }
           }
           if (incoming) {
             p.series = mergeSeries(p.series, incoming, cutoffMs);
@@ -1124,7 +1216,9 @@
     function renderGridPanels() {
       const vis = [];
       for (const p of panels.values()) {
-        const show = underPath(p.el.dataset.target, gridScope);
+        // Scope by the display PATH (data-path), not data-target — the latter is now the stable id,
+        // which for a UUID target has no '/'-path relationship to the scope (CODE_REVIEW L8).
+        const show = underPath(p.el.dataset.path, gridScope);
         p.el.style.display = show ? '' : 'none';
         if (show) vis.push(p);
       }
@@ -1166,7 +1260,10 @@
           '<span class="twist" data-twist="1">▾</span><span class="tdot ' + folderStatus(n) + '"></span>' +
           '<span class="label">' + esc(n.name) + '</span><span class="tcount">' + countLeaves(n) + '</span></div>' + kids + '</div>';
       }
-      return '<div class="row leaf" data-target="' + esc(n.target) + '" style="--d:' + depth + '" tabindex="0" role="treeitem">' +
+      // The tree is path-structured (n.target/n.path are paths), but the leaf's data-target carries
+      // the stable id so a click deep-links by id and survives a move (CODE_REVIEW L8). Status is
+      // looked up by path — the maps are dual-keyed, so the path key resolves.
+      return '<div class="row leaf" data-target="' + esc(idByName.get(n.target) || n.target) + '" style="--d:' + depth + '" tabindex="0" role="treeitem">' +
         '<span class="twist" aria-hidden="true"></span><span class="tdot ' + (statusByTarget.get(n.target) || 'ok') + '"></span>' +
         '<span class="label">' + esc(n.name) + '</span></div>';
     }
@@ -1245,16 +1342,19 @@
     // fetch-driven render, a chip click (re-render from cache, no refetch), and a theme
     // toggle / resize (rerender()); the same function for all three keeps them consistent.
     function renderStackCell(c) {
+      // The focused vantage sources the meta's NTP stat (M2): the live stackFocus for a multi-vantage
+      // cell, or the cell's own fetched vantage for a single-vantage one.
+      const focusV = c.byV ? stackFocus : c.vantage;
       if (c.byV) {
         const focused = c.byV[stackFocus];
         const overlays = buildOverlays(c.byV, stackVantages, stackFocus);
         if (focused && !focused.unsupported && focused.buckets.length >= 2) {
-          c.meta.innerHTML = metaHtml(focused) + (c.failed ? ' <span class="reslabel">· last known</span>' : '');
+          c.meta.innerHTML = metaHtml(focused, focusV) + (c.failed ? ' <span class="reslabel">· last known</span>' : '');
         } else { c.meta.innerHTML = ''; }
         renderInto(c.canvas, focused, c.R, 170, undefined, overlays, ntpSigned(curTarget));
       } else {
         const s = c.series;
-        if (s && !s.unsupported && s.buckets.length >= 2) c.meta.innerHTML = metaHtml(s) + (c.failed ? ' <span class="reslabel">· last known</span>' : '');
+        if (s && !s.unsupported && s.buckets.length >= 2) c.meta.innerHTML = metaHtml(s, focusV) + (c.failed ? ' <span class="reslabel">· last known</span>' : '');
         renderInto(c.canvas, s, c.R, 170, undefined, undefined, ntpSigned(curTarget));
       }
     }
@@ -1277,6 +1377,8 @@
       if (gen !== stackGen) return; // a newer renderStack call superseded this one — don't append its panels
       const vs = Dash.orderVantages(vantagesFor(name));
       stackVantages = vs;
+      await ensureVantageStats(vs); // remote vantages' NTP stats for the meta (M2); local uses ntpByName
+      if (gen !== stackGen) return;
 
       const cells = RANGE_ORDER.map((key) => {
         const R = RANGES[key];
@@ -1302,7 +1404,7 @@
           if (gen !== stackGen) return; // superseded mid-fetch — don't push/render into a detached/reused cell
           const k = name + '|' + c.key;
           const pick = pickSeries(s, lastGood.get(k)); lastGood.set(k, pick.cache); s = pick.series;
-          const entry = { canvas: c.canvas, meta: c.meta, R: c.R, key: c.key, series: s, failed: pick.failed };
+          const entry = { canvas: c.canvas, meta: c.meta, R: c.R, key: c.key, series: s, failed: pick.failed, vantage: focus };
           stackCanvases.push(entry);
           renderStackCell(entry);
         }));
@@ -1367,6 +1469,8 @@
       $('zoomTitle').innerHTML = probeBadge(name) + displayLabel(name) + ' <span class="reslabel">· ' + R.label + '</span>';
       const vs = Dash.orderVantages(vantagesFor(name));
       zoomVantages = vs;
+      await ensureVantageStats(vs); // remote vantages' NTP stats for the meta (M2); local uses ntpByName
+      if (gen !== zoomGen) return;
 
       if (vs.length <= 1) {
         // Single-vantage: no overlays, no chips. Fetch the target's own vantage (may be a
@@ -1382,7 +1486,7 @@
         const t1 = Math.max(Date.now(), Number.isFinite(lastT) ? lastT : 0);
         zoomState = { canvas, series: s, band: R.mode === 'band', res: R.res, t0: t1 - R.windowMs, t1, xlabels: R.xl, custom: false };
         if (s && !s.unsupported && s.buckets.length >= 2) {
-          $('zoomMeta').innerHTML = metaHtml(s);
+          $('zoomMeta').innerHTML = metaHtml(s, focus);
           $('zoomRes').textContent = 'resolution: ' + R.desc + ' · ' + s.buckets.length + (R.mode === 'raw' ? ' rounds' : ' buckets') + (pick.failed ? ' · last known (refresh failed)' : ' · drag to zoom');
         }
         drawZoom();
@@ -1405,7 +1509,7 @@
       const t1 = Math.max(Date.now(), Number.isFinite(lastT) ? lastT : 0);
       zoomState = { canvas, series: s, band: R.mode === 'band', res: R.res, t0: t1 - R.windowMs, t1, xlabels: R.xl, custom: false, byV, vantages: vs, focus: zoomFocus };
       if (s && !s.unsupported && s.buckets.length >= 2) {
-        $('zoomMeta').innerHTML = metaHtml(s);
+        $('zoomMeta').innerHTML = metaHtml(s, zoomFocus);
         $('zoomRes').textContent = 'resolution: ' + R.desc + ' · ' + s.buckets.length + (R.mode === 'raw' ? ' rounds' : ' buckets') + (failed ? ' · last known (refresh failed)' : ' · drag to zoom');
       }
       drawZoom();
@@ -1457,8 +1561,9 @@
       };
       $('zoomReset').hidden = false;
       const desc = zr.mode === 'raw' ? 'per-round' : (zr.res === '1h' ? 'hourly band' : 'daily band');
+      const focusV = vs.length > 1 ? zoomFocus : (vs[0] && vs[0] !== 'local' ? vs[0] : '');
       if (s && !s.unsupported && s.buckets && s.buckets.length >= 2) {
-        $('zoomMeta').innerHTML = metaHtml(s);
+        $('zoomMeta').innerHTML = metaHtml(s, focusV);
         $('zoomRes').textContent = 'zoomed · ' + desc + ' · ' + s.buckets.length + (zr.mode === 'raw' ? ' rounds' : ' buckets') + ' · reset to exit';
       } else if (s && s.unsupported) {
         $('zoomMeta').innerHTML = ''; $('zoomRes').textContent = 'zoom to this resolution needs the TimescaleDB store';
@@ -2203,7 +2308,8 @@
       else if (r.view === 'zoom') { setTabs('zoom'); show('viewZoom'); renderZoom(r.name, r.range); }
       else if (r.view === 'vantages') { setTabs('vantages'); show('viewVantages'); renderVantages(); pingStatus('vantages'); }
       else if (r.view === 'config') { setTabs('config'); show('viewConfig'); renderConfig(); pingStatus('config'); }
-      $('statusText').textContent = (r.view === 'stack' || r.view === 'zoom') ? r.name : $('statusText').textContent;
+      // Show the human path in the status line, not the raw routing token (a UUID for a moved target).
+      $('statusText').textContent = (r.view === 'stack' || r.view === 'zoom') ? (nameByKey.get(r.name) || r.name) : $('statusText').textContent;
       window.scrollTo(0, 0);
     }
     function nav(hash) { if (location.hash.replace(/^#/, '') !== hash) history.pushState(null, '', '#' + hash); route(); }
@@ -2240,8 +2346,9 @@
       const s = zoomState.byV[v];
       zoomState.series = s;
       // Recompute the stats panel for the newly-focused vantage — mirrors renderStackCell's
-      // meta handling, so the band and #zoomMeta never disagree about which vantage is focused.
-      if (s && !s.unsupported && s.buckets.length >= 2) $('zoomMeta').innerHTML = metaHtml(s);
+      // meta handling, so the band and #zoomMeta never disagree about which vantage is focused
+      // (including its NTP stat, M2).
+      if (s && !s.unsupported && s.buckets.length >= 2) $('zoomMeta').innerHTML = metaHtml(s, v);
       else $('zoomMeta').innerHTML = '';
       drawZoom();
       renderZoomChips();

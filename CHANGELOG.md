@@ -6,6 +6,46 @@ All notable changes to **Heliograph** are recorded here. The format follows
 
 ## [Unreleased]
 
+Stable target identity, documented and hardened. A target's history now follows a stable, server-
+managed `id` rather than its position in the tree, so moving or renaming a node keeps its graph —
+and this release closes the follow-up gaps in how that identity interacts with imports, the
+dashboard, and remote vantages.
+
+### Added
+- **Stable target identity.** Every target created or imported through the admin UI carries an
+  opaque, server-minted `id`; its history, rollups, and alert state are keyed by that id, so
+  reorganizing the tree (moving a target into a different group, or renaming it) preserves the
+  existing graph instead of starting a new one. A target defined only in `config.yaml` has no minted
+  id and falls back to its tree path, so renaming it there still starts a fresh graph. The id is not
+  something you edit; the UI never exposes it.
+- **NTP clock stat in the detail views, per vantage.** The stacked and zoomed drill-downs now show a
+  target's offset/stratum for the vantage in focus (not only the Graphs grid), so a remote vantage's
+  NTP server shows its own clock reading in the detail view.
+
+### Fixed
+- **Imported targets keep their history.** Targets added via the admin config import, `smoked config
+  import`, or `smoked import smokeping --apply` are now assigned a stable id at import time, so a
+  later ordinary save no longer re-keys them and drops the history collected in between; re-running
+  the same import stays an idempotent no-op even after an id has been minted.
+- **The NTP clock stat follows the current server.** The offset/stratum stat is bound to the host it
+  was measured against, so repointing a target at a different NTP server (or a slow in-flight probe
+  of the old server) no longer shows the old server's clock reading for the new one; a remote
+  vantage's stat is only published for rounds that were durably committed.
+- **Remote NTP stat survives a move.** A `smoke-agent` now looks up its companion clock stat by the
+  target's stable id, so a moved (or newly created) NTP target still reports its offset/stratum
+  upstream.
+- **Assignment versioning and rolling upgrades track the stable id.** The per-vantage assignment
+  version now changes when a target's id changes, and the hub accepts a round reported under a
+  target's current path from an agent predating stable identity — so moving a remotely-measured
+  target does not silently drop its data mid-upgrade.
+- **Deep links survive a move.** Dashboard navigation, the URL hash, and detail fetches are keyed by
+  the stable id, so a link to a target created in the UI keeps working after the target is moved in
+  the tree.
+
+### Docs
+- Documented the stable-identity lifecycle (server-managed id, YAML path fallback, and the federation
+  upgrade constraint) in `config.example.yaml`.
+
 ## [1.0.10] - 2026-08-22
 
 Close the remaining NTP review follow-ups. The clock offset/stratum stat is now tied to a target's

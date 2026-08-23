@@ -304,7 +304,7 @@ func AppendDBFragment(cfg *Config, fragBytes []byte) error {
 	return mergeBranches(cfg, origin, "the database config", frag)
 }
 
-// nodesEqual reports whether two target nodes serialize identically. It compares by canonical
+// nodesEqual reports whether two target nodes carry the same settings. It compares by canonical
 // JSON — the exact encoding used to persist the fragment — rather than reflect.DeepEqual, so that
 // classification can never diverge from what actually gets stored. The omitempty fields
 // (params/children) collapse nil and empty to the same absent value on both sides, while the
@@ -312,16 +312,41 @@ func AppendDBFragment(cfg *Config, fragBytes []byte) error {
 // stored representation exactly. Without this, re-importing an unchanged target that carries an
 // empty map (e.g. `params: {}`) would spuriously conflict, because the marshal round-trip that
 // stored it dropped the empty map to nil.
+//
+// The server-owned id is excluded from the comparison (nodeWithoutIDs clears it on both sides,
+// recursively): a stored node has had a UUID minted onto it, while the re-imported file omits id,
+// so comparing it would turn an idempotent re-import into a spurious conflict (CODE_REVIEW M8). The
+// id is identity, not a user setting, so it must not affect the unchanged-vs-conflict decision.
 func nodesEqual(a, b *Node) (bool, error) {
-	ab, err := json.Marshal(a)
+	ab, err := json.Marshal(nodeWithoutIDs(a))
 	if err != nil {
 		return false, err
 	}
-	bb, err := json.Marshal(b)
+	bb, err := json.Marshal(nodeWithoutIDs(b))
 	if err != nil {
 		return false, err
 	}
 	return bytes.Equal(ab, bb), nil
+}
+
+// nodeWithoutIDs returns a copy of n with its (and every descendant's) server-owned id cleared,
+// without mutating the original: the struct value is copied and the Children map is rebuilt, so the
+// stored/imported nodes keep their ids while the equality check above ignores them. Non-id fields
+// (params, alerts, ...) are shared by reference — safe because the result is only marshaled, never
+// modified.
+func nodeWithoutIDs(n *Node) *Node {
+	if n == nil {
+		return nil
+	}
+	c := *n
+	c.ID = ""
+	if n.Children != nil {
+		c.Children = make(map[string]*Node, len(n.Children))
+		for k, ch := range n.Children {
+			c.Children[k] = nodeWithoutIDs(ch)
+		}
+	}
+	return &c
 }
 
 // AppendImport merges the target branches from importBytes (a YAML or JSON config) into the DB
