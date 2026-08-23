@@ -795,3 +795,34 @@ func TestIngestOldAgentReportsMovedTargetByName(t *testing.T) {
 		t.Fatalf("round must store under stable id grp/leaf regardless of reported path, got %+v", ing.got)
 	}
 }
+
+// A target's display path can equal a DIFFERENT target's stable id (X born at path "a", since moved
+// to "b"; Y later created at path "a" with a UUID id). A fingerprint-less round reporting the
+// ambiguous token "a" carries nothing to say whether it means X's stable id or Y's current path, so
+// it must be DROPPED rather than misattributed to the id owner X (CODE_REVIEW M9(B) follow-up).
+func TestIngestDropsFingerprintlessAmbiguousToken(t *testing.T) {
+	x := model.Monitor{ID: "a", Name: "b", ProbeKind: "FPing", Host: "1.1.1.1", Pings: 3, Step: time.Minute, Vantages: []string{"nyc"}}
+	y := model.Monitor{ID: "y-uuid", Name: "a", ProbeKind: "FPing", Host: "2.2.2.2", Pings: 3, Step: time.Minute, Vantages: []string{"nyc"}}
+	ing := &fakeIngester{}
+	srv := &Server{
+		store:       ing,
+		VantageAuth: fakeAuth{name: "nyc", ok: true},
+		Assignment: func(v string) ([]model.Monitor, map[string]map[string]string, string) {
+			return []model.Monitor{x, y}, nil, "sha256:v1"
+		},
+	}
+	// Old (pre-fingerprint) agent reports the ambiguous token "a" with no fingerprint.
+	body := fmt.Sprintf(`{"results":[{"target":"a","ts":%q,"pings":3,"rtts":[0.01,0.02,0.03]}]}`, recentTS())
+	w := postResults(t, srv, body)
+	if w.Code != 200 {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body)
+	}
+	var resp struct{ Accepted, Dropped int }
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	if resp.Accepted != 0 || resp.Dropped != 1 {
+		t.Fatalf("ambiguous fingerprint-less round must be dropped: counts=%+v, want accepted=0 dropped=1", resp)
+	}
+	if len(ing.got) != 0 {
+		t.Fatalf("ambiguous round must not be stored (least of all as target %q), got %+v", "a", ing.got)
+	}
+}

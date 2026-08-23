@@ -995,6 +995,14 @@
     // and its display path (dual-keyed, CODE_REVIEW L8), and seeds nameByKey/idByName. Status is set
     // by refreshGrid (its authoritative full-list scan), not here, so a deep-link seed doesn't paint
     // dots from a partial view.
+    //
+    // Known narrow limitation: these are ONE flat namespace, so if one target's display path happens
+    // to equal a DIFFERENT target's stable id (a birth-path id another target was later created/moved
+    // onto — the same overlap the hub de-collides for ingest), the two collide and the display-only
+    // side data (status dot, signed-axis choice, title, NTP stat) for one of them can be wrong. The
+    // per-panel series is unaffected (it joins on the unique id via tkey), and routing stays correct
+    // (idByName is keyed by distinct paths). Fully separating the id/name namespaces would remove the
+    // glitch; it isn't worth the churn for a collision this pathological.
     function indexTarget(t) {
       const k = tkey(t), nm = t.name;
       nameByKey.set(k, nm); nameByKey.set(nm, nm);
@@ -1009,13 +1017,21 @@
     // ensureVantageStats fetches /api/targets?vantage=<v> for each REMOTE vantage in the set and fills
     // ntpByVantage, so a detail view can show that vantage's NTP offset/stratum. Best-effort: a failed
     // fetch just leaves no stat. The local vantage's reading already arrives via the main /api/targets
-    // fetch (ntpByName), so it is skipped. Re-run on each detail refresh so the stat stays current.
+    // fetch (ntpByName), so it is skipped. A short per-vantage TTL coalesces the redundant fetches a
+    // detail view triggers within one refresh cadence (chip clicks, zoom transitions, re-renders):
+    // each remote vantage is fetched at most once per TTL, and the 30s auto-refresh (> TTL) still
+    // refreshes the stat (CODE_REVIEW efficiency finding).
+    const vantageStatsAt = new Map(); // vantage -> ms of its last successful stats fetch
+    const VANTAGE_STAT_TTL = 25000;   // just under the 30s detail refresh cadence
     async function ensureVantageStats(vantages) {
       await Promise.all([...new Set(vantages || [])].map(async (v) => {
         if (!v || v === 'local') return;
+        const at = vantageStatsAt.get(v);
+        if (at != null && (Date.now() - at) < VANTAGE_STAT_TTL) return; // reuse the recently-fetched stats
         let targets;
         try { targets = (await fetchJSON('/api/targets?vantage=' + enc(v))).targets || []; }
         catch (e) { return; }
+        vantageStatsAt.set(v, Date.now());
         for (const t of targets) {
           const stat = (typeof t.ntp_offset_ms === 'number') ? { off: t.ntp_offset_ms, stratum: t.stratum, measure: t.ntp_measure } : null;
           for (const key of [v + '|' + tkey(t), v + '|' + t.name]) {

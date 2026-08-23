@@ -164,16 +164,25 @@ func (srv *Server) agentResults(w http.ResponseWriter, r *http.Request) {
 	// reports RoundReport.Target = Name (its display path). Before a move ID==Name so the id-keyed
 	// map already matches; after a move Name becomes the new path while ID stays the frozen birth
 	// path, so such a round would be dropped as unassigned. byCurrentName lets an id-miss fall back
-	// to the target's current display path. A name that collides with some target's stable id is
-	// excluded, so the id space always wins the lookup below and the fallback can never
-	// misattribute a round (CODE_REVIEW M9(B)). The fingerprint gate still applies to the result.
+	// to the target's current display path.
+	//
+	// Collision handling: a target's display path can equal a DIFFERENT target's stable id (a
+	// birth-path id that another target has since been created/moved onto). Such a name is recorded
+	// in ambiguousName and kept OUT of byCurrentName, because a bare token can't tell "target X's
+	// stable id" from "target Y's current path". For a fingerprint-bearing round the gate below still
+	// sorts it out (only two targets sharing a fingerprint AND this exact path/id overlap is
+	// unresolvable — and then the measurements are identical anyway). For a fingerprint-LESS round
+	// (a pre-fingerprint agent, which reports by path) the token is unattributable, so it is dropped
+	// rather than misattributed to the id owner (CODE_REVIEW M9(B) follow-up).
 	byCurrentName := make(map[string]model.Monitor, len(monitors))
+	ambiguousName := map[string]bool{}
 	for _, m := range monitors {
 		if m.Name == m.ID {
 			continue // id-keyed entry already covers this target
 		}
 		if _, isID := allowed[m.Name]; isID {
-			continue // never shadow a target whose stable id equals this display path
+			ambiguousName[m.Name] = true // this display path is also another target's stable id
+			continue
 		}
 		byCurrentName[m.Name] = m
 	}
@@ -195,6 +204,13 @@ func (srv *Server) agentResults(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	for _, rd := range req.Results {
 		m, ok := allowed[rd.Target]
+		if ok && rd.Fingerprint == "" && ambiguousName[rd.Target] {
+			// The token is both this target's stable id and a different target's current path, and a
+			// fingerprint-less round carries nothing to disambiguate the two, so it can't be safely
+			// attributed to the id owner — drop it (it also isn't in byCurrentName). A fingerprint-
+			// bearing round keeps the id-owner match and is checked by the gate below (M9(B) follow-up).
+			ok = false
+		}
 		if !ok {
 			// Old-agent fallback: the round may be keyed by the target's current display path
 			// rather than its stable id (CODE_REVIEW M9(B)).
