@@ -1032,7 +1032,10 @@
         await Promise.all(gridTargets.map(async (t) => {
           const p = ensurePanel(t);
           let incoming = null;
-          const raw = bulk && bulk.targets && bulk.targets[t.name];
+          // /api/series/all is keyed by the stable id (not the display path), so join on t.id; a
+          // moved target (id != name) would otherwise miss its own series and render blank. Fall
+          // back to t.name for a bare setup where id is unset.
+          const raw = bulk && bulk.targets && bulk.targets[t.id != null ? t.id : t.name];
           if (raw) {
             incoming = Smoke.fromApiSeries(raw);
           } else if (!gridLoaded || !p.series) {
