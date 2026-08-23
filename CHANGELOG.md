@@ -6,6 +6,32 @@ All notable changes to **Heliograph** are recorded here. The format follows
 
 ## [Unreleased]
 
+## [1.0.10] - 2026-08-22
+
+Close the remaining NTP review follow-ups. The clock offset/stratum stat is now tied to a target's
+current identity and to the vantage that measured it, and it travels the federation wire, so a
+remote vantage's NTP server shows its own clock reading rather than nothing — or the hub's.
+
+### Added
+- **NTP clock stat at remote vantages.** A round now carries its companion offset/stratum stat over
+  the federation wire (`smoke-agent` fills it from the probe's latest-value registry), and the hub
+  keeps it per vantage, so an NTP target measured at a remote vantage shows that server's clock
+  offset and stratum. The wire fields are optional, so a mixed old-agent/new-hub fleet just shows no
+  remote stat, exactly as before.
+
+### Fixed
+- **The NTP clock stat follows the current target, not a stale round.** `/api/targets` takes a
+  target's probe identity from the live config, so a name reused for a different probe (or an
+  in-place probe change) no longer shows the previous target's offset/stratum, and a remote
+  vantage's panel is never decorated with the hub's own local clock reading.
+
+### Docs
+- Corrected the README probe contract and the `ntpprobe` comments: in `measure: offset` mode the
+  signed clock offset is itself the graphed sample, and adding a probe also means registering it in
+  the shared `internal/probe/allprobes` list (blank import + parity test), not just dropping in a
+  file.
+- Refreshed the dashboard screenshots from the v1.0.9 UI and tightened the README Features section.
+
 ## [1.0.9] - 2026-08-21
 
 Harden the NTP probe and keep clock offset and latency apart everywhere. Every round now records
@@ -1340,7 +1366,8 @@ the smoke-graph look, a fast/parallel poller, and probes as plugins.
 - Full re-implementation reference / code map maintained outside the repo at
   `~/.claude/plans/smokeping-codemap/`.
 
-[Unreleased]: https://github.com/seitzbg/heliograph/compare/v1.0.9...main
+[Unreleased]: https://github.com/seitzbg/heliograph/compare/v1.0.10...main
+[1.0.10]: https://github.com/seitzbg/heliograph/compare/v1.0.9...v1.0.10
 [1.0.9]: https://github.com/seitzbg/heliograph/compare/v1.0.8...v1.0.9
 [1.0.8]: https://github.com/seitzbg/heliograph/compare/v1.0.7...v1.0.8
 [1.0.7]: https://github.com/seitzbg/heliograph/compare/v1.0.6...v1.0.7
