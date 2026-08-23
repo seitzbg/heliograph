@@ -305,3 +305,25 @@ func TestMemStoreReplayIndexBounded(t *testing.T) {
 		t.Fatalf("replay of a retained round must report 0 newly-inserted, got %d", len(ins))
 	}
 }
+
+// TestMemStoreKeysByIDAcrossMove reproduces the reported symptom at the store layer: a target
+// moved to a new display path (e.g. between config groups) must keep its history, because the
+// store keys on the stable Target.ID rather than the display Name/path.
+func TestMemStoreKeysByIDAcrossMove(t *testing.T) {
+	s := NewMem(100)
+	mk := func(path string) scheduler.Outcome {
+		return scheduler.Outcome{
+			Target: probe.Target{ID: "stable-1", Name: path, Host: "h"},
+			When:   time.Now(), Computed: sample.Computed{Pings: 1},
+		}
+	}
+	s.Add([]scheduler.Outcome{mk("Resolvers/dns1")}) // before the move
+	s.Add([]scheduler.Outcome{mk("Datacenter/dns1")}) // after the move: same ID, new display path
+	h, err := s.History("stable-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(h) != 2 {
+		t.Fatalf("history keyed by ID should hold both rounds; got %d", len(h))
+	}
+}

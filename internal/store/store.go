@@ -261,10 +261,10 @@ func (s *MemStore) Add(outcomes []scheduler.Outcome) {
 // and AddResults (deduplicated agent ingest).
 func (s *MemStore) storeOne(o scheduler.Outcome) {
 	o.Vantage = VantageOf(o) // resolve "" -> local once, on write
-	k := vk{o.Vantage, o.Target.Name}
-	if !s.seen[o.Target.Name] {
-		s.seen[o.Target.Name] = true
-		s.keys = append(s.keys, o.Target.Name)
+	k := vk{o.Vantage, o.Target.Key()}
+	if !s.seen[o.Target.Key()] {
+		s.seen[o.Target.Key()] = true
+		s.keys = append(s.keys, o.Target.Key())
 	}
 	s.latest[k] = o
 	h := append(s.history[k], o)
@@ -283,7 +283,7 @@ func (s *MemStore) storeOne(o scheduler.Outcome) {
 // resultKey identifies one ingested round by (vantage, target, ts) — the same tuple the DB's
 // unique constraint uses — so a replay is detected regardless of resolved-vantage timing.
 func resultKey(o scheduler.Outcome) string {
-	return VantageOf(o) + "\x00" + o.Target.Name + "\x00" + strconv.FormatInt(o.When.UTC().UnixNano(), 10)
+	return VantageOf(o) + "\x00" + o.Target.Key() + "\x00" + strconv.FormatInt(o.When.UTC().UnixNano(), 10)
 }
 
 // AddResults implements ResultIngester: it stores each round at most once (keyed by
