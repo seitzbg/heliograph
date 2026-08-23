@@ -11,6 +11,9 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/seitzbg/heliograph/internal/probe"
+	"github.com/seitzbg/heliograph/internal/store"
 )
 
 // TestWebhookFullLossSendsValidBody proves the outage case that matters most: a
@@ -355,14 +358,14 @@ func TestSeedWindowFiresAlreadyBadTargetOnFirstEvaluate(t *testing.T) {
 	e.SeedWindow("t", "local", []string{"loss"}, []float64{100, 100}, []float64{math.NaN(), math.NaN()})
 
 	// The first real round (also bad) completes 3-in-a-row -> fires now.
-	evs := e.Evaluate("t", "local", []string{"loss"}, 100, math.NaN(), time.Unix(1_700_000_000, 0))
+	evs := e.Evaluate("t", "t", "local", []string{"loss"}, 100, math.NaN(), time.Unix(1_700_000_000, 0))
 	if len(evs) != 1 || !evs[0].Firing {
 		t.Fatalf("expected an immediate FIRING from the warmed window, got %+v", evs)
 	}
 
 	// Sanity: without warm-start the same first round must NOT fire (needs 3 rounds).
 	e2 := NewEngine(alerts, map[string]Notifier{"log": &capture{}})
-	if evs := e2.Evaluate("t", "local", []string{"loss"}, 100, math.NaN(), time.Unix(1_700_000_000, 0)); len(evs) != 0 {
+	if evs := e2.Evaluate("t", "t", "local", []string{"loss"}, 100, math.NaN(), time.Unix(1_700_000_000, 0)); len(evs) != 0 {
 		t.Fatalf("cold start must not fire on the first round, got %+v", evs)
 	}
 }
@@ -374,7 +377,7 @@ func TestSeedWindowDoesNotSpuriouslyFire(t *testing.T) {
 	e := NewEngine(map[string]*Alert{"loss": {Name: "loss", Matcher: m, To: []string{"log"}}}, map[string]Notifier{"log": &capture{}})
 	e.SeedWindow("t", "local", []string{"loss"}, []float64{100, 100}, []float64{math.NaN(), math.NaN()})
 	// First post-boot round is healthy -> the 3-in-a-row is broken -> no fire.
-	if evs := e.Evaluate("t", "local", []string{"loss"}, 0, 0.01, time.Unix(1_700_000_000, 0)); len(evs) != 0 {
+	if evs := e.Evaluate("t", "t", "local", []string{"loss"}, 0, 0.01, time.Unix(1_700_000_000, 0)); len(evs) != 0 {
 		t.Fatalf("a recovering round must not fire, got %+v", evs)
 	}
 }
@@ -393,8 +396,8 @@ func TestEvaluateIsolatesVantages(t *testing.T) {
 	var localEvents, nycEvents []Event
 	for i := 0; i < 2; i++ {
 		w := when.Add(time.Duration(i) * time.Minute)
-		localEvents = append(localEvents, e.Evaluate("t", "local", []string{"loss"}, 100, math.NaN(), w)...)
-		nycEvents = append(nycEvents, e.Evaluate("t", "nyc", []string{"loss"}, 0, 0.01, w)...)
+		localEvents = append(localEvents, e.Evaluate("t", "t", "local", []string{"loss"}, 100, math.NaN(), w)...)
+		nycEvents = append(nycEvents, e.Evaluate("t", "t", "nyc", []string{"loss"}, 0, 0.01, w)...)
 	}
 	if len(localEvents) != 1 || !localEvents[0].Firing || localEvents[0].Vantage != "local" {
 		t.Fatalf("local should fire once with vantage=local, got %+v", localEvents)
@@ -408,8 +411,8 @@ func TestEvaluateIsolatesVantages(t *testing.T) {
 	var more []Event
 	for i := 2; i < 4; i++ {
 		w := when.Add(time.Duration(i) * time.Minute)
-		more = append(more, e.Evaluate("t", "nyc", []string{"loss"}, 100, math.NaN(), w)...)
-		more = append(more, e.Evaluate("t", "local", []string{"loss"}, 100, math.NaN(), w)...)
+		more = append(more, e.Evaluate("t", "t", "nyc", []string{"loss"}, 100, math.NaN(), w)...)
+		more = append(more, e.Evaluate("t", "t", "local", []string{"loss"}, 100, math.NaN(), w)...)
 	}
 	if len(more) != 1 || !more[0].Firing || more[0].Vantage != "nyc" {
 		t.Fatalf("nyc should fire once independently with vantage=nyc, got %+v", more)
@@ -435,7 +438,7 @@ func TestEdgeTriggerLifecycle(t *testing.T) {
 	seq := []float64{0, 0, 60, 60, 60, 0, 0} // loss %
 	var allEvents []Event
 	for i, loss := range seq {
-		evs := e.Evaluate("t", "local", []string{"loss"}, loss, 0.01, when.Add(time.Duration(i)*time.Minute))
+		evs := e.Evaluate("t", "t", "local", []string{"loss"}, loss, 0.01, when.Add(time.Duration(i)*time.Minute))
 		e.Dispatch(evs)
 		allEvents = append(allEvents, evs...)
 	}
@@ -462,7 +465,7 @@ func TestNonEdgeEmitsWhileFiring(t *testing.T) {
 
 	var got []string
 	for i, loss := range []float64{60, 60, 0} {
-		evs := e.Evaluate("t", "local", []string{"loss"}, loss, 0.01, when.Add(time.Duration(i)*time.Minute))
+		evs := e.Evaluate("t", "t", "local", []string{"loss"}, loss, 0.01, when.Add(time.Duration(i)*time.Minute))
 		got = append(got, statuses(evs)...)
 	}
 	// non-edge: fires every active cycle, then one resolved on the clearing edge
@@ -489,7 +492,7 @@ func TestCheckLatencyNoSpuriousResolveOnHardDown(t *testing.T) {
 		if math.IsNaN(rtt) {
 			lossPct = 100
 		}
-		e.Dispatch(e.Evaluate("t", "local", []string{"lat"}, lossPct, rtt, when.Add(time.Duration(i)*time.Minute)))
+		e.Dispatch(e.Evaluate("t", "t", "local", []string{"lat"}, lossPct, rtt, when.Add(time.Duration(i)*time.Minute)))
 	}
 
 	got := statuses(cap.events)
@@ -513,7 +516,7 @@ func TestInheritStateAcrossReloadNoSpuriousRefire(t *testing.T) {
 	cap1 := &capture{}
 	e1 := newEng(cap1)
 	for i, loss := range []float64{60, 60} { // two rounds >= 50% -> FIRING
-		e1.Dispatch(e1.Evaluate("t", "local", []string{"loss"}, loss, math.NaN(), when.Add(time.Duration(i)*time.Minute)))
+		e1.Dispatch(e1.Evaluate("t", "t", "local", []string{"loss"}, loss, math.NaN(), when.Add(time.Duration(i)*time.Minute)))
 	}
 	if got := statuses(cap1.events); len(got) != 1 || got[0] != "FIRING" {
 		t.Fatalf("pre-reload events = %v, want [FIRING]", got)
@@ -523,7 +526,7 @@ func TestInheritStateAcrossReloadNoSpuriousRefire(t *testing.T) {
 	cap2 := &capture{}
 	e2 := newEng(cap2)
 	e2.InheritStateFrom(e1, ReloadIdentity{ValidTarget: map[string]bool{"t": true}})
-	e2.Dispatch(e2.Evaluate("t", "local", []string{"loss"}, 60, math.NaN(), when.Add(2*time.Minute)))
+	e2.Dispatch(e2.Evaluate("t", "t", "local", []string{"loss"}, 60, math.NaN(), when.Add(2*time.Minute)))
 	if got := statuses(cap2.events); len(got) != 0 {
 		t.Fatalf("post-reload while still down emitted %v, want none (no re-fire)", got)
 	}
@@ -531,7 +534,7 @@ func TestInheritStateAcrossReloadNoSpuriousRefire(t *testing.T) {
 	// Recovery must still produce exactly one RESOLVED — proving the window
 	// history carried over (X=2 low samples clear it).
 	for i, loss := range []float64{0, 0} {
-		e2.Dispatch(e2.Evaluate("t", "local", []string{"loss"}, loss, 0.01, when.Add(time.Duration(3+i)*time.Minute)))
+		e2.Dispatch(e2.Evaluate("t", "t", "local", []string{"loss"}, loss, 0.01, when.Add(time.Duration(3+i)*time.Minute)))
 	}
 	if got := statuses(cap2.events); len(got) != 1 || got[0] != "RESOLVED" {
 		t.Fatalf("post-reload events = %v, want [RESOLVED]", got)
@@ -547,7 +550,7 @@ func TestInheritStateDropsStaleTargets(t *testing.T) {
 	}
 	when := time.Unix(1_700_000_000, 0)
 	e1 := mk()
-	e1.Evaluate("gone", "local", []string{"loss"}, 60, math.NaN(), when) // firing on a target dropped in the new config
+	e1.Evaluate("gone", "gone", "local", []string{"loss"}, 60, math.NaN(), when) // firing on a target dropped in the new config
 
 	e2 := mk()
 	e2.InheritStateFrom(e1, ReloadIdentity{ValidTarget: map[string]bool{"kept": true}}) // "gone" not in valid set
@@ -570,7 +573,7 @@ func TestInheritDropsStateOnTargetIdentityChange(t *testing.T) {
 	}
 	when := time.Unix(1_700_000_000, 0)
 	e1 := mk()
-	e1.Dispatch(e1.Evaluate("t", "local", []string{"loss"}, 60, math.NaN(), when)) // firing + visible
+	e1.Dispatch(e1.Evaluate("t", "t", "local", []string{"loss"}, 60, math.NaN(), when)) // firing + visible
 
 	e2 := mk()
 	e2.InheritStateFrom(e1, ReloadIdentity{ValidTarget: map[string]bool{"t": true}, SameTarget: map[string]bool{"t": false}}) // identity changed
@@ -594,7 +597,7 @@ func TestInheritDropsStateOnMatcherChange(t *testing.T) {
 		"a": {Name: "a", Matcher: CheckLoss{L: 50, X: 1}, EdgeTrigger: true, To: []string{"cap"}},
 		"b": {Name: "b", Matcher: CheckLoss{L: 50, X: 1}, EdgeTrigger: true, To: []string{"cap"}},
 	}, map[string]Notifier{"cap": &capture{}})
-	e1.Dispatch(e1.Evaluate("t", "local", []string{"a", "b"}, 60, math.NaN(), when)) // both firing + visible
+	e1.Dispatch(e1.Evaluate("t", "t", "local", []string{"a", "b"}, 60, math.NaN(), when)) // both firing + visible
 
 	// Reload: alert "a" keeps its matcher; alert "b" changes its matcher (l=50 -> l=80).
 	e2 := NewEngine(map[string]*Alert{
@@ -630,7 +633,7 @@ func TestInheritDropsStateForDetachedAlert(t *testing.T) {
 	}
 	when := time.Unix(1_700_000_000, 0)
 	e1 := mk()
-	e1.Dispatch(e1.Evaluate("t", "local", []string{"a", "b"}, 60, math.NaN(), when)) // a+b firing on t
+	e1.Dispatch(e1.Evaluate("t", "t", "local", []string{"a", "b"}, 60, math.NaN(), when)) // a+b firing on t
 
 	// Reload: alert a is still defined globally but NO LONGER attached to t; b remains attached.
 	e2 := mk()
@@ -660,7 +663,7 @@ func TestInheritResetsVisibleOnRoutingChange(t *testing.T) {
 		e := NewEngine(map[string]*Alert{
 			"a": {Name: "a", Matcher: CheckLoss{L: 50, X: 1}, EdgeTrigger: true, To: []string{to}},
 		}, map[string]Notifier{"old": &capture{}, "new": &capture{}})
-		e.Dispatch(e.Evaluate("t", "local", []string{"a"}, 60, math.NaN(), when)) // firing + visible
+		e.Dispatch(e.Evaluate("t", "t", "local", []string{"a"}, 60, math.NaN(), when)) // firing + visible
 		return e
 	}
 
@@ -716,12 +719,12 @@ func TestPriorityInhibitionNonEdge(t *testing.T) {
 	when := time.Unix(1_700_000_000, 0)
 
 	// 60% loss: both would fire; only the higher-priority crit is emitted.
-	got := evSummary(e.Evaluate("t", "local", []string{"crit", "warn"}, 60, math.NaN(), when))
+	got := evSummary(e.Evaluate("t", "t", "local", []string{"crit", "warn"}, 60, math.NaN(), when))
 	if len(got) != 1 || got[0] != "crit/FIRING" {
 		t.Fatalf("round1 = %v, want [crit/FIRING] (warn inhibited)", got)
 	}
 	// 20% loss: crit clears, warn still over its threshold -> warn now surfaces.
-	got = evSummary(e.Evaluate("t", "local", []string{"crit", "warn"}, 20, math.NaN(), when.Add(time.Minute)))
+	got = evSummary(e.Evaluate("t", "t", "local", []string{"crit", "warn"}, 20, math.NaN(), when.Add(time.Minute)))
 	if len(got) != 2 || !containsStr(got, "crit/RESOLVED") || !containsStr(got, "warn/FIRING") {
 		t.Fatalf("round2 = %v, want crit/RESOLVED + warn/FIRING", got)
 	}
@@ -740,10 +743,10 @@ func TestPriorityInhibitionNoOrphanResolved(t *testing.T) {
 	var all []Event
 	// Round 1: 60% loss -> both fire; warn (lower priority) is inhibited on its
 	// rising edge, so only crit is delivered.
-	all = append(all, e.Evaluate("t", "local", []string{"crit", "warn"}, 60, math.NaN(), when)...)
+	all = append(all, e.Evaluate("t", "t", "local", []string{"crit", "warn"}, 60, math.NaN(), when)...)
 	// Round 2: 0% loss -> both clear. crit resolves (it was delivered); warn must
 	// stay silent because its FIRING was never delivered.
-	all = append(all, e.Evaluate("t", "local", []string{"crit", "warn"}, 0, 0.01, when.Add(time.Minute))...)
+	all = append(all, e.Evaluate("t", "t", "local", []string{"crit", "warn"}, 0, 0.01, when.Add(time.Minute))...)
 
 	for _, ev := range all {
 		if ev.Alert == "warn" {
@@ -768,12 +771,12 @@ func TestPriorityInhibitionStillResolvesDeliveredAlert(t *testing.T) {
 
 	var all []Event
 	// Round 1: 20% loss -> only warn fires (crit needs >=50). warn is delivered.
-	all = append(all, e.Evaluate("t", "local", []string{"crit", "warn"}, 20, 0.01, when)...)
+	all = append(all, e.Evaluate("t", "t", "local", []string{"crit", "warn"}, 20, 0.01, when)...)
 	// Round 2: 60% loss -> crit fires and now inhibits warn (still firing).
-	all = append(all, e.Evaluate("t", "local", []string{"crit", "warn"}, 60, math.NaN(), when.Add(time.Minute))...)
+	all = append(all, e.Evaluate("t", "t", "local", []string{"crit", "warn"}, 60, math.NaN(), when.Add(time.Minute))...)
 	// Round 3: 0% loss -> both clear. warn was delivered in round 1, so it must
 	// still emit RESOLVED even though it was inhibited in between.
-	all = append(all, e.Evaluate("t", "local", []string{"crit", "warn"}, 0, 0.01, when.Add(2*time.Minute))...)
+	all = append(all, e.Evaluate("t", "t", "local", []string{"crit", "warn"}, 0, 0.01, when.Add(2*time.Minute))...)
 
 	got := evSummary(all)
 	if !containsStr(got, "warn/FIRING") || !containsStr(got, "warn/RESOLVED") {
@@ -796,13 +799,13 @@ func TestPriorityInhibitionEdgeSurfacesAfterInhibitorClears(t *testing.T) {
 
 	var all []Event
 	// Round 1: 60% loss -> both fire on the same edge; warn is inhibited by crit.
-	all = append(all, e.Evaluate("t", "local", []string{"crit", "warn"}, 60, math.NaN(), when)...)
+	all = append(all, e.Evaluate("t", "t", "local", []string{"crit", "warn"}, 60, math.NaN(), when)...)
 	// Round 2: 60% loss -> both still firing; no new edge for either.
-	all = append(all, e.Evaluate("t", "local", []string{"crit", "warn"}, 60, math.NaN(), when.Add(time.Minute))...)
+	all = append(all, e.Evaluate("t", "t", "local", []string{"crit", "warn"}, 60, math.NaN(), when.Add(time.Minute))...)
 	// Round 3: 20% loss -> crit clears (<50) but warn is still over its 10%
 	// threshold. crit's inhibition lifts, so warn must now surface FIRING even
 	// though it produced no matcher edge this round.
-	all = append(all, e.Evaluate("t", "local", []string{"crit", "warn"}, 20, 0.05, when.Add(2*time.Minute))...)
+	all = append(all, e.Evaluate("t", "t", "local", []string{"crit", "warn"}, 20, 0.05, when.Add(2*time.Minute))...)
 
 	got := evSummary(all)
 	if !containsStr(got, "crit/RESOLVED") {
@@ -821,7 +824,7 @@ func TestPriorityUnsetAlwaysNotifies(t *testing.T) {
 		"any":  {Name: "any", Matcher: CheckLoss{L: 10, X: 1}, Priority: 0, EdgeTrigger: true, To: []string{"log"}},
 	}
 	e := NewEngine(alerts, map[string]Notifier{})
-	got := evSummary(e.Evaluate("t", "local", []string{"crit", "any"}, 60, math.NaN(), time.Unix(1_700_000_000, 0)))
+	got := evSummary(e.Evaluate("t", "t", "local", []string{"crit", "any"}, 60, math.NaN(), time.Unix(1_700_000_000, 0)))
 	if len(got) != 2 || !containsStr(got, "crit/FIRING") || !containsStr(got, "any/FIRING") {
 		t.Fatalf("got %v, want both crit/FIRING and any/FIRING (unset priority not inhibited)", got)
 	}
@@ -851,6 +854,42 @@ func containsStr(s []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// TestAlertStateKeyStableAcrossMove: a target's alert state key follows its stable id, so
+// moving it to a new display path leaves the key (and thus its hysteresis) untouched. Before
+// the id split the key was the display path, so a move reset all firing/window state.
+func TestAlertStateKeyStableAcrossMove(t *testing.T) {
+	got := StateKeyForTest(store.DefaultVantage, probe.Target{ID: "aid", Name: "New/path"}, "myalert")
+	want := StateKeyForTest(store.DefaultVantage, probe.Target{ID: "aid", Name: "Old/path"}, "myalert")
+	if got != want {
+		t.Fatalf("alert state key must be stable across a display-path move: %q vs %q", got, want)
+	}
+}
+
+// TestEvaluateEmitsDisplayNotID: state is keyed by the stable id, but the emitted Event carries
+// the human display path — so notifier messages name the tree location, not the storage id.
+func TestEvaluateEmitsDisplayNotID(t *testing.T) {
+	alerts := map[string]*Alert{
+		"loss": {Name: "loss", Matcher: CheckLoss{L: 50, X: 1}, To: []string{"cap"}},
+	}
+	e := NewEngine(alerts, map[string]Notifier{"cap": &capture{}})
+
+	const id, display = "the-id", "Grp/leaf"
+	evs := e.Evaluate(id, display, store.DefaultVantage, []string{"loss"}, 100, math.NaN(), time.Unix(1_700_000_000, 0))
+	if len(evs) != 1 || !evs[0].Firing {
+		t.Fatalf("expected one FIRING event from a fully-lost round, got %+v", evs)
+	}
+	if evs[0].Target != display {
+		t.Errorf("Event.Target = %q, want the display path %q", evs[0].Target, display)
+	}
+	// State must be keyed by the id, never the display path.
+	if _, ok := e.state[stKey(store.DefaultVantage, id, "loss")]; !ok {
+		t.Errorf("alert state must be keyed by the id %q", id)
+	}
+	if _, ok := e.state[stKey(store.DefaultVantage, display, "loss")]; ok {
+		t.Errorf("alert state must NOT be keyed by the display path %q", display)
+	}
 }
 
 func TestParseMatcher(t *testing.T) {

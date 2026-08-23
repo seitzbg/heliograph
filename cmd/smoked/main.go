@@ -922,7 +922,7 @@ func (rt *runtime) eval(out []scheduler.Outcome) {
 		return
 	}
 	for _, o := range out {
-		names := rt.alertsByTarget[o.Target.Name]
+		names := rt.alertsByTarget[o.Target.Key()]
 		if len(names) == 0 {
 			continue
 		}
@@ -933,9 +933,9 @@ func (rt *runtime) eval(out []scheduler.Outcome) {
 		if rt.fingerprintStale(o) {
 			continue
 		}
-		events := rt.engine.Evaluate(o.Target.Name, store.VantageOf(o), names,
+		events := rt.engine.Evaluate(o.Target.Key(), o.Target.Name, store.VantageOf(o), names,
 			o.Computed.LossFraction()*100, alertRTT(o), o.When)
-		rt.engine.Dispatch(events, rt.alerteeByTarget[o.Target.Name]...)
+		rt.engine.Dispatch(events, rt.alerteeByTarget[o.Target.Key()]...)
 	}
 }
 
@@ -944,7 +944,7 @@ func (rt *runtime) eval(out []scheduler.Outcome) {
 // fingerprint — an internal path predating stamping — is never stale; current local rounds and all
 // handler-accepted remote rounds are stamped before they reach this boundary.
 func (rt *runtime) fingerprintStale(o scheduler.Outcome) bool {
-	return o.Fingerprint != "" && rt.targetFP[o.Target.Name] != o.Fingerprint
+	return o.Fingerprint != "" && rt.targetFP[o.Target.Key()] != o.Fingerprint
 }
 
 // storeLocal persists locally-measured outcomes and evaluates their alerts under THIS runtime
@@ -992,7 +992,7 @@ func (rt *runtime) commitRemote(ctx context.Context, ing store.ResultIngester, o
 		// Drop a round whose target a reload has since removed (absent from targetFP) or redefined
 		// (fingerprintStale) — the same identity gate storeLocal and eval apply, now enforced under
 		// the lock at write time rather than only against the handler's earlier snapshot.
-		if _, ok := rt.targetFP[o.Target.Name]; !ok {
+		if _, ok := rt.targetFP[o.Target.Key()]; !ok {
 			continue
 		}
 		if rt.fingerprintStale(o) {
@@ -1163,9 +1163,9 @@ func warmStartAlerts(ctx context.Context, engine *alert.Engine, monitors []model
 			var hist []scheduler.Outcome
 			var err error
 			if v == store.DefaultVantage {
-				hist, err = st.History(m.Name)
+				hist, err = st.History(m.ID)
 			} else if rh != nil {
-				hist, err = rh.HistorySince(ctx, m.Name, v, now.Add(-warmStartLookback))
+				hist, err = rh.HistorySince(ctx, m.ID, v, now.Add(-warmStartLookback))
 			} else {
 				continue
 			}
@@ -1185,7 +1185,7 @@ func warmStartAlerts(ctx context.Context, engine *alert.Engine, monitors []model
 				loss[i] = o.Computed.LossFraction() * 100
 				rtt[i] = alertRTT(o) // median for an rtt round; NaN for a lost or offset round
 			}
-			engine.SeedWindow(m.Name, v, m.Alerts, loss, rtt)
+			engine.SeedWindow(m.ID, v, m.Alerts, loss, rtt)
 		}
 	}
 }
@@ -1293,6 +1293,13 @@ func buildRuntime(configPath string, demoPings int, demoStep, timeout time.Durat
 	// Config monitors already default to [local]; demo monitors carry no vantages, so default
 	// them first, then filter. This scopes both the probe jobs and the alert loops below.
 	for i := range monitors {
+		// Every monitor reaching the runtime must carry a stable storage id: the alert maps,
+		// warm-start seed, and store are all keyed by it. Config monitors already default their
+		// id to the path (config.go); demo monitors carry none, so mirror that fallback here so
+		// the id-keyed collector wiring behaves identically for both (id == path when unset).
+		if monitors[i].ID == "" {
+			monitors[i].ID = monitors[i].Name
+		}
 		if len(monitors[i].Vantages) == 0 {
 			monitors[i].Vantages = []string{store.DefaultVantage}
 		}
@@ -1339,10 +1346,10 @@ func buildRuntime(configPath string, demoPings int, demoStep, timeout time.Durat
 	alerteeByTarget := map[string][]string{}
 	for _, m := range fullMonitors {
 		if len(m.Alerts) > 0 {
-			alertsByTarget[m.Name] = m.Alerts
+			alertsByTarget[m.ID] = m.Alerts
 		}
 		if len(m.Alertee) > 0 {
-			alerteeByTarget[m.Name] = m.Alertee
+			alerteeByTarget[m.ID] = m.Alertee
 		}
 	}
 	if miss := unresolvedRecipients(alertDefs, alerteeByTarget, notifiers); len(miss) > 0 {
@@ -1363,7 +1370,7 @@ func buildRuntime(configPath string, demoPings int, demoStep, timeout time.Durat
 	targetFP := make(map[string]string, len(fullMonitors))
 	metricByName := make(map[string]string, len(fullMonitors))
 	for _, m := range fullMonitors {
-		targetFP[m.Name] = federation.Fingerprint(m, probeCfgs[m.ProbeKind])
+		targetFP[m.ID] = federation.Fingerprint(m, probeCfgs[m.ProbeKind])
 		metricByName[m.Name] = probe.MetricFor(m.ProbeKind, m.Params, probeCfgs[m.ProbeKind])
 	}
 	return &runtime{jobs: jobs, monitors: fullMonitors, probeCfgs: probeCfgs, engine: engine,

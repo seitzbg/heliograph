@@ -462,7 +462,7 @@ func TestSwapRuntimeSeedsNewlyAlertedTarget(t *testing.T) {
 	alertDef := map[string]*alert.Alert{"loss": {Name: "loss", Matcher: alert.CheckLoss{L: 50, X: 2}, To: []string{"cap"}}}
 	cap := &capNotify{}
 
-	mon := model.Monitor{Name: "t", ProbeKind: "FPing", Host: "h", Pings: 1, Step: time.Minute, Vantages: []string{store.DefaultVantage}}
+	mon := model.Monitor{Name: "t", ID: "t", ProbeKind: "FPing", Host: "h", Pings: 1, Step: time.Minute, Vantages: []string{store.DefaultVantage}}
 	old := &runtime{ // target present but NOT alerted yet
 		engine:   alert.NewEngine(alertDef, map[string]alert.Notifier{"cap": cap}),
 		monitors: []model.Monitor{mon}, alertsByTarget: map[string][]string{}, targetFP: map[string]string{"t": "fp"},
