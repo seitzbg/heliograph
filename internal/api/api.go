@@ -1230,6 +1230,10 @@ func (srv *Server) rollup(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"missing target param"}`, http.StatusBadRequest)
 		return
 	}
+	// The param is the stable id; a pre-move bookmark or the frontend's live display path may carry
+	// the target's display PATH — resolve it to the id so the store lookup (keyed by id) and the
+	// metric resolver both hit, symmetric with /api/series (else a moved target's bands render blank).
+	key = srv.resolveTargetKey(key)
 	res := r.URL.Query().Get("res")
 	if res == "" {
 		res = "1h"
