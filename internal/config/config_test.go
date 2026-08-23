@@ -961,3 +961,52 @@ targets:
 		t.Fatalf("YAML weight order = %v, want %v", names, want)
 	}
 }
+
+// A node's stable id resolves to its explicit `id:` when set, else falls back to the
+// flattened path — so a node moved between parent groups (path changes) keeps its
+// storage identity only when it was given an explicit id.
+func TestMonitorsResolvesStableID(t *testing.T) {
+	c, err := Parse([]byte(`
+database: {pings: 1, step: 1s}
+probes: {FPing: {}}
+targets:
+  children:
+    Resolvers:
+      children:
+        dns1: {probe: FPing, host: 192.168.1.5, id: "frozen-id-1"}
+        dns2: {probe: FPing, host: 192.168.1.6}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ms, err := c.Monitors()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{} // path -> id
+	for _, m := range ms {
+		got[m.Name] = m.ID
+	}
+	if got["Resolvers/dns1"] != "frozen-id-1" {
+		t.Errorf("explicit id: got %q want frozen-id-1", got["Resolvers/dns1"])
+	}
+	if got["Resolvers/dns2"] != "Resolvers/dns2" {
+		t.Errorf("id fallback to path: got %q want Resolvers/dns2", got["Resolvers/dns2"])
+	}
+}
+
+// Two nodes that resolve to the same id (explicit or otherwise) would silently share
+// one storage identity, so it must be rejected like a duplicate name.
+func TestMonitorsRejectsDuplicateID(t *testing.T) {
+	c, _ := Parse([]byte(`
+database: {pings: 1, step: 1s}
+probes: {FPing: {}}
+targets:
+  children:
+    a: {probe: FPing, host: h1, id: dup}
+    b: {probe: FPing, host: h2, id: dup}
+`))
+	if _, err := c.Monitors(); err == nil {
+		t.Fatal("expected duplicate-id error, got nil")
+	}
+}

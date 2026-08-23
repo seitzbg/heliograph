@@ -76,6 +76,9 @@ type Node struct {
 	Probe string `yaml:"probe" json:"probe,omitempty"`
 	Host  string `yaml:"host" json:"host,omitempty"`
 	Title string `yaml:"title" json:"title,omitempty"`
+	// ID is a stable identity; decouples storage key from tree position. A node with no
+	// id falls back to its flattened path (see Monitors), matching pre-id behavior exactly.
+	ID string `yaml:"id" json:"id,omitempty"`
 	// IP is an optional pinned address shown in the graph title (display-only; the probe
 	// still targets Host). Distinct from Host so a hostname target can display a fixed IP.
 	IP     string            `yaml:"ip" json:"ip,omitempty"`
@@ -557,8 +560,12 @@ func (c *Config) Monitors() ([]model.Monitor, error) {
 			vantages: vantages,
 		}
 		if n.Host != "" {
+			id := n.ID
+			if id == "" {
+				id = path
+			}
 			m := model.Monitor{
-				Name: path, Title: n.Title, ProbeKind: eff.probe, Host: n.Host, IP: n.IP,
+				Name: path, ID: id, Title: n.Title, ProbeKind: eff.probe, Host: n.Host, IP: n.IP,
 				Pings: eff.pings, Step: eff.step, Params: eff.params,
 				Alerts: eff.alerts, Alertee: eff.alertee, Vantages: eff.vantages,
 			}
@@ -619,6 +626,17 @@ func (c *Config) Monitors() ([]model.Monitor, error) {
 			problems = append(problems, fmt.Sprintf("%s: duplicate target name — two config paths collapse to the same identity (avoid \"/\" in a node key)", m.Name))
 		}
 		seenName[m.Name] = true
+	}
+
+	// Two nodes that resolve to the same id (explicit `id:` collision, or an explicit id
+	// that happens to match another node's path fallback) would silently share one
+	// storage identity — the whole point of a stable id is a 1:1 mapping to a target.
+	seenID := make(map[string]bool, len(out))
+	for _, m := range out {
+		if seenID[m.ID] {
+			problems = append(problems, fmt.Sprintf("%s: duplicate target id %q — two nodes resolve to the same identity", m.Name, m.ID))
+		}
+		seenID[m.ID] = true
 	}
 
 	if len(problems) > 0 {
