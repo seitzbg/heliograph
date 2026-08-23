@@ -64,8 +64,9 @@ func TestReportFromOutcomeCarriesNTPStat(t *testing.T) {
 		Computed: sample.Compute(2, []float64{0.001, 0.002}),
 		When:     when,
 	}
-	stat := func(target, wantHost string) (float64, uint8, string, bool) {
-		if target == "clock" && wantHost == "h" {
+	stat := func(target, wantKey string) (float64, uint8, string, bool) {
+		// The agent reads back its own just-measured round with wantKey="" (identity gate skipped).
+		if target == "clock" && wantKey == "" {
 			return -0.0009, 2, "rtt", true // -0.9 ms, stratum 2
 		}
 		return 0, 0, "", false
@@ -106,9 +107,10 @@ func TestReportFromOutcomeNTPStatKeyedByID(t *testing.T) {
 		Computed:  sample.Compute(1, []float64{0.001}),
 		When:      when,
 	}
-	// The registry keys by Key() == ID ("wid"); a lookup by Name ("grp/leaf") would miss.
-	stat := func(key, wantHost string) (float64, uint8, string, bool) {
-		if key == "wid" && wantHost == "h" {
+	// The registry keys by Key() == ID ("wid"); a lookup by Name ("grp/leaf") would miss. The agent
+	// reads back with wantKey="" (identity gate skipped for the just-measured round).
+	stat := func(key, wantKey string) (float64, uint8, string, bool) {
+		if key == "wid" && wantKey == "" {
 			return -0.0009, 2, "offset", true
 		}
 		return 0, 0, "", false

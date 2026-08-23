@@ -707,6 +707,95 @@ func TestRemoteNTPStatTransportsAndClears(t *testing.T) {
 	}
 }
 
+// offsetForClock reads the clock target's ntp_offset_ms from a /api/targets response.
+func offsetForClock(t *testing.T, srv *Server, url string) *float64 {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(rec, httptest.NewRequest("GET", url, nil))
+	if rec.Code != 200 {
+		t.Fatalf("%s status=%d", url, rec.Code)
+	}
+	var tj struct {
+		Targets []struct {
+			Name        string   `json:"name"`
+			NTPOffsetMs *float64 `json:"ntp_offset_ms"`
+		} `json:"targets"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &tj); err != nil {
+		t.Fatalf("%s json: %v", url, err)
+	}
+	for _, d := range tj.Targets {
+		if d.Name == "clock" {
+			return d.NTPOffsetMs
+		}
+	}
+	t.Fatalf("%s: clock target missing", url)
+	return nil
+}
+
+// A store-and-forward replay can deliver an older round after a newer one. The companion NTP stat
+// must keep the NEWEST measurement, not whatever arrived last, or an out-of-order delivery rolls the
+// displayed offset backward (CODE_REVIEW M3).
+func TestRemoteNTPStatKeepsNewestAcrossOutOfOrderDelivery(t *testing.T) {
+	m := model.Monitor{Name: "clock", ID: "clock", ProbeKind: "NTP", Host: "h", Pings: 2, Step: time.Minute, Vantages: []string{"nyc"}}
+	srv := &Server{
+		store:       store.NewMem(10),
+		VantageAuth: fakeAuth{name: "nyc", ok: true},
+		Assignment: func(v string) ([]model.Monitor, map[string]map[string]string, string) {
+			return []model.Monitor{m}, nil, "sha256:v1"
+		},
+		Active:         func() map[string]bool { return map[string]bool{"clock": true} },
+		Configured:     func() []model.Monitor { return []model.Monitor{m} },
+		TargetVantages: func() map[string][]string { return map[string][]string{"clock": {"nyc"}} },
+	}
+	newer := time.Now().UTC().Add(-1 * time.Minute).Format(time.RFC3339Nano)
+	older := time.Now().UTC().Add(-3 * time.Minute).Format(time.RFC3339Nano)
+
+	// Deliver the NEWER synchronized round first (offset -0.9), then an OLDER one (offset -0.5).
+	if w := postResults(t, srv, fmt.Sprintf(
+		`{"results":[{"target":"clock","ts":%q,"pings":2,"rtts":[0.001,0.002],"ntp_offset_ms":-0.9,"stratum":2}]}`, newer)); w.Code != 200 {
+		t.Fatalf("newer ingest status=%d body=%s", w.Code, w.Body)
+	}
+	if w := postResults(t, srv, fmt.Sprintf(
+		`{"results":[{"target":"clock","ts":%q,"pings":2,"rtts":[0.001,0.002],"ntp_offset_ms":-0.5,"stratum":2}]}`, older)); w.Code != 200 {
+		t.Fatalf("older ingest status=%d body=%s", w.Code, w.Body)
+	}
+	if off := offsetForClock(t, srv, "/api/targets?vantage=nyc"); off == nil || *off != -0.9 {
+		t.Fatalf("out-of-order older round rolled the stat backward: got %v, want the newest -0.9", off)
+	}
+}
+
+// After a target keeps its stable id but is repointed to a different endpoint on the SAME host (a new
+// port), the previously measured offset/stratum must not decorate the new panel (CODE_REVIEW M3).
+func TestRemoteNTPStatRefusedAfterSameHostPortChange(t *testing.T) {
+	// A mutable monitor shared by Assignment (ingest) and Configured (read): the stat is stored under
+	// the ingest-time endpoint, then the target is moved to a new port before the read.
+	mon := model.Monitor{Name: "clock", ID: "clock", ProbeKind: "NTP", Host: "h", Params: map[string]string{"port": "123"}, Pings: 2, Step: time.Minute, Vantages: []string{"nyc"}}
+	srv := &Server{
+		store:       store.NewMem(10),
+		VantageAuth: fakeAuth{name: "nyc", ok: true},
+		Assignment: func(v string) ([]model.Monitor, map[string]map[string]string, string) {
+			return []model.Monitor{mon}, nil, "sha256:v1"
+		},
+		Active:         func() map[string]bool { return map[string]bool{"clock": true} },
+		Configured:     func() []model.Monitor { return []model.Monitor{mon} },
+		TargetVantages: func() map[string][]string { return map[string][]string{"clock": {"nyc"}} },
+	}
+	ts := time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano)
+	if w := postResults(t, srv, fmt.Sprintf(
+		`{"results":[{"target":"clock","ts":%q,"pings":2,"rtts":[0.001,0.002],"ntp_offset_ms":-0.9,"stratum":2}]}`, ts)); w.Code != 200 {
+		t.Fatalf("ingest status=%d body=%s", w.Code, w.Body)
+	}
+	if off := offsetForClock(t, srv, "/api/targets?vantage=nyc"); off == nil || *off != -0.9 {
+		t.Fatalf("stat should show for the endpoint it was measured against, got %v", off)
+	}
+	// Repoint the SAME target to a different port; the old endpoint's reading must no longer show.
+	mon.Params = map[string]string{"port": "1234"}
+	if off := offsetForClock(t, srv, "/api/targets?vantage=nyc"); off != nil {
+		t.Fatalf("a reading measured on port 123 must not decorate the target after it moves to port 1234, got %v", *off)
+	}
+}
+
 // A round reported under the assignment's stable ID is accepted and stored under that ID,
 // even though the monitor's display Name (path) differs from the ID — proving the wire
 // carries the id end-to-end: hub assignment -> agent echo -> hub ingest key.

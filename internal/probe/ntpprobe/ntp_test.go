@@ -78,7 +78,7 @@ func TestNTPMeasuresRTTAndOffset(t *testing.T) {
 		}
 	}
 
-	offSec, stratum, _, ok := LatestFor("ntp-sync", "127.0.0.1")
+	offSec, stratum, _, ok := LatestFor("ntp-sync", "")
 	if !ok {
 		t.Fatal("no offset recorded for a synchronized (stratum 2) server")
 	}
@@ -112,7 +112,7 @@ func TestNTPOffsetModeGraphsOffset(t *testing.T) {
 			t.Errorf("offset-mode sample = %v, want ~%v (the clock offset, not RTT)", d, skew)
 		}
 	}
-	if _, _, measure, ok := LatestFor("ntp-offmode", "127.0.0.1"); !ok || measure != "offset" {
+	if _, _, measure, ok := LatestFor("ntp-offmode", ""); !ok || measure != "offset" {
 		t.Errorf("registry measure = %q (ok=%v), want \"offset\"", measure, ok)
 	}
 }
@@ -131,27 +131,80 @@ func TestNTPUnsyncedServerRecordsNoOffset(t *testing.T) {
 	if len(res.Samples) != 2 {
 		t.Fatalf("stratum-16 server is reachable; want 2 RTT samples, got %d", len(res.Samples))
 	}
-	if _, _, _, ok := LatestFor("ntp-unsynced", "127.0.0.1"); ok {
+	if _, _, _, ok := LatestFor("ntp-unsynced", ""); ok {
 		t.Error("stratum-16 (unsynchronized) reply must not record an offset")
 	}
 }
 
-// A recorded clock stat belongs to the host it was measured against. LatestFor refuses it once the
-// caller asks with a different host, so after a target keeps its stable id but is repointed at
-// another NTP server (a config change, or a slow in-flight probe of the old server completing after
-// the swap), the old server's offset/stratum is never attributed to the new one (CODE_REVIEW M3).
-func TestLatestForBindsStatToHost(t *testing.T) {
+// A recorded clock stat belongs to the exact endpoint it was measured against (host + port +
+// version). LatestFor refuses it once the caller asks with a different measurement identity, so after
+// a target keeps its stable id but is repointed at another server — a new host, or the same host on a
+// new port/version — the old endpoint's offset/stratum is never attributed to the new one, nor can a
+// slow in-flight probe of the old endpoint completing after the swap (CODE_REVIEW M3).
+func TestLatestForBindsStatToMeasurementIdentity(t *testing.T) {
 	port := ntpServer(t, 2, 3*time.Second)
 	p, _ := probe.New("NTP", nil)
-	target := probe.Target{Name: "hostbind", Host: "127.0.0.1", Params: map[string]string{"port": strconv.Itoa(port)}}
+	params := map[string]string{"port": strconv.Itoa(port)}
+	target := probe.Target{Name: "idbind", Host: "127.0.0.1", Params: params}
 	if _, err := p.Measure(context.Background(), target, 2); err != nil {
 		t.Fatalf("Measure: %v", err)
 	}
-	if _, _, _, ok := LatestFor("hostbind", "127.0.0.1"); !ok {
-		t.Fatal("the reading must be returned for the host it was measured against")
+	if _, _, _, ok := LatestFor("idbind", StatKey("127.0.0.1", params, nil)); !ok {
+		t.Fatal("the reading must be returned for the endpoint it was measured against")
 	}
-	if _, _, _, ok := LatestFor("hostbind", "192.0.2.9"); ok {
+	if _, _, _, ok := LatestFor("idbind", StatKey("192.0.2.9", params, nil)); ok {
 		t.Fatal("a reading measured against 127.0.0.1 must not be returned for a different current host")
+	}
+	// Same host, different port: a same-host reconfiguration must also invalidate the old reading.
+	if _, _, _, ok := LatestFor("idbind", StatKey("127.0.0.1", map[string]string{"port": "12345"}, nil)); ok {
+		t.Fatal("a reading measured on one port must not be returned after the target moves to another port")
+	}
+}
+
+// StatKey (the reader's identity token) must reproduce the exact key the probe stores for the same
+// configuration, or the API would never match a valid reading. Guards against the probe's and the
+// API's resolution drifting apart.
+func TestStatKeyMatchesProbeStoredKey(t *testing.T) {
+	cases := []struct {
+		host      string
+		params    map[string]string
+		probeCfg  map[string]string
+		probePort string // what the probe instance resolved as its port default
+		probeVer  uint8
+	}{
+		{"h", nil, nil, "123", 4},
+		{"h", map[string]string{"port": "1000"}, nil, "1000", 4},
+		{"h", map[string]string{"version": "3"}, nil, "123", 3},
+		{"h", nil, map[string]string{"port": "4500", "version": "3"}, "4500", 3},
+		{"h", map[string]string{"version": "4"}, map[string]string{"version": "3"}, "123", 4},
+	}
+	for _, c := range cases {
+		want := statKey(c.host, c.probePort, c.probeVer) // what the probe's Measure would store
+		if got := StatKey(c.host, c.params, c.probeCfg); got != want {
+			t.Errorf("StatKey(%q,%v,%v)=%q, want probe key %q", c.host, c.params, c.probeCfg, got, want)
+		}
+	}
+}
+
+// An out-of-order write must not roll a fresher reading backward: a store-and-forward replay can
+// deliver an older round after a newer one, and the stat must keep the newest measurement (M3).
+func TestRegistryRejectsOlderWrite(t *testing.T) {
+	r := &registry{m: map[string]ntpLatest{}}
+	newer := time.Now()
+	older := newer.Add(-time.Minute)
+	key := statKey("h", "123", 4)
+	r.set("t", 0.002, 2, "offset", key, newer)
+	r.set("t", 0.001, 2, "offset", key, older) // older — must be ignored
+	if v := r.m["t"]; v.offsetSec != 0.002 {
+		t.Fatalf("older write rolled the stat backward: got %v, want the newer 0.002", v.offsetSec)
+	}
+	r.clear("t", older) // an older clear must not wipe the newer reading
+	if _, ok := r.m["t"]; !ok {
+		t.Fatal("older clear wiped a newer reading")
+	}
+	r.clear("t", newer.Add(time.Second)) // a newer clear does drop it
+	if _, ok := r.m["t"]; ok {
+		t.Fatal("newer clear must drop the reading")
 	}
 }
 

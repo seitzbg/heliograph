@@ -12,6 +12,7 @@ import (
 	"github.com/seitzbg/heliograph/internal/federation"
 	"github.com/seitzbg/heliograph/internal/model"
 	"github.com/seitzbg/heliograph/internal/probe"
+	"github.com/seitzbg/heliograph/internal/probe/ntpprobe"
 	"github.com/seitzbg/heliograph/internal/sample"
 	"github.com/seitzbg/heliograph/internal/scheduler"
 	"github.com/seitzbg/heliograph/internal/store"
@@ -201,7 +202,8 @@ func (srv *Server) agentResults(w http.ResponseWriter, r *http.Request) {
 		offsetSec float64
 		stratum   uint8
 		measure   string
-		host      string
+		key       string    // the round's NTP measurement identity (host+port+version)
+		ts        time.Time // the round's measurement time — the newest wins, in-batch and across
 		clear     bool
 	}
 	pendingNTP := map[string]ntpUpdate{}
@@ -297,13 +299,19 @@ func (srv *Server) agentResults(w http.ResponseWriter, r *http.Request) {
 		// Record the NTP companion clock stat for this vantage, applied post-commit below. A
 		// synchronized round reports offset + stratum; an unsynchronized/unreachable round, or a
 		// pre-stat agent, reports neither, so the stat is cleared then — a remote NTP panel shows the
-		// current reading or nothing, never a stale one (CODE_REVIEW M2). The stat is tagged with the
-		// target's current host so a later read rejects it once the target is repointed (M3).
+		// current reading or nothing, never a stale one (CODE_REVIEW M2). The update is tagged with the
+		// round's measurement identity (host+port+version) and time, so a later read rejects it once
+		// the target is repointed, and an out-of-order older round can't roll it back (M3). Within this
+		// batch the newest round for a target wins; the registry then enforces the same across batches.
 		if m.ProbeKind == "NTP" {
+			var u ntpUpdate
 			if rd.NTPOffsetMs != nil && rd.Stratum != nil && *rd.Stratum >= 0 && *rd.Stratum <= 255 {
-				pendingNTP[m.ID] = ntpUpdate{offsetSec: *rd.NTPOffsetMs / 1000, stratum: uint8(*rd.Stratum), measure: metric, host: m.Host}
+				u = ntpUpdate{offsetSec: *rd.NTPOffsetMs / 1000, stratum: uint8(*rd.Stratum), measure: metric, key: ntpprobe.StatKey(m.Host, m.Params, probeCfgs["NTP"]), ts: ts}
 			} else {
-				pendingNTP[m.ID] = ntpUpdate{clear: true}
+				u = ntpUpdate{clear: true, key: ntpprobe.StatKey(m.Host, m.Params, probeCfgs["NTP"]), ts: ts}
+			}
+			if prev, ok := pendingNTP[m.ID]; !ok || !u.ts.Before(prev.ts) {
+				pendingNTP[m.ID] = u
 			}
 		}
 	}
@@ -344,10 +352,13 @@ func (srv *Server) agentResults(w http.ResponseWriter, r *http.Request) {
 		for _, o := range committed {
 			if u, ok := pendingNTP[o.Target.Key()]; ok {
 				if u.clear {
-					srv.remoteNTP.clear(v, o.Target.Key())
+					srv.remoteNTP.clear(v, o.Target.Key(), u.ts)
 				} else {
-					srv.remoteNTP.set(v, o.Target.Key(), u.offsetSec, u.stratum, u.measure, u.host)
+					srv.remoteNTP.set(v, o.Target.Key(), u.offsetSec, u.stratum, u.measure, u.key, u.ts)
 				}
+				// Apply once per target even if the batch committed several of its rounds; the
+				// entry already holds the newest (pendingNTP kept max ts above).
+				delete(pendingNTP, o.Target.Key())
 			}
 		}
 	}
