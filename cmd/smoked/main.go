@@ -1319,7 +1319,7 @@ func buildRuntime(configPath string, demoPings int, demoStep, timeout time.Durat
 		}
 		jobs = append(jobs, scheduler.Job{
 			Probe:   p,
-			Target:  probe.Target{Name: m.Name, Host: m.Host, Params: m.Params},
+			Target:  probe.Target{ID: m.ID, Name: m.Name, Host: m.Host, Params: m.Params},
 			Pings:   m.Pings,
 			Timeout: timeout,
 			Step:    m.Step,

@@ -152,6 +152,10 @@ type Dispatcher struct {
 	wg       sync.WaitGroup
 }
 
+// InflightKey is the identity a job dedups on: the target's stable Key
+// (ID, falling back to Name for a target built before the wire carries an id).
+func InflightKey(t probe.Target) string { return t.Key() }
+
 // NewDispatcher returns a Dispatcher whose in-flight probes are capped at workers.
 func NewDispatcher(workers int) *Dispatcher {
 	if workers <= 0 {
@@ -170,10 +174,11 @@ func (d *Dispatcher) Go(ctx context.Context, jobs []Job, onEach func(Outcome), o
 	var run []Job
 	d.mu.Lock()
 	for _, j := range jobs {
-		if d.inflight[j.Target.Name] {
+		key := InflightKey(j.Target)
+		if d.inflight[key] {
 			continue
 		}
-		d.inflight[j.Target.Name] = true
+		d.inflight[key] = true
 		run = append(run, j)
 	}
 	d.mu.Unlock()
@@ -205,7 +210,7 @@ func (d *Dispatcher) Go(ctx context.Context, jobs []Job, onEach func(Outcome), o
 					onEach(o)
 				}
 				d.mu.Lock()
-				delete(d.inflight, j.Target.Name)
+				delete(d.inflight, InflightKey(j.Target))
 				d.mu.Unlock()
 			}(j)
 		}
