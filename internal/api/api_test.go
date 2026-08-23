@@ -1465,3 +1465,82 @@ func TestSeriesFallsBackFromPathToID(t *testing.T) {
 		t.Errorf("target echo = %q, want %q (the resolved storage key)", resp.Target, "the-id")
 	}
 }
+
+// Prod shape: a store-scanned outcome carries Target.ID and an EMPTY Target.Name. /api/sla must key
+// its store aggregates on the id (o.Target.Key()) — not the empty Name, which misses every lookup so
+// the whole report comes back empty under the TimescaleDB backend — and take each entry's display
+// name from the live catalog (id -> path).
+func TestSLAKeysByIDAndDisplaysCatalogPath(t *testing.T) {
+	st := store.NewMem(100)
+	now := time.Now()
+	for i := 1; i <= 3; i++ {
+		st.Add([]scheduler.Outcome{
+			{Target: probe.Target{ID: "the-id", Host: "h"}, ProbeName: "FPing",
+				When: now.Add(-time.Duration(i) * time.Minute), Computed: sample.Compute(4, []float64{.01, .01, .01, .01})},
+		})
+	}
+	srv := New(st, "")
+	srv.Active = func() map[string]bool { return map[string]bool{"the-id": true} }
+	srv.Configured = func() []model.Monitor {
+		return []model.Monitor{{ID: "the-id", Name: "Grp/leaf", ProbeKind: "FPing"}}
+	}
+
+	rec := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(rec, httptest.NewRequest("GET", "/api/sla?window=24h", nil))
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var tj struct {
+		Targets []struct {
+			Name     string `json:"name"`
+			Measured int    `json:"measured"`
+		} `json:"targets"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &tj); err != nil {
+		t.Fatalf("sla json: %v", err)
+	}
+	if len(tj.Targets) != 1 {
+		t.Fatalf("want 1 sla entry, got %d (%+v) — the id-keyed store aggregate must be found", len(tj.Targets), tj.Targets)
+	}
+	if tj.Targets[0].Name != "Grp/leaf" {
+		t.Errorf("sla name = %q, want %q (display path from the catalog)", tj.Targets[0].Name, "Grp/leaf")
+	}
+	if tj.Targets[0].Measured != 3 {
+		t.Errorf("sla measured = %d, want 3 (rounds found under the id)", tj.Targets[0].Measured)
+	}
+}
+
+// Prod shape: /api/charts must not render a blank name for a store-scanned outcome (empty
+// Target.Name). Its display name comes from the live catalog (id -> path); identity stays the id.
+func TestChartsDisplaysCatalogPath(t *testing.T) {
+	st := store.NewMem(10)
+	st.Add([]scheduler.Outcome{
+		{Target: probe.Target{ID: "the-id", Host: "h"}, ProbeName: "FPing",
+			Computed: sample.Compute(4, nil), When: time.Unix(1_700_000_000, 0)}, // fully lost -> ranks in the loss chart
+	})
+	srv := New(st, "")
+	srv.Active = func() map[string]bool { return map[string]bool{"the-id": true} }
+	srv.Configured = func() []model.Monitor {
+		return []model.Monitor{{ID: "the-id", Name: "Grp/leaf", ProbeKind: "FPing"}}
+	}
+
+	rec := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(rec, httptest.NewRequest("GET", "/api/charts?by=loss", nil))
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var tj struct {
+		Charts []struct {
+			Name string `json:"name"`
+		} `json:"charts"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &tj); err != nil {
+		t.Fatalf("charts json: %v", err)
+	}
+	if len(tj.Charts) != 1 {
+		t.Fatalf("want 1 chart entry, got %d (%+v)", len(tj.Charts), tj.Charts)
+	}
+	if tj.Charts[0].Name != "Grp/leaf" {
+		t.Errorf("charts name = %q, want %q (display path from the catalog, not the empty scanned Name)", tj.Charts[0].Name, "Grp/leaf")
+	}
+}

@@ -383,6 +383,32 @@ func monitorKey(m model.Monitor) string {
 	return m.Name
 }
 
+// displayPaths returns an id -> display path map from the live catalog, or nil when no catalog is
+// wired. A store-scanned outcome carries only its id (Name is empty), so any listing that shows a
+// human-facing name — the /metrics label, a charts entry, an sla entry — resolves the id through
+// this map. Because id == path for every existing target, the resolved label is unchanged today.
+func (srv *Server) displayPaths() map[string]string {
+	if srv.Configured == nil {
+		return nil
+	}
+	cfg := srv.Configured()
+	paths := make(map[string]string, len(cfg))
+	for _, m := range cfg {
+		paths[monitorKey(m)] = m.Name
+	}
+	return paths
+}
+
+// displayName resolves a target's stable identity to its current display path via paths, falling
+// back to the identity itself when the target is absent from the catalog (or no catalog is wired —
+// paths is nil, a safe read that yields ""). Never returns "" for a target that has an identity.
+func displayName(paths map[string]string, identity string) string {
+	if p := paths[identity]; p != "" {
+		return p
+	}
+	return identity
+}
+
 // latestDTO builds a target DTO from a stored latest round, attaching the target's vantage
 // set, display metadata, and windowed recent loss (for the status dot). Shared by the live
 // and catalog-driven listings. identity is the target's stable storage key (o.Target.Key());
@@ -594,10 +620,13 @@ func (srv *Server) charts(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"store unavailable"}`, http.StatusServiceUnavailable)
 		return
 	}
+	// A store-scanned outcome carries only its id, so take the display name from the live catalog
+	// (id -> path); identity plays no part in ranking, only the label the user reads.
+	paths := srv.displayPaths()
 	var rows []scored
 	for _, o := range latest {
 		e := chartEntry{
-			Name:    o.Target.Name,
+			Name:    displayName(paths, o.Target.Key()),
 			Probe:   o.ProbeName,
 			LossPct: o.Computed.LossFraction() * 100,
 			When:    o.When.UTC().Format("2006-01-02T15:04:05Z"),
@@ -746,9 +775,13 @@ func (srv *Server) sla(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"store unavailable"}`, http.StatusServiceUnavailable)
 		return
 	}
+	// Identity for the store aggregates is the stable id (o.Target.Key()); the display name comes
+	// from the live catalog (id -> path). A store-scanned outcome has an EMPTY Name, so keying the
+	// aggregates on it would miss every target and return an empty report under the DB backend.
+	paths := srv.displayPaths()
 	out := make([]slaEntry, 0)
 	for _, o := range active {
-		k := o.Target.Name
+		id := o.Target.Key()
 		var (
 			measured, up   int
 			sumLoss        float64
@@ -756,19 +789,19 @@ func (srv *Server) sla(w http.ResponseWriter, r *http.Request) {
 		)
 		switch {
 		case statsAll != nil:
-			st := statsAll[k] // zero value (measured 0) if no in-window rounds
+			st := statsAll[id] // zero value (measured 0) if no in-window rounds
 			measured, up, sumLoss, oldest, latest = st.Measured, st.Up, st.SumLossPct, st.Oldest, st.Latest
 		case av != nil:
-			st, err := av.Availability(r.Context(), k, vant, cutoff, maxLossPct)
+			st, err := av.Availability(r.Context(), id, vant, cutoff, maxLossPct)
 			if err != nil {
-				slog.Warn("sla: availability query failed", "target", k, "err", err)
+				slog.Warn("sla: availability query failed", "target", id, "err", err)
 				continue
 			}
 			measured, up, sumLoss, oldest, latest = st.Measured, st.Up, st.SumLossPct, st.Oldest, st.Latest
 		default:
-			h, err := srv.store.History(k)
+			h, err := srv.store.History(id)
 			if err != nil {
-				slog.Warn("sla: history query failed", "target", k, "err", err)
+				slog.Warn("sla: history query failed", "target", id, "err", err)
 				continue
 			}
 			measured, up, sumLoss, oldest, latest = slaOf(h, cutoff, isUp)
@@ -777,7 +810,7 @@ func (srv *Server) sla(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		e := slaEntry{
-			Name:         k,
+			Name:         displayName(paths, id),
 			Probe:        o.ProbeName,
 			Measured:     measured,
 			UpRounds:     up,
@@ -788,7 +821,7 @@ func (srv *Server) sla(w http.ResponseWriter, r *http.Request) {
 		}
 		// Coverage: how much of the requested window we actually measured, derived
 		// from the target's step. Unknown step -> availability shown without coverage.
-		if step, ok := steps[k]; ok && step > 0 {
+		if step, ok := steps[id]; ok && step > 0 {
 			if expected := int(window / step); expected > 0 {
 				cov := float64(measured) / float64(expected) * 100
 				if cov > 100 {
@@ -1292,17 +1325,10 @@ func (srv *Server) metrics(w http.ResponseWriter, _ *http.Request) {
 	}
 	// Prometheus labels are for dashboards and should read as the target's CURRENT path, not its
 	// opaque storage id. A store-scanned outcome carries only the id, so resolve it to the display
-	// path via the live catalog (id -> path); an id with no catalog entry (or no catalog wired)
-	// keeps the id as its label. Because id == path for every existing target, scrape/Grafana
-	// labels are unchanged — this only relabels a moved node to its new path.
-	var displayPath map[string]string
-	if srv.Configured != nil {
-		cfg := srv.Configured()
-		displayPath = make(map[string]string, len(cfg))
-		for _, m := range cfg {
-			displayPath[monitorKey(m)] = m.Name
-		}
-	}
+	// path via the live catalog; an id with no catalog entry (or no catalog wired) keeps the id as
+	// its label. Because id == path for every existing target, scrape/Grafana labels are unchanged —
+	// this only relabels a moved node to its new path.
+	paths := srv.displayPaths()
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	var b strings.Builder
 	b.WriteString("# HELP heliograph_probe_median_seconds Median round-trip time of the most recent round.\n")
@@ -1318,11 +1344,7 @@ func (srv *Server) metrics(w http.ResponseWriter, _ *http.Request) {
 	b.WriteString("# HELP heliograph_probe_last_sample_timestamp_seconds Unix time of this target's most recent round (alert on staleness).\n")
 	b.WriteString("# TYPE heliograph_probe_last_sample_timestamp_seconds gauge\n")
 	for _, o := range latest {
-		label := o.Target.Key()
-		if p := displayPath[label]; p != "" {
-			label = p
-		}
-		lbl := fmt.Sprintf(`{target=%q,probe=%q}`, escapeLabel(label), escapeLabel(o.ProbeName))
+		lbl := fmt.Sprintf(`{target=%q,probe=%q}`, escapeLabel(displayName(paths, o.Target.Key())), escapeLabel(o.ProbeName))
 		median := o.Computed.Median
 		// A signed clock offset is not a round-trip time, so it never rides the RTT median gauge
 		// (whose HELP says "round-trip time") — it goes to an offset-specific gauge instead. Loss,
