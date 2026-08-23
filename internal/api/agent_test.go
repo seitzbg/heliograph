@@ -826,3 +826,69 @@ func TestIngestDropsFingerprintlessAmbiguousToken(t *testing.T) {
 		t.Fatalf("ambiguous round must not be stored (least of all as target %q), got %+v", "a", ing.got)
 	}
 }
+
+// The fingerprint-BEARING counterpart of the ambiguous-token case: a pre-#94 but fingerprint-capable
+// agent reports the ambiguous token "a" (X's stable id AND Y's current path) carrying Y's
+// fingerprint. Because the fingerprint uniquely identifies the current-path owner, the round must be
+// attributed to Y, not dropped for failing to match the id owner X (CODE_REVIEW M9, review of #95).
+func TestIngestDisambiguatesAmbiguousTokenByFingerprint(t *testing.T) {
+	// X born at path "a" (id="a"), since moved to "b". Y later created at the vacated path "a".
+	x := model.Monitor{ID: "a", Name: "b", ProbeKind: "FPing", Host: "1.1.1.1", Pings: 3, Step: time.Minute, Vantages: []string{"nyc"}}
+	y := model.Monitor{ID: "y-uuid", Name: "a", ProbeKind: "FPing", Host: "2.2.2.2", Pings: 3, Step: time.Minute, Vantages: []string{"nyc"}}
+	probeCfgs := map[string]map[string]string{"FPing": {"binary": "/usr/sbin/fping"}}
+	ing := &fakeIngester{}
+	srv := &Server{
+		store:       ing,
+		VantageAuth: fakeAuth{name: "nyc", ok: true},
+		Assignment: func(v string) ([]model.Monitor, map[string]map[string]string, string) {
+			return []model.Monitor{x, y}, probeCfgs, "sha256:v1"
+		},
+	}
+	fpY := federation.Fingerprint(y, probeCfgs["FPing"]) // host 2.2.2.2 → distinct from X (1.1.1.1)
+	body := fmt.Sprintf(`{"results":[{"target":"a","ts":%q,"pings":3,"rtts":[0.01,0.02,0.03],"fingerprint":%q}]}`,
+		recentTS(), fpY)
+	w := postResults(t, srv, body)
+	if w.Code != 200 {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body)
+	}
+	var resp struct{ Accepted, Dropped int }
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	if resp.Accepted != 1 || resp.Dropped != 0 {
+		t.Fatalf("fingerprint-bearing ambiguous round must be attributed to its fingerprint owner: counts=%+v, want accepted=1 dropped=0", resp)
+	}
+	if len(ing.got) != 1 || ing.got[0].Target.ID != "y-uuid" {
+		t.Fatalf("round must store under Y's stable id y-uuid (its fingerprint owner), got %+v", ing.got)
+	}
+}
+
+// If both the id owner and the current-path owner share a fingerprint (identical host/probe/params),
+// a report on the ambiguous token is unresolvable — equivalent measurements still belong to
+// different graphs — so it must be dropped rather than guessed onto either candidate (CODE_REVIEW M9).
+func TestIngestDropsAmbiguousTokenWhenCandidatesShareFingerprint(t *testing.T) {
+	x := model.Monitor{ID: "a", Name: "b", ProbeKind: "FPing", Host: "9.9.9.9", Pings: 3, Step: time.Minute, Vantages: []string{"nyc"}}
+	y := model.Monitor{ID: "y-uuid", Name: "a", ProbeKind: "FPing", Host: "9.9.9.9", Pings: 3, Step: time.Minute, Vantages: []string{"nyc"}}
+	probeCfgs := map[string]map[string]string{"FPing": {"binary": "/usr/sbin/fping"}}
+	ing := &fakeIngester{}
+	srv := &Server{
+		store:       ing,
+		VantageAuth: fakeAuth{name: "nyc", ok: true},
+		Assignment: func(v string) ([]model.Monitor, map[string]map[string]string, string) {
+			return []model.Monitor{x, y}, probeCfgs, "sha256:v1"
+		},
+	}
+	fp := federation.Fingerprint(y, probeCfgs["FPing"]) // == X's fingerprint (same host/probe/params)
+	body := fmt.Sprintf(`{"results":[{"target":"a","ts":%q,"pings":3,"rtts":[0.01,0.02,0.03],"fingerprint":%q}]}`,
+		recentTS(), fp)
+	w := postResults(t, srv, body)
+	if w.Code != 200 {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body)
+	}
+	var resp struct{ Accepted, Dropped int }
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	if resp.Accepted != 0 || resp.Dropped != 1 {
+		t.Fatalf("ambiguous round with a shared fingerprint must be dropped: counts=%+v, want accepted=0 dropped=1", resp)
+	}
+	if len(ing.got) != 0 {
+		t.Fatalf("unresolvable ambiguous round must not be stored, got %+v", ing.got)
+	}
+}

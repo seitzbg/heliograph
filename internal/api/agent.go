@@ -167,21 +167,25 @@ func (srv *Server) agentResults(w http.ResponseWriter, r *http.Request) {
 	// to the target's current display path.
 	//
 	// Collision handling: a target's display path can equal a DIFFERENT target's stable id (a
-	// birth-path id that another target has since been created/moved onto). Such a name is recorded
-	// in ambiguousName and kept OUT of byCurrentName, because a bare token can't tell "target X's
-	// stable id" from "target Y's current path". For a fingerprint-bearing round the gate below still
-	// sorts it out (only two targets sharing a fingerprint AND this exact path/id overlap is
-	// unresolvable — and then the measurements are identical anyway). For a fingerprint-LESS round
-	// (a pre-fingerprint agent, which reports by path) the token is unattributable, so it is dropped
-	// rather than misattributed to the id owner (CODE_REVIEW M9(B) follow-up).
+	// birth-path id that another target has since been created/moved onto). Such a token has two
+	// candidate owners — the id owner (in `allowed`) and the current-path owner (recorded in
+	// ambiguousOwner and kept OUT of byCurrentName so it is never a blind id-miss fallback). A bare
+	// token can't tell "target X's stable id" from "target Y's current path", so the ingest loop
+	// below resolves it by fingerprint (CODE_REVIEW M9):
+	//   - a fingerprint-bearing round is attributed to whichever candidate its fingerprint UNIQUELY
+	//     matches; if it matches both (identical host/probe/params) or neither, it stays unresolved;
+	//   - a fingerprint-LESS round (a pre-fingerprint agent, which reports by path) is unattributable
+	//     and is dropped rather than misattributed to the id owner.
 	byCurrentName := make(map[string]model.Monitor, len(monitors))
 	ambiguousName := map[string]bool{}
+	ambiguousOwner := make(map[string]model.Monitor)
 	for _, m := range monitors {
 		if m.Name == m.ID {
 			continue // id-keyed entry already covers this target
 		}
 		if _, isID := allowed[m.Name]; isID {
 			ambiguousName[m.Name] = true // this display path is also another target's stable id
+			ambiguousOwner[m.Name] = m   // the current-path owner (the id owner is allowed[name])
 			continue
 		}
 		byCurrentName[m.Name] = m
@@ -204,12 +208,26 @@ func (srv *Server) agentResults(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	for _, rd := range req.Results {
 		m, ok := allowed[rd.Target]
-		if ok && rd.Fingerprint == "" && ambiguousName[rd.Target] {
-			// The token is both this target's stable id and a different target's current path, and a
-			// fingerprint-less round carries nothing to disambiguate the two, so it can't be safely
-			// attributed to the id owner — drop it (it also isn't in byCurrentName). A fingerprint-
-			// bearing round keeps the id-owner match and is checked by the gate below (M9(B) follow-up).
-			ok = false
+		if ok && ambiguousName[rd.Target] {
+			// The token is both this target's stable id (X = m) and a different target's current
+			// display path (Y = ambiguousOwner[token]). Resolve by fingerprint (CODE_REVIEW M9).
+			y := ambiguousOwner[rd.Target]
+			switch {
+			case rd.Fingerprint == "":
+				// Nothing to disambiguate the two candidates — can't be safely attributed to either,
+				// so drop it (it also isn't in byCurrentName).
+				ok = false
+			case rd.Fingerprint == wantFP[m.ID] && rd.Fingerprint == wantFP[y.ID]:
+				// Both candidates measure identically (same host/probe/params). Equivalent numbers
+				// still belong to different graphs and the token can't say which, so drop rather than
+				// guess — nothing on the wire proves which identity the agent meant.
+				ok = false
+			case rd.Fingerprint == wantFP[y.ID]:
+				// The fingerprint uniquely identifies the current-path owner, not the id owner.
+				m = y
+				// default: the fingerprint matches the id owner alone, or neither. Keep m = X and let
+				// the normal fingerprint gate below accept it (id match) or drop+count it (no match).
+			}
 		}
 		if !ok {
 			// Old-agent fallback: the round may be keyed by the target's current display path
