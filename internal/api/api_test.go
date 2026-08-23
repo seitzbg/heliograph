@@ -517,6 +517,54 @@ func TestMetricsEndpoint(t *testing.T) {
 	}
 }
 
+// The Overview boards (/api/charts, /api/sla) must expose each target's stable id alongside its
+// display path, so a link built from Overview on a fresh page load points at the id and survives a
+// later move — not the mutable path (CODE_REVIEW L8).
+func TestChartsAndSLAExposeStableID(t *testing.T) {
+	st := store.NewMem(10)
+	// A moved target: stored under stable id "wid", now displayed at "grp2/leaf". A recent round so
+	// it falls inside the SLA window.
+	st.Add([]scheduler.Outcome{
+		{Target: probe.Target{ID: "wid", Name: "grp2/leaf", Host: "h"}, ProbeName: "FPing",
+			Computed: sample.Compute(2, []float64{0.01, 0.02}), When: time.Now().Add(-time.Hour)},
+	})
+	srv := New(st, "")
+	srv.Active = func() map[string]bool { return map[string]bool{"wid": true} }
+	srv.Configured = func() []model.Monitor {
+		return []model.Monitor{{ID: "wid", Name: "grp2/leaf", ProbeKind: "FPing", Host: "h"}}
+	}
+
+	entry := func(path string) map[string]any {
+		rec := httptest.NewRecorder()
+		srv.Routes().ServeHTTP(rec, httptest.NewRequest("GET", path, nil))
+		if rec.Code != 200 {
+			t.Fatalf("%s: status %d", path, rec.Code)
+		}
+		var m map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &m); err != nil {
+			t.Fatalf("%s: %v", path, err)
+		}
+		arr, _ := m["charts"].([]any)
+		if arr == nil {
+			arr, _ = m["targets"].([]any)
+		}
+		if len(arr) != 1 {
+			t.Fatalf("%s: want 1 entry, got %d (%+v)", path, len(arr), m)
+		}
+		return arr[0].(map[string]any)
+	}
+
+	for _, path := range []string{"/api/charts?by=loss", "/api/sla?window=24h"} {
+		e := entry(path)
+		if e["id"] != "wid" {
+			t.Errorf("%s: id = %v, want the stable id \"wid\" (the durable deep-link key)", path, e["id"])
+		}
+		if e["name"] != "grp2/leaf" {
+			t.Errorf("%s: name = %v, want the current display path \"grp2/leaf\"", path, e["name"])
+		}
+	}
+}
+
 func TestChartsRanking(t *testing.T) {
 	st := store.NewMem(10)
 	st.Add([]scheduler.Outcome{

@@ -881,10 +881,10 @@
         if (worstBy === 'loss') { val = fmt(c.loss_pct, 1) + ' %'; cls = c.loss_pct > 2 ? 'bad' : c.loss_pct > 0.5 ? 'warn' : ''; }
         else if (worstBy === 'median') { val = fmt(c.median_ms, 1) + ' ms'; }
         else { val = '± ' + fmt(c.stddev_ms, 1) + ' ms'; }
-        // Route by the stable id when known (idByName is seeded by the grid/detail fetches), so a
-        // click deep-links durably; fall back to the display path, which the server still resolves
-        // in-session (CODE_REVIEW L8).
-        return '<li><span class="n">' + (i + 1) + '</span><span class="who" data-target="' + esc(idByName.get(c.name) || c.name) + '">' + esc(c.name) +
+        // Route by the stable id the charts DTO now carries, so a click deep-links durably even on a
+        // fresh page load before the target catalog is fetched; fall back to the seeded map or the
+        // display path (CODE_REVIEW L8).
+        return '<li><span class="n">' + (i + 1) + '</span><span class="who" data-target="' + esc(c.id || idByName.get(c.name) || c.name) + '">' + esc(c.name) +
           '<span class="pk">' + esc(c.probe) + '</span></span><span class="val ' + cls + '">' + val + '</span></li>';
       }).join('');
       return true;
@@ -912,7 +912,7 @@
               '<span class="track"><span class="fill" style="width:' + Math.min(100, cov) + '%"></span></span></span>';
           }
           return '<li><span class="n">' + (i + 1) + '</span>' +
-            '<span class="who" data-target="' + esc(idByName.get(s.name) || s.name) + '">' + esc(s.name) + '<span class="pk">' + esc(s.probe) + '</span>' + (thin ? '<span class="chip">thin data</span>' : '') + '</span>' +
+            '<span class="who" data-target="' + esc(s.id || idByName.get(s.name) || s.name) + '">' + esc(s.name) + '<span class="pk">' + esc(s.probe) + '</span>' + (thin ? '<span class="chip">thin data</span>' : '') + '</span>' +
             '<span class="avail ' + acls + '"><span class="pct">' + fmt(s.availability, 2) + ' %</span><span class="frac">' + s.up_rounds + ' / ' + s.measured + ' up</span></span>' +
             covCell + '</li>';
         }).join('');
@@ -1014,6 +1014,21 @@
       ipByName.set(k, t.ip); ipByName.set(nm, t.ip);
       setNtp(t);
     }
+    // canonicalizeTargetHash rewrites a #target=<display-path> route to the target's stable id once
+    // the catalog is loaded (idByName seeded), so a pre-move bookmark/tab — or an Overview link that
+    // predates the id-bearing DTOs — becomes a durable id link without adding a history entry or a
+    // reload (CODE_REVIEW L8). No-op when the token is already an id, unknown, or its own id.
+    function canonicalizeTargetHash() {
+      const h = location.hash.replace(/^#/, '');
+      if (!h.startsWith('target=')) return;
+      const p = new URLSearchParams(h);
+      const tok = p.get('target') || '';
+      const id = idByName.get(tok);
+      if (!id || id === tok) return; // not a known display path, or already the stable id
+      const range = p.get('range');
+      const canon = 'target=' + enc(id) + (range && RANGES[range] ? '&range=' + enc(range) : '');
+      if (canon !== h) history.replaceState(null, '', '#' + canon);
+    }
     // ensureVantageStats fetches /api/targets?vantage=<v> for each REMOTE vantage in the set and fills
     // ntpByVantage, so a detail view can show that vantage's NTP offset/stratum. Best-effort: a failed
     // fetch just leaves no stat. The local vantage's reading already arrives via the main /api/targets
@@ -1049,6 +1064,7 @@
       try {
         const targets = (await fetchJSON('/api/targets')).targets || [];
         for (const t of targets) indexTarget(t);
+        canonicalizeTargetHash(); // a deep-linked #target=<path> becomes its stable id (L8)
       } catch (e) { /* transient: vantagesFor falls back to ['local'] */ }
     }
     function ensurePanel(t) {
@@ -1105,6 +1121,7 @@
         // Dual-key every per-target map by stable token AND display path (indexTarget), plus status
         // (set here, from this authoritative full-list scan) under both keys (CODE_REVIEW L8).
         for (const t of targets) { indexTarget(t); const st = targetStatus(t); statusByTarget.set(tkey(t), st); statusByTarget.set(t.name, st); }
+        canonicalizeTargetHash(); // an open #target=<path> view becomes its stable id (L8)
         treeNames = targets.map((t) => t.name);
         const gridTargets = targets.filter((t) => !t.no_data);
         // Reconcile ONLY against an authoritative target list (the fetch above succeeded):

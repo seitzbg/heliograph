@@ -588,6 +588,10 @@ func (srv *Server) targets(w http.ResponseWriter, r *http.Request) {
 }
 
 type chartEntry struct {
+	// ID is the target's stable storage key — the deep-link key that survives a move. Name is the
+	// current display path (for the label). The Overview links by ID so a link built from this board
+	// keeps working after the target is moved/renamed (CODE_REVIEW L8).
+	ID       string   `json:"id"`
 	Name     string   `json:"name"`
 	Probe    string   `json:"probe"`
 	MedianMs *float64 `json:"median_ms"`
@@ -652,6 +656,7 @@ func (srv *Server) charts(w http.ResponseWriter, r *http.Request) {
 	var rows []scored
 	for _, o := range latest {
 		e := chartEntry{
+			ID:      o.Target.Key(),
 			Name:    displayName(paths, o.Target.Key()),
 			Probe:   o.ProbeName,
 			LossPct: o.Computed.LossFraction() * 100,
@@ -705,6 +710,8 @@ func (srv *Server) charts(w http.ResponseWriter, r *http.Request) {
 }
 
 type slaEntry struct {
+	// ID is the stable deep-link key; Name is the current display path (see chartEntry, L8).
+	ID           string   `json:"id"`
 	Name         string   `json:"name"`
 	Probe        string   `json:"probe"`
 	Measured     int      `json:"measured"`     // rounds actually measured within the window
@@ -836,6 +843,7 @@ func (srv *Server) sla(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		e := slaEntry{
+			ID:           id,
 			Name:         displayName(paths, id),
 			Probe:        o.ProbeName,
 			Measured:     measured,
