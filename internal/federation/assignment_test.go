@@ -87,6 +87,24 @@ func TestConfigVersionStableAndSensitive(t *testing.T) {
 	}
 }
 
+// A change to a target's stable id must bump the assignment version. The agent acts on
+// AssignmentTarget.ID — it echoes it back as each round's storage key — so an id-only change
+// that left the version unchanged would be answered 304 Not Modified and the agent would keep
+// the stale id, misattributing every round (CODE_REVIEW M9(A)).
+func TestConfigVersionSensitiveToID(t *testing.T) {
+	base := monP("a", "h", map[string]string{"port": "80"}, "local")
+	withID := base
+	withID.ID = "uuid-1234"
+	if ConfigVersion([]model.Monitor{base}, nil) == ConfigVersion([]model.Monitor{withID}, nil) {
+		t.Error("stable id change (empty -> uuid) not reflected in ConfigVersion")
+	}
+	other := base
+	other.ID = "uuid-5678"
+	if ConfigVersion([]model.Monitor{withID}, nil) == ConfigVersion([]model.Monitor{other}, nil) {
+		t.Error("two different stable ids must produce different ConfigVersions")
+	}
+}
+
 // A change to the effective probe-level config for a kind an assignment uses must
 // bump that assignment's version (so agents re-fetch instead of getting a 304 with
 // stale probe behavior), while a change to an unused kind's config must not

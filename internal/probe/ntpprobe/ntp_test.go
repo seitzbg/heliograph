@@ -78,7 +78,7 @@ func TestNTPMeasuresRTTAndOffset(t *testing.T) {
 		}
 	}
 
-	offSec, stratum, _, ok := LatestFor("ntp-sync")
+	offSec, stratum, _, ok := LatestFor("ntp-sync", "127.0.0.1")
 	if !ok {
 		t.Fatal("no offset recorded for a synchronized (stratum 2) server")
 	}
@@ -112,7 +112,7 @@ func TestNTPOffsetModeGraphsOffset(t *testing.T) {
 			t.Errorf("offset-mode sample = %v, want ~%v (the clock offset, not RTT)", d, skew)
 		}
 	}
-	if _, _, measure, ok := LatestFor("ntp-offmode"); !ok || measure != "offset" {
+	if _, _, measure, ok := LatestFor("ntp-offmode", "127.0.0.1"); !ok || measure != "offset" {
 		t.Errorf("registry measure = %q (ok=%v), want \"offset\"", measure, ok)
 	}
 }
@@ -131,8 +131,27 @@ func TestNTPUnsyncedServerRecordsNoOffset(t *testing.T) {
 	if len(res.Samples) != 2 {
 		t.Fatalf("stratum-16 server is reachable; want 2 RTT samples, got %d", len(res.Samples))
 	}
-	if _, _, _, ok := LatestFor("ntp-unsynced"); ok {
+	if _, _, _, ok := LatestFor("ntp-unsynced", "127.0.0.1"); ok {
 		t.Error("stratum-16 (unsynchronized) reply must not record an offset")
+	}
+}
+
+// A recorded clock stat belongs to the host it was measured against. LatestFor refuses it once the
+// caller asks with a different host, so after a target keeps its stable id but is repointed at
+// another NTP server (a config change, or a slow in-flight probe of the old server completing after
+// the swap), the old server's offset/stratum is never attributed to the new one (CODE_REVIEW M3).
+func TestLatestForBindsStatToHost(t *testing.T) {
+	port := ntpServer(t, 2, 3*time.Second)
+	p, _ := probe.New("NTP", nil)
+	target := probe.Target{Name: "hostbind", Host: "127.0.0.1", Params: map[string]string{"port": strconv.Itoa(port)}}
+	if _, err := p.Measure(context.Background(), target, 2); err != nil {
+		t.Fatalf("Measure: %v", err)
+	}
+	if _, _, _, ok := LatestFor("hostbind", "127.0.0.1"); !ok {
+		t.Fatal("the reading must be returned for the host it was measured against")
+	}
+	if _, _, _, ok := LatestFor("hostbind", "192.0.2.9"); ok {
+		t.Fatal("a reading measured against 127.0.0.1 must not be returned for a different current host")
 	}
 }
 

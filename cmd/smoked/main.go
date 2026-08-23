@@ -588,6 +588,11 @@ func main() {
 					if add == 0 {
 						return 0, unch, ver, nil // nothing to apply
 					}
+					// Mint UUIDs for the imported (id-less) host nodes before persisting, the same as
+					// an ordinary PUT does — otherwise they'd store under their display path and the
+					// next PUT would re-key them to a fresh UUID, orphaning the history collected in
+					// between (CODE_REVIEW M8).
+					merged, _ = configstore.MintNewIDs(merged)
 					build := func(getter func() ([]byte, error)) (*runtime, error) {
 						return buildRuntime(*configPath, *pings, *step, *timeout, *resolveIPs, notifiers, getter)
 					}
@@ -817,6 +822,10 @@ func configCmd(args []string) int {
 		fmt.Printf("nothing to import (%d unchanged)\n", unchanged)
 		return 0
 	}
+	// Mint UUIDs for the imported (id-less) host nodes before persisting, the same as an ordinary
+	// admin apply — otherwise they'd store under their display path and the next apply would re-key
+	// them to a fresh UUID, orphaning the history collected in between (CODE_REVIEW M8).
+	merged, _ = configstore.MintNewIDs(merged)
 	if *configDir != "" {
 		if err := effectiveValidate(*configDir, merged); err != nil {
 			fmt.Fprintf(os.Stderr, "config import: effective validation against %s failed: %v\n", *configDir, err)

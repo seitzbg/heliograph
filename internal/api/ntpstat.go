@@ -22,16 +22,19 @@ type remoteNTPVal struct {
 	offsetSec float64
 	stratum   uint8
 	measure   string
+	host      string // the server this reading came from; the reader supplies the target's current
+	// host and a stale reading whose host no longer matches is refused (M3).
 }
 
-// set records (or overwrites) a vantage's latest clock stat for a target.
-func (r *remoteNTPStats) set(vantage, target string, offsetSec float64, stratum uint8, measure string) {
+// set records (or overwrites) a vantage's latest clock stat for a target, tagged with the host it
+// was measured against so a later read can reject it once the target is repointed elsewhere.
+func (r *remoteNTPStats) set(vantage, target string, offsetSec float64, stratum uint8, measure, host string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.m == nil {
 		r.m = make(map[remoteNTPKey]remoteNTPVal)
 	}
-	r.m[remoteNTPKey{vantage, target}] = remoteNTPVal{offsetSec, stratum, measure}
+	r.m[remoteNTPKey{vantage, target}] = remoteNTPVal{offsetSec, stratum, measure, host}
 }
 
 // clear drops a vantage's clock stat for a target — used when a round no longer carries one
@@ -44,13 +47,15 @@ func (r *remoteNTPStats) clear(vantage, target string) {
 }
 
 // lookupFor returns a per-target accessor bound to one vantage, matching Server.NTPStat's shape so
-// latestDTO consumes either the hub's local registry or a remote vantage's store uniformly.
-func (r *remoteNTPStats) lookupFor(vantage string) func(target string) (float64, uint8, string, bool) {
-	return func(target string) (float64, uint8, string, bool) {
+// latestDTO consumes either the hub's local registry or a remote vantage's store uniformly. It
+// refuses a reading whose stored host differs from wantHost (the target's current host), so a
+// remote panel never shows a stale server's offset after the target is repointed (M3).
+func (r *remoteNTPStats) lookupFor(vantage string) func(target, wantHost string) (float64, uint8, string, bool) {
+	return func(target, wantHost string) (float64, uint8, string, bool) {
 		r.mu.RLock()
 		defer r.mu.RUnlock()
 		v, ok := r.m[remoteNTPKey{vantage, target}]
-		if !ok {
+		if !ok || v.host != wantHost {
 			return 0, 0, "", false
 		}
 		return v.offsetSec, v.stratum, v.measure, true

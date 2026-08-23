@@ -28,7 +28,9 @@ func AssignmentFor(monitors []model.Monitor, v string) []model.Monitor {
 }
 
 // ConfigVersion is a stable content hash of an assignment — the fields an agent acts on
-// (name, probe, host, params, effective probe-level config, step, pings). It encodes them
+// (stable id, name, probe, host, params, effective probe-level config, step, pings). The id is
+// included because the agent echoes it back as each round's storage key, so an id-only change
+// must invalidate the cached assignment rather than 304 (CODE_REVIEW M9). It encodes them
 // as canonical JSON (monitors sorted by name; Params and each kind's ProbeConfig flattened
 // to a name-sorted [k,v] list) and hashes that. JSON string-escaping makes the encoding
 // unambiguous, so two distinct configs can never collide the way a bare-delimiter join
@@ -41,16 +43,16 @@ func AssignmentFor(monitors []model.Monitor, v string) []model.Monitor {
 // Format: "sha256:<hex>".
 func ConfigVersion(assignment []model.Monitor, probeCfgs map[string]map[string]string) string {
 	type entry struct {
-		Name, Probe, Host string
-		Pings             int
-		StepNs            int64
-		Params            []kvPair
-		ProbeConfig       []kvPair
+		ID, Name, Probe, Host string
+		Pings                 int
+		StepNs                int64
+		Params                []kvPair
+		ProbeConfig           []kvPair
 	}
 	entries := make([]entry, 0, len(assignment))
 	for _, m := range assignment {
 		entries = append(entries, entry{
-			Name: m.Name, Probe: m.ProbeKind, Host: m.Host,
+			ID: m.ID, Name: m.Name, Probe: m.ProbeKind, Host: m.Host,
 			Pings: m.Pings, StepNs: int64(m.Step),
 			Params:      sortedKV(m.Params),
 			ProbeConfig: sortedKV(probeCfgs[m.ProbeKind]),

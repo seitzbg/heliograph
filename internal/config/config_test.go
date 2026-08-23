@@ -754,6 +754,24 @@ func TestAppendImportConflictWritesNothing(t *testing.T) {
 	}
 }
 
+// A stored target carries a server-minted stable id, but the re-imported file omits it (id is
+// server-owned, never present in the user's import). AppendImport must treat the re-import as
+// unchanged, not a conflict on the id difference — otherwise minting an id, which every persist
+// path now does, would break import idempotency (CODE_REVIEW M8).
+func TestAppendImportIdempotentAcrossMintedID(t *testing.T) {
+	// The DB already holds "a" with a minted UUID id, as it would after any persist.
+	db := []byte(`{"targets":{"children":{"a":{"probe":"HTTP","host":"a.example","id":"11111111-2222-3333-4444-555555555555"}}}}`)
+	imp := []byte("targets:\n  children:\n    a: {probe: HTTP, host: a.example}\n")
+	if _, added, unchanged, err := AppendImport(db, imp); err != nil || added != 0 || unchanged != 1 {
+		t.Fatalf("re-import of an id-less file against a minted-id store must be idempotent: added=%d unchanged=%d err=%v", added, unchanged, err)
+	}
+	// Clearing id for the comparison must not mask a real settings change: a differing host still conflicts.
+	impDiff := []byte("targets:\n  children:\n    a: {probe: HTTP, host: DIFFERENT.example}\n")
+	if _, _, _, err := AppendImport(db, impDiff); err == nil {
+		t.Fatal("a genuine settings change must still conflict even when the ids differ")
+	}
+}
+
 func TestAppendImportRejectsGlobals(t *testing.T) {
 	_, _, _, err := AppendImport(nil, []byte("alerts:\n  x: {type: loss, pattern: \">50%\"}\ntargets:\n  children:\n    a: {probe: HTTP, host: a}\n"))
 	if err == nil || !strings.Contains(err.Error(), "alerts") {

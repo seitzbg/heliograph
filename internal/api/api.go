@@ -92,11 +92,14 @@ type Server struct {
 	TargetMeta func() map[string]TargetMeta
 	// NTPStat, if set, returns the most recent clock offset (seconds), stratum, and graphed metric
 	// ("rtt"/"offset") measured for an NTP target (ok=false for non-NTP targets or before the first
-	// measurement). /api/targets surfaces it so the dashboard shows offset + stratum as stats (and,
-	// on an offset-graphing panel, hides the now-redundant offset stat). nil = the fields are omitted
-	// (no NTP probe registered / pure API tests). Wired to ntpprobe.LatestFor in main. NTPStat is the
+	// measurement). The caller passes the target's CURRENT host as wantHost; a stored reading whose
+	// host no longer matches is refused (ok=false), so after a target is repointed at a different NTP
+	// server the old server's offset/stratum is never shown for the new one (CODE_REVIEW M3).
+	// /api/targets surfaces it so the dashboard shows offset + stratum as stats (and, on an
+	// offset-graphing panel, hides the now-redundant offset stat). nil = the fields are omitted (no
+	// NTP probe registered / pure API tests). Wired to ntpprobe.LatestFor in main. NTPStat is the
 	// HUB's own (local-vantage) reading; a remote vantage's reading comes from remoteNTP instead.
-	NTPStat func(target string) (offsetSec float64, stratum uint8, measure string, ok bool)
+	NTPStat func(target, wantHost string) (offsetSec float64, stratum uint8, measure string, ok bool)
 	// remoteNTP holds each remote vantage's latest NTP clock stat, fed by agent RoundReports on
 	// ingest and read by /api/targets for a non-local vantage. Keyed by (vantage, target) so a
 	// remote reading is never attributed to the hub or another vantage (CODE_REVIEW M2/M3).
@@ -417,7 +420,7 @@ func displayName(paths map[string]string, identity string) string {
 // catalog), and probeKind is the authoritative probe identity for the panel — the catalog's
 // current kind where known, so a stored round left behind under a reused id never mislabels the
 // panel (M3); callers without a catalog pass the id as the display name and the stored round's kind.
-func latestDTO(o scheduler.Outcome, identity, displayName, probeKind string, tv map[string][]string, meta map[string]TargetMeta, recent map[string]float64, ntp func(string) (float64, uint8, string, bool)) targetDTO {
+func latestDTO(o scheduler.Outcome, identity, displayName, probeKind, curHost string, tv map[string][]string, meta map[string]TargetMeta, recent map[string]float64, ntp func(target, wantHost string) (float64, uint8, string, bool)) targetDTO {
 	dto := targetDTO{
 		ID:      identity,
 		Name:    displayName,
@@ -444,13 +447,14 @@ func latestDTO(o scheduler.Outcome, identity, displayName, probeKind string, tv 
 	if rl, ok := recent[identity]; ok {
 		dto.RecentLossPct = &rl
 	}
-	// Only an NTP panel carries offset/stratum. The registry is keyed by target id only, with no
-	// config fingerprint or vantage, so gate on the CURRENT probe identity (not the stored round's)
-	// — an id reused for a different probe must not show the old NTP stat. The caller also passes a
-	// nil registry for a remote vantage, since srv.NTPStat is the hub's LOCAL reading and must never
-	// be attributed to a remote outcome (M3).
+	// Only an NTP panel carries offset/stratum. Gate on the CURRENT probe identity (not the stored
+	// round's) — an id reused for a different probe must not show the old NTP stat — and on the
+	// target's current host: the accessor refuses a reading whose host no longer matches curHost, so
+	// an id repointed at a different NTP server (or a slow in-flight probe of the old server) can't
+	// mislabel the new server with the old one's offset/stratum (M3). The caller passes a per-vantage
+	// registry, since srv.NTPStat is the hub's LOCAL reading and must never decorate a remote outcome.
 	if ntp != nil && probeKind == "NTP" {
-		if offSec, stratum, measure, ok := ntp(identity); ok {
+		if offSec, stratum, measure, ok := ntp(identity, curHost); ok {
 			offMs := offSec * 1000
 			st := int(stratum)
 			dto.NTPOffsetMs, dto.Stratum, dto.NTPMeasure = &offMs, &st, measure
@@ -517,7 +521,7 @@ func (srv *Server) targets(w http.ResponseWriter, r *http.Request) {
 		for _, m := range srv.Configured() {
 			id := monitorKey(m)
 			if o, ok := byID[id]; ok {
-				dto := latestDTO(o, id, m.Name, m.ProbeKind, tv, meta, recent, ntpStat)
+				dto := latestDTO(o, id, m.Name, m.ProbeKind, m.Host, tv, meta, recent, ntpStat)
 				// The effective config metric (probe-level default + per-target override) is
 				// authoritative: it wins over the stored round's kind right after a config change and
 				// honors a probe-level default. Falls back to the per-target param when no resolver
@@ -554,7 +558,9 @@ func (srv *Server) targets(w http.ResponseWriter, r *http.Request) {
 		// node id is set — so pass the stored round's identity as both.
 		for _, o := range latest {
 			key := o.Target.Key()
-			out = append(out, latestDTO(o, key, key, o.ProbeName, tv, meta, recent, ntpStat))
+			// No catalog to change the target's host, so the stored round's host is the current
+			// one — the host gate always matches here.
+			out = append(out, latestDTO(o, key, key, o.ProbeName, o.Target.Host, tv, meta, recent, ntpStat))
 		}
 		sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	}

@@ -122,7 +122,7 @@ func (p *ntpProbe) Measure(ctx context.Context, t probe.Target, pings int) (prob
 				samples = append(samples, rtt.Seconds())
 			}
 			if synced {
-				latestReg.set(t.Key(), offset.Seconds(), stratum, measure)
+				latestReg.set(t.Key(), offset.Seconds(), stratum, measure, t.Host)
 				syncedThisRound = true
 			}
 		}
@@ -246,6 +246,8 @@ type ntpLatest struct {
 	stratum   uint8
 	measure   string // the target's graphed metric ("rtt" or "offset"); lets the UI hide the
 	// redundant offset stat on a panel that already graphs offset.
+	host string // the server this reading came from; a reader supplies the target's CURRENT host and
+	// the accessor refuses a stale reading whose host no longer matches (see LatestFor / M3).
 }
 
 var latestReg = &registry{m: map[string]ntpLatest{}}
@@ -255,9 +257,9 @@ type registry struct {
 	m  map[string]ntpLatest
 }
 
-func (r *registry) set(target string, offsetSec float64, stratum uint8, measure string) {
+func (r *registry) set(target string, offsetSec float64, stratum uint8, measure, host string) {
 	r.mu.Lock()
-	r.m[target] = ntpLatest{offsetSec: offsetSec, stratum: stratum, measure: measure}
+	r.m[target] = ntpLatest{offsetSec: offsetSec, stratum: stratum, measure: measure, host: host}
 	r.mu.Unlock()
 }
 
@@ -270,10 +272,18 @@ func (r *registry) clear(target string) {
 }
 
 // LatestFor returns the most recent clock offset (seconds), stratum, and graphed metric recorded for
-// an NTP target, or ok=false if none has been measured yet. Wired into the API as Server.NTPStat.
-func LatestFor(target string) (offsetSec float64, stratum uint8, measure string, ok bool) {
+// an NTP target, or ok=false if none has been measured yet OR the stored reading came from a
+// different host than wantHost. Binding the stat to the host closes M3: after a target keeps its
+// stable id but is repointed at a different NTP server (a config change, or a slow in-flight probe
+// of the old server completing after the swap), the old server's offset/stratum is not attributed to
+// the new one — the reader passes the target's current host, so a host mismatch reads as "no stat"
+// until a fresh round for the current host lands. Wired into the API as Server.NTPStat.
+func LatestFor(target, wantHost string) (offsetSec float64, stratum uint8, measure string, ok bool) {
 	latestReg.mu.RLock()
 	v, ok := latestReg.m[target]
 	latestReg.mu.RUnlock()
-	return v.offsetSec, v.stratum, v.measure, ok
+	if !ok || v.host != wantHost {
+		return 0, 0, "", false
+	}
+	return v.offsetSec, v.stratum, v.measure, true
 }

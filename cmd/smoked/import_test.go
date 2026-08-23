@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -19,6 +20,45 @@ import (
 	"github.com/seitzbg/heliograph/internal/importer/smokeping"
 	"github.com/seitzbg/heliograph/internal/store/pgstore"
 )
+
+// Every import path (the admin API's ConfigImport, `smoked config import`, and `smoked import
+// smokeping --apply`) now mints stable ids onto the merged doc before persisting (CODE_REVIEW M8):
+// otherwise an imported host node would store under its display path and the next ordinary apply
+// would re-key it to a fresh UUID, orphaning the history collected in between. This guards the exact
+// composition those sites perform — config.AppendImport's targets-only output fed through
+// configstore.MintNewIDs — so an imported host leaf gets a UUID while a pure grouping node does not.
+func TestImportMergedDocGetsMintedIDs(t *testing.T) {
+	imp := []byte("targets:\n  children:\n    grp:\n      children:\n        a: {probe: HTTP, host: a.example}\n")
+	merged, added, _, err := config.AppendImport(nil, imp)
+	if err != nil || added != 1 {
+		t.Fatalf("AppendImport: added=%d err=%v", added, err)
+	}
+	minted, changed := configstore.MintNewIDs(merged)
+	if !changed {
+		t.Fatal("MintNewIDs must stamp an id onto the imported host node")
+	}
+	var doc struct {
+		Targets struct {
+			Children map[string]struct {
+				ID       string `json:"id"`
+				Children map[string]struct {
+					ID   string `json:"id"`
+					Host string `json:"host"`
+				} `json:"children"`
+			} `json:"children"`
+		} `json:"targets"`
+	}
+	if err := json.Unmarshal(minted, &doc); err != nil {
+		t.Fatalf("unmarshal minted doc: %v", err)
+	}
+	grp := doc.Targets.Children["grp"]
+	if grp.ID != "" {
+		t.Errorf("a pure grouping node must stay id-less, got id=%q", grp.ID)
+	}
+	if a := grp.Children["a"]; a.ID == "" {
+		t.Error("an imported host node must receive a minted id before persistence")
+	}
+}
 
 // renderFragmentYAML must marshal a tidy YAML fragment: target fields present,
 // but none of the null-emitting Node fields (alerts/alertee/vantages) or a

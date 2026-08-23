@@ -192,6 +192,10 @@ func applyFragment(dsn string, root *config.Node, configDir string) int {
 		fmt.Printf("nothing new to merge (%d top-level branch(es) unchanged)\n", unchanged)
 		return 0
 	}
+	// Mint UUIDs for the imported (id-less) host nodes before persisting, the same as an ordinary
+	// admin apply — otherwise they'd store under their display path and the next apply would re-key
+	// them to a fresh UUID, orphaning the history collected in between (CODE_REVIEW M8).
+	merged, _ = configstore.MintNewIDs(merged)
 	if configDir != "" {
 		if err := effectiveValidate(configDir, merged); err != nil {
 			fmt.Fprintf(os.Stderr, "import: effective validation against %s failed: %v\n", configDir, err)

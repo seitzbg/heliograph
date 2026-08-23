@@ -1235,8 +1235,8 @@ func TestTargetsSurfacesNTPOffsetAndStratum(t *testing.T) {
 	})
 	srv := New(st, "")
 	srv.Active = func() map[string]bool { return map[string]bool{"ntp1": true, "web1": true} }
-	srv.NTPStat = func(target string) (float64, uint8, string, bool) {
-		if target == "ntp1" {
+	srv.NTPStat = func(target, wantHost string) (float64, uint8, string, bool) {
+		if target == "ntp1" && wantHost == "h" {
 			return -0.0009, 2, "rtt", true // -0.9 ms, stratum 2, graphing rtt
 		}
 		return 0, 0, "", false // web1 (and anything else) has no NTP reading
@@ -1280,6 +1280,60 @@ func TestTargetsSurfacesNTPOffsetAndStratum(t *testing.T) {
 	}
 }
 
+// M3: the NTP clock stat is bound to the host it was measured against. /api/targets asks the
+// registry with the target's CURRENT catalog host, so a target still pointed at the same server
+// shows its stat, while one repointed at a different NTP server (same id, new host) withholds the
+// old server's offset/stratum until a fresh round for the new host lands.
+func TestTargetsGatesNTPStatOnCurrentHost(t *testing.T) {
+	st := store.NewMem(10)
+	st.Add([]scheduler.Outcome{
+		{Target: probe.Target{ID: "keep", Name: "keep", Host: "h"}, ProbeName: "NTP",
+			Computed: sample.Compute(2, []float64{0.001, 0.002}), When: time.Unix(1_700_000_000, 0)},
+		{Target: probe.Target{ID: "moved", Name: "moved", Host: "new"}, ProbeName: "NTP",
+			Computed: sample.Compute(2, []float64{0.001, 0.002}), When: time.Unix(1_700_000_000, 0)},
+	})
+	srv := New(st, "")
+	srv.Active = func() map[string]bool { return map[string]bool{"keep": true, "moved": true} }
+	srv.Configured = func() []model.Monitor {
+		return []model.Monitor{
+			{Name: "keep", ID: "keep", ProbeKind: "NTP", Host: "h"},
+			{Name: "moved", ID: "moved", ProbeKind: "NTP", Host: "new"}, // repointed at a new server
+		}
+	}
+	// The registry holds a reading for "keep" measured at host "h", and for "moved" only a STALE
+	// reading measured at its OLD host "old" — never the current host "new".
+	srv.NTPStat = func(target, wantHost string) (float64, uint8, string, bool) {
+		if target == "keep" && wantHost == "h" {
+			return -0.0009, 2, "rtt", true
+		}
+		if target == "moved" && wantHost == "old" { // never satisfied: catalog host is "new"
+			return -0.0009, 2, "rtt", true
+		}
+		return 0, 0, "", false
+	}
+	rec := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(rec, httptest.NewRequest("GET", "/api/targets", nil))
+	var tj struct {
+		Targets []struct {
+			Name        string   `json:"name"`
+			NTPOffsetMs *float64 `json:"ntp_offset_ms"`
+		} `json:"targets"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &tj); err != nil {
+		t.Fatalf("targets json: %v", err)
+	}
+	off := map[string]*float64{}
+	for _, d := range tj.Targets {
+		off[d.Name] = d.NTPOffsetMs
+	}
+	if off["keep"] == nil || *off["keep"] != -0.9 {
+		t.Errorf("unchanged-host target must keep its clock stat, got %v", off["keep"])
+	}
+	if off["moved"] != nil {
+		t.Errorf("a target repointed at a new host must withhold the old server's stat, got %v", *off["moved"])
+	}
+}
+
 // M3: the catalog is authoritative for a target's probe identity. When a name is reused for a
 // different probe (or its kind is changed in place), a lingering NTP round stored under that name
 // must not surface as probe="NTP" nor drag the old clock offset/stratum onto the new panel — the
@@ -1297,7 +1351,7 @@ func TestTargetsProbeIdentityFollowsCurrentCatalog(t *testing.T) {
 		return []model.Monitor{{Name: "clock", ProbeKind: "HTTP"}}
 	}
 	// The stale NTP registry still returns a reading for the name.
-	srv.NTPStat = func(target string) (float64, uint8, string, bool) {
+	srv.NTPStat = func(target, wantHost string) (float64, uint8, string, bool) {
 		return -0.0009, 2, "rtt", true
 	}
 
@@ -1345,7 +1399,7 @@ func TestTargetsNTPStatOnlyDecoratesLocalVantage(t *testing.T) {
 	}
 	srv.TargetVantages = func() map[string][]string { return map[string][]string{"clock": {"local", "nyc"}} }
 	// The registry is the HUB's local reading — valid only for the local vantage.
-	srv.NTPStat = func(target string) (float64, uint8, string, bool) {
+	srv.NTPStat = func(target, wantHost string) (float64, uint8, string, bool) {
 		return -0.0009, 2, "rtt", true
 	}
 

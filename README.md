@@ -35,7 +35,9 @@ click a graph to zoom):
 ![Heliograph per-target graph grid](docs/img/dashboard-graphs-dark.png)
 
 The **Config** tab edits DB-backed targets as a drag-to-reorder tree (merged live with the YAML
-config), and the **Vantages** panel manages federation agent keys — both behind the admin password:
+config); each target keeps a stable, server-managed identity, so moving or renaming it in the tree
+preserves its existing graph rather than starting a new one. The **Vantages** panel manages
+federation agent keys — both behind the admin password:
 
 ![Heliograph Config tab — DB-backed target tree with drag-to-reorder](docs/img/config-tree-dark.png)
 

@@ -64,8 +64,8 @@ func TestReportFromOutcomeCarriesNTPStat(t *testing.T) {
 		Computed: sample.Compute(2, []float64{0.001, 0.002}),
 		When:     when,
 	}
-	stat := func(target string) (float64, uint8, string, bool) {
-		if target == "clock" {
+	stat := func(target, wantHost string) (float64, uint8, string, bool) {
+		if target == "clock" && wantHost == "h" {
 			return -0.0009, 2, "rtt", true // -0.9 ms, stratum 2
 		}
 		return 0, 0, "", false
@@ -91,5 +91,30 @@ func TestReportFromOutcomeCarriesNTPStat(t *testing.T) {
 	unknown.Target.Name = "silent"
 	if got := reportFromOutcome(unknown, stat); got.NTPOffsetMs != nil || got.Stratum != nil {
 		t.Fatalf("no-stat NTP round must omit offset/stratum, got off=%v st=%v", got.NTPOffsetMs, got.Stratum)
+	}
+}
+
+// The NTP stat lookup must be keyed by the target's stable id (Target.Key()), the same key the
+// probe's latest-value registry writes under, not the display Name. A moved target — or any target
+// the hub minted with an id different from its path — otherwise loses its measured clock stat on
+// the wire even though the round produced one (CODE_REVIEW M2(A)).
+func TestReportFromOutcomeNTPStatKeyedByID(t *testing.T) {
+	when := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
+	o := scheduler.Outcome{
+		Target:    probe.Target{ID: "wid", Name: "grp/leaf", Host: "h"},
+		ProbeName: "NTP",
+		Computed:  sample.Compute(1, []float64{0.001}),
+		When:      when,
+	}
+	// The registry keys by Key() == ID ("wid"); a lookup by Name ("grp/leaf") would miss.
+	stat := func(key, wantHost string) (float64, uint8, string, bool) {
+		if key == "wid" && wantHost == "h" {
+			return -0.0009, 2, "offset", true
+		}
+		return 0, 0, "", false
+	}
+	got := reportFromOutcome(o, stat)
+	if got.NTPOffsetMs == nil || *got.NTPOffsetMs != -0.9 || got.Stratum == nil || *got.Stratum != 2 {
+		t.Fatalf("NTP stat must be looked up by Target.Key()=%q, got off=%v st=%v", o.Target.Key(), got.NTPOffsetMs, got.Stratum)
 	}
 }
