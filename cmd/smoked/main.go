@@ -558,6 +558,12 @@ func main() {
 				srv.ConfigApply = func(doc json.RawMessage, expectedVersion int) error {
 					applyMu.Lock()
 					defer applyMu.Unlock()
+					// Mint UUIDs for any id-less host node BEFORE validating/persisting: never
+					// trust the client (the UI) to mint the id itself. The minted doc is what
+					// gets validated and persisted, so the UI's next GET sees the new ids.
+					// expectedVersion is untouched — it still refers to the version the client
+					// read, which minting doesn't change.
+					doc, _ = configstore.MintNewIDs(doc)
 					build := func(getter func() ([]byte, error)) (*runtime, error) {
 						return buildRuntime(*configPath, *pings, *step, *timeout, *resolveIPs, notifiers, getter)
 					}

@@ -855,6 +855,32 @@ func TestAppendImportIdempotentWithEmptyMaps(t *testing.T) {
 	}
 }
 
+// A node's `id` (its stable storage identity, decoupled from tree position) must survive
+// AppendImport unchanged: it's a plain Node field with a json/yaml tag, merged wholesale
+// (base.Targets.Children[k] = imp.Targets.Children[k]), not reconstructed field-by-field.
+// Re-importing the same fragment (id included) must be a no-op — the id participates in
+// nodesEqual's canonical-JSON comparison the same as every other field, so a differing id
+// on an otherwise-identical node would (correctly) be treated as a conflict, and an
+// identical id keeps the re-import idempotent (unchanged count, not added).
+func TestImportPreservesID(t *testing.T) {
+	imp := []byte("targets:\n  children:\n    a: {probe: HTTP, host: a.example, id: existing-id-123}\n")
+	merged, added, unchanged, err := AppendImport(nil, imp)
+	if err != nil || added != 1 || unchanged != 0 {
+		t.Fatalf("first import: added=%d unchanged=%d err=%v", added, unchanged, err)
+	}
+	if !strings.Contains(string(merged), `"id":"existing-id-123"`) {
+		t.Fatalf("id not preserved in merged doc: %s", merged)
+	}
+	// Re-import the exact same fragment: unchanged, not added -> id round-trips stably.
+	merged2, added2, unchanged2, err2 := AppendImport(merged, imp)
+	if err2 != nil || added2 != 0 || unchanged2 != 1 {
+		t.Fatalf("re-import: added=%d unchanged=%d err=%v (want 0/1/nil)", added2, unchanged2, err2)
+	}
+	if !strings.Contains(string(merged2), `"id":"existing-id-123"`) {
+		t.Fatalf("id lost on re-import: %s", merged2)
+	}
+}
+
 // TestMonitorCarriesDisplayIPAndTitle: a leaf may carry a pinned display `ip` and a
 // `title` (display name); both flow into the Monitor as display-only fields, separate
 // from the probed `host`.
