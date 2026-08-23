@@ -27,24 +27,30 @@ dashboard, and remote vantages.
   import`, or `smoked import smokeping --apply` are now assigned a stable id at import time, so a
   later ordinary save no longer re-keys them and drops the history collected in between; re-running
   the same import stays an idempotent no-op even after an id has been minted.
-- **The NTP clock stat follows the current server.** The offset/stratum stat is bound to the host it
-  was measured against, so repointing a target at a different NTP server (or a slow in-flight probe
-  of the old server) no longer shows the old server's clock reading for the new one; a remote
-  vantage's stat is only published for rounds that were durably committed.
+- **The NTP clock stat follows the current server and never rolls backward.** The offset/stratum
+  stat is bound to the exact endpoint it was measured against (host, port, and protocol version) and
+  to its measurement time, so repointing a target at a different server — or a slow in-flight probe of
+  the previous endpoint, or an out-of-order store-and-forward replay — can no longer show a superseded
+  or older reading; a remote vantage's stat is only published for rounds that were durably committed.
 - **Remote NTP stat survives a move.** A `smoke-agent` now looks up its companion clock stat by the
   target's stable id, so a moved (or newly created) NTP target still reports its offset/stratum
   upstream.
 - **Assignment versioning and rolling upgrades track the stable id.** The per-vantage assignment
-  version now changes when a target's id changes, and the hub accepts a round reported under a
-  target's current path from an agent predating stable identity — so moving a remotely-measured
-  target does not silently drop its data mid-upgrade.
-- **Deep links survive a move.** Dashboard navigation, the URL hash, and detail fetches are keyed by
-  the stable id, so a link to a target created in the UI keeps working after the target is moved in
-  the tree.
+  version changes when a target's id changes, and the hub accepts a round reported under a target's
+  current path from an agent predating stable identity. When an old display path is reused by a new
+  target, the hub disambiguates the two by the round's fingerprint, so a fingerprint-carrying agent is
+  still attributed correctly — only a pre-fingerprint agent reporting a reused path pauses until
+  upgrade, rather than silently misattributing or dropping the data.
+- **Deep links and Overview links survive a move.** Dashboard navigation, the URL hash, detail
+  fetches, and the Overview worst-offenders / SLA boards are all keyed by the stable id, and an
+  existing path-based `#target=` hash is rewritten to the id once the target catalog loads — so a link
+  built, bookmarked, or opened before a move keeps working.
 
 ### Docs
-- Documented the stable-identity lifecycle (server-managed id, YAML path fallback, and the federation
-  upgrade constraint) in `config.example.yaml`.
+- Documented the stable-identity lifecycle end to end: the server-managed id and YAML path fallback in
+  `config.example.yaml`, a "Stable target identity" rolling-upgrade section in `docs/federation.md`
+  (reconciling how a pre-identity or pre-fingerprint agent behaves across a move or a reused path), and
+  the shipped feature plus its residual follow-ups in `ROADMAP.md`.
 
 ## [1.0.10] - 2026-08-22
 

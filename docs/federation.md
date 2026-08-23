@@ -233,6 +233,35 @@ Once it stops rising for every vantage (all agents upgraded), start `smoked` wit
 `-require-fingerprint` to enforce strictly: a round with no fingerprint is then a
 visible permanent drop (still counted by the metric above) rather than accepted.
 
+### Stable target identity
+
+A target's history is stored under a stable, server-managed `id` rather than its
+position in the tree, so **moving or renaming** a node keeps its graph. The hub
+mints the id (an opaque UUID) for any target created or imported through the admin
+UI / `config import`; a target defined only in raw `config.yaml` has no minted id
+and falls back to its tree path as identity, so renaming it there starts a fresh
+graph. The id is not something you edit and the UI never exposes it. The id travels
+in each vantage's assignment (`AssignmentTarget.id`), and a current agent echoes it
+on every round so the hub attributes data to the same identity regardless of where
+the target now sits.
+
+**Rolling-upgrade behaviour.** A pre-identity agent doesn't understand the new
+assignment field and reports a target by its current display path. The hub resolves
+that path back to the stable id, so such an agent keeps delivering data across a
+move without an upgrade. If an old display path is later **reused** by a different
+new target, the hub disambiguates the two by the round's measurement fingerprint —
+so a fingerprint-carrying agent is still attributed correctly. The one case that
+cannot be resolved is a *pre-fingerprint* agent (old enough to send neither an id
+nor a fingerprint) reporting a **reused** path: the token is genuinely ambiguous, so
+that round is dropped rather than misattributed, and the new target's data from that
+vantage pauses until the agent is upgraded.
+
+The safe rollout is therefore to **upgrade a vantage's agent before moving a target
+it measures**, and especially before reusing a freed-up path for a different target.
+Watch the same `heliograph_agent_missing_fingerprint_total` counter above: while it
+is nonzero for a vantage, that vantage still runs a pre-fingerprint agent for which
+a path reuse can pause data.
+
 ## Troubleshooting
 
 - **Agent gets `401`** — key wrong, revoked, or rotated (`vantage add`/`regenerate`
