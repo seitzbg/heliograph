@@ -208,6 +208,14 @@ follow-up found several edge cases, now fixed in **Unreleased**:
   global top bar and Add group action in Unreleased.
 - ✅ CI db-test flake fixed — TimescaleDB run with background workers disabled (#49); this unblocked
   the **v1.0.2** publish (the `v1.0.1` tag was superseded — see CHANGELOG).
+- ✅ **Stable target identity** — history is keyed by a server-minted stable `id`, not the tree path,
+  so moving/renaming a node keeps its graph (#94). Raw-YAML targets fall back to path identity. The
+  id travels in each vantage's assignment; a pre-identity agent keeps reporting across a move (the hub
+  resolves its current path back to the id, and disambiguates a reused path by the round's
+  fingerprint), so only a pre-fingerprint agent reporting a *reused* path pauses until upgrade — see
+  `docs/federation.md` "Stable target identity". Review follow-ups closed the id/path-overlap ingest
+  disambiguation (M9), the NTP clock-stat identity/freshness binding (M3), and the Overview/deep-link
+  id keying (L8).
 
 ### Remaining follow-ups (non-blocking; none critical/high)
 - **Caddy image (#38):** the runtime `apk --upgrade c-ares/curl` + the three `xcaddy --with

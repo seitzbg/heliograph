@@ -31,13 +31,13 @@ type Options struct {
 	SpoolDir string // on-disk store-and-forward directory ("" = in-memory only)
 
 	// NTPStat, if set, returns the NTP probe's latest clock stat (offset seconds, stratum,
-	// graphed measure) for a target measured in this process, or ok=false when there is none — or
-	// when the stored reading came from a different host than wantHost, so a slow in-flight probe of
-	// a since-repointed server can't attach the old server's stat to a new round (CODE_REVIEW M3).
-	// The binary wires it to ntpprobe.LatestFor; each NTP round then carries its companion
-	// offset/stratum to the hub so a remote vantage's clock stat is visible there (CODE_REVIEW M2).
-	// Left nil in tests and non-NTP setups — the round then omits the stat.
-	NTPStat func(target, wantHost string) (offsetSec float64, stratum uint8, measure string, ok bool)
+	// graphed measure) for a target measured in this process, or ok=false when there is none. wantKey
+	// gates the reading on the target's current NTP measurement identity; the agent passes "" to read
+	// back the value its own probe just wrote this round (no config drift is possible then). The
+	// binary wires it to ntpprobe.LatestFor; each NTP round then carries its companion offset/stratum
+	// to the hub so a remote vantage's clock stat is visible there (CODE_REVIEW M2/M3). Left nil in
+	// tests and non-NTP setups — the round then omits the stat.
+	NTPStat func(target, wantKey string) (offsetSec float64, stratum uint8, measure string, ok bool)
 }
 
 // Validate rejects an Options that would make an unusable or dangerous agent — the
@@ -433,7 +433,7 @@ func (a *Agent) finalFlush(ttl time.Duration) {
 // agent's own derived stats. ntpStat, when set, supplies the NTP companion
 // clock stat for an NTP outcome; nil (or a non-NTP outcome, or an
 // unsynchronized clock) leaves the offset/stratum fields absent.
-func reportFromOutcome(o scheduler.Outcome, ntpStat func(target, wantHost string) (float64, uint8, string, bool)) agentwire.RoundReport {
+func reportFromOutcome(o scheduler.Outcome, ntpStat func(target, wantKey string) (float64, uint8, string, bool)) agentwire.RoundReport {
 	errStr := ""
 	if o.Err != nil {
 		errStr = o.Err.Error()
@@ -456,7 +456,10 @@ func reportFromOutcome(o scheduler.Outcome, ntpStat func(target, wantHost string
 	// no stat for this vantage rather than a stale one (M2). measure is the hub's to decide
 	// (it knows the assignment's metric), so it is not sent.
 	if ntpStat != nil && o.ProbeName == "NTP" {
-		if offSec, stratum, _, ok := ntpStat(o.Target.Key(), o.Target.Host); ok {
+		// Read back the value this process's own probe just wrote for this round. wantKey is "" (skip
+		// the identity gate): there is no config drift within a round, and the agent may lack the
+		// probe-config defaults needed to rebuild the key (CODE_REVIEW M3).
+		if offSec, stratum, _, ok := ntpStat(o.Target.Key(), ""); ok {
 			offMs := offSec * 1000
 			st := int(stratum)
 			rr.NTPOffsetMs, rr.Stratum = &offMs, &st

@@ -88,10 +88,11 @@ func (p *ntpProbe) Measure(ctx context.Context, t probe.Target, pings int) (prob
 	// or the round cancelled — means any previously recorded offset/stratum is stale. Clear it on
 	// every exit path so a server that goes unreachable or loses sync stops showing a "good clock"
 	// stat (M3). A synchronized ping sets this and updates the stat via latestReg.set below.
+	key := statKey(t.Host, t.Param("port", p.port), version)
 	syncedThisRound := false
 	defer func() {
 		if !syncedThisRound {
-			latestReg.clear(t.Key())
+			latestReg.clear(t.Key(), time.Now())
 		}
 	}()
 	for i := 0; i < pings; i++ {
@@ -122,7 +123,7 @@ func (p *ntpProbe) Measure(ctx context.Context, t probe.Target, pings int) (prob
 				samples = append(samples, rtt.Seconds())
 			}
 			if synced {
-				latestReg.set(t.Key(), offset.Seconds(), stratum, measure, t.Host)
+				latestReg.set(t.Key(), offset.Seconds(), stratum, measure, key, time.Now())
 				syncedThisRound = true
 			}
 		}
@@ -246,8 +247,11 @@ type ntpLatest struct {
 	stratum   uint8
 	measure   string // the target's graphed metric ("rtt" or "offset"); lets the UI hide the
 	// redundant offset stat on a panel that already graphs offset.
-	host string // the server this reading came from; a reader supplies the target's CURRENT host and
-	// the accessor refuses a stale reading whose host no longer matches (see LatestFor / M3).
+	key string // the measurement identity this reading came from (host+port+version — see statKey).
+	// A reader supplies the target's CURRENT identity; the accessor refuses a reading whose key no
+	// longer matches, so a same-host reconfiguration (a new port/version) or a slow in-flight probe
+	// of the previous endpoint never mislabels the new configuration (CODE_REVIEW M3).
+	ts time.Time // when this reading was measured; an older write/clear can't roll it back (M3).
 }
 
 var latestReg = &registry{m: map[string]ntpLatest{}}
@@ -257,32 +261,75 @@ type registry struct {
 	m  map[string]ntpLatest
 }
 
-func (r *registry) set(target string, offsetSec float64, stratum uint8, measure, host string) {
+// statKey is the measurement-identity token a clock stat is bound to: the exact endpoint and
+// protocol version a round measured. The API rebuilds it (via StatKey) from the current target
+// config; a mismatch means the reading belongs to a superseded configuration and is refused (M3).
+func statKey(host, port string, version uint8) string {
+	return net.JoinHostPort(host, port) + "|v" + strconv.Itoa(int(version))
+}
+
+// StatKey builds the clock-stat identity token from a target's NTP settings, so a reader (the API)
+// can match the token the probe stored. targetParams are the target's per-node overrides; probeCfg
+// is the tree-wide probes.NTP config. Resolution mirrors the probe's own: target param, then probe
+// config, then the schema default (port 123, version 4).
+func StatKey(host string, targetParams, probeCfg map[string]string) string {
+	port := "123"
+	if v := probeCfg["port"]; v != "" {
+		port = v
+	}
+	if v := targetParams["port"]; v != "" {
+		port = v
+	}
+	version := uint8(4)
+	if probeCfg["version"] == "3" {
+		version = 3
+	}
+	if v := targetParams["version"]; v == "3" {
+		version = 3
+	} else if v == "4" {
+		version = 4
+	}
+	return statKey(host, port, version)
+}
+
+// set records a reading, tagged with its measurement identity (key) and time (ts). A write whose ts
+// is older than the stored reading's is rejected, so an out-of-order or slow-completing probe can't
+// roll the stat backward (CODE_REVIEW M3).
+func (r *registry) set(target string, offsetSec float64, stratum uint8, measure, key string, ts time.Time) {
 	r.mu.Lock()
-	r.m[target] = ntpLatest{offsetSec: offsetSec, stratum: stratum, measure: measure, host: host}
-	r.mu.Unlock()
+	defer r.mu.Unlock()
+	if cur, ok := r.m[target]; ok && ts.Before(cur.ts) {
+		return
+	}
+	r.m[target] = ntpLatest{offsetSec: offsetSec, stratum: stratum, measure: measure, key: key, ts: ts}
 }
 
 // clear drops a target's latest offset/stratum so a server that has gone unsynchronized (or a
-// removed target) stops showing a stale "good clock" reading. A no-op if nothing was recorded.
-func (r *registry) clear(target string) {
+// removed target) stops showing a stale "good clock" reading. Like set it is freshness-gated: an
+// older round's clear can't wipe a newer round's reading (M3). A no-op if nothing was recorded.
+func (r *registry) clear(target string, ts time.Time) {
 	r.mu.Lock()
+	defer r.mu.Unlock()
+	if cur, ok := r.m[target]; ok && ts.Before(cur.ts) {
+		return
+	}
 	delete(r.m, target)
-	r.mu.Unlock()
 }
 
 // LatestFor returns the most recent clock offset (seconds), stratum, and graphed metric recorded for
-// an NTP target, or ok=false if none has been measured yet OR the stored reading came from a
-// different host than wantHost. Binding the stat to the host closes M3: after a target keeps its
-// stable id but is repointed at a different NTP server (a config change, or a slow in-flight probe
-// of the old server completing after the swap), the old server's offset/stratum is not attributed to
-// the new one — the reader passes the target's current host, so a host mismatch reads as "no stat"
-// until a fresh round for the current host lands. Wired into the API as Server.NTPStat.
-func LatestFor(target, wantHost string) (offsetSec float64, stratum uint8, measure string, ok bool) {
+// an NTP target, or ok=false if none has been measured yet OR the stored reading's measurement
+// identity differs from wantKey. Binding the stat to the identity closes M3: after a target keeps
+// its stable id but is repointed at a different NTP server/port/version, the old endpoint's
+// offset/stratum is not attributed to the new one — the reader passes the target's current StatKey,
+// so a mismatch reads as "no stat" until a fresh round for the current endpoint lands. As a special
+// case wantKey == "" skips the identity gate: the measuring agent reads back the value its own probe
+// just wrote this round (no config drift is possible, and it may lack the config to rebuild the key).
+// Wired into the API as Server.NTPStat.
+func LatestFor(target, wantKey string) (offsetSec float64, stratum uint8, measure string, ok bool) {
 	latestReg.mu.RLock()
 	v, ok := latestReg.m[target]
 	latestReg.mu.RUnlock()
-	if !ok || v.host != wantHost {
+	if !ok || (wantKey != "" && v.key != wantKey) {
 		return 0, 0, "", false
 	}
 	return v.offsetSec, v.stratum, v.measure, true

@@ -15,6 +15,7 @@ import (
 
 	"github.com/seitzbg/heliograph/internal/model"
 	"github.com/seitzbg/heliograph/internal/probe"
+	"github.com/seitzbg/heliograph/internal/probe/ntpprobe"
 	"github.com/seitzbg/heliograph/internal/sample"
 	"github.com/seitzbg/heliograph/internal/scheduler"
 	"github.com/seitzbg/heliograph/internal/store"
@@ -513,6 +514,54 @@ func TestMetricsEndpoint(t *testing.T) {
 	// Without a RoundStats, no round metrics are emitted.
 	if strings.Contains(body, "heliograph_rounds_total") {
 		t.Errorf("round metrics emitted without a RoundStats:\n%s", body)
+	}
+}
+
+// The Overview boards (/api/charts, /api/sla) must expose each target's stable id alongside its
+// display path, so a link built from Overview on a fresh page load points at the id and survives a
+// later move — not the mutable path (CODE_REVIEW L8).
+func TestChartsAndSLAExposeStableID(t *testing.T) {
+	st := store.NewMem(10)
+	// A moved target: stored under stable id "wid", now displayed at "grp2/leaf". A recent round so
+	// it falls inside the SLA window.
+	st.Add([]scheduler.Outcome{
+		{Target: probe.Target{ID: "wid", Name: "grp2/leaf", Host: "h"}, ProbeName: "FPing",
+			Computed: sample.Compute(2, []float64{0.01, 0.02}), When: time.Now().Add(-time.Hour)},
+	})
+	srv := New(st, "")
+	srv.Active = func() map[string]bool { return map[string]bool{"wid": true} }
+	srv.Configured = func() []model.Monitor {
+		return []model.Monitor{{ID: "wid", Name: "grp2/leaf", ProbeKind: "FPing", Host: "h"}}
+	}
+
+	entry := func(path string) map[string]any {
+		rec := httptest.NewRecorder()
+		srv.Routes().ServeHTTP(rec, httptest.NewRequest("GET", path, nil))
+		if rec.Code != 200 {
+			t.Fatalf("%s: status %d", path, rec.Code)
+		}
+		var m map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &m); err != nil {
+			t.Fatalf("%s: %v", path, err)
+		}
+		arr, _ := m["charts"].([]any)
+		if arr == nil {
+			arr, _ = m["targets"].([]any)
+		}
+		if len(arr) != 1 {
+			t.Fatalf("%s: want 1 entry, got %d (%+v)", path, len(arr), m)
+		}
+		return arr[0].(map[string]any)
+	}
+
+	for _, path := range []string{"/api/charts?by=loss", "/api/sla?window=24h"} {
+		e := entry(path)
+		if e["id"] != "wid" {
+			t.Errorf("%s: id = %v, want the stable id \"wid\" (the durable deep-link key)", path, e["id"])
+		}
+		if e["name"] != "grp2/leaf" {
+			t.Errorf("%s: name = %v, want the current display path \"grp2/leaf\"", path, e["name"])
+		}
 	}
 }
 
@@ -1235,8 +1284,10 @@ func TestTargetsSurfacesNTPOffsetAndStratum(t *testing.T) {
 	})
 	srv := New(st, "")
 	srv.Active = func() map[string]bool { return map[string]bool{"ntp1": true, "web1": true} }
-	srv.NTPStat = func(target, wantHost string) (float64, uint8, string, bool) {
-		if target == "ntp1" && wantHost == "h" {
+	srv.NTPStat = func(target, wantKey string) (float64, uint8, string, bool) {
+		// No catalog is wired, so the read path passes wantKey="" (identity gate skipped); the
+		// registry returns whatever reading it has for the target.
+		if target == "ntp1" {
 			return -0.0009, 2, "rtt", true // -0.9 ms, stratum 2, graphing rtt
 		}
 		return 0, 0, "", false // web1 (and anything else) has no NTP reading
@@ -1280,10 +1331,10 @@ func TestTargetsSurfacesNTPOffsetAndStratum(t *testing.T) {
 	}
 }
 
-// M3: the NTP clock stat is bound to the host it was measured against. /api/targets asks the
-// registry with the target's CURRENT catalog host, so a target still pointed at the same server
-// shows its stat, while one repointed at a different NTP server (same id, new host) withholds the
-// old server's offset/stratum until a fresh round for the new host lands.
+// M3: the NTP clock stat is bound to the measurement identity (host+port+version) it was measured
+// against. /api/targets asks the registry with the target's CURRENT identity (ntpprobe.StatKey), so a
+// target still pointed at the same endpoint shows its stat, while one repointed at a different NTP
+// server (same id, new host) withholds the old server's offset/stratum until a fresh round lands.
 func TestTargetsGatesNTPStatOnCurrentHost(t *testing.T) {
 	st := store.NewMem(10)
 	st.Add([]scheduler.Outcome{
@@ -1301,12 +1352,14 @@ func TestTargetsGatesNTPStatOnCurrentHost(t *testing.T) {
 		}
 	}
 	// The registry holds a reading for "keep" measured at host "h", and for "moved" only a STALE
-	// reading measured at its OLD host "old" — never the current host "new".
-	srv.NTPStat = func(target, wantHost string) (float64, uint8, string, bool) {
-		if target == "keep" && wantHost == "h" {
+	// reading measured at its OLD host "old" — never the current host "new". The read path gates on
+	// the target's current measurement identity (ntpprobe.StatKey), so "moved"'s stale reading is
+	// refused.
+	srv.NTPStat = func(target, wantKey string) (float64, uint8, string, bool) {
+		if target == "keep" && wantKey == ntpprobe.StatKey("h", nil, nil) {
 			return -0.0009, 2, "rtt", true
 		}
-		if target == "moved" && wantHost == "old" { // never satisfied: catalog host is "new"
+		if target == "moved" && wantKey == ntpprobe.StatKey("old", nil, nil) { // never satisfied: catalog host is "new"
 			return -0.0009, 2, "rtt", true
 		}
 		return 0, 0, "", false
@@ -1351,7 +1404,7 @@ func TestTargetsProbeIdentityFollowsCurrentCatalog(t *testing.T) {
 		return []model.Monitor{{Name: "clock", ProbeKind: "HTTP"}}
 	}
 	// The stale NTP registry still returns a reading for the name.
-	srv.NTPStat = func(target, wantHost string) (float64, uint8, string, bool) {
+	srv.NTPStat = func(target, wantKey string) (float64, uint8, string, bool) {
 		return -0.0009, 2, "rtt", true
 	}
 
@@ -1399,7 +1452,7 @@ func TestTargetsNTPStatOnlyDecoratesLocalVantage(t *testing.T) {
 	}
 	srv.TargetVantages = func() map[string][]string { return map[string][]string{"clock": {"local", "nyc"}} }
 	// The registry is the HUB's local reading — valid only for the local vantage.
-	srv.NTPStat = func(target, wantHost string) (float64, uint8, string, bool) {
+	srv.NTPStat = func(target, wantKey string) (float64, uint8, string, bool) {
 		return -0.0009, 2, "rtt", true
 	}
 

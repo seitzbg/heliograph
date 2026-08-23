@@ -66,8 +66,11 @@ targets:
   # not write it, and the UI does not expose it for editing. A target defined only in THIS YAML file
   # has no minted id and falls back to its tree path as its identity, so renaming such a target in
   # YAML starts a fresh graph. Federation note: the stable id travels in each vantage's assignment;
-  # a remote `smoke-agent` older than this feature still reports data, but MOVING a remotely-measured
-  # target should wait until that vantage's agent is upgraded, or its rounds pause until it is.
+  # a remote `smoke-agent` older than this feature keeps reporting data across a move (the hub
+  # resolves its current display path back to the id, and disambiguates a reused path by the round's
+  # fingerprint). Only a pre-FINGERPRINT agent reporting a REUSED path is ambiguous and pauses until
+  # upgrade — so upgrade a vantage's agent before moving or reusing a path it measures. See
+  # docs/federation.md ("Stable target identity").
 
   children:
     # Leaf names describe the PROBE METHOD, grouped by provider. (These are ICMP pings etc.
