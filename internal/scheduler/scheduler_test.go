@@ -386,6 +386,16 @@ func TestRunOneRecoversPanic(t *testing.T) {
 	}
 }
 
+// Two jobs with the same display Name but different IDs must both be schedulable
+// (dedup is per identity, not per display path).
+func TestSchedulerInflightKeysByID(t *testing.T) {
+	a := probe.Target{ID: "id-a", Name: "same/path", Host: "h"}
+	b := probe.Target{ID: "id-b", Name: "same/path", Host: "h"}
+	if InflightKey(a) == InflightKey(b) {
+		t.Fatal("inflight key must be the target ID, not the display Name")
+	}
+}
+
 func TestNextDelay(t *testing.T) {
 	step := 10 * time.Second
 	// now exactly on a grid boundary (offset 0) -> next delay == full step.

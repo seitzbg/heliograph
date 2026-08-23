@@ -578,7 +578,7 @@ func buildBatch(outcomes []scheduler.Outcome) *pgx.Batch {
 			   (ts, target, probe, host, vantage, pings, loss, median_seconds, rtts_seconds, err, duration_ms, metric)
 			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
 			 ON CONFLICT (target, vantage, ts) DO NOTHING`,
-			o.When.UTC(), o.Target.Name, o.ProbeName, o.Target.Host, store.VantageOf(o),
+			o.When.UTC(), o.Target.Key(), o.ProbeName, o.Target.Host, store.VantageOf(o),
 			o.Computed.Pings, o.Computed.Loss, nanToNil(o.Computed.Median),
 			centeredToDB(o.Computed.Centered), errText,
 			float64(o.Duration.Microseconds())/1000.0, store.MetricOf(o),
@@ -741,7 +741,7 @@ func scanOutcome(row scannable) (scheduler.Outcome, error) {
 		durationMs *float64
 	)
 	if err := row.Scan(
-		&o.When, &o.Target.Name, &o.ProbeName, &o.Target.Host, &o.Vantage,
+		&o.When, &o.Target.ID, &o.ProbeName, &o.Target.Host, &o.Vantage,
 		&o.Computed.Pings, &o.Computed.Loss, &median, &centered, &errText, &durationMs, &o.Metric,
 	); err != nil {
 		return o, err
@@ -977,7 +977,7 @@ func (s *PGStore) LatestAll(vantage string) (map[string]scheduler.Outcome, error
 			s.onErr(err)
 			return nil, err
 		}
-		out[o.Target.Name] = o
+		out[o.Target.ID] = o
 	}
 	if err := rows.Err(); err != nil {
 		s.onErr(err)
@@ -1111,7 +1111,7 @@ func (s *PGStore) SeriesAll(ctx context.Context, vantage string, targets []strin
 			s.onErr(err)
 			return nil, false, err
 		}
-		out[o.Target.Name] = append(out[o.Target.Name], o)
+		out[o.Target.ID] = append(out[o.Target.ID], o)
 	}
 	if err := rows.Err(); err != nil {
 		s.onErr(err)

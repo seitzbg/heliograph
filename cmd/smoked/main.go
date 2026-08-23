@@ -239,6 +239,24 @@ func main() {
 			fatal("config store", cerr)
 		}
 		defer cfgStore.Close()
+
+		// One-time migration (idempotent): stamp id = <flattened path> onto any existing
+		// DB-config target node that doesn't have one yet, so its id matches the string the
+		// store already keys its history under — existing prod rows survive with zero
+		// rewrite. Must run before the first runtime build below reads dbFragment. A version
+		// conflict means another smoked instance raced this and migrated first; benign.
+		if migrated, merr := configstore.MigrateStampIDs(context.Background(), cfgStore); merr != nil {
+			if errors.Is(merr, configstore.ErrConflict) {
+				slog.Info("config id migration: lost race to another instance, skipping")
+			} else {
+				slog.Warn("config id migration failed", "err", merr)
+			}
+		} else if migrated {
+			slog.Info("config id migration: stamped birth-path ids on existing DB targets")
+		} else {
+			slog.Info("config id migration: nothing to stamp")
+		}
+
 		dbFragment = func() ([]byte, error) {
 			doc, _, err := cfgStore.Get(context.Background())
 			return doc, err
@@ -411,20 +429,22 @@ func main() {
 		// the store but ages out via retention / the bounded cap). Built from the full
 		// monitor set (all vantages), not just the hub's local jobs, so a remote-only
 		// target survives the activeLatest filter for its own vantage (CODE_REVIEW #3 / P1-3).
+		// Keyed by the stable id (mon.ID) — activeLatest filters the store's keys, which are ids,
+		// through this set, so a target must be indexed by the same id its rows are stored under.
 		srv.Active = func() map[string]bool {
 			ms := current.Load().monitors
 			m := make(map[string]bool, len(ms))
 			for _, mon := range ms {
-				m[mon.Name] = true
+				m[mon.ID] = true
 			}
 			return m
 		}
-		// Per-target step drives /api/sla's coverage (expected rounds = window/step).
+		// Per-target step drives /api/sla's coverage (expected rounds = window/step); keyed by id.
 		srv.Steps = func() map[string]time.Duration {
 			ms := current.Load().monitors
 			m := make(map[string]time.Duration, len(ms))
 			for _, mon := range ms {
-				m[mon.Name] = mon.Step
+				m[mon.ID] = mon.Step
 			}
 			return m
 		}
@@ -482,11 +502,12 @@ func main() {
 					return current.Load().commitRemote(ctx, ing, out)
 				}
 			}
+			// Keyed by the stable id, matching /api/targets' catalog join (tv[m.ID]).
 			srv.TargetVantages = func() map[string][]string {
 				ms := current.Load().monitors
 				m := make(map[string][]string, len(ms))
 				for _, mon := range ms {
-					m[mon.Name] = mon.Vantages
+					m[mon.ID] = mon.Vantages
 				}
 				return m
 			}
@@ -537,6 +558,12 @@ func main() {
 				srv.ConfigApply = func(doc json.RawMessage, expectedVersion int) error {
 					applyMu.Lock()
 					defer applyMu.Unlock()
+					// Mint UUIDs for any id-less host node BEFORE validating/persisting: never
+					// trust the client (the UI) to mint the id itself. The minted doc is what
+					// gets validated and persisted, so the UI's next GET sees the new ids.
+					// expectedVersion is untouched — it still refers to the version the client
+					// read, which minting doesn't change.
+					doc, _ = configstore.MintNewIDs(doc)
 					build := func(getter func() ([]byte, error)) (*runtime, error) {
 						return buildRuntime(*configPath, *pings, *step, *timeout, *resolveIPs, notifiers, getter)
 					}
@@ -905,10 +932,11 @@ type runtime struct {
 	// definition that a reload has since redefined (CODE_REVIEW #4, in-flight completion).
 	targetFP map[string]string
 	// targetMeta is each target's display-only metadata (title override + IP to show in the
-	// title), recomputed on every build so it refreshes on SIGHUP reload.
+	// title), keyed by the stable id, recomputed on every build so it refreshes on SIGHUP reload.
 	targetMeta map[string]api.TargetMeta
 	// metricByName is each target's effective metric (rtt/offset) resolved from the current config
-	// (probe-level default + per-target override). The API reads it for the signed-axis choice and
+	// (probe-level default + per-target override), keyed by the stable id (matching the store and the
+	// API's id-keyed reads — the name is historical). The API reads it for the signed-axis choice and
 	// for filtering series/rollup, so a config change takes effect at once and a probe-level default
 	// is honored even before a target has stored data (CODE_REVIEW round 2, M5/M6).
 	metricByName map[string]string
@@ -922,7 +950,7 @@ func (rt *runtime) eval(out []scheduler.Outcome) {
 		return
 	}
 	for _, o := range out {
-		names := rt.alertsByTarget[o.Target.Name]
+		names := rt.alertsByTarget[o.Target.Key()]
 		if len(names) == 0 {
 			continue
 		}
@@ -933,9 +961,9 @@ func (rt *runtime) eval(out []scheduler.Outcome) {
 		if rt.fingerprintStale(o) {
 			continue
 		}
-		events := rt.engine.Evaluate(o.Target.Name, store.VantageOf(o), names,
+		events := rt.engine.Evaluate(o.Target.Key(), o.Target.Name, store.VantageOf(o), names,
 			o.Computed.LossFraction()*100, alertRTT(o), o.When)
-		rt.engine.Dispatch(events, rt.alerteeByTarget[o.Target.Name]...)
+		rt.engine.Dispatch(events, rt.alerteeByTarget[o.Target.Key()]...)
 	}
 }
 
@@ -944,7 +972,7 @@ func (rt *runtime) eval(out []scheduler.Outcome) {
 // fingerprint — an internal path predating stamping — is never stale; current local rounds and all
 // handler-accepted remote rounds are stamped before they reach this boundary.
 func (rt *runtime) fingerprintStale(o scheduler.Outcome) bool {
-	return o.Fingerprint != "" && rt.targetFP[o.Target.Name] != o.Fingerprint
+	return o.Fingerprint != "" && rt.targetFP[o.Target.Key()] != o.Fingerprint
 }
 
 // storeLocal persists locally-measured outcomes and evaluates their alerts under THIS runtime
@@ -992,7 +1020,7 @@ func (rt *runtime) commitRemote(ctx context.Context, ing store.ResultIngester, o
 		// Drop a round whose target a reload has since removed (absent from targetFP) or redefined
 		// (fingerprintStale) — the same identity gate storeLocal and eval apply, now enforced under
 		// the lock at write time rather than only against the handler's earlier snapshot.
-		if _, ok := rt.targetFP[o.Target.Name]; !ok {
+		if _, ok := rt.targetFP[o.Target.Key()]; !ok {
 			continue
 		}
 		if rt.fingerprintStale(o) {
@@ -1158,14 +1186,14 @@ func warmStartAlerts(ctx context.Context, engine *alert.Engine, monitors []model
 		if len(m.Alerts) == 0 {
 			continue
 		}
-		meta := warmMeta{host: m.Host, probe: m.ProbeKind, step: m.Step, metric: probe.NormalizeMetric(metricByName[m.Name])}
+		meta := warmMeta{host: m.Host, probe: m.ProbeKind, step: m.Step, metric: probe.NormalizeMetric(metricByName[m.ID])}
 		for _, v := range m.Vantages {
 			var hist []scheduler.Outcome
 			var err error
 			if v == store.DefaultVantage {
-				hist, err = st.History(m.Name)
+				hist, err = st.History(m.ID)
 			} else if rh != nil {
-				hist, err = rh.HistorySince(ctx, m.Name, v, now.Add(-warmStartLookback))
+				hist, err = rh.HistorySince(ctx, m.ID, v, now.Add(-warmStartLookback))
 			} else {
 				continue
 			}
@@ -1185,7 +1213,7 @@ func warmStartAlerts(ctx context.Context, engine *alert.Engine, monitors []model
 				loss[i] = o.Computed.LossFraction() * 100
 				rtt[i] = alertRTT(o) // median for an rtt round; NaN for a lost or offset round
 			}
-			engine.SeedWindow(m.Name, v, m.Alerts, loss, rtt)
+			engine.SeedWindow(m.ID, v, m.Alerts, loss, rtt)
 		}
 	}
 }
@@ -1293,6 +1321,13 @@ func buildRuntime(configPath string, demoPings int, demoStep, timeout time.Durat
 	// Config monitors already default to [local]; demo monitors carry no vantages, so default
 	// them first, then filter. This scopes both the probe jobs and the alert loops below.
 	for i := range monitors {
+		// Every monitor reaching the runtime must carry a stable storage id: the alert maps,
+		// warm-start seed, and store are all keyed by it. Config monitors already default their
+		// id to the path (config.go); demo monitors carry none, so mirror that fallback here so
+		// the id-keyed collector wiring behaves identically for both (id == path when unset).
+		if monitors[i].ID == "" {
+			monitors[i].ID = monitors[i].Name
+		}
 		if len(monitors[i].Vantages) == 0 {
 			monitors[i].Vantages = []string{store.DefaultVantage}
 		}
@@ -1319,7 +1354,7 @@ func buildRuntime(configPath string, demoPings int, demoStep, timeout time.Durat
 		}
 		jobs = append(jobs, scheduler.Job{
 			Probe:   p,
-			Target:  probe.Target{Name: m.Name, Host: m.Host, Params: m.Params},
+			Target:  probe.Target{ID: m.ID, Name: m.Name, Host: m.Host, Params: m.Params},
 			Pings:   m.Pings,
 			Timeout: timeout,
 			Step:    m.Step,
@@ -1339,10 +1374,10 @@ func buildRuntime(configPath string, demoPings int, demoStep, timeout time.Durat
 	alerteeByTarget := map[string][]string{}
 	for _, m := range fullMonitors {
 		if len(m.Alerts) > 0 {
-			alertsByTarget[m.Name] = m.Alerts
+			alertsByTarget[m.ID] = m.Alerts
 		}
 		if len(m.Alertee) > 0 {
-			alerteeByTarget[m.Name] = m.Alertee
+			alerteeByTarget[m.ID] = m.Alertee
 		}
 	}
 	if miss := unresolvedRecipients(alertDefs, alerteeByTarget, notifiers); len(miss) > 0 {
@@ -1363,8 +1398,8 @@ func buildRuntime(configPath string, demoPings int, demoStep, timeout time.Durat
 	targetFP := make(map[string]string, len(fullMonitors))
 	metricByName := make(map[string]string, len(fullMonitors))
 	for _, m := range fullMonitors {
-		targetFP[m.Name] = federation.Fingerprint(m, probeCfgs[m.ProbeKind])
-		metricByName[m.Name] = probe.MetricFor(m.ProbeKind, m.Params, probeCfgs[m.ProbeKind])
+		targetFP[m.ID] = federation.Fingerprint(m, probeCfgs[m.ProbeKind])
+		metricByName[m.ID] = probe.MetricFor(m.ProbeKind, m.Params, probeCfgs[m.ProbeKind])
 	}
 	return &runtime{jobs: jobs, monitors: fullMonitors, probeCfgs: probeCfgs, engine: engine,
 		alertsByTarget: alertsByTarget, alerteeByTarget: alerteeByTarget, targetFP: targetFP,
@@ -1388,7 +1423,7 @@ func buildTargetMeta(monitors []model.Monitor, resolveIPs bool) map[string]api.T
 			md.IP = config.DisplayIP(m, lookup)
 		}
 		if md.Title != "" || md.IP != "" {
-			meta[m.Name] = md
+			meta[m.ID] = md
 		}
 	}
 	return meta

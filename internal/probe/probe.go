@@ -19,9 +19,20 @@ import (
 
 // Target is one thing to measure.
 type Target struct {
-	Name   string            // display / path key
+	ID     string            // stable storage identity (falls back to the path); the key the store/scheduler use
+	Name   string            // display / path (NOT the storage key — see ID)
 	Host   string            // hostname or IP
 	Params map[string]string // per-target overrides (port, packetsize, ...)
+}
+
+// Key is the stable identity a target is stored and deduped under: its ID,
+// falling back to the display Name when no ID is set (a transitional target
+// built before the wire carries an id).
+func (t Target) Key() string {
+	if t.ID != "" {
+		return t.ID
+	}
+	return t.Name
 }
 
 // MetricRTT and MetricOffset name what a probe's Samples mean: round-trip time (the default for

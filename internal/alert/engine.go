@@ -15,6 +15,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/seitzbg/heliograph/internal/probe"
 )
 
 // Alert is a named, compiled alert attached to targets.
@@ -61,6 +63,12 @@ type Notifier interface{ Notify(Event) }
 func winKey(vantage, target string) string { return vantage + "\x00" + target }
 func stKey(vantage, target, name string) string {
 	return vantage + "\x00" + target + "\x00" + name
+}
+
+// StateKeyForTest exposes the alert-state key derivation for tests, so a test can assert the
+// key follows a target's stable id (t.Key()) rather than its display path.
+func StateKeyForTest(vantage string, t probe.Target, alertName string) string {
+	return stKey(vantage, t.Key(), alertName)
 }
 
 // splitStateKey extracts (target, name) from a vantage\x00target\x00name state key,
@@ -243,15 +251,24 @@ func sameStringSet(x, y []string) bool {
 	return true
 }
 
-// Evaluate pushes a new sample for (target, vantage), runs the attached alerts, updates
-// state, and returns any events produced this round. Each vantage keeps an independent
-// window and firing state, so alerts fire per measuring location (P2-5).
-func (e *Engine) Evaluate(target, vantage string, alertNames []string, lossPct, rttSec float64, when time.Time) []Event {
+// Evaluate pushes a new sample for (id, vantage), runs the attached alerts, updates state,
+// and returns any events produced this round. All engine state — the sample window and the
+// per-alert firing/visible bits — is keyed by the stable target id, so moving a target to a
+// new display path leaves its hysteresis intact. The human display path enters only as
+// Event.Target (falling back to id when display is empty), so notifier messages name the tree
+// location, not the storage id. Each vantage keeps an independent window and firing state, so
+// alerts fire per measuring location (P2-5).
+func (e *Engine) Evaluate(id, display, vantage string, alertNames []string, lossPct, rttSec float64, when time.Time) []Event {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
+	disp := display
+	if disp == "" {
+		disp = id
+	}
+
 	cap := e.windowCap(alertNames)
-	wk := winKey(vantage, target)
+	wk := winKey(vantage, id)
 	w := e.win[wk]
 	if w == nil {
 		w = &Window{}
@@ -276,7 +293,7 @@ func (e *Engine) Evaluate(target, vantage string, alertNames []string, lossPct, 
 		if a == nil {
 			continue
 		}
-		key := stKey(vantage, target, name)
+		key := stKey(vantage, id, name)
 		prev := e.state[key]
 		now := a.Matcher.Test(*w, prev)
 		e.state[key] = now
@@ -297,7 +314,7 @@ func (e *Engine) Evaluate(target, vantage string, alertNames []string, lossPct, 
 	var events []Event
 	rttms := rttSec * 1000
 	for _, p := range pend {
-		key := stKey(vantage, target, p.a.Name)
+		key := stKey(vantage, id, p.a.Name)
 		if p.firing {
 			// Suppress while a strictly-higher-priority alert fires on this target.
 			if p.a.Priority >= 1 && topFiring != 0 && p.a.Priority > topFiring {
@@ -319,7 +336,7 @@ func (e *Engine) Evaluate(target, vantage string, alertNames []string, lossPct, 
 			e.visible[key] = false
 		}
 		events = append(events, Event{
-			Target: target, Vantage: vantage, Alert: p.a.Name, Comment: p.a.Comment, Firing: p.firing,
+			Target: disp, Vantage: vantage, Alert: p.a.Name, Comment: p.a.Comment, Firing: p.firing,
 			LossPct: lossPct, RTTms: rttms, When: when,
 		})
 	}

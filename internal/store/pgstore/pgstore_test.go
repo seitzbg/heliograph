@@ -16,6 +16,7 @@ import (
 	"github.com/seitzbg/heliograph/internal/probe"
 	"github.com/seitzbg/heliograph/internal/sample"
 	"github.com/seitzbg/heliograph/internal/scheduler"
+	"github.com/seitzbg/heliograph/internal/store"
 )
 
 // fakeBatch is a minimal pgx.BatchResults for exercising drainBatch's finalization handling
@@ -1392,5 +1393,44 @@ func TestEnableDownsamplingBackfillsHistory(t *testing.T) {
 	}
 	if got < 3 {
 		t.Fatalf("initial backfill: expected the 3 five-day-old rounds materialized, got sum(rounds)=%d", got)
+	}
+}
+
+// A target's history is keyed by its stable ID, not its display path: moving a node between
+// parent groups changes Name (the path) but not ID, so both rounds must land under one series
+// instead of splitting into two — the pgstore counterpart of Task 3's MemStore coverage.
+func TestKeysByIDAcrossMove(t *testing.T) {
+	dsn := os.Getenv("SMOKE_TEST_DSN")
+	if dsn == "" {
+		t.Skip("set SMOKE_TEST_DSN to run the TimescaleDB integration test")
+	}
+	ctx := context.Background()
+	s, err := New(ctx, dsn, 100, func(e error) { t.Errorf("store error: %v", e) })
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.pool.Exec(ctx, "DELETE FROM samples WHERE target = 'pg-stable-1'"); err != nil {
+		t.Fatal(err)
+	}
+	mk := func(path string, when time.Time) scheduler.Outcome {
+		return scheduler.Outcome{
+			Target:    probe.Target{ID: "pg-stable-1", Name: path, Host: "h"},
+			ProbeName: "FPing", When: when, Computed: sample.Computed{Pings: 1},
+		}
+	}
+	now := time.Now()
+	if _, err := s.AddResults(ctx, []scheduler.Outcome{mk("A/x", now.Add(-time.Minute))}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddResults(ctx, []scheduler.Outcome{mk("B/x", now)}); err != nil { // moved
+		t.Fatal(err)
+	}
+	h, err := s.HistorySince(ctx, "pg-stable-1", store.DefaultVantage, now.Add(-time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(h) != 2 {
+		t.Fatalf("want 2 rounds under the stable id; got %d", len(h))
 	}
 }

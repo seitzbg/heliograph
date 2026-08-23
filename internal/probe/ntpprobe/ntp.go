@@ -91,7 +91,7 @@ func (p *ntpProbe) Measure(ctx context.Context, t probe.Target, pings int) (prob
 	syncedThisRound := false
 	defer func() {
 		if !syncedThisRound {
-			latestReg.clear(t.Name)
+			latestReg.clear(t.Key())
 		}
 	}()
 	for i := 0; i < pings; i++ {
@@ -122,7 +122,7 @@ func (p *ntpProbe) Measure(ctx context.Context, t probe.Target, pings int) (prob
 				samples = append(samples, rtt.Seconds())
 			}
 			if synced {
-				latestReg.set(t.Name, offset.Seconds(), stratum, measure)
+				latestReg.set(t.Key(), offset.Seconds(), stratum, measure)
 				syncedThisRound = true
 			}
 		}

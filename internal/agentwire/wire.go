@@ -11,6 +11,12 @@ package agentwire
 // settings the hub uses locally — e.g. DNS protocol tcp, HTTP method HEAD —
 // instead of bare probe defaults (CODE_REVIEW #2 / P1-2).
 type AssignmentTarget struct {
+	// ID is the hub-computed stable storage identity for this target (model.Monitor.ID,
+	// falling back to its path — see probe.Target.Key()). The agent treats it as opaque and
+	// echoes it back as RoundReport.Target, so a target's history/alerts key stays stable
+	// across a tree move even though Name (the display path) changes. Empty from a pre-id
+	// hub; the agent then falls back to Name (old-hub compat).
+	ID          string            `json:"id"`
 	Name        string            `json:"name"`
 	Probe       string            `json:"probe"`
 	Host        string            `json:"host"`

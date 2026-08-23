@@ -18,7 +18,7 @@ func TestIngestOffsetNTPAcceptsSignedSamples(t *testing.T) {
 		store:       ing,
 		VantageAuth: fakeAuth{name: "nyc", ok: true},
 		Assignment: func(string) ([]model.Monitor, map[string]map[string]string, string) {
-			return []model.Monitor{{Name: "clk", ProbeKind: "NTP", Host: "ntp1", Pings: 3, Step: time.Minute,
+			return []model.Monitor{{Name: "clk", ID: "clk", ProbeKind: "NTP", Host: "ntp1", Pings: 3, Step: time.Minute,
 				Vantages: []string{"nyc"}, Params: map[string]string{"measure": "offset"}}}, nil, "sha256:v1"
 		},
 	}

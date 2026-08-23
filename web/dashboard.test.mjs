@@ -630,6 +630,27 @@ check('moveNode: a stale srcPath is a harmless no-op', () => {
   const out = D.moveNode(mvDoc(), 'Web/zzz', 'DNS', 0);
   assert.deepEqual(D.cfgTree(out).find((n) => n.name === 'DNS').children.map((n) => n.name), ['x']);
 });
+// Lock-in (stable target id): move/rename relocate the node OBJECT verbatim, so a stable
+// `id` set on the node travels with it. This guards a UI edit-then-save from ever stripping
+// `id` back to path-fallback identity. A has a host so it survives cfgPruneEmptyGroups after
+// its only child leaves (an empty hostless group is deleted — see the prune test above).
+check('moveNode: preserves the node id', () => {
+  const doc = { targets: { children: {
+    A: { host: 'a', children: { leaf: { host: 'h', id: 'keep-me' } } },
+    B: { children: {} },
+  } } };
+  const out = D.moveNode(doc, 'A/leaf', 'B');
+  assert.equal(out.targets.children.B.children.leaf.id, 'keep-me'); // id travels
+  assert.equal(out.targets.children.A.children.leaf, undefined);    // left the old parent
+});
+check('renameNodeAtPath: preserves the node id', () => {
+  const doc = { targets: { children: {
+    A: { children: { leaf: { host: 'h', id: 'keep-me' } } },
+  } } };
+  const out = D.renameNodeAtPath(doc, 'A/leaf', 'renamed');
+  assert.equal(out.targets.children.A.children.renamed.id, 'keep-me'); // id survives a rename
+  assert.equal(out.targets.children.A.children.leaf, undefined);
+});
 
 check('cfgDropDestination: dropping onto a sibling folder moves inside it', () => {
   assert.deepEqual(D.cfgDropDestination('leaf', 'Folder', true), { destParent: 'Folder', kind: 'into' });

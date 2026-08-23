@@ -8,6 +8,7 @@ import "time"
 // Monitor is one configured measurement (a leaf target).
 type Monitor struct {
 	Name      string            // display / path key, e.g. "Cloudflare DNS"
+	ID        string            // stable storage identity; falls back to Name (path) when no node id is set
 	Title     string            // optional display-name override for the graph header (falls back to Name)
 	ProbeKind string            // registered probe name, e.g. "FPing", "TCPConnect"
 	Host      string            // hostname or IP (the probe target)

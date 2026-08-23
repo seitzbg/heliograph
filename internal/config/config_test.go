@@ -855,6 +855,32 @@ func TestAppendImportIdempotentWithEmptyMaps(t *testing.T) {
 	}
 }
 
+// A node's `id` (its stable storage identity, decoupled from tree position) must survive
+// AppendImport unchanged: it's a plain Node field with a json/yaml tag, merged wholesale
+// (base.Targets.Children[k] = imp.Targets.Children[k]), not reconstructed field-by-field.
+// Re-importing the same fragment (id included) must be a no-op — the id participates in
+// nodesEqual's canonical-JSON comparison the same as every other field, so a differing id
+// on an otherwise-identical node would (correctly) be treated as a conflict, and an
+// identical id keeps the re-import idempotent (unchanged count, not added).
+func TestImportPreservesID(t *testing.T) {
+	imp := []byte("targets:\n  children:\n    a: {probe: HTTP, host: a.example, id: existing-id-123}\n")
+	merged, added, unchanged, err := AppendImport(nil, imp)
+	if err != nil || added != 1 || unchanged != 0 {
+		t.Fatalf("first import: added=%d unchanged=%d err=%v", added, unchanged, err)
+	}
+	if !strings.Contains(string(merged), `"id":"existing-id-123"`) {
+		t.Fatalf("id not preserved in merged doc: %s", merged)
+	}
+	// Re-import the exact same fragment: unchanged, not added -> id round-trips stably.
+	merged2, added2, unchanged2, err2 := AppendImport(merged, imp)
+	if err2 != nil || added2 != 0 || unchanged2 != 1 {
+		t.Fatalf("re-import: added=%d unchanged=%d err=%v (want 0/1/nil)", added2, unchanged2, err2)
+	}
+	if !strings.Contains(string(merged2), `"id":"existing-id-123"`) {
+		t.Fatalf("id lost on re-import: %s", merged2)
+	}
+}
+
 // TestMonitorCarriesDisplayIPAndTitle: a leaf may carry a pinned display `ip` and a
 // `title` (display name); both flow into the Monitor as display-only fields, separate
 // from the probed `host`.
@@ -959,5 +985,54 @@ targets:
 	want := []string{"omega", "mid", "alpha"} // weight -1, 0, 10
 	if !reflect.DeepEqual(names, want) {
 		t.Fatalf("YAML weight order = %v, want %v", names, want)
+	}
+}
+
+// A node's stable id resolves to its explicit `id:` when set, else falls back to the
+// flattened path — so a node moved between parent groups (path changes) keeps its
+// storage identity only when it was given an explicit id.
+func TestMonitorsResolvesStableID(t *testing.T) {
+	c, err := Parse([]byte(`
+database: {pings: 1, step: 1s}
+probes: {FPing: {}}
+targets:
+  children:
+    Resolvers:
+      children:
+        dns1: {probe: FPing, host: 192.168.1.5, id: "frozen-id-1"}
+        dns2: {probe: FPing, host: 192.168.1.6}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ms, err := c.Monitors()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{} // path -> id
+	for _, m := range ms {
+		got[m.Name] = m.ID
+	}
+	if got["Resolvers/dns1"] != "frozen-id-1" {
+		t.Errorf("explicit id: got %q want frozen-id-1", got["Resolvers/dns1"])
+	}
+	if got["Resolvers/dns2"] != "Resolvers/dns2" {
+		t.Errorf("id fallback to path: got %q want Resolvers/dns2", got["Resolvers/dns2"])
+	}
+}
+
+// Two nodes that resolve to the same id (explicit or otherwise) would silently share
+// one storage identity, so it must be rejected like a duplicate name.
+func TestMonitorsRejectsDuplicateID(t *testing.T) {
+	c, _ := Parse([]byte(`
+database: {pings: 1, step: 1s}
+probes: {FPing: {}}
+targets:
+  children:
+    a: {probe: FPing, host: h1, id: dup}
+    b: {probe: FPing, host: h2, id: dup}
+`))
+	if _, err := c.Monitors(); err == nil {
+		t.Fatal("expected duplicate-id error, got nil")
 	}
 }

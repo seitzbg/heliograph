@@ -437,7 +437,10 @@ func reportFromOutcome(o scheduler.Outcome, ntpStat func(string) (float64, uint8
 		errStr = o.Err.Error()
 	}
 	rr := agentwire.RoundReport{
-		Target:      o.Target.Name,
+		// Echo the assignment's stable id (falling back to Name when the hub sent none — an
+		// old-hub compat case, since Target.Key() is ID else Name) so the hub attributes this
+		// round to the same storage identity it assigned, not the display path.
+		Target:      o.Target.Key(),
 		TS:          o.When.UTC().Format(time.RFC3339Nano),
 		Pings:       o.Computed.Pings,
 		RTTs:        o.Computed.Sorted,

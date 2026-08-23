@@ -36,6 +36,7 @@ func (srv *Server) agentAssignment(w http.ResponseWriter, r *http.Request) {
 	out := agentwire.Assignment{Vantage: v, ConfigVersion: cv, Targets: make([]agentwire.AssignmentTarget, 0, len(monitors))}
 	for _, m := range monitors {
 		out.Targets = append(out.Targets, agentwire.AssignmentTarget{
+			ID:   m.ID,
 			Name: m.Name, Probe: m.ProbeKind, Host: m.Host,
 			Params: m.Params, ProbeConfig: probeCfgs[m.ProbeKind],
 			StepMs: m.Step.Milliseconds(), Pings: m.Pings,
@@ -142,6 +143,11 @@ func (srv *Server) agentResults(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	monitors, probeCfgs, _ := srv.Assignment(v)
+	// allowed, wantFP, and metricByTarget are keyed by the target's stable id (the same id
+	// the hub handed out on AssignmentTarget.ID and the agent echoes back as
+	// RoundReport.Target) rather than its display Name/path, so a round is attributed to the
+	// same storage identity the assignment named regardless of where the target currently
+	// sits in the tree.
 	allowed := make(map[string]model.Monitor, len(monitors))
 	// wantFP is each assigned target's current measurement-identity fingerprint, computed
 	// once per target here rather than per round: a store-and-forward replay is typically a
@@ -150,9 +156,9 @@ func (srv *Server) agentResults(w http.ResponseWriter, r *http.Request) {
 	wantFP := make(map[string]string, len(monitors))
 	metricByTarget := make(map[string]string, len(monitors))
 	for _, m := range monitors {
-		allowed[m.Name] = m
-		wantFP[m.Name] = federation.Fingerprint(m, probeCfgs[m.ProbeKind])
-		metricByTarget[m.Name] = assignmentMetric(m, probeCfgs)
+		allowed[m.ID] = m
+		wantFP[m.ID] = federation.Fingerprint(m, probeCfgs[m.ProbeKind])
+		metricByTarget[m.ID] = assignmentMetric(m, probeCfgs)
 	}
 	outcomes := make([]scheduler.Outcome, 0, len(req.Results))
 	dropped, mismatched, noFP := 0, 0, 0
@@ -198,7 +204,11 @@ func (srv *Server) agentResults(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		o := scheduler.Outcome{
-			Target:    probe.Target{Name: m.Name, Host: m.Host},
+			// ID carries the stable storage identity (what the round is attributed/stored
+			// under); Name carries the display path (what a panel/notification shows) —
+			// looked up here from the id-keyed allowed map, so a remote round stores under
+			// the same id local rounds do while still showing the target's current tree path.
+			Target:    probe.Target{ID: m.ID, Name: m.Name, Host: m.Host},
 			ProbeName: m.ProbeKind,
 			Computed:  sample.Compute(rd.Pings, rd.RTTs),
 			Metric:    metric, // from the authenticated assignment, not the agent's self-report
@@ -221,9 +231,9 @@ func (srv *Server) agentResults(w http.ResponseWriter, r *http.Request) {
 		// (CODE_REVIEW M2). Best-effort and per-vantage, mirroring the hub's own local registry.
 		if m.ProbeKind == "NTP" {
 			if rd.NTPOffsetMs != nil && rd.Stratum != nil && *rd.Stratum >= 0 && *rd.Stratum <= 255 {
-				srv.remoteNTP.set(v, m.Name, *rd.NTPOffsetMs/1000, uint8(*rd.Stratum), metric)
+				srv.remoteNTP.set(v, m.ID, *rd.NTPOffsetMs/1000, uint8(*rd.Stratum), metric)
 			} else {
-				srv.remoteNTP.clear(v, m.Name)
+				srv.remoteNTP.clear(v, m.ID)
 			}
 		}
 	}
