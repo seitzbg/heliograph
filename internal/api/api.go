@@ -207,7 +207,9 @@ func (srv *Server) activeLatest(vantage string) ([]scheduler.Outcome, error) {
 			out = append(out, o)
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Target.Name < out[j].Target.Name })
+	// Order by the stable identity: a store-scanned outcome carries the id, not the display
+	// Name (which is empty), so sorting on Name would be a no-op in production.
+	sort.Slice(out, func(i, j int) bool { return out[i].Target.Key() < out[j].Target.Key() })
 	return out, nil
 }
 
@@ -301,6 +303,10 @@ func (srv *Server) probeSchema(w http.ResponseWriter, _ *http.Request) {
 }
 
 type targetDTO struct {
+	// ID is the target's stable storage key — the value to pass to /api/series?target= and to
+	// key a deep link on. Name is the display path (the tree position), which a move changes
+	// while ID stays put. For all existing targets ID == Name (the path was the key).
+	ID   string `json:"id"`
 	Name string `json:"name"`
 	// Title is the display-name override (falls back to Name in the UI); IP is the address
 	// to show in the graph title (pinned or resolved). Both display-only, omitted when unset.
@@ -364,14 +370,31 @@ func configuredMetric(params map[string]string) string {
 	return ""
 }
 
+// monitorKey is a Monitor's stable storage identity — its ID, falling back to its display Name
+// (path) when no id is set. It mirrors probe.Target.Key() so the catalog join, the series
+// resolver, and the /metrics label all match the store, which keys history by the same fallback
+// for an id-less target (a hand-built monitor, or config that predates node ids). In production
+// buildRuntime backfills ID = Name before the catalog is exposed, so this is inert there; it keeps
+// the API correct for monitors that reach it without an id (chiefly tests).
+func monitorKey(m model.Monitor) string {
+	if m.ID != "" {
+		return m.ID
+	}
+	return m.Name
+}
+
 // latestDTO builds a target DTO from a stored latest round, attaching the target's vantage
 // set, display metadata, and windowed recent loss (for the status dot). Shared by the live
-// and catalog-driven listings. probeKind is the authoritative probe identity for the panel —
-// the catalog's current kind where known, so a stored round left behind under a reused name
-// never mislabels the panel (M3); callers without a catalog pass the stored round's kind.
-func latestDTO(o scheduler.Outcome, probeKind string, tv map[string][]string, meta map[string]TargetMeta, recent map[string]float64, ntp func(string) (float64, uint8, string, bool)) targetDTO {
+// and catalog-driven listings. identity is the target's stable storage key (o.Target.Key());
+// every side-map lookup (tv/meta/recent/ntp) keys by it, since a store-scanned outcome carries
+// only the id, not the display name. displayName is the path shown to the user (from the live
+// catalog), and probeKind is the authoritative probe identity for the panel — the catalog's
+// current kind where known, so a stored round left behind under a reused id never mislabels the
+// panel (M3); callers without a catalog pass the id as the display name and the stored round's kind.
+func latestDTO(o scheduler.Outcome, identity, displayName, probeKind string, tv map[string][]string, meta map[string]TargetMeta, recent map[string]float64, ntp func(string) (float64, uint8, string, bool)) targetDTO {
 	dto := targetDTO{
-		Name:    o.Target.Name,
+		ID:      identity,
+		Name:    displayName,
 		Probe:   probeKind,
 		Metric:  store.MetricOf(o),
 		Loss:    o.Computed.Loss,
@@ -386,22 +409,22 @@ func latestDTO(o scheduler.Outcome, probeKind string, tv map[string][]string, me
 	if o.Err != nil {
 		dto.Error = o.Err.Error()
 	}
-	if vs := tv[o.Target.Name]; len(vs) > 0 {
+	if vs := tv[identity]; len(vs) > 0 {
 		dto.Vantages = vs
 	}
-	if md, ok := meta[o.Target.Name]; ok {
+	if md, ok := meta[identity]; ok {
 		dto.Title, dto.IP = md.Title, md.IP
 	}
-	if rl, ok := recent[o.Target.Name]; ok {
+	if rl, ok := recent[identity]; ok {
 		dto.RecentLossPct = &rl
 	}
-	// Only an NTP panel carries offset/stratum. The registry is keyed by target name only, with no
+	// Only an NTP panel carries offset/stratum. The registry is keyed by target id only, with no
 	// config fingerprint or vantage, so gate on the CURRENT probe identity (not the stored round's)
-	// — a name reused for a different probe must not show the old NTP stat. The caller also passes a
+	// — an id reused for a different probe must not show the old NTP stat. The caller also passes a
 	// nil registry for a remote vantage, since srv.NTPStat is the hub's LOCAL reading and must never
 	// be attributed to a remote outcome (M3).
 	if ntp != nil && probeKind == "NTP" {
-		if offSec, stratum, measure, ok := ntp(o.Target.Name); ok {
+		if offSec, stratum, measure, ok := ntp(identity); ok {
 			offMs := offSec * 1000
 			st := int(stratum)
 			dto.NTPOffsetMs, dto.Stratum, dto.NTPMeasure = &offMs, &st, measure
@@ -452,23 +475,28 @@ func (srv *Server) targets(w http.ResponseWriter, r *http.Request) {
 			slog.Warn("targets: recent-loss scan failed; status dots fall back to last round", "err", err)
 		}
 	}
-	byName := make(map[string]scheduler.Outcome, len(latest))
+	// Index the stored rounds by their stable identity (o.Target.Key()) — NOT the display Name,
+	// which a store-scanned outcome leaves empty — so the catalog join below matches on m.ID.
+	byID := make(map[string]scheduler.Outcome, len(latest))
 	for _, o := range latest {
-		byName[o.Target.Name] = o
+		byID[o.Target.Key()] = o
 	}
 	var out []targetDTO
 	if srv.Configured != nil {
 		// Catalog-driven: list every configured target so remote-only targets (no local
 		// row) still appear and their deep links resolve; merge live data where present,
 		// otherwise emit a no-data entry carrying the target's vantage set (CODE_REVIEW #3).
+		// Identity (the store key + side-map key) is the Monitor's key; display (name/title) is the
+		// Monitor's Name/Title.
 		for _, m := range srv.Configured() {
-			if o, ok := byName[m.Name]; ok {
-				dto := latestDTO(o, m.ProbeKind, tv, meta, recent, ntpStat)
+			id := monitorKey(m)
+			if o, ok := byID[id]; ok {
+				dto := latestDTO(o, id, m.Name, m.ProbeKind, tv, meta, recent, ntpStat)
 				// The effective config metric (probe-level default + per-target override) is
 				// authoritative: it wins over the stored round's kind right after a config change and
 				// honors a probe-level default. Falls back to the per-target param when no resolver
 				// is wired (bare setups/tests).
-				if em := srv.effectiveMetric(m.Name); em != "" {
+				if em := srv.effectiveMetric(id); em != "" {
 					dto.Metric = em
 				} else if cm := configuredMetric(m.Params); cm != "" {
 					dto.Metric = cm
@@ -476,28 +504,31 @@ func (srv *Server) targets(w http.ResponseWriter, r *http.Request) {
 				out = append(out, dto)
 				continue
 			}
-			dto := targetDTO{Name: m.Name, Probe: m.ProbeKind, NoData: true, Metric: probe.MetricRTT}
-			if em := srv.effectiveMetric(m.Name); em != "" {
+			dto := targetDTO{ID: id, Name: m.Name, Probe: m.ProbeKind, NoData: true, Metric: probe.MetricRTT}
+			if em := srv.effectiveMetric(id); em != "" {
 				dto.Metric = em
 			} else if cm := configuredMetric(m.Params); cm != "" {
 				dto.Metric = cm
 			}
-			if vs := tv[m.Name]; len(vs) > 0 {
+			if vs := tv[id]; len(vs) > 0 {
 				dto.Vantages = vs
 			} else if len(m.Vantages) > 0 {
 				dto.Vantages = m.Vantages
 			}
-			if md, ok := meta[m.Name]; ok {
+			if md, ok := meta[id]; ok {
 				dto.Title, dto.IP = md.Title, md.IP
 			}
-			if rl, ok := recent[m.Name]; ok {
+			if rl, ok := recent[id]; ok {
 				dto.RecentLossPct = &rl
 			}
 			out = append(out, dto)
 		}
 	} else {
+		// No catalog (bare setups/tests): the id is the display path — they coincide when no
+		// node id is set — so pass the stored round's identity as both.
 		for _, o := range latest {
-			out = append(out, latestDTO(o, o.ProbeName, tv, meta, recent, ntpStat))
+			key := o.Target.Key()
+			out = append(out, latestDTO(o, key, key, o.ProbeName, tv, meta, recent, ntpStat))
 		}
 		sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	}
@@ -825,6 +856,10 @@ func (srv *Server) series(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// The param is the stable id; a pre-move bookmark may carry the old display path — resolve
+	// it to the id so the store lookup (keyed by id) and the metric resolver both hit, and echo
+	// the resolved key back in the response's "target".
+	key = srv.resolveTargetKey(key)
 	// Drag-zoom sub-range: explicit [from,to] (unix ms) fetches an arbitrary historical
 	// window and takes precedence over the window-based tail.
 	if from, to, present, errMsg := parseFromTo(r); errMsg != "" {
@@ -929,6 +964,33 @@ func (srv *Server) effectiveMetric(target string) string {
 	return ""
 }
 
+// resolveTargetKey maps a /api/series target param to its storage key. The param is normally the
+// stable id; a pre-move bookmark may instead carry the target's old display PATH. With a catalog
+// wired, a param that is a known id is used as-is; otherwise a param matching a known display path
+// is mapped to that target's id; anything else (bare setups, or an unknown target) is returned
+// unchanged. An id match wins over a path match, so a param that is genuinely an id still resolves
+// to itself even if it happens to equal another target's path. Because id == path for every
+// existing target, this fallback is inert today and only matters for a link to a node's pre-move path.
+func (srv *Server) resolveTargetKey(param string) string {
+	if srv.Configured == nil {
+		return param
+	}
+	var pathID string
+	for _, m := range srv.Configured() {
+		id := monitorKey(m)
+		if id == param {
+			return param
+		}
+		if pathID == "" && m.Name == param {
+			pathID = id
+		}
+	}
+	if pathID != "" {
+		return pathID
+	}
+	return param
+}
+
 // roundsDTO converts a target's rounds (oldest->newest) into the wire shape shared by
 // /api/series and /api/series/all: each round carries its wall-clock timestamp `t`,
 // loss/pings, and the centered RTTs (null in lost slots) ready for the smoke bands.
@@ -994,31 +1056,34 @@ func capSeriesAll(all map[string][]scheduler.Outcome, max int) bool {
 	return trimmed
 }
 
-// seriesCatalog returns the bounded configured targets measured from vantage. A catalog is required:
-// falling back to Store.Keys would reintroduce an unbounded DISTINCT over persistent history on this
-// unauthenticated endpoint, which is exactly what the catalog-driven query is intended to remove.
+// seriesCatalog returns the bounded configured targets measured from vantage, as their stable
+// storage ids (the key the store's SeriesAll queries by, and the key the response is grouped
+// under). A catalog is required: falling back to Store.Keys would reintroduce an unbounded DISTINCT
+// over persistent history on this unauthenticated endpoint, which is exactly what the catalog-driven
+// query is intended to remove.
 func (srv *Server) seriesCatalog(vantage string) ([]string, error) {
 	if srv.Configured == nil {
 		return nil, errors.New("configured target catalog unavailable")
 	}
 	want := store.VantageOrDefault(vantage)
 	seen := map[string]bool{}
-	var names []string
+	var ids []string
 	for _, m := range srv.Configured() {
+		id := monitorKey(m)
 		vantages := m.Vantages
 		if len(vantages) == 0 {
 			vantages = []string{store.DefaultVantage}
 		}
 		for _, v := range vantages {
-			if v == want && !seen[m.Name] {
-				seen[m.Name] = true
-				names = append(names, m.Name)
+			if v == want && !seen[id] {
+				seen[id] = true
+				ids = append(ids, id)
 				break
 			}
 		}
 	}
-	sort.Strings(names)
-	return names, nil
+	sort.Strings(ids)
+	return ids, nil
 }
 
 // seriesAll returns recent per-round samples for every target in one response — the
@@ -1080,12 +1145,15 @@ func (srv *Server) seriesAll(w http.ResponseWriter, r *http.Request) {
 	// capSeriesAll is a cheap response-side backstop for a store that doesn't. Either counts as
 	// truncation (CODE_REVIEW M5).
 	truncated := storeTruncated || capSeriesAll(all, maxSeriesAllTotalRounds)
+	// The store groups by (and the catalog is built from) the stable id, so each key here is a
+	// target id — the same key /api/series and the DTO's `id` use. The client joins it against
+	// /api/targets for the display path.
 	targets := make(map[string]any, len(all))
 	total := 0
-	for name, hist := range all {
-		rounds, metric := currentMetricSeries(hist, srv.effectiveMetric(name))
+	for id, hist := range all {
+		rounds, metric := currentMetricSeries(hist, srv.effectiveMetric(id))
 		total += len(rounds)
-		targets[name] = map[string]any{"metric": metric, "rounds": roundsDTO(rounds)}
+		targets[id] = map[string]any{"metric": metric, "rounds": roundsDTO(rounds)}
 	}
 	if truncated {
 		slog.Warn("series/all response truncated to the global round budget",
@@ -1222,6 +1290,19 @@ func (srv *Server) metrics(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "store unavailable", http.StatusServiceUnavailable)
 		return
 	}
+	// Prometheus labels are for dashboards and should read as the target's CURRENT path, not its
+	// opaque storage id. A store-scanned outcome carries only the id, so resolve it to the display
+	// path via the live catalog (id -> path); an id with no catalog entry (or no catalog wired)
+	// keeps the id as its label. Because id == path for every existing target, scrape/Grafana
+	// labels are unchanged — this only relabels a moved node to its new path.
+	var displayPath map[string]string
+	if srv.Configured != nil {
+		cfg := srv.Configured()
+		displayPath = make(map[string]string, len(cfg))
+		for _, m := range cfg {
+			displayPath[monitorKey(m)] = m.Name
+		}
+	}
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	var b strings.Builder
 	b.WriteString("# HELP heliograph_probe_median_seconds Median round-trip time of the most recent round.\n")
@@ -1237,7 +1318,11 @@ func (srv *Server) metrics(w http.ResponseWriter, _ *http.Request) {
 	b.WriteString("# HELP heliograph_probe_last_sample_timestamp_seconds Unix time of this target's most recent round (alert on staleness).\n")
 	b.WriteString("# TYPE heliograph_probe_last_sample_timestamp_seconds gauge\n")
 	for _, o := range latest {
-		lbl := fmt.Sprintf(`{target=%q,probe=%q}`, escapeLabel(o.Target.Name), escapeLabel(o.ProbeName))
+		label := o.Target.Key()
+		if p := displayPath[label]; p != "" {
+			label = p
+		}
+		lbl := fmt.Sprintf(`{target=%q,probe=%q}`, escapeLabel(label), escapeLabel(o.ProbeName))
 		median := o.Computed.Median
 		// A signed clock offset is not a round-trip time, so it never rides the RTT median gauge
 		// (whose HELP says "round-trip time") — it goes to an offset-specific gauge instead. Loss,

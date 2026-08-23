@@ -411,20 +411,22 @@ func main() {
 		// the store but ages out via retention / the bounded cap). Built from the full
 		// monitor set (all vantages), not just the hub's local jobs, so a remote-only
 		// target survives the activeLatest filter for its own vantage (CODE_REVIEW #3 / P1-3).
+		// Keyed by the stable id (mon.ID) — activeLatest filters the store's keys, which are ids,
+		// through this set, so a target must be indexed by the same id its rows are stored under.
 		srv.Active = func() map[string]bool {
 			ms := current.Load().monitors
 			m := make(map[string]bool, len(ms))
 			for _, mon := range ms {
-				m[mon.Name] = true
+				m[mon.ID] = true
 			}
 			return m
 		}
-		// Per-target step drives /api/sla's coverage (expected rounds = window/step).
+		// Per-target step drives /api/sla's coverage (expected rounds = window/step); keyed by id.
 		srv.Steps = func() map[string]time.Duration {
 			ms := current.Load().monitors
 			m := make(map[string]time.Duration, len(ms))
 			for _, mon := range ms {
-				m[mon.Name] = mon.Step
+				m[mon.ID] = mon.Step
 			}
 			return m
 		}
@@ -482,11 +484,12 @@ func main() {
 					return current.Load().commitRemote(ctx, ing, out)
 				}
 			}
+			// Keyed by the stable id, matching /api/targets' catalog join (tv[m.ID]).
 			srv.TargetVantages = func() map[string][]string {
 				ms := current.Load().monitors
 				m := make(map[string][]string, len(ms))
 				for _, mon := range ms {
-					m[mon.Name] = mon.Vantages
+					m[mon.ID] = mon.Vantages
 				}
 				return m
 			}
@@ -905,10 +908,11 @@ type runtime struct {
 	// definition that a reload has since redefined (CODE_REVIEW #4, in-flight completion).
 	targetFP map[string]string
 	// targetMeta is each target's display-only metadata (title override + IP to show in the
-	// title), recomputed on every build so it refreshes on SIGHUP reload.
+	// title), keyed by the stable id, recomputed on every build so it refreshes on SIGHUP reload.
 	targetMeta map[string]api.TargetMeta
 	// metricByName is each target's effective metric (rtt/offset) resolved from the current config
-	// (probe-level default + per-target override). The API reads it for the signed-axis choice and
+	// (probe-level default + per-target override), keyed by the stable id (matching the store and the
+	// API's id-keyed reads — the name is historical). The API reads it for the signed-axis choice and
 	// for filtering series/rollup, so a config change takes effect at once and a probe-level default
 	// is honored even before a target has stored data (CODE_REVIEW round 2, M5/M6).
 	metricByName map[string]string
@@ -1158,7 +1162,7 @@ func warmStartAlerts(ctx context.Context, engine *alert.Engine, monitors []model
 		if len(m.Alerts) == 0 {
 			continue
 		}
-		meta := warmMeta{host: m.Host, probe: m.ProbeKind, step: m.Step, metric: probe.NormalizeMetric(metricByName[m.Name])}
+		meta := warmMeta{host: m.Host, probe: m.ProbeKind, step: m.Step, metric: probe.NormalizeMetric(metricByName[m.ID])}
 		for _, v := range m.Vantages {
 			var hist []scheduler.Outcome
 			var err error
@@ -1371,7 +1375,7 @@ func buildRuntime(configPath string, demoPings int, demoStep, timeout time.Durat
 	metricByName := make(map[string]string, len(fullMonitors))
 	for _, m := range fullMonitors {
 		targetFP[m.ID] = federation.Fingerprint(m, probeCfgs[m.ProbeKind])
-		metricByName[m.Name] = probe.MetricFor(m.ProbeKind, m.Params, probeCfgs[m.ProbeKind])
+		metricByName[m.ID] = probe.MetricFor(m.ProbeKind, m.Params, probeCfgs[m.ProbeKind])
 	}
 	return &runtime{jobs: jobs, monitors: fullMonitors, probeCfgs: probeCfgs, engine: engine,
 		alertsByTarget: alertsByTarget, alerteeByTarget: alerteeByTarget, targetFP: targetFP,
@@ -1395,7 +1399,7 @@ func buildTargetMeta(monitors []model.Monitor, resolveIPs bool) map[string]api.T
 			md.IP = config.DisplayIP(m, lookup)
 		}
 		if md.Title != "" || md.IP != "" {
-			meta[m.Name] = md
+			meta[m.ID] = md
 		}
 	}
 	return meta

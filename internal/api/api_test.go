@@ -1380,3 +1380,88 @@ func TestTargetsNTPStatOnlyDecoratesLocalVantage(t *testing.T) {
 		t.Errorf("remote vantage must NOT be decorated with the hub's local clock offset, got %v", *off)
 	}
 }
+
+// A stored round is keyed by the stable target id, while the display path comes from the live
+// config catalog. /api/targets must join the two by id (a pgstore-scanned outcome has Target.ID
+// set and Target.Name empty), returning the storage key as `id` and the Monitor's path as `name`.
+func TestTargetsDTOExposesIDAndDisplayPath(t *testing.T) {
+	st := store.NewMem(10)
+	// A prod-shaped stored round: keyed by ID, no display Name (as a pgstore scan yields).
+	st.Add([]scheduler.Outcome{
+		{Target: probe.Target{ID: "the-id", Host: "h"}, ProbeName: "FPing",
+			Computed: sample.Compute(2, []float64{0.01, 0.02}), When: time.Unix(1_700_000_000, 0)},
+	})
+	srv := New(st, "")
+	srv.Active = func() map[string]bool { return map[string]bool{"the-id": true} }
+	// The live catalog: id != path (the node was moved), Title empty so name is the path.
+	srv.Configured = func() []model.Monitor {
+		return []model.Monitor{{ID: "the-id", Name: "Grp/leaf", ProbeKind: "FPing"}}
+	}
+
+	rec := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(rec, httptest.NewRequest("GET", "/api/targets", nil))
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var tj struct {
+		Targets []struct {
+			ID       string   `json:"id"`
+			Name     string   `json:"name"`
+			NoData   bool     `json:"no_data"`
+			MedianMs *float64 `json:"median_ms"`
+		} `json:"targets"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &tj); err != nil {
+		t.Fatalf("targets json: %v", err)
+	}
+	if len(tj.Targets) != 1 {
+		t.Fatalf("want 1 target, got %d (%+v)", len(tj.Targets), tj.Targets)
+	}
+	d := tj.Targets[0]
+	if d.ID != "the-id" {
+		t.Errorf("id = %q, want %q (the storage key)", d.ID, "the-id")
+	}
+	if d.Name != "Grp/leaf" {
+		t.Errorf("name = %q, want %q (the display path from the catalog)", d.Name, "Grp/leaf")
+	}
+	// The stored round must be joined in by id, not treated as no-data.
+	if d.NoData || d.MedianMs == nil {
+		t.Errorf("stored round must join by id (live data), got no_data=%v median=%v", d.NoData, d.MedianMs)
+	}
+}
+
+// /api/series is fetched by id, but a pre-move bookmark carries the old display PATH. With id !=
+// path, GET /api/series?target=<path> must fall back through the catalog to the id and return the
+// stored rounds (which live under the id), echoing the resolved id in the response's `target`.
+func TestSeriesFallsBackFromPathToID(t *testing.T) {
+	st := store.NewMem(10)
+	st.Add([]scheduler.Outcome{
+		{Target: probe.Target{ID: "the-id", Host: "h"}, ProbeName: "FPing",
+			Computed: sample.Compute(2, []float64{0.01, 0.02}), When: time.Unix(1_700_000_000, 0)},
+		{Target: probe.Target{ID: "the-id", Host: "h"}, ProbeName: "FPing",
+			Computed: sample.Compute(2, []float64{0.03, 0.04}), When: time.Unix(1_700_000_060, 0)},
+	})
+	srv := New(st, "")
+	srv.Configured = func() []model.Monitor {
+		return []model.Monitor{{ID: "the-id", Name: "Grp/leaf", ProbeKind: "FPing"}}
+	}
+
+	rec := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(rec, httptest.NewRequest("GET", "/api/series?target=Grp/leaf", nil))
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var resp struct {
+		Target string           `json:"target"`
+		Rounds []map[string]any `json:"rounds"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("series json: %v", err)
+	}
+	if len(resp.Rounds) != 2 {
+		t.Fatalf("rounds = %d, want 2 (the rounds stored under the id, reached via the path)", len(resp.Rounds))
+	}
+	if resp.Target != "the-id" {
+		t.Errorf("target echo = %q, want %q (the resolved storage key)", resp.Target, "the-id")
+	}
+}
