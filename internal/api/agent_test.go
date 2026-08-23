@@ -122,7 +122,10 @@ func ingestServer(ing store.Store) *Server {
 		store:       ing,
 		VantageAuth: fakeAuth{name: "nyc", ok: true},
 		Assignment: func(v string) ([]model.Monitor, map[string]map[string]string, string) {
-			return []model.Monitor{{Name: "cf", ProbeKind: "FPing", Host: "1.1.1.1", Pings: 20, Step: time.Minute, Vantages: []string{"nyc"}}}, nil, "sha256:v1"
+			// ID mirrors Name: an unmoved target's id falls back to its path (config.Monitors'
+			// resolution), so posting under the display name "cf" still hits the id-keyed
+			// ingest maps, matching production for a target that has never moved.
+			return []model.Monitor{{Name: "cf", ID: "cf", ProbeKind: "FPing", Host: "1.1.1.1", Pings: 20, Step: time.Minute, Vantages: []string{"nyc"}}}, nil, "sha256:v1"
 		},
 	}
 }
@@ -280,7 +283,7 @@ func TestAssignmentStampsFingerprint(t *testing.T) {
 // not be stored (or alerted) as the target's redefined identity. A round carrying the
 // CURRENT fingerprint is accepted; a stale one is dropped and counted, not misattributed.
 func TestIngestFingerprintAttribution(t *testing.T) {
-	current := model.Monitor{Name: "cf", ProbeKind: "FPing", Host: "2.2.2.2", Pings: 3, Step: time.Minute, Vantages: []string{"nyc"}}
+	current := model.Monitor{Name: "cf", ID: "cf", ProbeKind: "FPing", Host: "2.2.2.2", Pings: 3, Step: time.Minute, Vantages: []string{"nyc"}}
 	probeCfgs := map[string]map[string]string{"FPing": {"binary": "/usr/sbin/fping"}}
 	ing := &fakeIngester{}
 	var alerted []scheduler.Outcome
@@ -642,7 +645,10 @@ func TestRemoteNTPStatTransportsAndClears(t *testing.T) {
 		store:       st,
 		VantageAuth: fakeAuth{name: "nyc", ok: true},
 		Assignment: func(v string) ([]model.Monitor, map[string]map[string]string, string) {
-			return []model.Monitor{{Name: "clock", ProbeKind: "NTP", Host: "h", Pings: 2, Step: time.Minute, Vantages: []string{"nyc"}}}, nil, "sha256:v1"
+			// ID mirrors Name (unmoved target, matching config.Monitors' path fallback), so the
+			// remote NTP registry — now keyed by id on the write side — is still found by the
+			// read side's o.Target.Name lookup below.
+			return []model.Monitor{{Name: "clock", ID: "clock", ProbeKind: "NTP", Host: "h", Pings: 2, Step: time.Minute, Vantages: []string{"nyc"}}}, nil, "sha256:v1"
 		},
 		Active: func() map[string]bool { return map[string]bool{"clock": true} },
 		Configured: func() []model.Monitor {
@@ -697,5 +703,59 @@ func TestRemoteNTPStatTransportsAndClears(t *testing.T) {
 	}
 	if off := offsetAt("/api/targets?vantage=nyc"); off != nil {
 		t.Fatalf("a no-stat round must clear the remote offset, got %v", *off)
+	}
+}
+
+// A round reported under the assignment's stable ID is accepted and stored under that ID,
+// even though the monitor's display Name (path) differs from the ID — proving the wire
+// carries the id end-to-end: hub assignment -> agent echo -> hub ingest key.
+func TestAssignmentCarriesIDAndIngestKeysByIt(t *testing.T) {
+	st := store.NewMem(10)
+	m := model.Monitor{ID: "wid", Name: "grp/leaf", ProbeKind: "FPing", Host: "1.1.1.1", Pings: 3, Step: time.Minute, Vantages: []string{"nyc"}}
+	srv := &Server{
+		store:       st,
+		VantageAuth: fakeAuth{name: "nyc", ok: true},
+		Assignment: func(v string) ([]model.Monitor, map[string]map[string]string, string) {
+			return []model.Monitor{m}, nil, "sha256:v1"
+		},
+	}
+
+	r := httptest.NewRequest("GET", "/agent/v1/assignment", nil)
+	r.Header.Set("Authorization", "Bearer smk_x_y")
+	w := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(w, r)
+	if w.Code != 200 {
+		t.Fatalf("assignment status=%d body=%s", w.Code, w.Body)
+	}
+	var assignment agentwire.Assignment
+	if err := json.Unmarshal(w.Body.Bytes(), &assignment); err != nil {
+		t.Fatalf("decode assignment: %v", err)
+	}
+	if len(assignment.Targets) != 1 || assignment.Targets[0].ID != "wid" {
+		t.Fatalf("assignment.Targets[0].ID = %+v, want ID=wid", assignment.Targets)
+	}
+	fp := assignment.Targets[0].Fingerprint
+
+	// The agent echoes the ID (not the display path) as RoundReport.Target.
+	body := fmt.Sprintf(`{"results":[{"target":"wid","ts":%q,"pings":3,"rtts":[0.01,0.02,0.03],"fingerprint":%q}]}`,
+		recentTS(), fp)
+	w2 := postResults(t, srv, body)
+	if w2.Code != 200 {
+		t.Fatalf("results status=%d body=%s", w2.Code, w2.Body)
+	}
+	var resp agentwire.ResultsResponse
+	if err := json.Unmarshal(w2.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode results: %v", err)
+	}
+	if resp.Accepted != 1 || resp.Dropped != 0 {
+		t.Fatalf("results response = %+v, want accepted=1 dropped=0", resp)
+	}
+
+	hist, err := st.HistoryVantage(context.Background(), "wid", "nyc")
+	if err != nil {
+		t.Fatalf("HistoryVantage: %v", err)
+	}
+	if len(hist) == 0 {
+		t.Fatalf("expected the round to be stored under the stable id %q, got none", "wid")
 	}
 }

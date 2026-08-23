@@ -82,3 +82,19 @@ func TestBuildJobsCarriesFingerprint(t *testing.T) {
 		t.Fatalf("Job.Fingerprint = %q, want sha256:deadbeef", jobs[0].Fingerprint)
 	}
 }
+
+// BuildJobs must carry the hub's stable target id from each AssignmentTarget onto the
+// built Job's probe.Target, alongside (not replacing) the display Name — the id is what
+// flows through the scheduler into the Outcome and ultimately the wire RoundReport.
+func TestBuildJobsCarriesID(t *testing.T) {
+	targets := []agentwire.AssignmentTarget{
+		{ID: "wid", Name: "grp/leaf", Probe: "TCPConnect", Host: "1.1.1.1", Params: map[string]string{"port": "443"}, StepMs: 1000, Pings: 1},
+	}
+	jobs, skipped := BuildJobs(targets, 4*time.Second)
+	if len(jobs) != 1 || len(skipped) != 0 {
+		t.Fatalf("jobs=%d skipped=%v", len(jobs), skipped)
+	}
+	if jobs[0].Target.ID != "wid" || jobs[0].Target.Name != "grp/leaf" {
+		t.Fatalf("Job.Target = %+v, want ID=wid Name=grp/leaf", jobs[0].Target)
+	}
+}

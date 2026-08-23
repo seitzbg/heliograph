@@ -50,8 +50,11 @@ func BuildJobs(targets []agentwire.AssignmentTarget, timeout time.Duration) (job
 			step = config.MinStep
 		}
 		jobs = append(jobs, scheduler.Job{
-			Probe:   p,
-			Target:  probe.Target{Name: t.Name, Host: t.Host, Params: t.Params},
+			Probe: p,
+			// ID carries the hub's stable storage identity through the probe/scheduler
+			// pipeline into the Outcome, so reportFromOutcome can echo it (falling back to
+			// Name for an old hub that sent none) as RoundReport.Target.
+			Target:  probe.Target{ID: t.ID, Name: t.Name, Host: t.Host, Params: t.Params},
 			Pings:   t.Pings,
 			Timeout: timeout,
 			Step:    step,

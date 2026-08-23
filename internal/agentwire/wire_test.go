@@ -11,7 +11,9 @@ func TestAssignmentJSONTags(t *testing.T) {
 		{Name: "cf", Probe: "FPing", Host: "1.1.1.1", StepMs: 60000, Pings: 20},
 	}}
 	b, _ := json.Marshal(a)
-	want := `{"vantage":"nyc","config_version":"sha256:x","targets":[{"name":"cf","probe":"FPing","host":"1.1.1.1","step_ms":60000,"pings":20}]}`
+	// id is a core identity field like name/probe/host: no omitempty, so it always rides
+	// the wire even when a caller (like this test fixture) left it unset.
+	want := `{"vantage":"nyc","config_version":"sha256:x","targets":[{"id":"","name":"cf","probe":"FPing","host":"1.1.1.1","step_ms":60000,"pings":20}]}`
 	if string(b) != want {
 		t.Fatalf("assignment json:\n got %s\nwant %s", b, want)
 	}

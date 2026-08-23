@@ -32,6 +32,28 @@ func TestReportFromOutcomeCarriesFingerprint(t *testing.T) {
 	}
 }
 
+// reportFromOutcome must echo the target's stable id (not its display Name) as
+// RoundReport.Target when the assignment carried one, so the hub attributes the round to the
+// same storage identity regardless of the target's current tree path. When the id is empty
+// (an old hub that never sent one), it falls back to Name — Target.Key()'s contract.
+func TestReportFromOutcomeTargetUsesIDElseName(t *testing.T) {
+	when := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
+	o := scheduler.Outcome{
+		Target:    probe.Target{ID: "wid", Name: "grp/leaf", Host: "h"},
+		ProbeName: "FPing",
+		Computed:  sample.Compute(1, []float64{0.01}),
+		When:      when,
+	}
+	if got := reportFromOutcome(o, nil); got.Target != "wid" {
+		t.Fatalf("RoundReport.Target = %q, want the id %q", got.Target, "wid")
+	}
+
+	o.Target.ID = "" // old-hub compat: no id was assigned
+	if got := reportFromOutcome(o, nil); got.Target != "grp/leaf" {
+		t.Fatalf("RoundReport.Target = %q, want fallback to Name %q", got.Target, "grp/leaf")
+	}
+}
+
 // An NTP outcome carries the probe's companion clock stat (offset ms + stratum) onto the wire
 // RoundReport via the injected lookup, so a remote vantage's clock reading reaches the hub. A
 // non-NTP outcome, or an unsynchronized clock (ok=false), leaves the fields absent (CODE_REVIEW M2).
