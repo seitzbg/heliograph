@@ -175,6 +175,10 @@ type Server struct {
 	// "effective" is the file+DB merged config the collector is running. Open read like ConfigGet
 	// (the config holds no secrets); nil ⇒ route not registered.
 	ConfigYAML func(source string) ([]byte, error)
+	// ConfigEffective, if set, returns the file+DB merged config as JSON — the read-only "effective"
+	// source of GET /api/admin/config?source=effective, which the Config tab renders as a tree. Same
+	// non-secret data as ConfigYAML("effective"); nil ⇒ the effective source answers 503.
+	ConfigEffective func() (json.RawMessage, error)
 }
 
 func New(s store.Store, webDir string) *Server { return &Server{store: s, webDir: webDir} }
@@ -1660,6 +1664,24 @@ func (srv *Server) revokeVantage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (srv *Server) getConfig(w http.ResponseWriter, r *http.Request) {
+	// source=effective serves the file+DB merged config, read-only (the Config tab's default view).
+	// It has no editable version — the frontend renders it read-only and edits only the DB fragment.
+	if r.URL.Query().Get("source") == "effective" {
+		if srv.ConfigEffective == nil {
+			http.Error(w, `{"error":"effective config unavailable"}`, http.StatusServiceUnavailable)
+			return
+		}
+		doc, err := srv.ConfigEffective()
+		if err != nil {
+			http.Error(w, `{"error":"config unavailable"}`, http.StatusServiceUnavailable)
+			return
+		}
+		if trimmed := bytes.TrimSpace(doc); len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+			doc = json.RawMessage(`{}`)
+		}
+		writeJSON(w, map[string]any{"readonly": true, "doc": doc})
+		return
+	}
 	doc, version, err := srv.ConfigGet()
 	if err != nil {
 		http.Error(w, `{"error":"store unavailable"}`, http.StatusServiceUnavailable)

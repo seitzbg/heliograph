@@ -6,6 +6,15 @@ All notable changes to **Heliograph** are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed
+- **The Config tab now defaults to your Effective config, not the DB fragment.** The Effective | DB
+  source toggle now applies to both the Tree and YAML views (previously YAML-only), and the tab opens
+  on **Effective** — the file+DB merged config the collector actually runs — so you see your real
+  config instead of an empty database fragment. Effective is read-only (you can't edit file-defined
+  targets from the browser); switch the source to **DB** to add or edit database-backed targets. New
+  read-only endpoint `GET /api/admin/config?source=effective` (open read, same non-secret data as the
+  effective YAML) backs the effective tree.
+
 ## [1.0.15] - 2026-08-24
 
 ### Added

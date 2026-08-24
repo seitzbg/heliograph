@@ -185,6 +185,12 @@
   body:not(.admin-can-edit) .cfg-tree .cfg-addchild,
   body:not(.admin-can-edit) .cfg-tree .chandle { display:none !important; }
   body:not(.admin-can-edit) .cfg-tree .crow { cursor:default; }
+  /* read-only effective tree (Config source = Effective): no edit affordances even for an admin */
+  .cfg-tree.readonly [data-edit],
+  .cfg-tree.readonly [data-remove],
+  .cfg-tree.readonly .cfg-addchild,
+  .cfg-tree.readonly .chandle { display:none !important; }
+  .cfg-tree.readonly .crow { cursor:default; }
   #zoomCanvas { cursor:crosshair; }
   .zoom-sel { position:absolute; top:0; height:100%; background:rgba(80,150,235,.18); background:color-mix(in srgb, var(--accent) 16%, transparent); border-left:1px solid var(--accent); border-right:1px solid var(--accent); pointer-events:none; }
   .zoom-reset { background:transparent; border:1px solid var(--border); border-radius:6px; padding:3px 9px; cursor:pointer; }
@@ -472,7 +478,7 @@
   <!-- CONFIG (DB-backed targets) -->
   <section id="viewConfig" class="hidden">
     <h2 class="vadmin-title">Config</h2>
-    <p class="lede">Targets stored in the database, merged live with your YAML config. Requires the admin password. YAML-defined targets are managed in files, not here.</p>
+    <p class="lede">Your monitoring config. <b>Effective</b> is your YAML files merged with the database targets, exactly as the collector runs it (read-only); switch to <b>DB</b> to add or edit database-backed targets (admin login required). YAML-defined targets are managed in files, not here.</p>
 
     <div id="cfgDisabled" class="panel vadmin-note hidden">
       Config management is disabled. It requires a database (<code>-dsn</code>), a config file
@@ -485,26 +491,24 @@
       <div class="panel">
         <div class="vadmin-reveal-actions" style="justify-content:space-between; align-items:baseline; margin-bottom:8px; flex-wrap:wrap; gap:8px 12px">
           <span style="display:flex; gap:10px; align-items:baseline; flex-wrap:wrap">
-            <span class="vadmin-lbl">DB targets <span id="cfgVersion" class="vadmin-err" style="color:var(--ink-faint)"></span></span>
+            <span class="vadmin-lbl"><span id="cfgLabel">Effective config</span> <span id="cfgVersion" class="vadmin-err" style="color:var(--ink-faint)"></span></span>
+            <span class="seg" id="cfgSrcSeg" role="group" aria-label="Config source" title="Effective = your YAML files merged with the DB targets, as the collector runs it (read-only) · DB = just the targets stored in the database (editable)">
+              <button type="button" data-cfgsrc="effective" aria-pressed="true">Effective</button>
+              <button type="button" data-cfgsrc="db" aria-pressed="false">DB</button>
+            </span>
             <span class="seg" id="cfgViewSeg" role="group" aria-label="Config view">
               <button type="button" data-cfgview="tree" aria-pressed="true">Tree</button>
               <button type="button" data-cfgview="yaml" aria-pressed="false">YAML</button>
             </span>
           </span>
-          <span style="display:flex; gap:8px; align-items:baseline; flex-wrap:wrap">
-            <span id="cfgTreeActions" style="display:flex; gap:8px; align-items:baseline; flex-wrap:wrap">
-              <span class="admin-hint">Read-only — <b>Log in</b> (top right) to edit</span>
-              <button id="cfgAddBtn" class="vadmin-btn" type="button">+ Add target</button>
-              <button id="cfgAddGroupBtn" class="vadmin-btn" type="button">+ Add group</button>
-              <button id="cfgImportBtn" class="vadmin-btn" type="button">Import YAML</button>
-            </span>
-            <span class="seg hidden" id="cfgSrcSeg" role="group" aria-label="YAML source" title="DB = targets stored in the database · Effective = your YAML files merged with the DB targets, as the collector runs it">
-              <button type="button" data-cfgsrc="db" aria-pressed="true">DB</button>
-              <button type="button" data-cfgsrc="effective" aria-pressed="false">Effective</button>
-            </span>
+          <span id="cfgTreeActions" style="display:flex; gap:8px; align-items:baseline; flex-wrap:wrap">
+            <span class="admin-hint">Read-only — <b>Log in</b> (top right) to edit</span>
+            <button id="cfgAddBtn" class="vadmin-btn" type="button">+ Add target</button>
+            <button id="cfgAddGroupBtn" class="vadmin-btn" type="button">+ Add group</button>
+            <button id="cfgImportBtn" class="vadmin-btn" type="button">Import YAML</button>
           </span>
         </div>
-        <div id="cfgTree" class="cfg-tree" role="tree" aria-label="DB targets"></div>
+        <div id="cfgTree" class="cfg-tree" role="tree" aria-label="Config targets"></div>
         <pre id="cfgYaml" class="cfg-yaml hidden" tabindex="0" aria-label="Config as YAML"></pre>
       </div>
     </div>

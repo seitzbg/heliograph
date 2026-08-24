@@ -1975,7 +1975,7 @@
       (function walk(ns) { for (const n of ns) if (n.isFolder) { folderPaths.add(n.path); walk(n.children); } })(tree);
       for (const p of Array.from(cfgCollapsed)) if (!folderPaths.has(p)) cfgCollapsed.delete(p);
       $('cfgVersion').textContent = 'v' + cfg.version;
-      if (!tree.length) { cfgFocusPath = null; $('cfgTree').innerHTML = '<div class="tree-empty">No DB targets yet — add one.</div>'; return; }
+      if (!tree.length) { cfgFocusPath = null; $('cfgTree').innerHTML = '<div class="tree-empty">' + (cfg.readonly ? 'No targets configured.' : 'No DB targets yet — add one.') + '</div>'; return; }
       // Keep the roving-focus anchor on a still-visible row; a save/collapse can retire the old
       // one (removed node, or hidden under a now-collapsed parent) — fall back to the first row.
       const rows = Dash.cfgVisibleRows(tree, cfgCollapsed);
@@ -2019,48 +2019,70 @@
       if (mode === 'error') { cShow('cfgError'); return; }
       // Auth is handled by the top-bar Log in control; keep the bar in sync and point there.
       if (mode === 'login') { refreshAdminState(); cShow('cfgLogin'); return; }
-      let data;
-      try { data = await r.json(); } catch (e) { cShow('cfgError'); return; }
-      cfg.version = data.version || 0;
-      cfg.doc = (data.doc && typeof data.doc === 'object') ? data.doc : { targets: { children: {} } };
-      renderCfgTree();
+      // The probe above only resolves the disabled/login/list state; applyCfgView loads the actual
+      // data for whichever source+view is active (Effective tree by default).
       cShow('cfgList');
       applyCfgView();
     }
     $('cfgRetry').addEventListener('click', () => renderConfig());
 
-    // ---- Config view toggle: Tree (the editable target tree) | YAML (read-only). In YAML mode a
-    // DB | Effective source picker chooses between the stored DB fragment and the file+DB merged
-    // config the collector runs. The YAML views are read-only for everyone (the GET is open, the
-    // config holds no secrets); the tree's edit controls show only in Tree mode. ----
-    let cfgView = 'tree';  // 'tree' | 'yaml'
-    let cfgYamlSrc = 'db'; // 'db' | 'effective'
+    // ---- Config source (Effective|DB) + view (Tree|YAML), both applying to the whole tab.
+    // Effective = the file+DB merged config the collector runs, read-only (tree edit controls hidden);
+    // DB = the editable stored fragment. Default is Effective so the tab opens on the running config.
+    // The reads are open (the config holds no secrets); every write endpoint stays admin-gated. ----
+    let cfgView = 'tree';      // 'tree' | 'yaml'
+    let cfgSrc = 'effective';  // 'effective' (read-only merged) | 'db' (editable fragment)
     function segPress(segId, key, val) {
       for (const b of $(segId).querySelectorAll('button')) b.setAttribute('aria-pressed', String(b.dataset[key] === val));
     }
     function applyCfgView() {
       segPress('cfgViewSeg', 'cfgview', cfgView);
+      segPress('cfgSrcSeg', 'cfgsrc', cfgSrc);
       const yaml = cfgView === 'yaml';
-      $('cfgTree').classList.toggle('hidden', yaml);
-      $('cfgTreeActions').classList.toggle('hidden', yaml);
+      const db = cfgSrc === 'db';
       $('cfgYaml').classList.toggle('hidden', !yaml);
-      $('cfgSrcSeg').classList.toggle('hidden', !yaml);
-      if (yaml) loadCfgYaml();
+      $('cfgTree').classList.toggle('hidden', yaml);
+      $('cfgTreeActions').classList.toggle('hidden', yaml || !db); // add/import: editable DB tree only
+      $('cfgLabel').textContent = db ? 'DB targets' : 'Effective config';
+      $('cfgVersion').classList.toggle('hidden', !db);             // the version applies to the DB fragment
+      if (yaml) loadCfgYaml(); else loadCfgTree();
+    }
+    // loadCfgTree renders the target tree for the active source. Effective is read-only — the .readonly
+    // class hides every edit affordance and the drag/click handlers bail; DB is the editable fragment.
+    let cfgTreeReq = 0;
+    async function loadCfgTree() {
+      const req = ++cfgTreeReq;
+      const source = cfgSrc; // pin the requested source: a switch mid-flight (even via the YAML view,
+      // which doesn't bump cfgTreeReq) must invalidate this response, never leave effective data editable.
+      const url = source === 'effective' ? '/api/admin/config?source=effective' : '/api/admin/config';
+      const current = () => req === cfgTreeReq && source === cfgSrc;
+      const fail = (m) => { if (current()) { cfg.doc = { targets: { children: {} } }; cfg.readonly = true; $('cfgTree').innerHTML = '<div class="tree-empty">' + m + '</div>'; } };
+      let r;
+      try { r = await fetch(url, { cache: 'no-store' }); }
+      catch (e) { fail("Couldn't reach the admin API."); return; }
+      if (!current()) return;
+      if (!r.ok) { fail('Could not load the ' + source + ' config (HTTP ' + r.status + ').'); return; }
+      let data; try { data = await r.json(); } catch (e) { fail('Could not load the ' + source + ' config.'); return; }
+      if (!current()) return;
+      cfg.readonly = data.readonly === true; // trust the response, not the (mutable) current source
+      cfg.version = data.version || 0;
+      cfg.doc = (data.doc && typeof data.doc === 'object') ? data.doc : { targets: { children: {} } };
+      $('cfgTree').classList.toggle('readonly', cfg.readonly);
+      renderCfgTree();
     }
     let cfgYamlReq = 0; // generation guard: a slower superseded fetch must never overwrite the newer source
     async function loadCfgYaml() {
       const req = ++cfgYamlReq;
       const stale = () => req !== cfgYamlReq;
-      segPress('cfgSrcSeg', 'cfgsrc', cfgYamlSrc);
       const pre = $('cfgYaml');
       const msg = (t) => { if (!stale()) { pre.classList.add('cfg-yaml-msg'); pre.textContent = t; } };
       pre.classList.remove('cfg-yaml-msg');
       pre.textContent = 'Loading…';
       let r;
-      try { r = await fetch('/api/admin/config.yaml?source=' + cfgYamlSrc, { cache: 'no-store' }); }
+      try { r = await fetch('/api/admin/config.yaml?source=' + cfgSrc, { cache: 'no-store' }); }
       catch (e) { msg("Couldn't reach the admin API."); return; }
       if (stale()) return;
-      if (!r.ok) { msg('Could not load the ' + cfgYamlSrc + ' config (HTTP ' + r.status + ').'); return; }
+      if (!r.ok) { msg('Could not load the ' + cfgSrc + ' config (HTTP ' + r.status + ').'); return; }
       const text = await r.text();
       if (!stale()) pre.textContent = text;
     }
@@ -2070,7 +2092,7 @@
     });
     $('cfgSrcSeg').addEventListener('click', (e) => {
       const b = e.target.closest('button[data-cfgsrc]'); if (!b) return;
-      cfgYamlSrc = b.dataset.cfgsrc; loadCfgYaml();
+      cfgSrc = b.dataset.cfgsrc; applyCfgView();
     });
     // ---- Top-bar admin auth: one shared login modal + a session probe driving the bar's
     // Log in / Admin·Log out / hidden(disabled) state on every tab. The session endpoint is read
@@ -2234,7 +2256,7 @@
       try { msg = (await r.json()).error || msg; } catch (e) { /* keep */ }
       showErr(msg);
     }
-    $('cfgAddBtn').addEventListener('click', () => openCfgModal('add'));
+    $('cfgAddBtn').addEventListener('click', () => { if (cfg.readonly) return; openCfgModal('add'); });
     $('cfgParamAdd').addEventListener('click', () => $('cfgParams').appendChild(cfgParamRow('', '')));
     $('cfgCancel').addEventListener('click', closeCfgModal);
     $('cfgModal').addEventListener('click', (e) => { if (e.target === $('cfgModal')) closeCfgModal(); });
@@ -2319,7 +2341,7 @@
         children,
       };
     }
-    $('cfgAddGroupBtn').addEventListener('click', () => openCfgGroupModal());
+    $('cfgAddGroupBtn').addEventListener('click', () => { if (cfg.readonly) return; openCfgGroupModal(); });
     $('cfgGroupCancel').addEventListener('click', closeCfgGroupModal);
     $('cfgGroupModal').addEventListener('click', (e) => { if (e.target === $('cfgGroupModal')) closeCfgGroupModal(); });
     $('cfgGroupForm').addEventListener('submit', (e) => {
@@ -2346,6 +2368,7 @@
         if (path) { cfgCollapsed.has(path) ? cfgCollapsed.delete(path) : cfgCollapsed.add(path); renderCfgTree(); focusCfgRow(path); }
         return;
       }
+      if (cfg.readonly) return; // Effective tree: navigation/collapse only — no add/edit/remove
       const ac = e.target.closest('[data-add-child]');
       if (ac) { openCfgModal('add', ac.getAttribute('data-add-child')); return; }
       const ed = e.target.closest('[data-edit]');
@@ -2435,7 +2458,7 @@
       }
       const clearDropMarks = () => { for (const el of host.querySelectorAll('.cfg-drop, .cfg-drop-into')) el.classList.remove('cfg-drop', 'cfg-drop-into'); };
       host.addEventListener('dragstart', (e) => {
-        if (!adminEditor) { e.preventDefault(); return; } // reordering is admin-only (read-only tree otherwise)
+        if (!adminEditor || cfg.readonly) { e.preventDefault(); return; } // reordering is admin-only, and never in the read-only Effective tree
         const row = e.target.closest('.crow'); if (!row) return;
         dragPath = row.getAttribute('data-path');
         e.dataTransfer.effectAllowed = 'move';
@@ -2469,6 +2492,7 @@
       host.addEventListener('dragend', () => { dragPath = null; clearDropMarks(); });
     })();
     $('cfgImportBtn').addEventListener('click', () => {
+      if (cfg.readonly) return; // never import into a read-only (effective) view
       $('cfgImportText').value = '';
       $('cfgImportErr').textContent = '';
       $('cfgImportModal').classList.remove('hidden');
