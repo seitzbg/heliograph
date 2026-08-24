@@ -2052,14 +2052,19 @@
     let cfgTreeReq = 0;
     async function loadCfgTree() {
       const req = ++cfgTreeReq;
-      const url = cfgSrc === 'effective' ? '/api/admin/config?source=effective' : '/api/admin/config';
+      const source = cfgSrc; // pin the requested source: a switch mid-flight (even via the YAML view,
+      // which doesn't bump cfgTreeReq) must invalidate this response, never leave effective data editable.
+      const url = source === 'effective' ? '/api/admin/config?source=effective' : '/api/admin/config';
+      const current = () => req === cfgTreeReq && source === cfgSrc;
+      const fail = (m) => { if (current()) { cfg.doc = { targets: { children: {} } }; cfg.readonly = true; $('cfgTree').innerHTML = '<div class="tree-empty">' + m + '</div>'; } };
       let r;
       try { r = await fetch(url, { cache: 'no-store' }); }
-      catch (e) { return; } // panel already shown; a transient error leaves the current tree in place
-      if (req !== cfgTreeReq || !r.ok) return;
-      let data; try { data = await r.json(); } catch (e) { return; }
-      if (req !== cfgTreeReq) return;
-      cfg.readonly = cfgSrc === 'effective';
+      catch (e) { fail("Couldn't reach the admin API."); return; }
+      if (!current()) return;
+      if (!r.ok) { fail('Could not load the ' + source + ' config (HTTP ' + r.status + ').'); return; }
+      let data; try { data = await r.json(); } catch (e) { fail('Could not load the ' + source + ' config.'); return; }
+      if (!current()) return;
+      cfg.readonly = data.readonly === true; // trust the response, not the (mutable) current source
       cfg.version = data.version || 0;
       cfg.doc = (data.doc && typeof data.doc === 'object') ? data.doc : { targets: { children: {} } };
       $('cfgTree').classList.toggle('readonly', cfg.readonly);
@@ -2251,7 +2256,7 @@
       try { msg = (await r.json()).error || msg; } catch (e) { /* keep */ }
       showErr(msg);
     }
-    $('cfgAddBtn').addEventListener('click', () => openCfgModal('add'));
+    $('cfgAddBtn').addEventListener('click', () => { if (cfg.readonly) return; openCfgModal('add'); });
     $('cfgParamAdd').addEventListener('click', () => $('cfgParams').appendChild(cfgParamRow('', '')));
     $('cfgCancel').addEventListener('click', closeCfgModal);
     $('cfgModal').addEventListener('click', (e) => { if (e.target === $('cfgModal')) closeCfgModal(); });
@@ -2336,7 +2341,7 @@
         children,
       };
     }
-    $('cfgAddGroupBtn').addEventListener('click', () => openCfgGroupModal());
+    $('cfgAddGroupBtn').addEventListener('click', () => { if (cfg.readonly) return; openCfgGroupModal(); });
     $('cfgGroupCancel').addEventListener('click', closeCfgGroupModal);
     $('cfgGroupModal').addEventListener('click', (e) => { if (e.target === $('cfgGroupModal')) closeCfgGroupModal(); });
     $('cfgGroupForm').addEventListener('submit', (e) => {
@@ -2487,6 +2492,7 @@
       host.addEventListener('dragend', () => { dragPath = null; clearDropMarks(); });
     })();
     $('cfgImportBtn').addEventListener('click', () => {
+      if (cfg.readonly) return; // never import into a read-only (effective) view
       $('cfgImportText').value = '';
       $('cfgImportErr').textContent = '';
       $('cfgImportModal').classList.remove('hidden');

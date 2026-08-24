@@ -183,7 +183,7 @@ func TestGetConfigEffectiveSource(t *testing.T) {
 	if _, hasVer := got["version"]; hasVer {
 		t.Errorf("effective source must not carry an editable version, got %v", got["version"])
 	}
-	if !strings.Contains(string(w.Body.Bytes()), "eff-t") {
+	if !strings.Contains(w.Body.String(), "eff-t") {
 		t.Errorf("want the effective doc, got %s", w.Body)
 	}
 
