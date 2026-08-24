@@ -155,6 +155,8 @@
   .vseg-chip.on.band { box-shadow:inset 0 0 0 1px var(--accent); }
   .vseg-chip .vr { color:var(--ink-faint); font-size:10px; letter-spacing:.02em; }
   .vseg-chip.on .vr { color:var(--accent); }
+  .grid-hidden-note { margin:2px 0 10px; font-family:ui-monospace,Menlo,monospace; font-size:11.5px; color:var(--ink-faint); }
+  .grid-hidden-note[hidden] { display:none; }
   #zoomCanvas { cursor:crosshair; }
   .zoom-sel { position:absolute; top:0; height:100%; background:rgba(80,150,235,.18); background:color-mix(in srgb, var(--accent) 16%, transparent); border-left:1px solid var(--accent); border-right:1px solid var(--accent); pointer-events:none; }
   .zoom-reset { background:transparent; border:1px solid var(--border); border-radius:6px; padding:3px 9px; cursor:pointer; }
@@ -349,6 +351,7 @@
             <label class="lbl" style="cursor:pointer; display:inline-flex; align-items:center; gap:5px" title="Share one Y-axis across all graphs so they're comparable"><input type="checkbox" id="unisonToggle"> unison scale</label>
           </div>
         </div>
+        <div class="grid-hidden-note" id="gridHiddenNote" hidden></div>
         <div class="grid" id="graphGrid"><div class="empty">Waiting for the collector…</div></div>
       </div>
     </div>

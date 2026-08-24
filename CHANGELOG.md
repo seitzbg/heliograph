@@ -6,6 +6,14 @@ All notable changes to **Heliograph** are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed
+- **Graphs grid hides targets a selected vantage doesn't measure.** When you view the grid from a
+  vantage (or vantages) that doesn't probe some targets — e.g. a Comcast vantage that doesn't measure
+  the hub's loopback or internal resolvers — those panels are now hidden with a "N targets not
+  measured — hidden" note, instead of drawing a blank "collecting…" graph. Each shown panel's band
+  follows the first selected vantage that actually measures it, so a shown panel never blanks either.
+  Hidden targets stay in the left nav tree and the detail view.
+
 ## [1.0.12] - 2026-08-24
 
 ### Added
