@@ -1766,6 +1766,7 @@
       }).join('');
     }
     async function renderVantages() {
+      refreshAdminState(); // keep the edit-affordance gate (body.admin-can-edit) current on tab entry
       let r;
       try { r = await fetch('/api/admin/vantages', { cache: 'no-store' }); }
       catch (e) { vShow('vantError'); return; }
@@ -2009,6 +2010,7 @@
       }
     }
     async function renderConfig() {
+      refreshAdminState(); // keep the edit-affordance gate (body.admin-can-edit) current on tab entry
       let r;
       try { r = await fetch('/api/admin/config', { cache: 'no-store' }); }
       catch (e) { cShow('cfgError'); return; }
@@ -2031,7 +2033,14 @@
     function setAdminBar(state) { // 'in' | 'out' | 'disabled' (disabled hides both controls)
       $('adminAcct').classList.toggle('hidden', state !== 'in');
       $('adminLoginBtn').classList.toggle('hidden', state !== 'out');
+      // Gate every edit affordance on the Vantages/Config tabs by a single body class: the read-only
+      // views render for everyone (the GETs are open), and the add/edit/remove/save/import controls +
+      // drag are shown only while an admin session is active. The backend still enforces every write,
+      // so this is UX, not the security boundary.
+      document.body.classList.toggle('admin-can-edit', state === 'in');
+      adminEditor = state === 'in';
     }
+    let adminEditor = false; // mirrors the body class; read by the drag handlers (attribute, not CSS)
     const adminState = Dash.createAdminStateController(setAdminBar);
     async function refreshAdminState() {
       const gen = adminState.beginProbe();
@@ -2381,6 +2390,7 @@
       }
       const clearDropMarks = () => { for (const el of host.querySelectorAll('.cfg-drop, .cfg-drop-into')) el.classList.remove('cfg-drop', 'cfg-drop-into'); };
       host.addEventListener('dragstart', (e) => {
+        if (!adminEditor) { e.preventDefault(); return; } // reordering is admin-only (read-only tree otherwise)
         const row = e.target.closest('.crow'); if (!row) return;
         dragPath = row.getAttribute('data-path');
         e.dataTransfer.effectAllowed = 'move';

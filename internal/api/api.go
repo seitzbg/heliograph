@@ -239,12 +239,18 @@ func (srv *Server) Routes() *http.ServeMux {
 		mux.HandleFunc("GET /api/admin/session", srv.requireAdmin(srv.adminSession))
 	}
 	if srv.AdminPassword != "" && srv.Vantages != nil && len(srv.AdminKey) > 0 {
-		mux.HandleFunc("GET /api/admin/vantages", srv.requireAdmin(srv.listVantages))
+		// Read is open (behind the proxy's Basic Auth like the rest of the dashboard): listVantages
+		// returns only names/created/last-seen/counts — never a key — so anyone who can see the graphs
+		// can see which vantages exist. Minting and revoking stay admin-gated.
+		mux.HandleFunc("GET /api/admin/vantages", srv.listVantages)
 		mux.HandleFunc("POST /api/admin/vantages", srv.requireAdmin(srv.addVantage))
 		mux.HandleFunc("DELETE /api/admin/vantages/{name}", srv.requireAdmin(srv.revokeVantage))
 	}
 	if srv.AdminPassword != "" && len(srv.AdminKey) > 0 && srv.ConfigGet != nil && srv.ConfigApply != nil {
-		mux.HandleFunc("GET /api/admin/config", srv.requireAdmin(srv.getConfig))
+		// Read is open like the vantage list: the config doc is the monitoring tree (targets, probes,
+		// alert routing by notifier NAME) — the actual secrets (DB password, webhook URLs) come from
+		// the environment, not this doc — so it is safe to show read-only. Applying changes stays gated.
+		mux.HandleFunc("GET /api/admin/config", srv.getConfig)
 		mux.HandleFunc("PUT /api/admin/config", srv.requireAdmin(srv.putConfig))
 	}
 	if srv.AdminPassword != "" && len(srv.AdminKey) > 0 && srv.ConfigImport != nil {
