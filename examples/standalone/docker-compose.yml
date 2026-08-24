@@ -1,0 +1,67 @@
+# Heliograph — standalone (single-host, no federation)
+#
+# The common case: one collector on one host, watched from its own dashboard.
+# Two services — TimescaleDB + the smoked collector — using the prebuilt GHCR
+# image, so no clone or build is needed. Copy this directory somewhere, then:
+#
+#   cp .env.example .env      # optional: set a DB password / enable the admin GUI
+#   docker compose up -d
+#   # -> open http://localhost:8087/
+#
+# The dashboard + read API are UNAUTHENTICATED, so the collector is published on
+# 127.0.0.1 only. To reach it from another machine, put it behind a reverse proxy
+# that terminates TLS and adds auth — or use the federation example next door,
+# which bundles one. Out of the box this runs a built-in demo target set; mount
+# your own YAML config to measure real targets (see the commented volume below).
+services:
+  timescaledb:
+    image: timescale/timescaledb:2.29.1-pg16
+    environment:
+      POSTGRES_USER: smoke
+      POSTGRES_PASSWORD: ${SMOKE_DB_PASSWORD:-smoke}   # set in .env; written to the volume on first init
+      POSTGRES_DB: smoke
+    volumes:
+      - tsdata:/var/lib/postgresql/data
+    healthcheck:
+      # Check TCP (-h 127.0.0.1), not the default local socket: during first-run init a
+      # temporary socket-only server is up while the real TCP listener is not, so a socket
+      # pg_isready reports healthy before smoked can actually connect.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U smoke -d smoke"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  smoked:
+    image: ghcr.io/seitzbg/heliograph:latest   # pin a release (e.g. :v1.0.16) for production
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    cap_add:
+      - NET_RAW          # fping ICMP via a setcap'd binary, so the collector runs non-root
+    sysctls:
+      # Lets the native Ping probe send ICMP via an unprivileged socket (the GID must fall in
+      # this range; 10001 is the collector's GID). Do NOT widen to "0 2147483647": rootless
+      # Podman rejects an out-of-range upper bound at container start (Docker rootful is fine).
+      net.ipv4.ping_group_range: "0 10001"
+    environment:
+      # The image's default command already runs `-serve -addr :8087 -webdir /web`; these env
+      # vars drive the rest, keeping the DB password out of the command list. Each mirrors a -flag.
+      SMOKED_DSN: postgres://smoke:${SMOKE_DB_PASSWORD:-smoke}@timescaledb:5432/smoke?sslmode=disable
+      SMOKED_DOWNSAMPLE: "1"                          # hourly/daily aggregates for the UI
+      SMOKED_RESOLVE_IPS: "1"                         # show each target's IP in the graph title
+      SMOKED_ABSOLUTE_TIME: ${SMOKED_ABSOLUTE_TIME:-1}   # graph x-axes: 1 = absolute clock time; 0 = relative -3h/now
+      # Optional admin GUI (Config + Vantages tabs). Empty = disabled (fail-closed). See .env.example.
+      SMOKED_ADMIN_PASSWORD: ${SMOKED_ADMIN_PASSWORD:-}
+      SMOKED_ADMIN_SESSION_KEY: ${SMOKED_ADMIN_SESSION_KEY:-}
+      SMOKED_ADMIN_SESSION_TTL: ${SMOKED_ADMIN_SESSION_TTL:-}
+      # Runs the built-in demo targets. To measure your own, mount a YAML tree and point at it:
+      # SMOKED_CONFIG: /etc/heliograph/config.yaml
+    # volumes:
+    #   - ./config.yaml:/etc/heliograph/config.yaml:ro   # your target tree (uncomment + set SMOKED_CONFIG above)
+    ports:
+      # Loopback only: the API is unauthenticated. For access beyond this host, front it with a
+      # reverse proxy (TLS + auth) pointed at 127.0.0.1:8087 rather than changing this to 0.0.0.0.
+      - "127.0.0.1:8087:8087"
+
+volumes:
+  tsdata: {}

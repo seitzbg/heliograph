@@ -6,6 +6,13 @@ All notable changes to **Heliograph** are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **Copyable deployment examples under `examples/`.** Two ready-to-run Compose stacks using the
+  prebuilt GHCR image — `examples/standalone/` (collector + TimescaleDB, the common single-host case)
+  and `examples/federation/` (adds a Caddy reverse proxy for remote vantages) — each with its own
+  `.env.example`, plus an `examples/README.md` that helps you pick. Federation is opt-in, so a
+  standalone user is never faced with the TLS/ACME/Basic-Auth settings they don't need.
+
 ### Security
 - **Config reads redact credentials embedded in a probe URL.** The open config reads
   (`GET /api/admin/config`, its `?source=effective` variant, and `GET /api/admin/config.yaml`) now

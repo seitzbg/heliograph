@@ -1,0 +1,87 @@
+# Heliograph — federation (multi-vantage, public reverse proxy)
+#
+# For measuring the same targets from several places: a hub plus one or more remote
+# `smoke-agent` vantages that report over HTTPS. This adds a bundled Caddy reverse
+# proxy in front of the collector, because remote agents (and remote browsers) need
+# TLS + auth that smoked does not provide itself. Most single-host users do NOT need
+# this — see ../standalone for the simpler stack.
+#
+#   cp .env.example .env      # set DOMAIN + ACME_EMAIL + DASH_PASSWORD_HASH (+ SMOKED_ADMIN_PASSWORD)
+#   docker compose up -d
+#   # -> open https://<your-domain>/
+#
+# The proxy serves two surfaces with two auth models (see ./Caddyfile):
+#   * /agent/v1/*  — remote agents, authenticated by a per-vantage API key (Bearer smk_...)
+#   * everything else (dashboard, read/query API, admin) — behind HTTP Basic Auth
+# Provision a vantage from the Vantages admin tab (set SMOKED_ADMIN_PASSWORD) or the
+# `smoked vantage` CLI, then run a smoke-agent with the minted key. The end-to-end
+# walkthrough is in docs/federation.md.
+services:
+  timescaledb:
+    image: timescale/timescaledb:2.29.1-pg16
+    environment:
+      POSTGRES_USER: smoke
+      POSTGRES_PASSWORD: ${SMOKE_DB_PASSWORD:-smoke}
+      POSTGRES_DB: smoke
+    volumes:
+      - tsdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U smoke -d smoke"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  smoked:
+    image: ghcr.io/seitzbg/heliograph:latest   # pin a release (e.g. :v1.0.16) for production
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    cap_add:
+      - NET_RAW
+    sysctls:
+      net.ipv4.ping_group_range: "0 10001"
+    environment:
+      SMOKED_DSN: postgres://smoke:${SMOKE_DB_PASSWORD:-smoke}@timescaledb:5432/smoke?sslmode=disable
+      SMOKED_DOWNSAMPLE: "1"
+      SMOKED_RESOLVE_IPS: "1"
+      SMOKED_ABSOLUTE_TIME: ${SMOKED_ABSOLUTE_TIME:-1}
+      # Enable the admin GUI so you can mint/list/revoke vantage keys and edit DB targets from the
+      # browser. Required to provision vantages without the CLI. See .env.example.
+      SMOKED_ADMIN_PASSWORD: ${SMOKED_ADMIN_PASSWORD:-}
+      SMOKED_ADMIN_SESSION_KEY: ${SMOKED_ADMIN_SESSION_KEY:-}
+      SMOKED_ADMIN_SESSION_TTL: ${SMOKED_ADMIN_SESSION_TTL:-}
+      # Mount a YAML tree that declares your targets and their `vantages:` to point Caddy's agents at:
+      # SMOKED_CONFIG: /etc/heliograph/config.yaml
+    # volumes:
+    #   - ./config.yaml:/etc/heliograph/config.yaml:ro
+    ports:
+      # Loopback only — Caddy (below) is the public surface. Keep this for local admin on the hub;
+      # remote access always goes through the proxy's TLS + auth.
+      - "127.0.0.1:8087:8087"
+
+  caddy:
+    # Stock Caddy: automatic Let's Encrypt via the HTTP-01 challenge (needs inbound ports 80 + 443,
+    # and DOMAIN's DNS pointing here). For the DNS-01 challenge instead — behind NAT, or wildcards —
+    # you need a Caddy image built with your provider's caddy-dns plugin; the repo's Caddy.Dockerfile
+    # bundles several. Swap `image:` for that build and set CADDY_ACME_DNS in the Caddyfile.
+    image: caddy:2.11-alpine
+    restart: unless-stopped
+    depends_on:
+      - smoked
+    ports:
+      - "80:80"     # HTTP-01 challenge + HTTP->HTTPS redirect
+      - "443:443"   # public agent API + dashboard over TLS
+    environment:
+      DOMAIN: ${DOMAIN}
+      ACME_EMAIL: ${ACME_EMAIL}
+      DASH_USER: ${DASH_USER:-admin}
+      DASH_PASSWORD_HASH: ${DASH_PASSWORD_HASH}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data       # persists issued certs across restarts (Let's Encrypt rate limits)
+      - caddy_config:/config
+
+volumes:
+  tsdata: {}
+  caddy_data: {}
+  caddy_config: {}
