@@ -854,5 +854,25 @@ check('bandVantageFor: first selected vantage that measures the target, else nul
   assert.equal(D.bandVantageFor([], ['munro-comcast']), null);
 });
 
+// gridShowsTarget (CODE_REVIEW M10): a remote-only target must become a grid panel candidate once a
+// non-local vantage that measures it is selected — otherwise the vantage selector can't surface a
+// site the hub can't reach. A local-data target always qualifies; a no-data LOCAL target never does.
+check('gridShowsTarget: remote-only target appears only when its remote vantage is selected', () => {
+  const localData = { no_data: false, vantages: ['local'] };
+  const remoteOnly = { no_data: true, vantages: ['munro-comcast'] };
+  const newLocal = { no_data: true, vantages: ['local'] };       // brand-new local target, no data yet
+  // A target with local data is always a candidate, regardless of selection.
+  assert.equal(D.gridShowsTarget(localData, ['local']), true);
+  assert.equal(D.gridShowsTarget(localData, ['munro-comcast']), true);
+  // The M10 case: remote-only target shows up exactly when its measuring vantage is selected.
+  assert.equal(D.gridShowsTarget(remoteOnly, ['local']), false);              // was invisible before the fix
+  assert.equal(D.gridShowsTarget(remoteOnly, ['local', 'munro-comcast']), true);
+  assert.equal(D.gridShowsTarget(remoteOnly, ['munro-comcast']), true);
+  // A no-data LOCAL target stays out (an empty panel; only a remote vantage can fill one).
+  assert.equal(D.gridShowsTarget(newLocal, ['local']), false);
+  // A remote-only target measured by a vantage that isn't selected stays hidden.
+  assert.equal(D.gridShowsTarget(remoteOnly, ['nyc']), false);
+});
+
 if (failed) { console.error(`\n${failed} test(s) failed`); process.exit(1); }
 console.log('\nall dashboard tests passed');

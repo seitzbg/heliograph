@@ -6,6 +6,27 @@ All notable changes to **Heliograph** are recorded here. The format follows
 
 ## [Unreleased]
 
+### Security
+- **Config reads redact credentials embedded in a probe URL.** The open config reads
+  (`GET /api/admin/config`, its `?source=effective` variant, and `GET /api/admin/config.yaml`) now
+  strip HTTP `urlformat` userinfo and query strings for a non-admin reader, so a credential placed in
+  a probe URL (e.g. `https://user:pass@%host%/health?token=…`) is no longer shown to everyone who can
+  reach the dashboard. A logged-in admin still receives the real, editable config — redacting the
+  editable source would let the next save persist the mask over the secret (CODE_REVIEW M11).
+
+### Fixed
+- **The Graphs grid shows the focused vantage's NTP clock stat.** On the multi-vantage grid, a panel
+  focused on a remote vantage now displays that vantage's clock offset/stratum instead of the hub's —
+  the companion stat follows the panel's plotted series, matching the detail view (CODE_REVIEW M2).
+- **Remote-only targets appear in the Graphs grid for their vantage.** Selecting a remote vantage now
+  surfaces targets measured only from that vantage (a site the hub can't reach directly), instead of
+  leaving them reachable only in the nav tree and detail view (CODE_REVIEW M10).
+
+### Docs
+- Clarified that a deep link survives a target move only while its path is still current; a dormant
+  bookmark to a target's *old* path, first reopened after the move, can go blank or resolve to a
+  reused path — prefer the app's id-based links for saved URLs (CODE_REVIEW L8).
+
 ## [1.0.16] - 2026-08-24
 
 ### Changed

@@ -312,6 +312,17 @@
     return null;
   }
 
+  // gridShowsTarget decides whether a target is a Graphs-grid panel candidate for the current
+  // vantage selection. A target with local data always qualifies (the grid's default local read).
+  // A remote-only target (no local row, no_data) qualifies once a NON-local vantage that measures it
+  // is selected — so the vantage selector can surface a site the hub can't reach, instead of leaving
+  // it reachable only in the tree/detail view (CODE_REVIEW M10). A no-data LOCAL target stays out: it
+  // would be an empty "collecting…" panel, and only a selected remote vantage can actually fill one.
+  function gridShowsTarget(t, selectedVantages) {
+    if (t && !t.no_data) return true;
+    return vantageList(t).some((v) => v !== 'local' && (selectedVantages || []).includes(v));
+  }
+
   // adminMode maps the status of GET /api/admin/vantages to the Vantages panel's display
   // mode: 200 authorized (show the list), 401 log in, 404 admin management disabled (no
   // SMOKED_ADMIN_PASSWORD -> routes unregistered), anything else a transient error.
@@ -822,7 +833,7 @@
     return (!vantage || vantage === 'local') ? local : remote;
   }
 
-  window.Dash = { RANGES, RANGE_ORDER, parseRoute, mergeSeries, gridSince, gridTemplateFor, maxColumnsFor, rangeLabels, fetchJSON, zoomResolution, pixelToTime, sharedYMax, buildTree, underPath, targetStatus, pickSeries, vantageList, orderVantages, defaultFocus, keepFocus, vantageColorVar, worstStatus, availableVantages, toggleGridVantage, bandVantageFor, adminMode, adminSessionState, createAdminStateController, statusProbeOwnsView, relTime, listTargets, addTarget, editTarget, removeTarget, buildTargetNode, buildGroupNode, labelHTML, collectingNote, agentYaml, agentCompose, cfgTree, reweightSiblings, reorderSiblings, editNodeAtPath, removeNodeAtPath, renameNodeAtPath, addNodeAtPath, moveNode, moveInList, cfgDropDestination, cfgVisibleRows, cfgTreeKey, tkey, ntpStatHtml, ntpStatOf, ntpStatSelect };
+  window.Dash = { RANGES, RANGE_ORDER, parseRoute, mergeSeries, gridSince, gridTemplateFor, maxColumnsFor, rangeLabels, fetchJSON, zoomResolution, pixelToTime, sharedYMax, buildTree, underPath, targetStatus, pickSeries, vantageList, orderVantages, defaultFocus, keepFocus, vantageColorVar, worstStatus, availableVantages, toggleGridVantage, bandVantageFor, gridShowsTarget, adminMode, adminSessionState, createAdminStateController, statusProbeOwnsView, relTime, listTargets, addTarget, editTarget, removeTarget, buildTargetNode, buildGroupNode, labelHTML, collectingNote, agentYaml, agentCompose, cfgTree, reweightSiblings, reorderSiblings, editNodeAtPath, removeNodeAtPath, renameNodeAtPath, addNodeAtPath, moveNode, moveInList, cfgDropDestination, cfgVisibleRows, cfgTreeKey, tkey, ntpStatHtml, ntpStatOf, ntpStatSelect };
 
   // ---------------------------------------------------------------- init (DOM) --
   function init() {
@@ -1198,11 +1209,10 @@
         catch (e) { $('statusText').textContent = 'collector unreachable — showing last known'; return; } // keep panels (#2)
         $('statusText').textContent = targets.length + ' targets · updated ' + new Date().toLocaleTimeString();
         // Feed the config-tree menu: the name set it's built from and per-target dot status.
-        // ALL configured targets go in the tree (so a remote-only target is navigable), but
-        // only those with local data get a grid thumbnail — the grid reads the local vantage,
-        // so a no-data (remote-only) target would otherwise show an empty "collecting…" panel
-        // forever. It stays reachable via the tree; its real series shows in the detail view,
-        // which focuses the target's own vantage (CODE_REVIEW #3 / P1-3).
+        // ALL configured targets go in the tree (so a remote-only target is navigable). A
+        // remote-only target also gets a grid thumbnail once a NON-local vantage that measures it is
+        // selected (the gridTargets filter below) — the grid then reads that vantage's series, so it
+        // is no longer stranded in the tree/detail view alone (CODE_REVIEW M10, extending #3 / P1-3).
         statusByTarget.clear(); vantagesByTarget.clear();
         // The vantages this deployment measures from (union across targets). Reconcile the shown set
         // against it and (re)render the toolbar control — which hides itself entirely when there's
@@ -1240,7 +1250,13 @@
         for (const [id, arr] of statById) { const w = worstStatus(arr); statusByTarget.set(id, w); statusByTarget.set(nameById.get(id), w); }
         canonicalizeTargetHash(); // an open #target=<path> view becomes its stable id (L8)
         treeNames = targets.map((t) => t.name);
-        const gridTargets = targets.filter((t) => !t.no_data);
+        // Grid candidates: every target with local data (as before), PLUS a remote-only target
+        // (no local row) when a NON-local vantage that measures it is currently selected — so the
+        // vantage selector can surface a site the hub can't reach, not just hide it in the tree
+        // (CODE_REVIEW M10). The per-panel bandVantageFor rule below still hides a candidate that
+        // none of the selected vantages measures. A no-data LOCAL target stays excluded (it would be
+        // an empty "collecting…" panel); only a selected remote vantage can actually fill one.
+        const gridTargets = targets.filter((t) => gridShowsTarget(t, gridVantages));
         // Reconcile ONLY against an authoritative target list (the fetch above succeeded):
         // drop panels for targets no longer reported (e.g. removed on a SIGHUP reload, or a
         // target that became no-data). A failed /api/targets returned early, so a transient
