@@ -6,6 +6,13 @@ All notable changes to **Heliograph** are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed
+- **The Graphs vantage selector caps at 4 simultaneous vantages.** The overlay palette has four
+  distinct colors (plus the neutral color for `local`), so a 5th overlaid vantage would reuse a color
+  and become indistinguishable. At the cap, the un-selected vantage chips are disabled with an
+  explanatory tooltip ("deselect one to add …"); you can always toggle one off to free a slot.
+  Vantages beyond four can still exist and be viewed — you just can't overlay more than four at once.
+
 ### Added
 - **Copyable deployment examples under `examples/`.** Two ready-to-run Compose stacks using the
   prebuilt GHCR image — `examples/standalone/` (collector + TimescaleDB, the common single-host case)

@@ -257,6 +257,11 @@
   // VPAL is the fixed overlay color palette (CSS var names defined in dashboard.css) cycled
   // across non-local vantages by their position in the ordered list.
   const VPAL = ['--v-a', '--v-b', '--v-c', '--v-d'];
+  // MAX_GRID_VANTAGES caps how many vantages the Graphs grid overlays at once. It equals the number
+  // of distinct overlay colors available (local uses the neutral median color; the rest cycle VPAL),
+  // so a 5th selection would reuse a color and make two overlays indistinguishable. Vantages beyond
+  // this may still EXIST and be viewed — you just can't overlay more than this many simultaneously.
+  const MAX_GRID_VANTAGES = 4;
 
   // vantageColorVar maps a vantage to a CSS var NAME: the neutral median color for 'local',
   // else a palette slot keyed by the vantage's position among `ordered`'s non-local entries
@@ -293,14 +298,37 @@
   }
   // toggleGridVantage flips one vantage in the shown set and returns the new ordered set, keeping at
   // least one vantage selected (you can't hide everything) and ignoring vantages that no longer
-  // exist. Pure, so the toolbar's reducer is unit-testable.
-  function toggleGridVantage(shown, key, all) {
+  // exist. `max` (optional) caps how many can be selected at once: toggling ON beyond the cap is a
+  // no-op (the click is refused, not silently dropping another selection). Toggling OFF is always
+  // allowed. Pure, so the toolbar's reducer is unit-testable.
+  function toggleGridVantage(shown, key, all, max) {
     const allow = new Set(all || []);
     let next = (shown || []).filter((v) => allow.has(v));
     if (next.includes(key)) { if (next.length > 1) next = next.filter((v) => v !== key); }
-    else if (allow.has(key)) next.push(key);
+    else if (allow.has(key) && !(max && next.length >= max)) next.push(key);
     if (!next.length) next = ['local'];
     return orderVantages(next);
+  }
+
+  // vantageControlChips builds the Graphs-toolbar vantage toggle buttons (pure, so the cap's
+  // disabled-state is unit-testable). `colorFor(v)` returns the swatch color (injected because the
+  // live control resolves it from CSS vars). At the cap (`selected.length >= max`) every un-selected
+  // chip is disabled with an explanatory title — deselect one to free a slot — so a 5th overlay can't
+  // reuse a palette color; selected chips stay enabled so you can always toggle one off.
+  function vantageControlChips(available, selected, focus, max, colorFor) {
+    const sel = new Set(selected || []);
+    const atCap = max && (selected || []).length >= max;
+    return '<span class="vseg-lbl">Vantages</span>' + (available || []).map((v) => {
+      const on = sel.has(v), band = on && v === focus;
+      const role = band ? 'band' : on ? 'line' : 'off';
+      const locked = !!(atCap && !on);
+      const title = locked
+        ? 'Max ' + max + ' vantages — deselect one to add ' + v
+        : (on ? 'Hide ' : 'Show ') + v + ' on every graph';
+      return '<button type="button" class="vseg-chip' + (on ? ' on' : '') + (band ? ' band' : '') + (locked ? ' locked' : '') + '" data-v="' + esc(v) +
+        '" aria-pressed="' + on + '"' + (locked ? ' disabled aria-disabled="true"' : '') + ' title="' + esc(title) + '">' +
+        '<i style="background:' + colorFor(v) + '"></i><span class="vn">' + esc(v) + '</span><span class="vr">' + role + '</span></button>';
+    }).join('');
   }
   // bandVantageFor returns the vantage whose band+median a panel should draw: the first SELECTED
   // vantage (in shown order) that actually measures this target. null means no selected vantage
@@ -833,7 +861,7 @@
     return (!vantage || vantage === 'local') ? local : remote;
   }
 
-  window.Dash = { RANGES, RANGE_ORDER, parseRoute, mergeSeries, gridSince, gridTemplateFor, maxColumnsFor, rangeLabels, fetchJSON, zoomResolution, pixelToTime, sharedYMax, buildTree, underPath, targetStatus, pickSeries, vantageList, orderVantages, defaultFocus, keepFocus, vantageColorVar, worstStatus, availableVantages, toggleGridVantage, bandVantageFor, gridShowsTarget, adminMode, adminSessionState, createAdminStateController, statusProbeOwnsView, relTime, listTargets, addTarget, editTarget, removeTarget, buildTargetNode, buildGroupNode, labelHTML, collectingNote, agentYaml, agentCompose, cfgTree, reweightSiblings, reorderSiblings, editNodeAtPath, removeNodeAtPath, renameNodeAtPath, addNodeAtPath, moveNode, moveInList, cfgDropDestination, cfgVisibleRows, cfgTreeKey, tkey, ntpStatHtml, ntpStatOf, ntpStatSelect };
+  window.Dash = { RANGES, RANGE_ORDER, parseRoute, mergeSeries, gridSince, gridTemplateFor, maxColumnsFor, rangeLabels, fetchJSON, zoomResolution, pixelToTime, sharedYMax, buildTree, underPath, targetStatus, pickSeries, vantageList, orderVantages, defaultFocus, keepFocus, vantageColorVar, worstStatus, availableVantages, toggleGridVantage, vantageControlChips, bandVantageFor, gridShowsTarget, adminMode, adminSessionState, createAdminStateController, statusProbeOwnsView, relTime, listTargets, addTarget, editTarget, removeTarget, buildTargetNode, buildGroupNode, labelHTML, collectingNote, agentYaml, agentCompose, cfgTree, reweightSiblings, reorderSiblings, editNodeAtPath, removeNodeAtPath, renameNodeAtPath, addNodeAtPath, moveNode, moveInList, cfgDropDestination, cfgVisibleRows, cfgTreeKey, tkey, ntpStatHtml, ntpStatOf, ntpStatSelect };
 
   // ---------------------------------------------------------------- init (DOM) --
   function init() {
@@ -1435,14 +1463,8 @@
       const bar = $('gridVantageBar'); if (!bar) return;
       if (availVantages.length < 2) { bar.hidden = true; bar.innerHTML = ''; return; }
       bar.hidden = false;
-      const focus = gridFocus();
-      bar.innerHTML = '<span class="vseg-lbl">Vantages</span>' + availVantages.map((v) => {
-        const on = gridVantages.includes(v), band = on && v === focus;
-        const role = band ? 'band' : on ? 'line' : 'off';
-        return '<button type="button" class="vseg-chip' + (on ? ' on' : '') + (band ? ' band' : '') + '" data-v="' + esc(v) +
-          '" aria-pressed="' + on + '" title="' + (on ? 'Hide ' : 'Show ') + esc(v) + ' on every graph">' +
-          '<i style="background:' + cssVar(vantageColorVar(v, availVantages)) + '"></i><span class="vn">' + esc(v) + '</span><span class="vr">' + role + '</span></button>';
-      }).join('');
+      bar.innerHTML = vantageControlChips(availVantages, gridVantages, gridFocus(), MAX_GRID_VANTAGES,
+        (v) => cssVar(vantageColorVar(v, availVantages)));
     }
 
     // ---- config-tree menu (left nav) ----
@@ -2681,7 +2703,7 @@
     // just-shown vantage's data and re-aggregate the status dots.
     $('gridVantageBar').addEventListener('click', (e) => {
       const b = e.target.closest('.vseg-chip'); if (!b) return;
-      gridVantages = toggleGridVantage(gridVantages, b.dataset.v, availVantages);
+      gridVantages = toggleGridVantage(gridVantages, b.dataset.v, availVantages, MAX_GRID_VANTAGES);
       saveGridVantages();
       renderVantageControl();
       renderGridPanels();
