@@ -6,6 +6,8 @@ All notable changes to **Heliograph** are recorded here. The format follows
 
 ## [Unreleased]
 
+## [1.0.15] - 2026-08-24
+
 ### Added
 - **View the config as YAML in the Config tab.** A Tree | YAML toggle sits beside the target tree; the
   YAML view is read-only and offers two sources — **DB** (just the targets stored in the database) and
@@ -1471,7 +1473,8 @@ the smoke-graph look, a fast/parallel poller, and probes as plugins.
 - Full re-implementation reference / code map maintained outside the repo at
   `~/.claude/plans/smokeping-codemap/`.
 
-[Unreleased]: https://github.com/seitzbg/heliograph/compare/v1.0.14...main
+[Unreleased]: https://github.com/seitzbg/heliograph/compare/v1.0.15...main
+[1.0.15]: https://github.com/seitzbg/heliograph/compare/v1.0.14...v1.0.15
 [1.0.14]: https://github.com/seitzbg/heliograph/compare/v1.0.13...v1.0.14
 [1.0.13]: https://github.com/seitzbg/heliograph/compare/v1.0.12...v1.0.13
 [1.0.12]: https://github.com/seitzbg/heliograph/compare/v1.0.11...v1.0.12
