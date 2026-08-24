@@ -837,6 +837,37 @@ check('toggleGridVantage: toggles, keeps >=1, drops stale keys, stays ordered', 
   assert.deepEqual(D.toggleGridVantage(['nyc', 'gone'], 'local', all)[0], 'local'); // stale 'gone' dropped, ordered
 });
 
+// The overlay palette has 4 colors, so at most 4 vantages can be distinctly shown at once. With a
+// cap, toggling ON a 5th is refused (no-op) — it must not silently drop another selection or reuse a
+// color. Toggling OFF is always allowed, even at the cap; no cap arg keeps the old uncapped behavior.
+check('toggleGridVantage: caps selection at max, refusing a 5th (toggle-off still works)', () => {
+  const all = ['local', 'a', 'b', 'c', 'd', 'e'];
+  const four = ['local', 'a', 'b', 'c'];
+  // At the cap of 4, turning on a 5th is a no-op: the set is unchanged.
+  assert.deepEqual(D.toggleGridVantage(four, 'd', all, 4), four);
+  assert.deepEqual(D.toggleGridVantage(four, 'e', all, 4), four);
+  // Toggling OFF an already-selected one is allowed even at the cap, and frees a slot.
+  assert.deepEqual(D.toggleGridVantage(four, 'c', all, 4), ['local', 'a', 'b']);
+  assert.deepEqual(D.toggleGridVantage(['local', 'a', 'b'], 'd', all, 4), ['local', 'a', 'b', 'd']);
+  // No cap argument = uncapped (unchanged legacy behavior).
+  assert.equal(D.toggleGridVantage(four, 'd', all).length, 5);
+});
+
+// vantageControlChips renders the toolbar toggles; at the cap every UN-selected chip is disabled
+// with an explanatory title, so the UI matches the reducer's refusal to overlay a 5th vantage.
+check('vantageControlChips: disables un-selected chips at the cap, keeps selected ones enabled', () => {
+  const color = () => '#fff';
+  const avail = ['local', 'a', 'b', 'c', 'd'];
+  // Below the cap: nothing disabled.
+  const below = D.vantageControlChips(avail, ['local', 'a'], 'local', 4, color);
+  assert.ok(!/disabled/.test(below), 'no chip should be disabled below the cap');
+  // At the cap (4 selected): the un-selected 'd' chip is disabled; a selected chip is not.
+  const at = D.vantageControlChips(avail, ['local', 'a', 'b', 'c'], 'local', 4, color);
+  assert.match(at, /data-v="d"[^>]*\bdisabled\b/, "the un-selected 'd' chip must be disabled at the cap");
+  assert.match(at, /Max 4 vantages/, 'the disabled chip explains the cap in its title');
+  assert.ok(!/data-v="a"[^>]*\bdisabled\b/.test(at), 'a selected chip must stay enabled (so it can be toggled off)');
+});
+
 // bandVantageFor: a panel's band follows the first SELECTED vantage that measures the target; null
 // (no selected vantage measures it) means the panel is hidden rather than drawn blank.
 check('bandVantageFor: first selected vantage that measures the target, else null', () => {
