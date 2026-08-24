@@ -156,6 +156,56 @@ func TestPutConfigNullDocRejected(t *testing.T) {
 	}
 }
 
+// TestGetConfigEffectiveSource checks the read-only effective tree source: it returns the merged
+// config JSON with readonly:true (and no version), is an open read, and 503s when unwired.
+func TestGetConfigEffectiveSource(t *testing.T) {
+	srv, _ := adminServer("hunter2")
+	srv.ConfigGet = func() (json.RawMessage, int, error) { return json.RawMessage(`{"targets":{"children":{}}}`), 4, nil }
+	srv.ConfigApply = func(json.RawMessage, int) error { return nil }
+	srv.ConfigEffective = func() (json.RawMessage, error) {
+		return json.RawMessage(`{"targets":{"children":{"eff-t":{"probe":"HTTP","host":"x"}}}}`), nil
+	}
+	mux := srv.Routes()
+
+	// Open read (no cookie) returns the effective doc, readonly, no version.
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/api/admin/config?source=effective", nil))
+	if w.Code != 200 {
+		t.Fatalf("effective source = %d, want 200\n%s", w.Code, w.Body)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["readonly"] != true {
+		t.Errorf("want readonly:true, got %v", got["readonly"])
+	}
+	if _, hasVer := got["version"]; hasVer {
+		t.Errorf("effective source must not carry an editable version, got %v", got["version"])
+	}
+	if !strings.Contains(string(w.Body.Bytes()), "eff-t") {
+		t.Errorf("want the effective doc, got %s", w.Body)
+	}
+
+	// Default (no source) still returns the editable DB fragment with a version.
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/api/admin/config", nil))
+	_ = json.Unmarshal(w.Body.Bytes(), &got)
+	if got["version"] != float64(4) {
+		t.Errorf("db source want version 4, got %v", got["version"])
+	}
+}
+
+func TestGetConfigEffectiveUnwiredReturns503(t *testing.T) {
+	// ConfigGet/Apply set (route registered) but ConfigEffective nil.
+	_, mux, _ := configServer(t, func(json.RawMessage, int) error { return nil }, nil, 0)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/api/admin/config?source=effective", nil))
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("effective source without hook = %d, want 503", w.Code)
+	}
+}
+
 // yamlConfigServer wires a stub ConfigYAML that echoes the requested source, so the
 // handler's source parsing and open-read behavior can be exercised without the collector.
 func yamlConfigServer(t *testing.T, fn func(source string) ([]byte, error)) (*http.ServeMux, *http.Cookie) {

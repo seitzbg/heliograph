@@ -623,6 +623,15 @@ func main() {
 					}
 					return jsonToYAML(doc)
 				}
+				// ConfigEffective backs the read-only "effective" tree (GET /api/admin/config?source=effective):
+				// the same merged snapshot ConfigYAML uses, returned as JSON for the tree renderer.
+				srv.ConfigEffective = func() (json.RawMessage, error) {
+					rt := current.Load()
+					if rt == nil || rt.effectiveJSON == nil {
+						return nil, fmt.Errorf("effective config unavailable")
+					}
+					return json.RawMessage(rt.effectiveJSON), nil
+				}
 			}
 		}
 		// Defensive timeouts so a slow or idle client can't tie up a connection
