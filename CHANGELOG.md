@@ -15,6 +15,14 @@ All notable changes to **Heliograph** are recorded here. The format follows
   (alongside `GET /api/admin/config`); the config holds no secrets, so it needs no admin login, and every
   write endpoint stays gated.
 
+### Fixed
+- **The dashboard no longer serves stale JavaScript after an upgrade.** Static assets (`index.html`,
+  `dashboard.js`, `smoke.js`, CSS) were served with only a `Last-Modified` header, so a browser could
+  keep running the pre-upgrade dashboard against a freshly-deployed server until a hard refresh — which
+  could leave panels stuck on "loading" after switching vantages. They now carry `Cache-Control:
+  no-cache`, forcing the browser to revalidate (a cheap 304 when unchanged, a fresh copy the moment the
+  file changes). Assets are still cached; they're just never served stale.
+
 ## [1.0.14] - 2026-08-24
 
 ### Changed
