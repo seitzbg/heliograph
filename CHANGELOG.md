@@ -6,6 +6,8 @@ All notable changes to **Heliograph** are recorded here. The format follows
 
 ## [Unreleased]
 
+## [1.0.14] - 2026-08-24
+
 ### Changed
 - **Tidier Graphs toolbar.** The reference key and the interactive controls are now separated into two
   zones (a divider between them), and the 8-chip loss legend is a single compact green→red strip
@@ -1452,7 +1454,8 @@ the smoke-graph look, a fast/parallel poller, and probes as plugins.
 - Full re-implementation reference / code map maintained outside the repo at
   `~/.claude/plans/smokeping-codemap/`.
 
-[Unreleased]: https://github.com/seitzbg/heliograph/compare/v1.0.13...main
+[Unreleased]: https://github.com/seitzbg/heliograph/compare/v1.0.14...main
+[1.0.14]: https://github.com/seitzbg/heliograph/compare/v1.0.13...v1.0.14
 [1.0.13]: https://github.com/seitzbg/heliograph/compare/v1.0.12...v1.0.13
 [1.0.12]: https://github.com/seitzbg/heliograph/compare/v1.0.11...v1.0.12
 [1.0.11]: https://github.com/seitzbg/heliograph/compare/v1.0.10...v1.0.11
