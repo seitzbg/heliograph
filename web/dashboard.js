@@ -302,6 +302,15 @@
     if (!next.length) next = ['local'];
     return orderVantages(next);
   }
+  // bandVantageFor returns the vantage whose band+median a panel should draw: the first SELECTED
+  // vantage (in shown order) that actually measures this target. null means no selected vantage
+  // measures it — so the panel is hidden rather than drawn blank (the "hide unmeasured" rule).
+  // Also decides which overlays a panel gets (the other selected vantages that measure it).
+  function bandVantageFor(targetVantages, shown) {
+    const measures = new Set((targetVantages && targetVantages.length) ? targetVantages : ['local']);
+    for (const v of (shown || [])) if (measures.has(v)) return v;
+    return null;
+  }
 
   // adminMode maps the status of GET /api/admin/vantages to the Vantages panel's display
   // mode: 200 authorized (show the list), 401 log in, 404 admin management disabled (no
@@ -797,7 +806,7 @@
     return html + '<span class="stat"><span class="k">stratum</span><span class="v">' + stat.stratum + '</span></span>';
   }
 
-  window.Dash = { RANGES, RANGE_ORDER, parseRoute, mergeSeries, gridSince, gridTemplateFor, maxColumnsFor, rangeLabels, fetchJSON, zoomResolution, pixelToTime, sharedYMax, buildTree, underPath, targetStatus, pickSeries, vantageList, orderVantages, defaultFocus, keepFocus, vantageColorVar, worstStatus, availableVantages, toggleGridVantage, adminMode, adminSessionState, createAdminStateController, statusProbeOwnsView, relTime, listTargets, addTarget, editTarget, removeTarget, buildTargetNode, buildGroupNode, labelHTML, collectingNote, agentYaml, agentCompose, cfgTree, reweightSiblings, reorderSiblings, editNodeAtPath, removeNodeAtPath, renameNodeAtPath, addNodeAtPath, moveNode, moveInList, cfgDropDestination, cfgVisibleRows, cfgTreeKey, tkey, ntpStatHtml };
+  window.Dash = { RANGES, RANGE_ORDER, parseRoute, mergeSeries, gridSince, gridTemplateFor, maxColumnsFor, rangeLabels, fetchJSON, zoomResolution, pixelToTime, sharedYMax, buildTree, underPath, targetStatus, pickSeries, vantageList, orderVantages, defaultFocus, keepFocus, vantageColorVar, worstStatus, availableVantages, toggleGridVantage, bandVantageFor, adminMode, adminSessionState, createAdminStateController, statusProbeOwnsView, relTime, listTargets, addTarget, editTarget, removeTarget, buildTargetNode, buildGroupNode, labelHTML, collectingNote, agentYaml, agentCompose, cfgTree, reweightSiblings, reorderSiblings, editNodeAtPath, removeNodeAtPath, renameNodeAtPath, addNodeAtPath, moveNode, moveInList, cfgDropDestination, cfgVisibleRows, cfgTreeKey, tkey, ntpStatHtml };
 
   // ---------------------------------------------------------------- init (DOM) --
   function init() {
@@ -1210,7 +1219,6 @@
           if (!live.has(key)) { p.el.remove(); panels.delete(key); }
         }
         const cutoffMs = Date.now() - RANGES['3h'].windowMs;
-        const focus = gridFocus();
         // Fetch each SHOWN vantage's bulk series (incrementally, with its own watermark) into
         // p.seriesByV[v]. The focused vantage becomes p.series — band + median + unison + meta — and
         // the other shown vantages render as overlay lines (renderGridPanels). A single-vantage grid
@@ -1241,12 +1249,9 @@
             else if (p.seriesByV[v]) p.seriesByV[v] = mergeSeries(p.seriesByV[v], null, cutoffMs); // age out
           }));
         }
-        // Point each panel at its focused vantage (the band owner) + refresh its stat line from it.
-        for (const t of gridTargets) {
-          const p = panels.get(tkey(t)); if (!p) continue;
-          p.series = p.seriesByV[focus] || null;
-          if (p.series && p.series.buckets.length) gridMeta(p, p.series);
-        }
+        // The band owner (p.series) + stat line are chosen PER PANEL in renderGridPanels: each panel
+        // follows the first selected vantage that measures its target, so a target a vantage doesn't
+        // measure is hidden rather than drawn blank (bandVantageFor). Nothing to set here.
         if (anyBulk) gridLoaded = true;
         // Don't claim "updated" when every vantage's series fetch failed (network/non-2xx): the panels
         // are showing last-known data, so say so instead of lying (#5).
@@ -1320,21 +1325,35 @@
     }
     function renderGridPanels() {
       const vis = [];
+      let hidden = 0; // targets in scope that NO selected vantage measures — hidden, not drawn blank
       for (const p of panels.values()) {
         // Scope by the display PATH (data-path), not data-target — the latter is now the stable id,
         // which for a UUID target has no '/'-path relationship to the scope (CODE_REVIEW L8).
-        const show = underPath(p.el.dataset.path, gridScope);
+        const inScope = underPath(p.el.dataset.path, gridScope);
+        // Band owner = the first SELECTED vantage that measures this target (per panel, so a target a
+        // vantage doesn't measure is hidden rather than drawn blank). null => not measured by the
+        // selection => hide it (it stays in the nav tree).
+        const band = bandVantageFor(vantagesByTarget.get(p.el.dataset.target), gridVantages);
+        const show = inScope && band != null;
         p.el.style.display = show ? '' : 'none';
-        if (show) vis.push(p);
+        if (inScope && band == null) hidden++;
+        if (show) {
+          p.band = band;
+          p.series = p.seriesByV[band] || null; // the band owner's series
+          if (p.series && p.series.buckets.length) gridMeta(p, p.series);
+          vis.push(p);
+        }
       }
-      // Which vantages overlay on each panel: everything shown except the focused one (which owns the
-      // band). Filter by the SHOWN set, but color by the full availVantages so a vantage keeps its
-      // color as others are toggled. Skip any series this panel hasn't loaded / can't support.
-      const focus = gridFocus();
+      updateHiddenNote(hidden);
+      // Which vantages overlay on each panel: every OTHER selected vantage that measures this target
+      // (not its band owner). Filter by the SHOWN set + what the target measures, but color by the
+      // full availVantages so a vantage keeps its color as others are toggled. Skip series a panel
+      // hasn't loaded / can't support.
       const overlaysFor = (p) => {
         if (gridVantages.length < 2) return undefined;
         const byV = p.seriesByV || {};
-        return gridVantages.filter((v) => v !== focus && byV[v] && !byV[v].unsupported)
+        const measures = new Set(vantagesByTarget.get(p.el.dataset.target) || ['local']);
+        return gridVantages.filter((v) => v !== p.band && measures.has(v) && byV[v] && !byV[v].unsupported)
           .map((v) => ({ series: byV[v], color: cssVar(vantageColorVar(v, availVantages)) }));
       };
       // Unison shares one latency scale — but only across rtt panels. A signed offset panel uses
@@ -1352,6 +1371,15 @@
       }
       for (const p of vis) renderInto(p.canvas, p.series, RANGES['3h'], 170, yMax, overlaysFor(p), ntpSigned(p.el.dataset.target));
       updateColsPicker(); // the grid now has a measurable width (e.g. first paint on view entry)
+    }
+    // updateHiddenNote reports how many in-scope targets the current vantage selection doesn't
+    // measure (hidden rather than shown blank). Silent when nothing is hidden, or single-vantage.
+    function updateHiddenNote(n) {
+      const el = $('gridHiddenNote'); if (!el) return;
+      if (n <= 0 || availVantages.length < 2) { el.hidden = true; el.textContent = ''; return; }
+      el.hidden = false;
+      el.textContent = n + (n === 1 ? ' target' : ' targets') + ' not measured from ' +
+        orderVantages(gridVantages).join(' + ') + ' — hidden (still in the tree)';
     }
     // renderVantageControl draws the Graphs-toolbar vantage toggles. Hidden entirely for a
     // single-vantage deployment. Each chip toggles whether that vantage is drawn on every panel; the

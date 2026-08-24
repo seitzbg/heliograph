@@ -813,5 +813,22 @@ check('toggleGridVantage: toggles, keeps >=1, drops stale keys, stays ordered', 
   assert.deepEqual(D.toggleGridVantage(['nyc', 'gone'], 'local', all)[0], 'local'); // stale 'gone' dropped, ordered
 });
 
+// bandVantageFor: a panel's band follows the first SELECTED vantage that measures the target; null
+// (no selected vantage measures it) means the panel is hidden rather than drawn blank.
+check('bandVantageFor: first selected vantage that measures the target, else null', () => {
+  // local-only target, viewing only munro-comcast -> not measured -> hidden (null): the reported bug
+  assert.equal(D.bandVantageFor(['local'], ['munro-comcast']), null);
+  // local-only target with local selected -> local owns the band
+  assert.equal(D.bandVantageFor(['local'], ['local', 'munro-comcast']), 'local');
+  // measured by munro-comcast, viewing only munro-comcast -> munro-comcast band
+  assert.equal(D.bandVantageFor(['local', 'munro-comcast'], ['munro-comcast']), 'munro-comcast');
+  // per-panel band: viewing [munro-comcast, nyc], a nyc-only target -> nyc owns the band (not the
+  // first selected), so a shown panel never blanks
+  assert.equal(D.bandVantageFor(['local', 'nyc'], ['munro-comcast', 'nyc']), 'nyc');
+  // missing/empty vantage list defaults to local
+  assert.equal(D.bandVantageFor(undefined, ['local']), 'local');
+  assert.equal(D.bandVantageFor([], ['munro-comcast']), null);
+});
+
 if (failed) { console.error(`\n${failed} test(s) failed`); process.exit(1); }
 console.log('\nall dashboard tests passed');
