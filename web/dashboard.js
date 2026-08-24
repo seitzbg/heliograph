@@ -2047,17 +2047,22 @@
       $('cfgSrcSeg').classList.toggle('hidden', !yaml);
       if (yaml) loadCfgYaml();
     }
+    let cfgYamlReq = 0; // generation guard: a slower superseded fetch must never overwrite the newer source
     async function loadCfgYaml() {
+      const req = ++cfgYamlReq;
+      const stale = () => req !== cfgYamlReq;
       segPress('cfgSrcSeg', 'cfgsrc', cfgYamlSrc);
       const pre = $('cfgYaml');
-      const msg = (t) => { pre.classList.add('cfg-yaml-msg'); pre.textContent = t; };
+      const msg = (t) => { if (!stale()) { pre.classList.add('cfg-yaml-msg'); pre.textContent = t; } };
       pre.classList.remove('cfg-yaml-msg');
       pre.textContent = 'Loading…';
       let r;
       try { r = await fetch('/api/admin/config.yaml?source=' + cfgYamlSrc, { cache: 'no-store' }); }
       catch (e) { msg("Couldn't reach the admin API."); return; }
+      if (stale()) return;
       if (!r.ok) { msg('Could not load the ' + cfgYamlSrc + ' config (HTTP ' + r.status + ').'); return; }
-      pre.textContent = await r.text();
+      const text = await r.text();
+      if (!stale()) pre.textContent = text;
     }
     $('cfgViewSeg').addEventListener('click', (e) => {
       const b = e.target.closest('button[data-cfgview]'); if (!b) return;
