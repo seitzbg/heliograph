@@ -7,6 +7,10 @@ All notable changes to **Heliograph** are recorded here. The format follows
 ## [Unreleased]
 
 ### Changed
+- **Tidier Graphs toolbar.** The reference key and the interactive controls are now separated into two
+  zones (a divider between them), and the 8-chip loss legend is a single compact green→red strip
+  (each bucket's threshold on hover) — so the vantage/cols/unison controls no longer fight the legend
+  for space. It scales down cleanly too: the zones wrap and the divider drops on narrow screens.
 - **The Vantages and Config admin pages are viewable without logging in.** Any user who can reach the
   dashboard (behind the reverse proxy's Basic Auth) can now see the vantage list and the DB config
   tree read-only; adding/revoking a vantage and editing/importing config still require an admin login.
