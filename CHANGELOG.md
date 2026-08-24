@@ -6,6 +6,8 @@ All notable changes to **Heliograph** are recorded here. The format follows
 
 ## [Unreleased]
 
+## [1.0.12] - 2026-08-24
+
 ### Added
 - **Vantages on the Graphs page.** A vantage control on the Graphs toolbar (shown only when a
   deployment measures from more than one vantage) picks which vantages draw on every panel: the
@@ -1427,7 +1429,8 @@ the smoke-graph look, a fast/parallel poller, and probes as plugins.
 - Full re-implementation reference / code map maintained outside the repo at
   `~/.claude/plans/smokeping-codemap/`.
 
-[Unreleased]: https://github.com/seitzbg/heliograph/compare/v1.0.11...main
+[Unreleased]: https://github.com/seitzbg/heliograph/compare/v1.0.12...main
+[1.0.12]: https://github.com/seitzbg/heliograph/compare/v1.0.11...v1.0.12
 [1.0.11]: https://github.com/seitzbg/heliograph/compare/v1.0.10...v1.0.11
 [1.0.10]: https://github.com/seitzbg/heliograph/compare/v1.0.9...v1.0.10
 [1.0.9]: https://github.com/seitzbg/heliograph/compare/v1.0.8...v1.0.9
