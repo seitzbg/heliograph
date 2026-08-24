@@ -6,6 +6,8 @@ All notable changes to **Heliograph** are recorded here. The format follows
 
 ## [Unreleased]
 
+## [1.0.13] - 2026-08-24
+
 ### Changed
 - **Graphs grid hides targets a selected vantage doesn't measure.** When you view the grid from a
   vantage (or vantages) that doesn't probe some targets — e.g. a Comcast vantage that doesn't measure
@@ -1437,7 +1439,8 @@ the smoke-graph look, a fast/parallel poller, and probes as plugins.
 - Full re-implementation reference / code map maintained outside the repo at
   `~/.claude/plans/smokeping-codemap/`.
 
-[Unreleased]: https://github.com/seitzbg/heliograph/compare/v1.0.12...main
+[Unreleased]: https://github.com/seitzbg/heliograph/compare/v1.0.13...main
+[1.0.13]: https://github.com/seitzbg/heliograph/compare/v1.0.12...v1.0.13
 [1.0.12]: https://github.com/seitzbg/heliograph/compare/v1.0.11...v1.0.12
 [1.0.11]: https://github.com/seitzbg/heliograph/compare/v1.0.10...v1.0.11
 [1.0.10]: https://github.com/seitzbg/heliograph/compare/v1.0.9...v1.0.10
