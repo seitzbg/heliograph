@@ -6,6 +6,10 @@ All notable changes to **Heliograph** are recorded here. The format follows
 
 ## [Unreleased]
 
+### Docs
+- `config.example.yaml` now shows a `vantages:` example, so the reference config demonstrates
+  measuring a subtree from both the hub and a remote vantage (federation), not just single-vantage.
+
 ## [1.0.11] - 2026-08-23
 
 Stable target identity, documented and hardened. A target's history now follows a stable, server-
