@@ -6,6 +6,8 @@ All notable changes to **Heliograph** are recorded here. The format follows
 
 ## [Unreleased]
 
+## [1.0.16] - 2026-08-24
+
 ### Changed
 - **The Config tab now defaults to your Effective config, not the DB fragment.** The Effective | DB
   source toggle now applies to both the Tree and YAML views (previously YAML-only), and the tab opens
@@ -1482,7 +1484,8 @@ the smoke-graph look, a fast/parallel poller, and probes as plugins.
 - Full re-implementation reference / code map maintained outside the repo at
   `~/.claude/plans/smokeping-codemap/`.
 
-[Unreleased]: https://github.com/seitzbg/heliograph/compare/v1.0.15...main
+[Unreleased]: https://github.com/seitzbg/heliograph/compare/v1.0.16...main
+[1.0.16]: https://github.com/seitzbg/heliograph/compare/v1.0.15...v1.0.16
 [1.0.15]: https://github.com/seitzbg/heliograph/compare/v1.0.14...v1.0.15
 [1.0.14]: https://github.com/seitzbg/heliograph/compare/v1.0.13...v1.0.14
 [1.0.13]: https://github.com/seitzbg/heliograph/compare/v1.0.12...v1.0.13
