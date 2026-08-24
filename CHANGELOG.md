@@ -6,6 +6,15 @@ All notable changes to **Heliograph** are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **Vantages on the Graphs page.** A vantage control on the Graphs toolbar (shown only when a
+  deployment measures from more than one vantage) picks which vantages draw on every panel: the
+  focused one owns the min–max band + median, the rest overlay as median lines — so selecting one
+  vantage is a clean single view and selecting all is a full fiber-vs-vantage overlay. The nav and
+  panel status dots now reflect the **worst** vantage (even one you've hidden), so a target that is
+  healthy locally but losing packets from another vantage still flags on the overview. Defaults to
+  `local`; the selection is remembered per browser.
+
 ### Docs
 - `config.example.yaml` now shows a `vantages:` example, so the reference config demonstrates
   measuring a subtree from both the hub and a remote vantage (federation), not just single-vantage.
