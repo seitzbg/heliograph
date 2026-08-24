@@ -113,10 +113,14 @@ dashboard, and remote vantages.
   target, the hub disambiguates the two by the round's fingerprint, so a fingerprint-carrying agent is
   still attributed correctly — only a pre-fingerprint agent reporting a reused path pauses until
   upgrade, rather than silently misattributing or dropping the data.
-- **Deep links and Overview links survive a move.** Dashboard navigation, the URL hash, detail
-  fetches, and the Overview worst-offenders / SLA boards are all keyed by the stable id, and an
-  existing path-based `#target=` hash is rewritten to the id once the target catalog loads — so a link
-  built, bookmarked, or opened before a move keeps working.
+- **Deep links and Overview links follow a move.** Dashboard navigation, the URL hash, detail
+  fetches, and the Overview worst-offenders / SLA boards are all keyed by the stable id, and a
+  path-based `#target=` hash is rewritten to the id once the target catalog loads — so a link built
+  or opened while its path is still current keeps working after the target later moves. A dormant
+  bookmark to a target's *old* path, first reopened only after the move, is the exception: the server
+  keeps no old-path alias, so it opens blank (or, if that path was since reused by another target,
+  resolves to the new occupant). The app emits id-based links once loaded — prefer those for anything
+  saved long-term.
 
 ### Docs
 - Documented the stable-identity lifecycle end to end: the server-managed id and YAML path fallback in

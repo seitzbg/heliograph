@@ -43,8 +43,8 @@ func TestGetConfigReturnsVersionAndDoc(t *testing.T) {
 	}
 }
 
-// The config read is open (a read-only view for anyone past the proxy's Basic Auth — the doc holds
-// no secrets); applying a change stays admin-gated.
+// The config read is open (a read-only view for anyone past the proxy's Basic Auth); a non-admin
+// read is redacted (see TestGetConfigRedactsForNonAdminOnly), and applying a change stays admin-gated.
 func TestConfigReadOpenWriteGated(t *testing.T) {
 	_, mux, _ := configServer(t, func(json.RawMessage, int) error { return nil }, nil, 0)
 	// GET without a cookie: open read -> 200.
@@ -76,6 +76,73 @@ func TestGetConfigEmptyRowIsEmptyObject(t *testing.T) {
 	_ = json.Unmarshal(w.Body.Bytes(), &got)
 	if got.Version != 0 || strings.TrimSpace(string(got.Doc)) != "{}" {
 		t.Fatalf("empty row want {version:0,doc:{}}, got %+v (%s)", got, got.Doc)
+	}
+}
+
+// A non-admin config read must not disclose a credential embedded in a probe param; a logged-in
+// admin gets the real, editable doc so a later save can't persist the mask over the secret (M11).
+func TestGetConfigRedactsForNonAdminOnly(t *testing.T) {
+	doc := json.RawMessage(`{"targets":{"children":{"x":{"probe":"HTTP","host":"h",` +
+		`"params":{"urlformat":"https://u:p@%host%/?token=SECRET"}}}}}`)
+	srv, _ := adminServer("hunter2")
+	srv.ConfigGet = func() (json.RawMessage, int, error) { return doc, 1, nil }
+	srv.ConfigApply = func(json.RawMessage, int) error { return nil }
+	redactCalled := 0
+	srv.ConfigRedact = func(d json.RawMessage) (json.RawMessage, error) {
+		redactCalled++
+		return json.RawMessage(`{"redacted":true}`), nil
+	}
+	mux := srv.Routes()
+	cookie := login(t, mux, "hunter2")
+
+	// No cookie: the redactor runs and the secret never reaches the body.
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/api/admin/config", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("public GET = %d, want 200", w.Code)
+	}
+	if strings.Contains(w.Body.String(), "SECRET") {
+		t.Fatalf("public read leaked the secret: %s", w.Body)
+	}
+	if !strings.Contains(w.Body.String(), "redacted") {
+		t.Fatalf("public read was not redacted: %s", w.Body)
+	}
+	if redactCalled != 1 {
+		t.Fatalf("redactor called %d times for the public read, want 1", redactCalled)
+	}
+
+	// With a valid admin cookie: the real doc (needed to edit) is served, the redactor is skipped.
+	w = httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/api/admin/config", nil)
+	r.AddCookie(cookie)
+	mux.ServeHTTP(w, r)
+	if !strings.Contains(w.Body.String(), "SECRET") {
+		t.Fatalf("admin read should see the real doc: %s", w.Body)
+	}
+	if redactCalled != 1 {
+		t.Fatalf("redactor must not run for an admin read (called %d)", redactCalled)
+	}
+}
+
+// The YAML view mirrors it: a non-admin read asks ConfigYAML to redact, an admin read does not.
+func TestGetConfigYAMLRedactsForNonAdminOnly(t *testing.T) {
+	srv, _ := adminServer("hunter2")
+	srv.ConfigGet = func() (json.RawMessage, int, error) { return nil, 0, nil }
+	srv.ConfigApply = func(json.RawMessage, int) error { return nil }
+	var lastRedact bool
+	srv.ConfigYAML = func(_ string, redact bool) ([]byte, error) { lastRedact = redact; return []byte("targets: {}\n"), nil }
+	mux := srv.Routes()
+	cookie := login(t, mux, "hunter2")
+
+	mux.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/api/admin/config.yaml", nil))
+	if !lastRedact {
+		t.Fatal("public YAML read must request redaction")
+	}
+	r := httptest.NewRequest("GET", "/api/admin/config.yaml", nil)
+	r.AddCookie(cookie)
+	mux.ServeHTTP(httptest.NewRecorder(), r)
+	if lastRedact {
+		t.Fatal("admin YAML read must not redact")
 	}
 }
 
@@ -196,6 +263,47 @@ func TestGetConfigEffectiveSource(t *testing.T) {
 	}
 }
 
+// The effective source merges file-defined targets, which can also carry a credential-bearing probe
+// param — a non-admin read of it must be redacted too, not just the DB source (CODE_REVIEW M11).
+func TestGetConfigEffectiveRedactsForNonAdmin(t *testing.T) {
+	srv, _ := adminServer("hunter2")
+	srv.ConfigGet = func() (json.RawMessage, int, error) { return nil, 0, nil }
+	srv.ConfigApply = func(json.RawMessage, int) error { return nil }
+	srv.ConfigEffective = func() (json.RawMessage, error) {
+		return json.RawMessage(`{"targets":{"children":{"eff":{"probe":"HTTP","host":"x",` +
+			`"params":{"urlformat":"https://u:p@%host%/?token=SECRET"}}}}}`), nil
+	}
+	redactCalled := 0
+	srv.ConfigRedact = func(d json.RawMessage) (json.RawMessage, error) {
+		redactCalled++
+		return json.RawMessage(`{"redacted":true}`), nil
+	}
+	mux := srv.Routes()
+	cookie := login(t, mux, "hunter2")
+
+	// No cookie: the effective doc is redacted before it reaches the reader.
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/api/admin/config?source=effective", nil))
+	if strings.Contains(w.Body.String(), "SECRET") {
+		t.Fatalf("public effective read leaked the secret: %s", w.Body)
+	}
+	if redactCalled != 1 {
+		t.Fatalf("effective redactor called %d times for public read, want 1", redactCalled)
+	}
+
+	// Admin cookie: the real effective doc is served (redactor skipped).
+	w = httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/api/admin/config?source=effective", nil)
+	r.AddCookie(cookie)
+	mux.ServeHTTP(w, r)
+	if !strings.Contains(w.Body.String(), "SECRET") {
+		t.Fatalf("admin effective read should see the real doc: %s", w.Body)
+	}
+	if redactCalled != 1 {
+		t.Fatalf("redactor must not run for an admin effective read (called %d)", redactCalled)
+	}
+}
+
 func TestGetConfigEffectiveUnwiredReturns503(t *testing.T) {
 	// ConfigGet/Apply set (route registered) but ConfigEffective nil.
 	_, mux, _ := configServer(t, func(json.RawMessage, int) error { return nil }, nil, 0)
@@ -208,7 +316,7 @@ func TestGetConfigEffectiveUnwiredReturns503(t *testing.T) {
 
 // yamlConfigServer wires a stub ConfigYAML that echoes the requested source, so the
 // handler's source parsing and open-read behavior can be exercised without the collector.
-func yamlConfigServer(t *testing.T, fn func(source string) ([]byte, error)) (*http.ServeMux, *http.Cookie) {
+func yamlConfigServer(t *testing.T, fn func(source string, redact bool) ([]byte, error)) (*http.ServeMux, *http.Cookie) {
 	t.Helper()
 	srv, _ := adminServer("hunter2")
 	srv.ConfigGet = func() (json.RawMessage, int, error) { return nil, 0, nil }
@@ -219,7 +327,7 @@ func yamlConfigServer(t *testing.T, fn func(source string) ([]byte, error)) (*ht
 }
 
 func TestGetConfigYAMLSources(t *testing.T) {
-	mux, _ := yamlConfigServer(t, func(source string) ([]byte, error) {
+	mux, _ := yamlConfigServer(t, func(source string, _ bool) ([]byte, error) {
 		return []byte("source: " + source + "\n"), nil
 	})
 	for _, tc := range []struct{ query, want string }{
@@ -243,7 +351,7 @@ func TestGetConfigYAMLSources(t *testing.T) {
 
 func TestGetConfigYAMLBadSource(t *testing.T) {
 	called := false
-	mux, _ := yamlConfigServer(t, func(string) ([]byte, error) { called = true; return nil, nil })
+	mux, _ := yamlConfigServer(t, func(string, bool) ([]byte, error) { called = true; return nil, nil })
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, httptest.NewRequest("GET", "/api/admin/config.yaml?source=bogus", nil))
 	if w.Code != http.StatusBadRequest {
@@ -256,7 +364,7 @@ func TestGetConfigYAMLBadSource(t *testing.T) {
 
 // The YAML view is an open read like GET /api/admin/config — no admin cookie required.
 func TestGetConfigYAMLReadOpen(t *testing.T) {
-	mux, _ := yamlConfigServer(t, func(string) ([]byte, error) { return []byte("targets: {}\n"), nil })
+	mux, _ := yamlConfigServer(t, func(string, bool) ([]byte, error) { return []byte("targets: {}\n"), nil })
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, httptest.NewRequest("GET", "/api/admin/config.yaml", nil))
 	if w.Code != http.StatusOK {
@@ -265,7 +373,7 @@ func TestGetConfigYAMLReadOpen(t *testing.T) {
 }
 
 func TestGetConfigYAMLErrorReturns503(t *testing.T) {
-	mux, _ := yamlConfigServer(t, func(string) ([]byte, error) { return nil, errConfigStore })
+	mux, _ := yamlConfigServer(t, func(string, bool) ([]byte, error) { return nil, errConfigStore })
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, httptest.NewRequest("GET", "/api/admin/config.yaml", nil))
 	if w.Code != http.StatusServiceUnavailable {

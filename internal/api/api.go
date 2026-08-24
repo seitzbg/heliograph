@@ -172,13 +172,21 @@ type Server struct {
 	ConfigImport func(body []byte) (added, unchanged, version int, err error)
 	// ConfigYAML, if set, renders the config as YAML for the read-only Config-tab view
 	// (GET /api/admin/config.yaml?source=db|effective). source "db" is the stored DB fragment;
-	// "effective" is the file+DB merged config the collector is running. Open read like ConfigGet
-	// (the config holds no secrets); nil ⇒ route not registered.
-	ConfigYAML func(source string) ([]byte, error)
+	// "effective" is the file+DB merged config the collector is running. Open read like ConfigGet;
+	// when redact is true (a non-admin reader) secret-capable probe params are sanitized before
+	// rendering (CODE_REVIEW M11). nil ⇒ route not registered.
+	ConfigYAML func(source string, redact bool) ([]byte, error)
 	// ConfigEffective, if set, returns the file+DB merged config as JSON — the read-only "effective"
 	// source of GET /api/admin/config?source=effective, which the Config tab renders as a tree. Same
-	// non-secret data as ConfigYAML("effective"); nil ⇒ the effective source answers 503.
+	// snapshot as ConfigYAML("effective"); redacted for a non-admin reader like ConfigGet (M11).
+	// nil ⇒ the effective source answers 503.
 	ConfigEffective func() (json.RawMessage, error)
+	// ConfigRedact, if set, sanitizes secret-capable probe params in a config document (the HTTP
+	// urlformat's userinfo/query) for the open reads. Applied to GET /api/admin/config (both the DB
+	// and effective sources) only for a request without a valid admin session; a logged-in admin is
+	// served the real, editable doc so a subsequent save can't overwrite a secret with its masked
+	// form (CODE_REVIEW M11).
+	ConfigRedact func(doc json.RawMessage) (json.RawMessage, error)
 }
 
 func New(s store.Store, webDir string) *Server { return &Server{store: s, webDir: webDir} }
@@ -257,8 +265,10 @@ func (srv *Server) Routes() *http.ServeMux {
 	}
 	if srv.AdminPassword != "" && len(srv.AdminKey) > 0 && srv.ConfigGet != nil && srv.ConfigApply != nil {
 		// Read is open like the vantage list: the config doc is the monitoring tree (targets, probes,
-		// alert routing by notifier NAME) — the actual secrets (DB password, webhook URLs) come from
-		// the environment, not this doc — so it is safe to show read-only. Applying changes stays gated.
+		// alert routing by notifier NAME). The environment-sourced secrets (DB password, webhook URLs)
+		// are never in it, but a probe param CAN embed a credential (an HTTP urlformat's userinfo or
+		// query), so a non-admin read is redacted; a logged-in admin gets the real doc (CODE_REVIEW
+		// M11). Applying changes stays admin-gated.
 		mux.HandleFunc("GET /api/admin/config", srv.getConfig)
 		mux.HandleFunc("PUT /api/admin/config", srv.requireAdmin(srv.putConfig))
 		if srv.ConfigYAML != nil {
@@ -1571,11 +1581,20 @@ func (srv *Server) adminSession(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// hasAdminSession reports whether the request carries a currently-valid admin session cookie. It is
+// the read-side of requireAdmin: the open config reads use it to serve the real document to a
+// logged-in admin (who needs it to edit) while redacting secrets for the public (CODE_REVIEW M11).
+// Safe because the config routes are registered only when admin is configured (a real AdminKey), so
+// an empty-key forgery can never pass here.
+func (srv *Server) hasAdminSession(r *http.Request) bool {
+	c, err := r.Cookie(adminCookie)
+	return err == nil && verifySession(srv.AdminKey, c.Value, time.Now())
+}
+
 func (srv *Server) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
-		c, err := r.Cookie(adminCookie)
-		if err != nil || !verifySession(srv.AdminKey, c.Value, time.Now()) {
+		if !srv.hasAdminSession(r) {
 			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 			return
 		}
@@ -1663,6 +1682,17 @@ func (srv *Server) revokeVantage(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"removed": true, "name": name})
 }
 
+// redactConfigForReader returns doc unchanged for a logged-in admin (who needs the real, editable
+// values), or with secret-capable probe params sanitized for any other reader — the open config
+// reads must not disclose a credential embedded in a probe param, e.g. an HTTP urlformat's
+// userinfo/query (CODE_REVIEW M11). A nil ConfigRedact (unwired) passes doc through unchanged.
+func (srv *Server) redactConfigForReader(r *http.Request, doc json.RawMessage) (json.RawMessage, error) {
+	if srv.ConfigRedact == nil || srv.hasAdminSession(r) {
+		return doc, nil
+	}
+	return srv.ConfigRedact(doc)
+}
+
 func (srv *Server) getConfig(w http.ResponseWriter, r *http.Request) {
 	// source=effective serves the file+DB merged config, read-only (the Config tab's default view).
 	// It has no editable version — the frontend renders it read-only and edits only the DB fragment.
@@ -1679,6 +1709,12 @@ func (srv *Server) getConfig(w http.ResponseWriter, r *http.Request) {
 		if trimmed := bytes.TrimSpace(doc); len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
 			doc = json.RawMessage(`{}`)
 		}
+		// The effective config merges file-defined targets, which can carry credential-bearing probe
+		// params too — redact for a non-admin reader like the DB source below (CODE_REVIEW M11).
+		if doc, err = srv.redactConfigForReader(r, doc); err != nil {
+			http.Error(w, `{"error":"config unavailable"}`, http.StatusServiceUnavailable)
+			return
+		}
 		writeJSON(w, map[string]any{"readonly": true, "doc": doc})
 		return
 	}
@@ -1689,6 +1725,13 @@ func (srv *Server) getConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	if trimmed := bytes.TrimSpace(doc); len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
 		doc = json.RawMessage(`{}`)
+	}
+	// The config read is open, but a non-admin viewer must not see a credential in a probe param. A
+	// logged-in admin gets the real doc: this is the editable source, so serving a masked value would
+	// let the next save persist the mask over the secret (CODE_REVIEW M11).
+	if doc, err = srv.redactConfigForReader(r, doc); err != nil {
+		http.Error(w, `{"error":"config unavailable"}`, http.StatusServiceUnavailable)
+		return
 	}
 	writeJSON(w, map[string]any{"version": version, "doc": doc})
 }
@@ -1705,7 +1748,10 @@ func (srv *Server) getConfigYAML(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"source must be db or effective"}`, http.StatusBadRequest)
 		return
 	}
-	out, err := srv.ConfigYAML(source)
+	// Redact secret-capable probe params for a non-admin reader; a logged-in admin sees the real
+	// config (CODE_REVIEW M11). The YAML view is display-only (there is no YAML save), so unlike
+	// getConfig there is no round-trip risk — this mirrors it only for a consistent auth model.
+	out, err := srv.ConfigYAML(source, !srv.hasAdminSession(r))
 	if err != nil {
 		http.Error(w, `{"error":"config unavailable"}`, http.StatusServiceUnavailable)
 		return
