@@ -48,29 +48,37 @@ window.Smoke = (function () {
     return `rgb(${Math.round(d * 0.86)},${Math.round(d * 0.94)},${d})`;
   }
 
-  function robustMax(s) {
-    const all = [];
-    for (const b of s.buckets) for (const v of b.samples) all.push(v);
-    all.sort((a, b) => a - b);
-    if (!all.length) return 1;
-    const p = all[Math.min(all.length - 1, Math.floor(all.length * 0.965))];
-    return Math.max(1, p * 1.18);
-  }
+  // robustMax is the y-axis top for the unison (shared-scale) grid — the same range robustRange
+  // computes for a single latency panel, so a median peak is never clipped there either.
+  function robustMax(s) { return robustRange(s, false)[1]; }
 
   // robustRange returns the [yMin, yMax] the y-axis should span. A latency series (signed=false) is
-  // 0-based and floored at 1ms — identical to robustMax, so every existing graph renders unchanged.
-  // A SIGNED series (NTP clock offset; explicitly flagged by the caller, since it can be legitimately
-  // all-positive) always gets a tight range that includes zero, padded, with NO 1ms floor — so a
-  // µs-scale offset fills the plot instead of collapsing to a sliver. Uses the 3.5th/96.5th
-  // percentiles so a single outlier doesn't set the scale, matching robustMax's high tail.
+  // 0-based and floored at 1ms. A SIGNED series (NTP clock offset; explicitly flagged by the caller,
+  // since it can be legitimately all-positive) always gets a tight range that includes zero, padded,
+  // with NO 1ms floor — so a µs-scale offset fills the plot instead of collapsing to a sliver.
+  //
+  // The SAMPLE band is scaled by the 3.5th/96.5th percentiles so a single outlier ping doesn't set
+  // the scale. But the MEDIAN line is the primary signal and must never be clipped: a brief latency
+  // spike's few samples fall in that trimmed top-tail, yet its per-round median is real and robust
+  // (one wild ping can't move a median). So fold the median extremes into the range — the spike
+  // shows, while the sample percentiles still keep a lone outlier ping from blowing up the band
+  // scale. (Reported symptom: graph peaks getting cut off at the top frame.)
   function robustRange(s, signed) {
     const all = [];
-    for (const b of s.buckets) for (const v of b.samples) all.push(v);
+    let medLo = Infinity, medHi = -Infinity;
+    for (const b of s.buckets) {
+      for (const v of b.samples) all.push(v);
+      if (b.median != null && !isNaN(b.median)) {
+        if (b.median < medLo) medLo = b.median;
+        if (b.median > medHi) medHi = b.median;
+      }
+    }
     if (!all.length) return signed ? [-1e-3, 1e-3] : [0, 1];
     all.sort((a, b) => a - b);
     const q = (f) => all[Math.min(all.length - 1, Math.max(0, Math.floor(all.length * f)))];
-    const hi = q(0.965), lo = q(0.035);
-    if (!signed) return [0, Math.max(1, hi * 1.18)]; // latency: unchanged (0-based, 1ms floor)
+    let hi = q(0.965), lo = q(0.035);
+    if (medHi > -Infinity) { hi = Math.max(hi, medHi); lo = Math.min(lo, medLo); }
+    if (!signed) return [0, Math.max(1, hi * 1.18)]; // latency: 0-based, 1ms floor
     const pad = Math.max((hi - lo) * 0.15, 1e-4);    // offset: include zero, pad both ends, no floor
     return [Math.min(0, lo - pad), Math.max(0, hi + pad)];
   }
@@ -392,5 +400,5 @@ window.Smoke = (function () {
     return { buckets, N: 2, resolution: resp.resolution || '1h' };
   }
 
-  return { LOSS_COLORS, MARGINS, lossColor, smokeGray, robustMax, gapThreshold, render, seriesStats, readVars, fromApiSeries, fromApiRollup };
+  return { LOSS_COLORS, MARGINS, lossColor, smokeGray, robustMax, robustRange, gapThreshold, render, seriesStats, readVars, fromApiSeries, fromApiRollup };
 })();
