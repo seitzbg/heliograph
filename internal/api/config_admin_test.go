@@ -39,13 +39,23 @@ func TestGetConfigReturnsVersionAndDoc(t *testing.T) {
 	}
 }
 
-func TestGetConfigUnauthorized(t *testing.T) {
+// The config read is open (a read-only view for anyone past the proxy's Basic Auth — the doc holds
+// no secrets); applying a change stays admin-gated.
+func TestConfigReadOpenWriteGated(t *testing.T) {
 	_, mux, _ := configServer(t, func(json.RawMessage, int) error { return nil }, nil, 0)
-	r := httptest.NewRequest("GET", "/api/admin/config", nil) // no cookie
+	// GET without a cookie: open read -> 200.
+	r := httptest.NewRequest("GET", "/api/admin/config", nil)
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET config (no cookie) = %d, want 200 (open read)", w.Code)
+	}
+	// PUT without a cookie: write stays gated -> 401.
+	r = httptest.NewRequest("PUT", "/api/admin/config", strings.NewReader(`{"version":0,"doc":{}}`))
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, r)
 	if w.Code != http.StatusUnauthorized {
-		t.Fatalf("want 401, got %d", w.Code)
+		t.Fatalf("PUT config (no cookie) = %d, want 401 (write gated)", w.Code)
 	}
 }
 

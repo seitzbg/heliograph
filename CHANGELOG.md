@@ -6,6 +6,15 @@ All notable changes to **Heliograph** are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed
+- **The Vantages and Config admin pages are viewable without logging in.** Any user who can reach the
+  dashboard (behind the reverse proxy's Basic Auth) can now see the vantage list and the DB config
+  tree read-only; adding/revoking a vantage and editing/importing config still require an admin login.
+  The vantage list never includes keys, and the config doc holds no secrets (notifiers are referenced
+  by name; the actual credentials come from the environment), so nothing sensitive is exposed. The
+  `GET /api/admin/vantages` and `GET /api/admin/config` endpoints are no longer admin-gated; every
+  write endpoint still is.
+
 ## [1.0.13] - 2026-08-24
 
 ### Changed

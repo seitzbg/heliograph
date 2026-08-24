@@ -157,6 +157,22 @@
   .vseg-chip.on .vr { color:var(--accent); }
   .grid-hidden-note { margin:2px 0 10px; font-family:ui-monospace,Menlo,monospace; font-size:11.5px; color:var(--ink-faint); }
   .grid-hidden-note[hidden] { display:none; }
+  /* Read-only admin views: the Vantages/Config tabs render for everyone (the GETs are open); every
+     edit affordance is hidden unless an admin session is active (body.admin-can-edit). The backend
+     enforces writes regardless — this is UX, not the security boundary. */
+  .admin-hint { font-size:11.5px; color:var(--ink-faint); }
+  body.admin-can-edit .admin-hint { display:none; }
+  body:not(.admin-can-edit) #vantAdd,
+  body:not(.admin-can-edit) #cfgAddBtn,
+  body:not(.admin-can-edit) #cfgAddGroupBtn,
+  body:not(.admin-can-edit) #cfgImportBtn,
+  body:not(.admin-can-edit) #vantRows [data-regen],
+  body:not(.admin-can-edit) #vantRows [data-revoke],
+  body:not(.admin-can-edit) .cfg-tree [data-edit],
+  body:not(.admin-can-edit) .cfg-tree [data-remove],
+  body:not(.admin-can-edit) .cfg-tree .cfg-addchild,
+  body:not(.admin-can-edit) .cfg-tree .chandle { display:none !important; }
+  body:not(.admin-can-edit) .cfg-tree .crow { cursor:default; }
   #zoomCanvas { cursor:crosshair; }
   .zoom-sel { position:absolute; top:0; height:100%; background:rgba(80,150,235,.18); background:color-mix(in srgb, var(--accent) 16%, transparent); border-left:1px solid var(--accent); border-right:1px solid var(--accent); pointer-events:none; }
   .zoom-reset { background:transparent; border:1px solid var(--border); border-radius:6px; padding:3px 9px; cursor:pointer; }
@@ -409,6 +425,7 @@
         <button type="submit" class="vadmin-btn">Add &amp; mint key</button>
         <span id="vantAddErr" class="vadmin-err" role="alert"></span>
       </form>
+      <p class="admin-hint">Viewing read-only — use <b>Log in</b> (top right) to add or manage vantages.</p>
     </div>
 
     <div id="vantError" class="panel vadmin-note hidden">
@@ -450,7 +467,8 @@
       <div class="panel">
         <div class="vadmin-reveal-actions" style="justify-content:space-between; align-items:baseline; margin-bottom:8px">
           <span class="vadmin-lbl">DB targets <span id="cfgVersion" class="vadmin-err" style="color:var(--ink-faint)"></span></span>
-          <span style="display:flex; gap:8px">
+          <span style="display:flex; gap:8px; align-items:baseline">
+            <span class="admin-hint">Read-only — <b>Log in</b> (top right) to edit</span>
             <button id="cfgAddBtn" class="vadmin-btn" type="button">+ Add target</button>
             <button id="cfgAddGroupBtn" class="vadmin-btn" type="button">+ Add group</button>
             <button id="cfgImportBtn" class="vadmin-btn" type="button">Import YAML</button>

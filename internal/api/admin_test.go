@@ -198,12 +198,18 @@ func TestAdminLoginAndCRUD(t *testing.T) {
 		t.Fatalf("bad login = %d, want 401", w.Code)
 	}
 
-	// no cookie -> 401 on a protected endpoint
+	// no cookie: the vantage LIST is an open read (200), but a WRITE stays admin-gated (401).
 	r = httptest.NewRequest("GET", "/api/admin/vantages", nil)
 	w = httptest.NewRecorder()
 	mux.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("unauth list (open read) = %d, want 200", w.Code)
+	}
+	r = httptest.NewRequest("POST", "/api/admin/vantages", nil)
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, r)
 	if w.Code != http.StatusUnauthorized {
-		t.Fatalf("unauth list = %d, want 401", w.Code)
+		t.Fatalf("unauth add (write gated) = %d, want 401", w.Code)
 	}
 
 	cookie := login(t, mux, "hunter2")
