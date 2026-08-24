@@ -55,19 +55,25 @@ type Config struct {
 }
 
 // AlertDef is the YAML shape of one alert.
+// The json tags mirror the yaml names for the Config-tab "effective" view (json.Marshal→YAML);
+// alerts are never part of a stored DB fragment, so these tags shape only that display path.
 type AlertDef struct {
-	Type        string   `yaml:"type"`    // "loss" | "rtt" | "matcher"
-	Pattern     string   `yaml:"pattern"` // for loss/rtt: ">50%,>50%" or ">200,>200" (ms)
-	Matcher     string   `yaml:"matcher"` // for matcher: "CheckLoss(l=50,x=3)"
-	Comment     string   `yaml:"comment"`
-	EdgeTrigger bool     `yaml:"edgetrigger"`
-	To          []string `yaml:"to"`       // notifier names; defaults to ["log"]
-	Priority    int      `yaml:"priority"` // 1 = highest; 0 = unset (never inhibited)
+	Type        string   `yaml:"type" json:"type,omitempty"`       // "loss" | "rtt" | "matcher"
+	Pattern     string   `yaml:"pattern" json:"pattern,omitempty"` // for loss/rtt: ">50%,>50%" or ">200,>200" (ms)
+	Matcher     string   `yaml:"matcher" json:"matcher,omitempty"` // for matcher: "CheckLoss(l=50,x=3)"
+	Comment     string   `yaml:"comment" json:"comment,omitempty"`
+	EdgeTrigger bool     `yaml:"edgetrigger" json:"edgetrigger,omitempty"`
+	To          []string `yaml:"to" json:"to,omitempty"`             // notifier names; defaults to ["log"]
+	Priority    int      `yaml:"priority" json:"priority,omitempty"` // 1 = highest; 0 = unset (never inhibited)
 }
 
+// The json tags mirror the yaml names so a config marshaled to JSON (the Config-tab
+// "effective" view, via json.Marshal→YAML) reads the same as the file form. Database is
+// never part of a stored DB fragment (fragments are target-only), so these tags shape only
+// that display path.
 type Database struct {
-	Step  Duration `yaml:"step"`
-	Pings int      `yaml:"pings"`
+	Step  Duration `yaml:"step" json:"step,omitempty"`
+	Pings int      `yaml:"pings" json:"pings,omitempty"`
 }
 
 // Node is one entry in the target tree. A node with a `host` becomes a monitor;

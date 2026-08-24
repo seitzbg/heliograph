@@ -6,6 +6,15 @@ All notable changes to **Heliograph** are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **View the config as YAML in the Config tab.** A Tree | YAML toggle sits beside the target tree; the
+  YAML view is read-only and offers two sources — **DB** (just the targets stored in the database) and
+  **Effective** (your YAML files merged with the DB targets, exactly as the collector runs it). It reads
+  like a hand-written config file: durations render as `60s`, and unset/inherited fields are omitted
+  rather than shown as `null`. Served by a new open read `GET /api/admin/config.yaml?source=db|effective`
+  (alongside `GET /api/admin/config`); the config holds no secrets, so it needs no admin login, and every
+  write endpoint stays gated.
+
 ## [1.0.14] - 2026-08-24
 
 ### Changed

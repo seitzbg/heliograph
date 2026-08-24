@@ -5,6 +5,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/json"
@@ -45,6 +46,8 @@ import (
 	// Named (not blank): main wires its per-target offset/stratum accessor into the API
 	// (srv.NTPStat). Registration itself comes via allprobes above.
 	ntpprobe "github.com/seitzbg/heliograph/internal/probe/ntpprobe"
+
+	"gopkg.in/yaml.v3"
 )
 
 // version is the smoked release version. Unset in an unversioned build (a plain `go build`
@@ -601,6 +604,25 @@ func main() {
 					}
 					return add, unch, ver + 1, nil
 				}
+				// ConfigYAML backs the Config tab's read-only YAML view. Both sources are config
+				// documents stored as JSON, rendered to YAML by the same jsonToYAML path: "effective"
+				// is the merged file+DB config the collector built (snapshotted per build, so it
+				// tracks reloads); "db" is just the stored DB fragment. Neither holds secrets — same
+				// as ConfigGet.
+				srv.ConfigYAML = func(source string) ([]byte, error) {
+					if source == "effective" {
+						rt := current.Load()
+						if rt == nil || rt.effectiveJSON == nil {
+							return nil, fmt.Errorf("effective config unavailable")
+						}
+						return jsonToYAML(rt.effectiveJSON)
+					}
+					doc, _, err := cfgStore.Get(context.Background())
+					if err != nil {
+						return nil, err
+					}
+					return jsonToYAML(doc)
+				}
 			}
 		}
 		// Defensive timeouts so a slow or idle client can't tie up a connection
@@ -949,6 +971,12 @@ type runtime struct {
 	// for filtering series/rollup, so a config change takes effect at once and a probe-level default
 	// is honored even before a target has stored data (CODE_REVIEW round 2, M5/M6).
 	metricByName map[string]string
+	// effectiveJSON is the file+DB merged config marshaled to JSON, for the Config tab's read-only
+	// YAML view (srv.ConfigYAML "effective" runs it through jsonToYAML). Stored as JSON so it shares
+	// the exact clean render path as the DB fragment (json omitempty, "60s" durations, null for
+	// inherited). Recomputed every build so a SIGHUP reload or config-apply refreshes it; nil in demo
+	// mode. Holds no secrets — the DSN/webhooks come from the environment, not the config doc.
+	effectiveJSON []byte
 }
 
 // eval runs the alert engine over a round's outcomes and dispatches notifications.
@@ -1284,6 +1312,44 @@ func unresolvedRecipients(alertDefs map[string]*alert.Alert, alerteeByTarget map
 	return out
 }
 
+// jsonToYAML re-renders a config document stored as JSON (the DB fragment, or the snapshotted
+// effective config) as YAML for the Config tab's read-only view. An empty/absent document becomes
+// a friendly comment rather than an empty file. Keys sort alphabetically (the generic YAML round
+// trip drops the struct field order), which is fine for a read-only view.
+func jsonToYAML(doc []byte) ([]byte, error) {
+	if t := bytes.TrimSpace(doc); len(t) == 0 || bytes.Equal(t, []byte("null")) || bytes.Equal(t, []byte("{}")) {
+		return []byte("# (empty — nothing configured)\n"), nil
+	}
+	var v any
+	if err := yaml.Unmarshal(doc, &v); err != nil {
+		return nil, err
+	}
+	return yaml.Marshal(stripNil(v))
+}
+
+// stripNil recursively drops map entries whose value is nil, so an unset/inherited field —
+// which json.Marshal emits as `key: null` because the config's slice fields deliberately omit
+// omitempty (nil vs [] is meaningful in storage) — doesn't clutter the read-only view; the result
+// reads like a hand-written config. An explicit empty list (`[]`, i.e. inheritance cleared) is a
+// non-nil empty slice and is kept, preserving the honest inherit-vs-explicitly-none distinction.
+func stripNil(v any) any {
+	switch t := v.(type) {
+	case map[string]any:
+		for k, val := range t {
+			if val == nil {
+				delete(t, k)
+			} else {
+				t[k] = stripNil(val)
+			}
+		}
+	case []any:
+		for i, val := range t {
+			t[i] = stripNil(val)
+		}
+	}
+	return v
+}
+
 // buildRuntime loads targets (from YAML config, or the demo set) and builds the
 // probe jobs and alert engine. A probe whose binary/deps are unavailable is
 // skipped with a warning, not fatal.
@@ -1299,6 +1365,7 @@ func buildRuntime(configPath string, demoPings int, demoStep, timeout time.Durat
 	var monitors []model.Monitor
 	var probeCfgs map[string]map[string]string
 	var alertDefs map[string]*alert.Alert
+	var effectiveJSON []byte
 	if configPath != "" {
 		cfg, err := config.LoadPath(configPath)
 		if err != nil {
@@ -1312,6 +1379,12 @@ func buildRuntime(configPath string, demoPings int, demoStep, timeout time.Durat
 			if err := config.AppendDBFragment(cfg, fragBytes); err != nil {
 				return nil, fmt.Errorf("config: %w", err)
 			}
+		}
+		// Snapshot the merged config as JSON for the Config tab's read-only "effective" view (rendered
+		// to YAML on demand via jsonToYAML). Display-only, so a marshal hiccup must not fail the build —
+		// leave it nil and the API answers 503 for that one view.
+		if j, merr := json.Marshal(cfg); merr == nil {
+			effectiveJSON = j
 		}
 		if monitors, err = cfg.Monitors(); err != nil {
 			return nil, err
@@ -1412,7 +1485,8 @@ func buildRuntime(configPath string, demoPings int, demoStep, timeout time.Durat
 	}
 	return &runtime{jobs: jobs, monitors: fullMonitors, probeCfgs: probeCfgs, engine: engine,
 		alertsByTarget: alertsByTarget, alerteeByTarget: alerteeByTarget, targetFP: targetFP,
-		targetMeta: buildTargetMeta(fullMonitors, resolveIPs), metricByName: metricByName}, nil
+		targetMeta: buildTargetMeta(fullMonitors, resolveIPs), metricByName: metricByName,
+		effectiveJSON: effectiveJSON}, nil
 }
 
 // buildTargetMeta computes each target's display metadata: its title override (always) and
