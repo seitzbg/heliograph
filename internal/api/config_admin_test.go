@@ -2,11 +2,15 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 )
+
+// errConfigStore stands in for a backing-store failure in the ConfigYAML stub.
+var errConfigStore = errors.New("store unavailable")
 
 // configServer extends adminServer with stub config closures.
 func configServer(t *testing.T, apply func(json.RawMessage, int) error, doc json.RawMessage, ver int) (*Server, *http.ServeMux, *http.Cookie) {
@@ -149,6 +153,84 @@ func TestPutConfigNullDocRejected(t *testing.T) {
 	}
 	if called {
 		t.Fatal("ConfigApply must not be called on a null doc")
+	}
+}
+
+// yamlConfigServer wires a stub ConfigYAML that echoes the requested source, so the
+// handler's source parsing and open-read behavior can be exercised without the collector.
+func yamlConfigServer(t *testing.T, fn func(source string) ([]byte, error)) (*http.ServeMux, *http.Cookie) {
+	t.Helper()
+	srv, _ := adminServer("hunter2")
+	srv.ConfigGet = func() (json.RawMessage, int, error) { return nil, 0, nil }
+	srv.ConfigApply = func(json.RawMessage, int) error { return nil }
+	srv.ConfigYAML = fn
+	mux := srv.Routes()
+	return mux, login(t, mux, "hunter2")
+}
+
+func TestGetConfigYAMLSources(t *testing.T) {
+	mux, _ := yamlConfigServer(t, func(source string) ([]byte, error) {
+		return []byte("source: " + source + "\n"), nil
+	})
+	for _, tc := range []struct{ query, want string }{
+		{"", "source: db"},                         // default is db
+		{"?source=db", "source: db"},               // explicit db
+		{"?source=effective", "source: effective"}, // effective
+	} {
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, httptest.NewRequest("GET", "/api/admin/config.yaml"+tc.query, nil))
+		if w.Code != 200 {
+			t.Fatalf("%q: code=%d body=%s", tc.query, w.Code, w.Body)
+		}
+		if ct := w.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/plain") {
+			t.Errorf("%q: Content-Type=%q, want text/plain", tc.query, ct)
+		}
+		if !strings.Contains(w.Body.String(), tc.want) {
+			t.Errorf("%q: body=%q, want to contain %q", tc.query, w.Body, tc.want)
+		}
+	}
+}
+
+func TestGetConfigYAMLBadSource(t *testing.T) {
+	called := false
+	mux, _ := yamlConfigServer(t, func(string) ([]byte, error) { called = true; return nil, nil })
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/api/admin/config.yaml?source=bogus", nil))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("bad source = %d, want 400", w.Code)
+	}
+	if called {
+		t.Fatal("ConfigYAML must not be called for an invalid source")
+	}
+}
+
+// The YAML view is an open read like GET /api/admin/config — no admin cookie required.
+func TestGetConfigYAMLReadOpen(t *testing.T) {
+	mux, _ := yamlConfigServer(t, func(string) ([]byte, error) { return []byte("targets: {}\n"), nil })
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/api/admin/config.yaml", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET config.yaml (no cookie) = %d, want 200 (open read)", w.Code)
+	}
+}
+
+func TestGetConfigYAMLErrorReturns503(t *testing.T) {
+	mux, _ := yamlConfigServer(t, func(string) ([]byte, error) { return nil, errConfigStore })
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/api/admin/config.yaml", nil))
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("ConfigYAML error = %d, want 503", w.Code)
+	}
+}
+
+// TestConfigYAMLRouteAbsentWithoutHook confirms the route is not registered when the hook
+// is nil, so a build without config CRUD doesn't expose a half-wired endpoint.
+func TestConfigYAMLRouteAbsentWithoutHook(t *testing.T) {
+	_, mux, _ := configServer(t, func(json.RawMessage, int) error { return nil }, nil, 0) // no ConfigYAML
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/api/admin/config.yaml", nil))
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("config.yaml without hook = %d, want 404", w.Code)
 	}
 }
 

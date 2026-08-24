@@ -191,6 +191,95 @@ func TestBuildRuntimeMergesDBFragment(t *testing.T) {
 	}
 }
 
+// TestBuildRuntimeSnapshotsEffectiveConfig checks that the runtime carries a JSON snapshot of the
+// merged file+DB config (the Config tab's "effective" view). It must be the *merged* config and a
+// valid, reloadable config — so we re-load it through the project's own loader (JSON is a YAML
+// subset) and confirm both the YAML-defined and the DB-fragment target survive the round trip.
+func TestBuildRuntimeSnapshotsEffectiveConfig(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte("targets:\n  children:\n    yaml-t: {probe: TCPConnect, host: 127.0.0.1, params: {port: \"80\"}}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	getter := func() ([]byte, error) {
+		return []byte(`{"targets":{"children":{"db-t":{"probe":"TCPConnect","host":"127.0.0.1","params":{"port":"80"}}}}}`), nil
+	}
+	rt, err := buildRuntime(cfgPath, 1, time.Second, time.Second, false, map[string]alert.Notifier{}, getter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rt.effectiveJSON) == 0 {
+		t.Fatal("effectiveJSON snapshot is empty")
+	}
+	outPath := filepath.Join(dir, "effective.yaml")
+	if err := os.WriteFile(outPath, rt.effectiveJSON, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := config.LoadPath(outPath)
+	if err != nil {
+		t.Fatalf("effective config snapshot did not re-load: %v\n---\n%s", err, rt.effectiveJSON)
+	}
+	mons, err := reloaded.Monitors()
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := map[string]bool{}
+	for _, m := range mons {
+		names[m.Name] = true
+	}
+	if !names["yaml-t"] || !names["db-t"] {
+		t.Fatalf("effective config missing a merged target, got %v\n---\n%s", names, rt.effectiveJSON)
+	}
+}
+
+// TestJSONToYAMLRendersConfig checks the shared render path: a config document stored as JSON comes
+// back as clean YAML — lowercase keys mirroring the file form, durations as "60s" (not nanoseconds),
+// and no dropped content.
+func TestJSONToYAMLRendersConfig(t *testing.T) {
+	y, err := jsonToYAML([]byte(`{"database":{"step":"60s","pings":3},"targets":{"children":{"cf":{"probe":"HTTP","host":"cloudflare.com"}}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(y)
+	for _, want := range []string{"database:", "step: 60s", "pings: 3", "cf:", "probe: HTTP", "host: cloudflare.com"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("rendered YAML missing %q\n---\n%s", want, s)
+		}
+	}
+	if strings.Contains(s, "60000000000") {
+		t.Errorf("duration rendered as nanoseconds, not \"60s\"\n---\n%s", s)
+	}
+}
+
+// TestJSONToYAMLStripsNilKeepsExplicitEmpty checks that an unset/inherited field (null) is dropped
+// from the read-only view, while an explicit empty list ("cleared") survives — preserving the
+// honest inherit-vs-explicitly-none distinction.
+func TestJSONToYAMLStripsNilKeepsExplicitEmpty(t *testing.T) {
+	y, err := jsonToYAML([]byte(`{"targets":{"children":{"a":{"probe":"Ping","host":"x","alerts":null,"vantages":[]}}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(y)
+	if strings.Contains(s, "alerts:") || strings.Contains(s, "null") {
+		t.Errorf("nil field should be stripped from the view\n---\n%s", s)
+	}
+	if !strings.Contains(s, "vantages: []") {
+		t.Errorf("explicit empty list should be kept as []\n---\n%s", s)
+	}
+}
+
+func TestJSONToYAMLEmpty(t *testing.T) {
+	for _, in := range []string{"", "  ", "null", "{}"} {
+		y, err := jsonToYAML([]byte(in))
+		if err != nil {
+			t.Fatalf("%q: %v", in, err)
+		}
+		if !strings.HasPrefix(string(y), "#") {
+			t.Errorf("%q: want an empty-note comment, got %q", in, y)
+		}
+	}
+}
+
 func TestBuildRuntimeDBFragmentCollision(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.yaml")

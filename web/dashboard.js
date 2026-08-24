@@ -2025,8 +2025,53 @@
       cfg.doc = (data.doc && typeof data.doc === 'object') ? data.doc : { targets: { children: {} } };
       renderCfgTree();
       cShow('cfgList');
+      applyCfgView();
     }
     $('cfgRetry').addEventListener('click', () => renderConfig());
+
+    // ---- Config view toggle: Tree (the editable target tree) | YAML (read-only). In YAML mode a
+    // DB | Effective source picker chooses between the stored DB fragment and the file+DB merged
+    // config the collector runs. The YAML views are read-only for everyone (the GET is open, the
+    // config holds no secrets); the tree's edit controls show only in Tree mode. ----
+    let cfgView = 'tree';  // 'tree' | 'yaml'
+    let cfgYamlSrc = 'db'; // 'db' | 'effective'
+    function segPress(segId, key, val) {
+      for (const b of $(segId).querySelectorAll('button')) b.setAttribute('aria-pressed', String(b.dataset[key] === val));
+    }
+    function applyCfgView() {
+      segPress('cfgViewSeg', 'cfgview', cfgView);
+      const yaml = cfgView === 'yaml';
+      $('cfgTree').classList.toggle('hidden', yaml);
+      $('cfgTreeActions').classList.toggle('hidden', yaml);
+      $('cfgYaml').classList.toggle('hidden', !yaml);
+      $('cfgSrcSeg').classList.toggle('hidden', !yaml);
+      if (yaml) loadCfgYaml();
+    }
+    let cfgYamlReq = 0; // generation guard: a slower superseded fetch must never overwrite the newer source
+    async function loadCfgYaml() {
+      const req = ++cfgYamlReq;
+      const stale = () => req !== cfgYamlReq;
+      segPress('cfgSrcSeg', 'cfgsrc', cfgYamlSrc);
+      const pre = $('cfgYaml');
+      const msg = (t) => { if (!stale()) { pre.classList.add('cfg-yaml-msg'); pre.textContent = t; } };
+      pre.classList.remove('cfg-yaml-msg');
+      pre.textContent = 'Loading…';
+      let r;
+      try { r = await fetch('/api/admin/config.yaml?source=' + cfgYamlSrc, { cache: 'no-store' }); }
+      catch (e) { msg("Couldn't reach the admin API."); return; }
+      if (stale()) return;
+      if (!r.ok) { msg('Could not load the ' + cfgYamlSrc + ' config (HTTP ' + r.status + ').'); return; }
+      const text = await r.text();
+      if (!stale()) pre.textContent = text;
+    }
+    $('cfgViewSeg').addEventListener('click', (e) => {
+      const b = e.target.closest('button[data-cfgview]'); if (!b) return;
+      cfgView = b.dataset.cfgview; applyCfgView();
+    });
+    $('cfgSrcSeg').addEventListener('click', (e) => {
+      const b = e.target.closest('button[data-cfgsrc]'); if (!b) return;
+      cfgYamlSrc = b.dataset.cfgsrc; loadCfgYaml();
+    });
     // ---- Top-bar admin auth: one shared login modal + a session probe driving the bar's
     // Log in / Admin·Log out / hidden(disabled) state on every tab. The session endpoint is read
     // by raw status (204 authed, 401 logged out, 404 admin disabled), not Dash.adminMode. ----

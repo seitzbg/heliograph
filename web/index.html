@@ -272,6 +272,10 @@
   .cfg-tree .cname { flex:0 0 auto; }
   .cfg-tree .cmeta { flex:1 1 auto; color:var(--ink-soft); font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .cfg-tree .crow .vadmin-btn { padding:4px 9px; font-size:11.5px; }
+  /* read-only YAML view of the config (Tree|YAML toggle). pre (not pre-wrap) keeps YAML indentation; scroll instead of wrapping tokens */
+  .cfg-yaml { background:var(--plot-bg); border:1px solid var(--border); border-radius:8px; padding:12px 14px; margin:0; font-family:ui-monospace,Menlo,monospace; font-size:12.5px; line-height:1.5; color:var(--ink); white-space:pre; overflow:auto; max-height:70vh; }
+  .cfg-yaml:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+  .cfg-yaml.cfg-yaml-msg { color:var(--ink-faint); }
   .vadmin-reveal-backdrop { position:fixed; inset:0; background:rgba(0,0,0,.45); display:flex; align-items:center; justify-content:center; padding:20px; z-index:50; }
   .vadmin-reveal { max-width:640px; width:100%; box-shadow:var(--shadow); max-height:calc(100vh - 40px); overflow-y:auto; }
   .vadmin-warn { color:var(--warn); font-weight:600; font-size:13px; }
@@ -479,16 +483,29 @@
 
     <div id="cfgList" class="hidden">
       <div class="panel">
-        <div class="vadmin-reveal-actions" style="justify-content:space-between; align-items:baseline; margin-bottom:8px">
-          <span class="vadmin-lbl">DB targets <span id="cfgVersion" class="vadmin-err" style="color:var(--ink-faint)"></span></span>
-          <span style="display:flex; gap:8px; align-items:baseline">
-            <span class="admin-hint">Read-only — <b>Log in</b> (top right) to edit</span>
-            <button id="cfgAddBtn" class="vadmin-btn" type="button">+ Add target</button>
-            <button id="cfgAddGroupBtn" class="vadmin-btn" type="button">+ Add group</button>
-            <button id="cfgImportBtn" class="vadmin-btn" type="button">Import YAML</button>
+        <div class="vadmin-reveal-actions" style="justify-content:space-between; align-items:baseline; margin-bottom:8px; flex-wrap:wrap; gap:8px 12px">
+          <span style="display:flex; gap:10px; align-items:baseline; flex-wrap:wrap">
+            <span class="vadmin-lbl">DB targets <span id="cfgVersion" class="vadmin-err" style="color:var(--ink-faint)"></span></span>
+            <span class="seg" id="cfgViewSeg" role="group" aria-label="Config view">
+              <button type="button" data-cfgview="tree" aria-pressed="true">Tree</button>
+              <button type="button" data-cfgview="yaml" aria-pressed="false">YAML</button>
+            </span>
+          </span>
+          <span style="display:flex; gap:8px; align-items:baseline; flex-wrap:wrap">
+            <span id="cfgTreeActions" style="display:flex; gap:8px; align-items:baseline; flex-wrap:wrap">
+              <span class="admin-hint">Read-only — <b>Log in</b> (top right) to edit</span>
+              <button id="cfgAddBtn" class="vadmin-btn" type="button">+ Add target</button>
+              <button id="cfgAddGroupBtn" class="vadmin-btn" type="button">+ Add group</button>
+              <button id="cfgImportBtn" class="vadmin-btn" type="button">Import YAML</button>
+            </span>
+            <span class="seg hidden" id="cfgSrcSeg" role="group" aria-label="YAML source" title="DB = targets stored in the database · Effective = your YAML files merged with the DB targets, as the collector runs it">
+              <button type="button" data-cfgsrc="db" aria-pressed="true">DB</button>
+              <button type="button" data-cfgsrc="effective" aria-pressed="false">Effective</button>
+            </span>
           </span>
         </div>
         <div id="cfgTree" class="cfg-tree" role="tree" aria-label="DB targets"></div>
+        <pre id="cfgYaml" class="cfg-yaml hidden" tabindex="0" aria-label="Config as YAML"></pre>
       </div>
     </div>
 

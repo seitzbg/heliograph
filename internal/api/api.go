@@ -170,6 +170,11 @@ type Server struct {
 	// hot-reloads (POST /api/admin/config/import). Returns ErrConfigInvalid (⇒400)/ErrConfigConflict
 	// (⇒409). nil ⇒ route not registered.
 	ConfigImport func(body []byte) (added, unchanged, version int, err error)
+	// ConfigYAML, if set, renders the config as YAML for the read-only Config-tab view
+	// (GET /api/admin/config.yaml?source=db|effective). source "db" is the stored DB fragment;
+	// "effective" is the file+DB merged config the collector is running. Open read like ConfigGet
+	// (the config holds no secrets); nil ⇒ route not registered.
+	ConfigYAML func(source string) ([]byte, error)
 }
 
 func New(s store.Store, webDir string) *Server { return &Server{store: s, webDir: webDir} }
@@ -252,6 +257,10 @@ func (srv *Server) Routes() *http.ServeMux {
 		// the environment, not this doc — so it is safe to show read-only. Applying changes stays gated.
 		mux.HandleFunc("GET /api/admin/config", srv.getConfig)
 		mux.HandleFunc("PUT /api/admin/config", srv.requireAdmin(srv.putConfig))
+		if srv.ConfigYAML != nil {
+			// Open read alongside GET /api/admin/config — same non-secret config, rendered as YAML.
+			mux.HandleFunc("GET /api/admin/config.yaml", srv.getConfigYAML)
+		}
 	}
 	if srv.AdminPassword != "" && len(srv.AdminKey) > 0 && srv.ConfigImport != nil {
 		mux.HandleFunc("POST /api/admin/config/import", srv.requireAdmin(srv.importConfig))
@@ -1660,6 +1669,27 @@ func (srv *Server) getConfig(w http.ResponseWriter, r *http.Request) {
 		doc = json.RawMessage(`{}`)
 	}
 	writeJSON(w, map[string]any{"version": version, "doc": doc})
+}
+
+// getConfigYAML serves the config as read-only YAML for the Config tab's YAML view.
+// source=db renders the stored DB fragment; source=effective renders the file+DB merged
+// config the collector is running. Default db. Like getConfig it is an open read.
+func (srv *Server) getConfigYAML(w http.ResponseWriter, r *http.Request) {
+	source := r.URL.Query().Get("source")
+	if source == "" {
+		source = "db"
+	}
+	if source != "db" && source != "effective" {
+		http.Error(w, `{"error":"source must be db or effective"}`, http.StatusBadRequest)
+		return
+	}
+	out, err := srv.ConfigYAML(source)
+	if err != nil {
+		http.Error(w, `{"error":"config unavailable"}`, http.StatusServiceUnavailable)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	_, _ = w.Write(out)
 }
 
 func (srv *Server) putConfig(w http.ResponseWriter, r *http.Request) {
