@@ -67,10 +67,12 @@
   // slowest-updating target — a single global max would skip that target's late/
   // out-of-order rounds permanently. Panels with no data yet are ignored (they backfill
   // separately); null when nothing holds data, so the first tick fetches the whole window.
-  function gridSince(panels) {
+  function gridSince(panels, pick) {
+    pick = pick || ((p) => p && p.series); // per-vantage grids pass a picker for p.seriesByV[v]
     let min = null;
     for (const p of panels) {
-      const bs = p && p.series && p.series.buckets;
+      const s = pick(p);
+      const bs = s && s.buckets;
       if (!bs || !bs.length) continue;
       const last = bs[bs.length - 1].t;
       if (!Number.isFinite(last)) continue;
@@ -264,6 +266,41 @@
     const rest = (ordered || []).filter((v) => v !== 'local');
     const i = rest.indexOf(vantage);
     return VPAL[(i < 0 ? 0 : i) % VPAL.length];
+  }
+
+  // --- Graphs-grid multi-vantage helpers (a target measured from >1 vantage) ---
+  // STAT_SEV ranks a target's dot severity. 'down' (outage/heavy loss) beats 'degraded' (light
+  // loss) beats a healthy/no-data 0; among the 0s, a real 'ok' (has data) beats 'nodata'.
+  const STAT_SEV = { nodata: 0, ok: 0, degraded: 1, down: 2 };
+  // worstStatus reduces a target's per-vantage statuses to the single dot the grid shows, so a
+  // target that is healthy on one vantage but losing packets on another still flags. Mirrors the
+  // nav folder rule: highest severity wins; 'ok' outranks 'nodata' at the shared 0 severity.
+  function worstStatus(list) {
+    let worst = 'nodata';
+    for (const s of (list || [])) {
+      if (!(s in STAT_SEV)) continue;
+      if (worst === 'nodata' ? s !== 'nodata' : STAT_SEV[s] > STAT_SEV[worst]) worst = s;
+    }
+    return worst;
+  }
+  // availableVantages returns the ordered union of every target's vantage set from an /api/targets
+  // listing — the vantages the Graphs control offers. Always includes 'local' first; ['local'] when
+  // no target declares more, so a single-vantage deployment shows no control at all.
+  function availableVantages(targets) {
+    const set = new Set(['local']);
+    for (const t of (targets || [])) for (const v of vantageList(t)) if (v) set.add(v);
+    return orderVantages([...set]);
+  }
+  // toggleGridVantage flips one vantage in the shown set and returns the new ordered set, keeping at
+  // least one vantage selected (you can't hide everything) and ignoring vantages that no longer
+  // exist. Pure, so the toolbar's reducer is unit-testable.
+  function toggleGridVantage(shown, key, all) {
+    const allow = new Set(all || []);
+    let next = (shown || []).filter((v) => allow.has(v));
+    if (next.includes(key)) { if (next.length > 1) next = next.filter((v) => v !== key); }
+    else if (allow.has(key)) next.push(key);
+    if (!next.length) next = ['local'];
+    return orderVantages(next);
   }
 
   // adminMode maps the status of GET /api/admin/vantages to the Vantages panel's display
@@ -760,7 +797,7 @@
     return html + '<span class="stat"><span class="k">stratum</span><span class="v">' + stat.stratum + '</span></span>';
   }
 
-  window.Dash = { RANGES, RANGE_ORDER, parseRoute, mergeSeries, gridSince, gridTemplateFor, maxColumnsFor, rangeLabels, fetchJSON, zoomResolution, pixelToTime, sharedYMax, buildTree, underPath, targetStatus, pickSeries, vantageList, orderVantages, defaultFocus, keepFocus, vantageColorVar, adminMode, adminSessionState, createAdminStateController, statusProbeOwnsView, relTime, listTargets, addTarget, editTarget, removeTarget, buildTargetNode, buildGroupNode, labelHTML, collectingNote, agentYaml, agentCompose, cfgTree, reweightSiblings, reorderSiblings, editNodeAtPath, removeNodeAtPath, renameNodeAtPath, addNodeAtPath, moveNode, moveInList, cfgDropDestination, cfgVisibleRows, cfgTreeKey, tkey, ntpStatHtml };
+  window.Dash = { RANGES, RANGE_ORDER, parseRoute, mergeSeries, gridSince, gridTemplateFor, maxColumnsFor, rangeLabels, fetchJSON, zoomResolution, pixelToTime, sharedYMax, buildTree, underPath, targetStatus, pickSeries, vantageList, orderVantages, defaultFocus, keepFocus, vantageColorVar, worstStatus, availableVantages, toggleGridVantage, adminMode, adminSessionState, createAdminStateController, statusProbeOwnsView, relTime, listTargets, addTarget, editTarget, removeTarget, buildTargetNode, buildGroupNode, labelHTML, collectingNote, agentYaml, agentCompose, cfgTree, reweightSiblings, reorderSiblings, editNodeAtPath, removeNodeAtPath, renameNodeAtPath, addNodeAtPath, moveNode, moveInList, cfgDropDestination, cfgVisibleRows, cfgTreeKey, tkey, ntpStatHtml };
 
   // ---------------------------------------------------------------- init (DOM) --
   function init() {
@@ -932,6 +969,19 @@
 
     // ---- Graphs grid (recent 3h thumbnails) ----
     const panels = new Map();
+    // Multi-vantage Graphs grid: gridVantages is the set of vantages drawn on every panel — the first
+    // (in orderVantages order) owns the band+median, the rest draw as overlay lines. availVantages is
+    // the union offered by the toolbar control (only shown when >1 exists). Default: local only, so a
+    // single-vantage deployment is unchanged. Remembered per browser.
+    let availVantages = ['local'];
+    function loadGridVantages() {
+      try { const s = JSON.parse(localStorage.getItem('grid-vantages')); if (Array.isArray(s) && s.length) return s; } catch (e) {}
+      return ['local'];
+    }
+    let gridVantages = loadGridVantages();
+    function saveGridVantages() { try { localStorage.setItem('grid-vantages', JSON.stringify(gridVantages)); } catch (e) {} }
+    // The focused vantage owns the band; it's the first shown in canonical order.
+    function gridFocus() { return orderVantages(gridVantages)[0] || 'local'; }
     // Config-tree menu (left nav) state: the current subtree scope, the filter query,
     // collapsed folders, the target-name set the tree is built from, and per-target status
     // for the menu dots. `treeSig` lets a periodic refresh skip a rebuild when nothing that
@@ -1083,7 +1133,9 @@
       const el = document.createElement('div'); el.className = 'panel gpanel'; el.dataset.target = key; el.dataset.path = t.name;
       el.innerHTML = '<h2><span class="probe">' + esc(t.probe) + '</span> ' + labelHTML(t.name, t.title, t.ip) + '</h2><div class="meta"></div><canvas></canvas>';
       grid.appendChild(el);
-      p = { el, canvas: el.querySelector('canvas'), meta: el.querySelector('.meta'), series: null };
+      // series is the FOCUSED vantage's series (band + median + unison + meta); seriesByV holds each
+      // shown vantage's series so the others render as overlay lines (multi-vantage Graphs grid).
+      p = { el, canvas: el.querySelector('canvas'), meta: el.querySelector('.meta'), series: null, seriesByV: {} };
       panels.set(key, p); return p;
     }
     // One bulk, incremental read for the whole grid: /api/series/all returns every
@@ -1091,9 +1143,11 @@
     // tick, when sinceMs is null), so a refresh is one request + one store query
     // regardless of target count — replacing the old one-fetch-per-target fan-out
     // (CODE_REVIEW #2). Response: { cutoff, targets: { name: { rounds:[...] } } }.
-    async function fetchGridSeries(sinceMs) {
+    async function fetchGridSeries(sinceMs, vantage) {
       const since = sinceMs != null ? '&since=' + sinceMs : '';
-      const r = await fetch('/api/series/all?window=' + RANGES['3h'].window + since, { cache: 'no-store' });
+      // 'local' (the hub) is the default vantage — no param; a remote vantage is requested explicitly.
+      const vq = (vantage && vantage !== 'local') ? '&vantage=' + enc(vantage) : '';
+      const r = await fetch('/api/series/all?window=' + RANGES['3h'].window + since + vq, { cache: 'no-store' });
       if (!r.ok) return null;
       return r.json();
     }
@@ -1118,9 +1172,32 @@
         // forever. It stays reachable via the tree; its real series shows in the detail view,
         // which focuses the target's own vantage (CODE_REVIEW #3 / P1-3).
         statusByTarget.clear(); vantagesByTarget.clear();
-        // Dual-key every per-target map by stable token AND display path (indexTarget), plus status
-        // (set here, from this authoritative full-list scan) under both keys (CODE_REVIEW L8).
-        for (const t of targets) { indexTarget(t); const st = targetStatus(t); statusByTarget.set(tkey(t), st); statusByTarget.set(t.name, st); }
+        // The vantages this deployment measures from (union across targets). Reconcile the shown set
+        // against it and (re)render the toolbar control — which hides itself entirely when there's
+        // only one vantage, so a non-federated deployment looks exactly as before.
+        availVantages = availableVantages(targets);
+        const prunedV = gridVantages.filter((v) => availVantages.includes(v));
+        gridVantages = prunedV.length ? prunedV : ['local'];
+        renderVantageControl();
+        // Status dot = the WORST across ALL vantages, not just the shown/local one — so a target that
+        // is healthy on fiber but losing packets from another vantage still flags on the overview.
+        // Local status comes from `targets`; each other vantage is one extra /api/targets read, merged
+        // by stable id. Best-effort: a vantage that fails to answer simply doesn't contribute.
+        const statById = new Map(), nameById = new Map();
+        for (const t of targets) {
+          indexTarget(t); const id = tkey(t); nameById.set(id, t.name);
+          if (!statById.has(id)) statById.set(id, []);
+          statById.get(id).push(targetStatus(t));
+        }
+        const otherV = availVantages.filter((v) => v !== 'local');
+        if (otherV.length) {
+          const lists = await Promise.all(otherV.map((v) =>
+            fetchJSON('/api/targets?vantage=' + enc(v)).then((r) => r.targets || []).catch(() => null)));
+          for (const list of lists) if (list) for (const t of list) {
+            const arr = statById.get(tkey(t)); if (arr) arr.push(targetStatus(t));
+          }
+        }
+        for (const [id, arr] of statById) { const w = worstStatus(arr); statusByTarget.set(id, w); statusByTarget.set(nameById.get(id), w); }
         canonicalizeTargetHash(); // an open #target=<path> view becomes its stable id (L8)
         treeNames = targets.map((t) => t.name);
         const gridTargets = targets.filter((t) => !t.no_data);
@@ -1133,36 +1210,47 @@
           if (!live.has(key)) { p.el.remove(); panels.delete(key); }
         }
         const cutoffMs = Date.now() - RANGES['3h'].windowMs;
-        // Incremental watermark = the oldest frontier among panels holding data, so the
-        // shared `since` never advances past a slow target and skips its late rounds (#1).
-        // null (until the first fetch lands) means fetch the whole window.
-        const since = gridLoaded ? gridSince([...panels.values()]) : null;
-        let bulk = null;
-        try { bulk = await fetchGridSeries(since); } catch (e) { /* transient: keep panels */ }
-        await Promise.all(gridTargets.map(async (t) => {
-          const p = ensurePanel(t);
-          let incoming = null;
-          // /api/series/all is keyed by the stable id (not the display path), so join on the stable
-          // token; a moved target (id != name) would otherwise miss its own series and render blank.
-          const raw = bulk && bulk.targets && bulk.targets[tkey(t)];
-          if (raw) {
-            incoming = Smoke.fromApiSeries(raw);
-          } else if (!gridLoaded || !p.series) {
-            // First load, or a panel the incremental read didn't cover that has no cached
-            // data yet: backfill its full window once (by the stable token, which the server resolves).
-            try { const s = await fetchRange(tkey(t), '3h'); if (s && !s.unsupported) incoming = s; } catch (e) { /* transient */ }
-          }
-          if (incoming) {
-            p.series = mergeSeries(p.series, incoming, cutoffMs);
-          } else if (p.series) {
-            p.series = mergeSeries(p.series, null, cutoffMs); // no new rounds: still age out old ones
-          }
+        const focus = gridFocus();
+        // Fetch each SHOWN vantage's bulk series (incrementally, with its own watermark) into
+        // p.seriesByV[v]. The focused vantage becomes p.series — band + median + unison + meta — and
+        // the other shown vantages render as overlay lines (renderGridPanels). A single-vantage grid
+        // is one fetch, exactly as before; each vantage is still one bulk /api/series/all query.
+        let anyBulk = false;
+        for (const v of gridVantages) {
+          // Incremental watermark = the oldest frontier among panels holding THIS vantage's data, so
+          // the shared `since` never advances past a slow target (#1). null (first tick, or a
+          // just-toggled-on vantage with no cached data) means fetch the whole window.
+          const sinceV = gridLoaded ? gridSince([...panels.values()], (p) => p.seriesByV[v]) : null;
+          let bulk = null;
+          try { bulk = await fetchGridSeries(sinceV, v); } catch (e) { /* transient: keep panels */ }
+          if (bulk) anyBulk = true;
+          await Promise.all(gridTargets.map(async (t) => {
+            const p = ensurePanel(t);
+            let incoming = null;
+            // /api/series/all is keyed by the stable id (not the display path), so join on the stable
+            // token; a moved target (id != name) would otherwise miss its own series and render blank.
+            const raw = bulk && bulk.targets && bulk.targets[tkey(t)];
+            if (raw) {
+              incoming = Smoke.fromApiSeries(raw);
+            } else if (!gridLoaded || !p.seriesByV[v]) {
+              // First load, or a panel the incremental read didn't cover: backfill this vantage's full
+              // window once (the server resolves the stable token; 'local' takes the default vantage).
+              try { const s = await fetchRange(tkey(t), '3h', v === 'local' ? undefined : v); if (s && !s.unsupported) incoming = s; } catch (e) { /* transient */ }
+            }
+            if (incoming) p.seriesByV[v] = mergeSeries(p.seriesByV[v], incoming, cutoffMs);
+            else if (p.seriesByV[v]) p.seriesByV[v] = mergeSeries(p.seriesByV[v], null, cutoffMs); // age out
+          }));
+        }
+        // Point each panel at its focused vantage (the band owner) + refresh its stat line from it.
+        for (const t of gridTargets) {
+          const p = panels.get(tkey(t)); if (!p) continue;
+          p.series = p.seriesByV[focus] || null;
           if (p.series && p.series.buckets.length) gridMeta(p, p.series);
-        }));
-        if (bulk) gridLoaded = true;
-        // Don't claim "updated" when the bulk series fetch failed (a non-2xx/network error left
-        // bulk null): the panels are showing last-known data, so say so instead of lying (#5).
-        if (!bulk) $('statusText').textContent = targets.length + ' targets · graph data degraded (last known) · ' + new Date().toLocaleTimeString();
+        }
+        if (anyBulk) gridLoaded = true;
+        // Don't claim "updated" when every vantage's series fetch failed (network/non-2xx): the panels
+        // are showing last-known data, so say so instead of lying (#5).
+        if (!anyBulk) $('statusText').textContent = targets.length + ' targets · graph data degraded (last known) · ' + new Date().toLocaleTimeString();
         renderGridPanels();     // render the visible (scoped) panels, sharing a Y-axis
         renderTreeIfChanged();  // refresh the menu dots when a target's status changed
       } finally { gridBusy = false; }
@@ -1239,12 +1327,47 @@
         p.el.style.display = show ? '' : 'none';
         if (show) vis.push(p);
       }
+      // Which vantages overlay on each panel: everything shown except the focused one (which owns the
+      // band). Filter by the SHOWN set, but color by the full availVantages so a vantage keeps its
+      // color as others are toggled. Skip any series this panel hasn't loaded / can't support.
+      const focus = gridFocus();
+      const overlaysFor = (p) => {
+        if (gridVantages.length < 2) return undefined;
+        const byV = p.seriesByV || {};
+        return gridVantages.filter((v) => v !== focus && byV[v] && !byV[v].unsupported)
+          .map((v) => ({ series: byV[v], color: cssVar(vantageColorVar(v, availVantages)) }));
+      };
       // Unison shares one latency scale — but only across rtt panels. A signed offset panel uses
       // its own zero-centered scale and would otherwise blow up the shared max (a +5s offset =>
-      // ~5000ms), flattening every real latency panel (M4).
-      const yMax = unisonScale ? sharedYMax(vis.filter((p) => !ntpSigned(p.el.dataset.target)).map((p) => p.series)) : undefined;
-      for (const p of vis) renderInto(p.canvas, p.series, RANGES['3h'], 170, yMax, undefined, ntpSigned(p.el.dataset.target));
+      // ~5000ms), flattening every real latency panel (M4). The shared max spans the focused series
+      // AND every overlay series, so an overlay vantage with higher latency isn't clipped.
+      let yMax;
+      if (unisonScale) {
+        const scaleSeries = [];
+        for (const p of vis) if (!ntpSigned(p.el.dataset.target)) {
+          if (p.series) scaleSeries.push(p.series);
+          (overlaysFor(p) || []).forEach((o) => o && o.series && scaleSeries.push(o.series));
+        }
+        yMax = sharedYMax(scaleSeries);
+      }
+      for (const p of vis) renderInto(p.canvas, p.series, RANGES['3h'], 170, yMax, overlaysFor(p), ntpSigned(p.el.dataset.target));
       updateColsPicker(); // the grid now has a measurable width (e.g. first paint on view entry)
+    }
+    // renderVantageControl draws the Graphs-toolbar vantage toggles. Hidden entirely for a
+    // single-vantage deployment. Each chip toggles whether that vantage is drawn on every panel; the
+    // focused one (first shown, marked "band") owns the band+median, the rest draw as overlay lines.
+    function renderVantageControl() {
+      const bar = $('gridVantageBar'); if (!bar) return;
+      if (availVantages.length < 2) { bar.hidden = true; bar.innerHTML = ''; return; }
+      bar.hidden = false;
+      const focus = gridFocus();
+      bar.innerHTML = '<span class="vseg-lbl">Vantages</span>' + availVantages.map((v) => {
+        const on = gridVantages.includes(v), band = on && v === focus;
+        const role = band ? 'band' : on ? 'line' : 'off';
+        return '<button type="button" class="vseg-chip' + (on ? ' on' : '') + (band ? ' band' : '') + '" data-v="' + esc(v) +
+          '" aria-pressed="' + on + '" title="' + (on ? 'Hide ' : 'Show ') + esc(v) + ' on every graph">' +
+          '<i style="background:' + cssVar(vantageColorVar(v, availVantages)) + '"></i><span class="vn">' + esc(v) + '</span><span class="vr">' + role + '</span></button>';
+      }).join('');
     }
 
     // ---- config-tree menu (left nav) ----
@@ -2400,6 +2523,16 @@
     })();
     $('zoomReset').addEventListener('click', () => { if (curTarget && curRange) renderZoom(curTarget, curRange); });
     $('unisonToggle').addEventListener('change', (e) => { unisonScale = e.target.checked; renderGridPanels(); });
+    // Toggle a vantage on the grid: re-render immediately from cached series, then refresh to fetch a
+    // just-shown vantage's data and re-aggregate the status dots.
+    $('gridVantageBar').addEventListener('click', (e) => {
+      const b = e.target.closest('.vseg-chip'); if (!b) return;
+      gridVantages = toggleGridVantage(gridVantages, b.dataset.v, availVantages);
+      saveGridVantages();
+      renderVantageControl();
+      renderGridPanels();
+      refreshGrid();
+    });
     $('colsSeg').addEventListener('click', (e) => { const b = e.target.closest('button'); if (!b) return; gridCols = b.dataset.cols; try { localStorage.setItem('graphCols', gridCols); } catch (err) {} document.querySelectorAll('#colsSeg button').forEach((x) => x.setAttribute('aria-pressed', String(x === b))); applyGridCols(); });
     // reflect the persisted columns choice on load, then apply it to the grid
     document.querySelectorAll('#colsSeg button').forEach((x) => x.setAttribute('aria-pressed', String(x.dataset.cols === gridCols)));

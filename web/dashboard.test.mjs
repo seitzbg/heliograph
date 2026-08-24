@@ -785,5 +785,33 @@ check('ntpStatHtml: offset+stratum on an rtt panel, stratum-only when signed, em
   assert.ok(!/offset/.test(signed), 'offset stat must be hidden on a signed panel'); assert.match(signed, /stratum/);
 });
 
+// Graphs-grid multi-vantage helpers: the dot must reflect the WORST vantage, the control offers the
+// union of vantages, and toggling keeps at least one selected (CODE_REVIEW / vantage overlay).
+check('worstStatus: highest severity wins; ok beats nodata; empty -> nodata', () => {
+  assert.equal(D.worstStatus([]), 'nodata');
+  assert.equal(D.worstStatus(['ok', 'nodata']), 'ok');            // a healthy vantage beats no-data
+  assert.equal(D.worstStatus(['ok', 'degraded']), 'degraded');
+  assert.equal(D.worstStatus(['ok', 'down', 'degraded']), 'down'); // the whole point: local ok, remote down -> down
+  assert.equal(D.worstStatus(['nodata', 'nodata']), 'nodata');
+  assert.equal(D.worstStatus(['ok', 'bogus']), 'ok');             // unknown severities ignored
+});
+check('availableVantages: ordered union, local first, single-vantage stays [local]', () => {
+  assert.deepEqual(D.availableVantages([{ vantages: ['local'] }]), ['local']);
+  const got = D.availableVantages([
+    { vantages: ['local', 'munro-comcast'] },
+    { vantages: ['munro-comcast', 'nyc'] },
+    { name: 'no-vantages-field' },
+  ]);
+  assert.equal(got[0], 'local', 'local is always first');
+  assert.deepEqual(new Set(got), new Set(['local', 'munro-comcast', 'nyc']));
+});
+check('toggleGridVantage: toggles, keeps >=1, drops stale keys, stays ordered', () => {
+  const all = ['local', 'munro-comcast', 'nyc'];
+  assert.deepEqual(D.toggleGridVantage(['local'], 'munro-comcast', all), ['local', 'munro-comcast']);
+  assert.deepEqual(D.toggleGridVantage(['local', 'munro-comcast'], 'munro-comcast', all), ['local']); // toggle off
+  assert.deepEqual(D.toggleGridVantage(['local'], 'local', all), ['local']);   // can't hide the last one
+  assert.deepEqual(D.toggleGridVantage(['nyc', 'gone'], 'local', all)[0], 'local'); // stale 'gone' dropped, ordered
+});
+
 if (failed) { console.error(`\n${failed} test(s) failed`); process.exit(1); }
 console.log('\nall dashboard tests passed');
