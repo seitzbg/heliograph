@@ -2625,8 +2625,11 @@
 
     // ---- legend ----
     (function buildLegend() {
+      // Loss key as one compact green→red strip (was 8 labeled chips): each bucket is a segment; its
+      // threshold shows on hover so the detail stays available without the horizontal bulk.
       const ll = $('lossLegend');
-      for (const b of Smoke.LOSS_COLORS) { const s = document.createElement('span'); s.className = 'swatch'; s.innerHTML = '<i style="background:' + b.color + '"></i>' + b.label; ll.appendChild(s); }
+      ll.innerHTML = '';
+      for (const b of Smoke.LOSS_COLORS) { const i = document.createElement('i'); i.style.background = b.color; i.title = b.label + ' loss'; ll.appendChild(i); }
       refreshKey();
     })();
     function refreshKey() { const sk = $('smokeKey'); if (!sk) return; sk.innerHTML = ''; const dark = Smoke.readVars().dark; for (let k = 1; k <= 6; k++) { const i = document.createElement('i'); i.style.background = Smoke.smokeGray(k, 6, dark); sk.appendChild(i); } }

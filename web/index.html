@@ -113,6 +113,18 @@
   .swatch { display:inline-flex; align-items:center; gap:5px; font-family:ui-monospace,Menlo,monospace; font-size:11.5px; color:var(--ink-soft); }
   .swatch i { width:12px; height:12px; border-radius:3px; display:inline-block; box-shadow:inset 0 0 0 1px rgba(0,0,0,.12); }
   .smoke-key { display:inline-flex; } .smoke-key i { width:9px; height:15px; }
+  /* Graphs toolbar (cleaned up): a quiet reference KEY (jitter + a compact loss color strip) on the
+     left, a divider, then the interactive CONTROLS (vantages/cols/unison) right-aligned. The strip
+     replaces the old 8 labeled loss chips; the divider drops on narrow screens where the zones wrap. */
+  .legend-key { display:inline-flex; align-items:center; gap:8px 14px; flex-wrap:wrap; }
+  .legend-key .lbl { color:var(--ink-faint); }
+  .lossbar { display:inline-flex; align-items:center; gap:7px; }
+  .lossbar-end { font-family:ui-monospace,Menlo,monospace; font-size:10px; color:var(--ink-faint); font-variant-numeric:tabular-nums; }
+  .loss-strip { display:inline-flex; height:11px; border-radius:3px; overflow:hidden; box-shadow:inset 0 0 0 1px rgba(0,0,0,.25); }
+  .loss-strip i { width:13px; height:100%; display:block; }
+  .vdiv { width:1px; align-self:center; height:20px; background:var(--border); flex:0 0 auto; }
+  .legend-right { margin-left:auto; display:inline-flex; align-items:center; gap:8px 16px; flex-wrap:wrap; }
+  @media (max-width:640px){ .vdiv { display:none; } .legend-right { margin-left:0; } }
   .grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(min(22.5rem,100%),1fr)); gap:18px; margin-top:18px; }
   .gpanel { cursor:pointer; transition:border-color .12s, transform .12s; }
   .gpanel:hover { border-color:var(--accent); transform:translateY(-1px); }
@@ -350,10 +362,12 @@
       <div class="graphs-main">
         <div class="graph-scope" id="graphScope"><span class="crumb-cur">All targets</span></div>
         <div class="legend" aria-label="How to read the graph">
-          <span class="lbl">Jitter</span><span class="smoke-key" id="smokeKey" aria-hidden="true"></span>
-          <span class="swatch" style="color:var(--ink-faint)">min → median → max</span>
-          <span class="lbl" style="margin-left:8px">Loss</span><span id="lossLegend" style="display:inline-flex;gap:12px;flex-wrap:wrap"></span>
-          <div class="legend-right" style="margin-left:auto; display:inline-flex; align-items:center; gap:8px 16px; flex-wrap:wrap">
+          <div class="legend-key">
+            <span class="lbl">Jitter</span><span class="smoke-key" id="smokeKey" aria-hidden="true" title="min → median → max"></span>
+            <span class="lossbar"><span class="lbl">Loss</span><span class="lossbar-end" aria-hidden="true">0</span><span class="loss-strip" id="lossLegend" role="img" aria-label="loss color scale, green 0% to red 100%"></span><span class="lossbar-end" aria-hidden="true">100%</span></span>
+          </div>
+          <span class="vdiv" aria-hidden="true"></span>
+          <div class="legend-right">
             <div class="vseg" id="gridVantageBar" role="group" aria-label="Vantages shown on every graph" hidden></div>
             <span class="lbl" id="colsLabel">Cols</span>
             <div class="seg" id="colsSeg" role="group" aria-label="Graphs per row" title="Graphs per row — only counts that fit at the current width are shown">
