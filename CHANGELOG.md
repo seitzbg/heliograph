@@ -6,6 +6,34 @@ All notable changes to **Heliograph** are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **Copyable deployment examples under `examples/`.** Two ready-to-run Compose stacks using the
+  prebuilt GHCR image — `examples/standalone/` (collector + TimescaleDB, the common single-host case)
+  and `examples/federation/` (adds a Caddy reverse proxy for remote vantages) — each with its own
+  `.env.example`, plus an `examples/README.md` that helps you pick. Federation is opt-in, so a
+  standalone user is never faced with the TLS/ACME/Basic-Auth settings they don't need.
+
+### Security
+- **Config reads redact credentials embedded in a probe URL.** The open config reads
+  (`GET /api/admin/config`, its `?source=effective` variant, and `GET /api/admin/config.yaml`) now
+  strip HTTP `urlformat` userinfo and query strings for a non-admin reader, so a credential placed in
+  a probe URL (e.g. `https://user:pass@%host%/health?token=…`) is no longer shown to everyone who can
+  reach the dashboard. A logged-in admin still receives the real, editable config — redacting the
+  editable source would let the next save persist the mask over the secret (CODE_REVIEW M11).
+
+### Fixed
+- **The Graphs grid shows the focused vantage's NTP clock stat.** On the multi-vantage grid, a panel
+  focused on a remote vantage now displays that vantage's clock offset/stratum instead of the hub's —
+  the companion stat follows the panel's plotted series, matching the detail view (CODE_REVIEW M2).
+- **Remote-only targets appear in the Graphs grid for their vantage.** Selecting a remote vantage now
+  surfaces targets measured only from that vantage (a site the hub can't reach directly), instead of
+  leaving them reachable only in the nav tree and detail view (CODE_REVIEW M10).
+
+### Docs
+- Clarified that a deep link survives a target move only while its path is still current; a dormant
+  bookmark to a target's *old* path, first reopened after the move, can go blank or resolve to a
+  reused path — prefer the app's id-based links for saved URLs (CODE_REVIEW L8).
+
 ## [1.0.16] - 2026-08-24
 
 ### Changed
@@ -113,10 +141,14 @@ dashboard, and remote vantages.
   target, the hub disambiguates the two by the round's fingerprint, so a fingerprint-carrying agent is
   still attributed correctly — only a pre-fingerprint agent reporting a reused path pauses until
   upgrade, rather than silently misattributing or dropping the data.
-- **Deep links and Overview links survive a move.** Dashboard navigation, the URL hash, detail
-  fetches, and the Overview worst-offenders / SLA boards are all keyed by the stable id, and an
-  existing path-based `#target=` hash is rewritten to the id once the target catalog loads — so a link
-  built, bookmarked, or opened before a move keeps working.
+- **Deep links and Overview links follow a move.** Dashboard navigation, the URL hash, detail
+  fetches, and the Overview worst-offenders / SLA boards are all keyed by the stable id, and a
+  path-based `#target=` hash is rewritten to the id once the target catalog loads — so a link built
+  or opened while its path is still current keeps working after the target later moves. A dormant
+  bookmark to a target's *old* path, first reopened only after the move, is the exception: the server
+  keeps no old-path alias, so it opens blank (or, if that path was since reused by another target,
+  resolves to the new occupant). The app emits id-based links once loaded — prefer those for anything
+  saved long-term.
 
 ### Docs
 - Documented the stable-identity lifecycle end to end: the server-managed id and YAML path fallback in

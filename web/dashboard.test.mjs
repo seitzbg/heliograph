@@ -785,6 +785,30 @@ check('ntpStatHtml: offset+stratum on an rtt panel, stratum-only when signed, em
   assert.ok(!/offset/.test(signed), 'offset stat must be hidden on a signed panel'); assert.match(signed, /stratum/);
 });
 
+// ntpStatOf (CODE_REVIEW M2): extract a target DTO's live clock stat. One reading with a synced
+// offset, null when the field is absent — the single "is there a reading" rule both registries use.
+check('ntpStatOf: builds a stat from ntp_offset_ms, null when absent', () => {
+  assert.deepEqual(D.ntpStatOf({ ntp_offset_ms: -0.02, stratum: 2, ntp_measure: 'offset' }),
+    { off: -0.02, stratum: 2, measure: 'offset' });
+  assert.equal(D.ntpStatOf({ stratum: 2 }), null);        // no offset field -> no reading
+  assert.equal(D.ntpStatOf({}), null);
+  assert.equal(D.ntpStatOf(null), null);
+  assert.deepEqual(D.ntpStatOf({ ntp_offset_ms: 0, stratum: 1 }), { off: 0, stratum: 1, measure: undefined }); // 0 is a real reading
+});
+
+// ntpStatSelect (CODE_REVIEW M2 regression): the grid must attribute a panel's clock stat to its
+// BAND vantage. The local/default vantage reads the hub-local stat; a remote vantage reads that
+// vantage's own stat — NOT the hub's (the regression showed a remote-focused panel with the hub's
+// offset/stratum). This is the rule the Graphs-grid meta path violated.
+check('ntpStatSelect: local vantage -> local reading, remote vantage -> that vantage reading', () => {
+  const local = { off: 1, stratum: 2 }, remote = { off: 9, stratum: 9 };
+  assert.equal(D.ntpStatSelect('local', local, remote), local);
+  assert.equal(D.ntpStatSelect('', local, remote), local);         // falsy vantage == local/default
+  assert.equal(D.ntpStatSelect(undefined, local, remote), local);
+  assert.equal(D.ntpStatSelect('nyc', local, remote), remote);     // remote-focused panel shows the remote clock, not the hub's
+  assert.equal(D.ntpStatSelect('nyc', local, undefined), undefined); // remote with no reading -> nothing (not a hub fallback)
+});
+
 // Graphs-grid multi-vantage helpers: the dot must reflect the WORST vantage, the control offers the
 // union of vantages, and toggling keeps at least one selected (CODE_REVIEW / vantage overlay).
 check('worstStatus: highest severity wins; ok beats nodata; empty -> nodata', () => {
@@ -828,6 +852,26 @@ check('bandVantageFor: first selected vantage that measures the target, else nul
   // missing/empty vantage list defaults to local
   assert.equal(D.bandVantageFor(undefined, ['local']), 'local');
   assert.equal(D.bandVantageFor([], ['munro-comcast']), null);
+});
+
+// gridShowsTarget (CODE_REVIEW M10): a remote-only target must become a grid panel candidate once a
+// non-local vantage that measures it is selected — otherwise the vantage selector can't surface a
+// site the hub can't reach. A local-data target always qualifies; a no-data LOCAL target never does.
+check('gridShowsTarget: remote-only target appears only when its remote vantage is selected', () => {
+  const localData = { no_data: false, vantages: ['local'] };
+  const remoteOnly = { no_data: true, vantages: ['munro-comcast'] };
+  const newLocal = { no_data: true, vantages: ['local'] };       // brand-new local target, no data yet
+  // A target with local data is always a candidate, regardless of selection.
+  assert.equal(D.gridShowsTarget(localData, ['local']), true);
+  assert.equal(D.gridShowsTarget(localData, ['munro-comcast']), true);
+  // The M10 case: remote-only target shows up exactly when its measuring vantage is selected.
+  assert.equal(D.gridShowsTarget(remoteOnly, ['local']), false);              // was invisible before the fix
+  assert.equal(D.gridShowsTarget(remoteOnly, ['local', 'munro-comcast']), true);
+  assert.equal(D.gridShowsTarget(remoteOnly, ['munro-comcast']), true);
+  // A no-data LOCAL target stays out (an empty panel; only a remote vantage can fill one).
+  assert.equal(D.gridShowsTarget(newLocal, ['local']), false);
+  // A remote-only target measured by a vantage that isn't selected stays hidden.
+  assert.equal(D.gridShowsTarget(remoteOnly, ['nyc']), false);
 });
 
 if (failed) { console.error(`\n${failed} test(s) failed`); process.exit(1); }

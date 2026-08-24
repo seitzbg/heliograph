@@ -312,6 +312,17 @@
     return null;
   }
 
+  // gridShowsTarget decides whether a target is a Graphs-grid panel candidate for the current
+  // vantage selection. A target with local data always qualifies (the grid's default local read).
+  // A remote-only target (no local row, no_data) qualifies once a NON-local vantage that measures it
+  // is selected — so the vantage selector can surface a site the hub can't reach, instead of leaving
+  // it reachable only in the tree/detail view (CODE_REVIEW M10). A no-data LOCAL target stays out: it
+  // would be an empty "collecting…" panel, and only a selected remote vantage can actually fill one.
+  function gridShowsTarget(t, selectedVantages) {
+    if (t && !t.no_data) return true;
+    return vantageList(t).some((v) => v !== 'local' && (selectedVantages || []).includes(v));
+  }
+
   // adminMode maps the status of GET /api/admin/vantages to the Vantages panel's display
   // mode: 200 authorized (show the list), 401 log in, 404 admin management disabled (no
   // SMOKED_ADMIN_PASSWORD -> routes unregistered), anything else a transient error.
@@ -806,7 +817,23 @@
     return html + '<span class="stat"><span class="k">stratum</span><span class="v">' + stat.stratum + '</span></span>';
   }
 
-  window.Dash = { RANGES, RANGE_ORDER, parseRoute, mergeSeries, gridSince, gridTemplateFor, maxColumnsFor, rangeLabels, fetchJSON, zoomResolution, pixelToTime, sharedYMax, buildTree, underPath, targetStatus, pickSeries, vantageList, orderVantages, defaultFocus, keepFocus, vantageColorVar, worstStatus, availableVantages, toggleGridVantage, bandVantageFor, adminMode, adminSessionState, createAdminStateController, statusProbeOwnsView, relTime, listTargets, addTarget, editTarget, removeTarget, buildTargetNode, buildGroupNode, labelHTML, collectingNote, agentYaml, agentCompose, cfgTree, reweightSiblings, reorderSiblings, editNodeAtPath, removeNodeAtPath, renameNodeAtPath, addNodeAtPath, moveNode, moveInList, cfgDropDestination, cfgVisibleRows, cfgTreeKey, tkey, ntpStatHtml };
+  // ntpStatOf extracts a target DTO's live NTP clock stat (offset/stratum/measure), or null when the
+  // target has no synced reading. Shared by every registry writer (the hub-local ntpByName and the
+  // per-vantage ntpByVantage) so the "is there a reading" rule lives in exactly one place.
+  function ntpStatOf(t) {
+    return (t && typeof t.ntp_offset_ms === 'number') ? { off: t.ntp_offset_ms, stratum: t.stratum, measure: t.ntp_measure } : null;
+  }
+
+  // ntpStatSelect chooses which clock reading a panel shows for a vantage: the hub-local reading for
+  // the local/default vantage, the per-vantage reading for a remote one. Exported (not merely used
+  // internally) so the Graphs-grid M2 attribution — a remote-focused panel must show THAT vantage's
+  // offset/stratum, not the hub's — is unit-testable; the DOM path that selects the registry needs a
+  // real browser to run, but this rule is where the regression lived.
+  function ntpStatSelect(vantage, local, remote) {
+    return (!vantage || vantage === 'local') ? local : remote;
+  }
+
+  window.Dash = { RANGES, RANGE_ORDER, parseRoute, mergeSeries, gridSince, gridTemplateFor, maxColumnsFor, rangeLabels, fetchJSON, zoomResolution, pixelToTime, sharedYMax, buildTree, underPath, targetStatus, pickSeries, vantageList, orderVantages, defaultFocus, keepFocus, vantageColorVar, worstStatus, availableVantages, toggleGridVantage, bandVantageFor, gridShowsTarget, adminMode, adminSessionState, createAdminStateController, statusProbeOwnsView, relTime, listTargets, addTarget, editTarget, removeTarget, buildTargetNode, buildGroupNode, labelHTML, collectingNote, agentYaml, agentCompose, cfgTree, reweightSiblings, reorderSiblings, editNodeAtPath, removeNodeAtPath, renameNodeAtPath, addNodeAtPath, moveNode, moveInList, cfgDropDestination, cfgVisibleRows, cfgTreeKey, tkey, ntpStatHtml, ntpStatOf, ntpStatSelect };
 
   // ---------------------------------------------------------------- init (DOM) --
   function init() {
@@ -1032,22 +1059,32 @@
     // metricByName holds every target's config-derived metric ('rtt' | 'offset') from /api/targets,
     // present even with no live NTP reading — the source of truth for the signed-axis choice.
     const metricByName = new Map();
-    function ntpStatsHtml(token) { return ntpStatHtml(ntpByName.get(token), ntpSigned(token)); }
     // ntpStatFor returns a target's NTP clock stat for a specific vantage: the hub-local reading
     // (ntpByName) for the local/default vantage, or the per-vantage reading (ntpByVantage) for a
-    // remote one (CODE_REVIEW M2).
+    // remote one (CODE_REVIEW M2). The local/remote pick is the pure, exported ntpStatSelect.
     function ntpStatFor(token, vantage) {
-      if (!vantage || vantage === 'local') return ntpByName.get(token);
-      return ntpByVantage.get(vantage + '|' + token);
+      return ntpStatSelect(vantage, ntpByName.get(token), ntpByVantage.get(vantage + '|' + token));
     }
     function ntpStatsHtmlForVantage(token, vantage) { return ntpStatHtml(ntpStatFor(token, vantage), ntpSigned(token)); }
+    // setNtpVantage records one remote vantage's NTP clock stat for a target into ntpByVantage,
+    // dual-keyed by stable id and display path (like ntpByName). Fed from a /api/targets?vantage=
+    // list — by ensureVantageStats (detail views) and by refreshGrid, which already fetches every
+    // remote vantage's list for the worst-status roll-up, so the grid attributes each panel's clock
+    // stat to its own band vantage (M2) at no extra request.
+    function setNtpVantage(vantage, t) {
+      const stat = ntpStatOf(t);
+      for (const key of [vantage + '|' + tkey(t), vantage + '|' + t.name]) {
+        if (stat) ntpByVantage.set(key, stat); else ntpByVantage.delete(key);
+      }
+    }
     function setNtp(t) {
       const k = tkey(t), nm = t.name;
       // Config-derived metric drives the signed axis (present for every target, survives restart).
       const metric = t.metric === 'offset' ? 'offset' : 'rtt';
       metricByName.set(k, metric); metricByName.set(nm, metric);
       // The live offset/stratum stat is a separate, best-effort display value (absent until synced).
-      if (typeof t.ntp_offset_ms === 'number') { const v = { off: t.ntp_offset_ms, stratum: t.stratum, measure: t.ntp_measure }; ntpByName.set(k, v); ntpByName.set(nm, v); }
+      const v = ntpStatOf(t);
+      if (v) { ntpByName.set(k, v); ntpByName.set(nm, v); }
       else { ntpByName.delete(k); ntpByName.delete(nm); }
     }
     // indexTarget records one /api/targets DTO into every per-target map under BOTH its stable token
@@ -1106,12 +1143,7 @@
         try { targets = (await fetchJSON('/api/targets?vantage=' + enc(v))).targets || []; }
         catch (e) { return; }
         vantageStatsAt.set(v, Date.now());
-        for (const t of targets) {
-          const stat = (typeof t.ntp_offset_ms === 'number') ? { off: t.ntp_offset_ms, stratum: t.stratum, measure: t.ntp_measure } : null;
-          for (const key of [v + '|' + tkey(t), v + '|' + t.name]) {
-            if (stat) ntpByVantage.set(key, stat); else ntpByVantage.delete(key);
-          }
-        }
+        for (const t of targets) setNtpVantage(v, t);
       }));
     }
     // ensureVantages backfills the per-target maps for a detail view reached before refreshGrid has
@@ -1164,7 +1196,9 @@
       const st = Smoke.seriesStats(s); const lcls = st.lossAvg > 2 ? 'bad' : st.lossAvg > 0.5 ? 'warn' : '';
       p.meta.innerHTML = '<span class="stat"><span class="k">median</span><span class="v">' + fmtMs(st.medAvg, ntpSigned(p.el.dataset.target)) + ' ms</span></span>' +
         '<span class="stat"><span class="k">loss</span><span class="v ' + lcls + '">' + fmt(st.lossAvg, 2) + ' %</span></span>' +
-        ntpStatsHtml(p.el.dataset.target);
+        // The clock stat must follow the panel's BAND vantage (its plotted series), not the hub-local
+        // reading — otherwise a remote-focused NTP panel shows the hub's offset/stratum (M2 regression).
+        ntpStatsHtmlForVantage(p.el.dataset.target, p.band);
     }
     let gridBusy = false, gridLoaded = false; // gridLoaded: the first full-window fetch has landed
     async function refreshGrid() {
@@ -1175,11 +1209,10 @@
         catch (e) { $('statusText').textContent = 'collector unreachable — showing last known'; return; } // keep panels (#2)
         $('statusText').textContent = targets.length + ' targets · updated ' + new Date().toLocaleTimeString();
         // Feed the config-tree menu: the name set it's built from and per-target dot status.
-        // ALL configured targets go in the tree (so a remote-only target is navigable), but
-        // only those with local data get a grid thumbnail — the grid reads the local vantage,
-        // so a no-data (remote-only) target would otherwise show an empty "collecting…" panel
-        // forever. It stays reachable via the tree; its real series shows in the detail view,
-        // which focuses the target's own vantage (CODE_REVIEW #3 / P1-3).
+        // ALL configured targets go in the tree (so a remote-only target is navigable). A
+        // remote-only target also gets a grid thumbnail once a NON-local vantage that measures it is
+        // selected (the gridTargets filter below) — the grid then reads that vantage's series, so it
+        // is no longer stranded in the tree/detail view alone (CODE_REVIEW M10, extending #3 / P1-3).
         statusByTarget.clear(); vantagesByTarget.clear();
         // The vantages this deployment measures from (union across targets). Reconcile the shown set
         // against it and (re)render the toolbar control — which hides itself entirely when there's
@@ -1202,14 +1235,28 @@
         if (otherV.length) {
           const lists = await Promise.all(otherV.map((v) =>
             fetchJSON('/api/targets?vantage=' + enc(v)).then((r) => r.targets || []).catch(() => null)));
-          for (const list of lists) if (list) for (const t of list) {
-            const arr = statById.get(tkey(t)); if (arr) arr.push(targetStatus(t));
-          }
+          otherV.forEach((v, i) => {
+            const list = lists[i];
+            if (!list) return;
+            for (const t of list) {
+              const arr = statById.get(tkey(t)); if (arr) arr.push(targetStatus(t));
+              // Reuse the list already fetched here to record this vantage's NTP clock stat, so a
+              // remote-focused grid panel's offset/stratum matches its plotted series (M2). Keyed by
+              // vantage, so the local reading (ntpByName) is untouched.
+              setNtpVantage(v, t);
+            }
+          });
         }
         for (const [id, arr] of statById) { const w = worstStatus(arr); statusByTarget.set(id, w); statusByTarget.set(nameById.get(id), w); }
         canonicalizeTargetHash(); // an open #target=<path> view becomes its stable id (L8)
         treeNames = targets.map((t) => t.name);
-        const gridTargets = targets.filter((t) => !t.no_data);
+        // Grid candidates: every target with local data (as before), PLUS a remote-only target
+        // (no local row) when a NON-local vantage that measures it is currently selected — so the
+        // vantage selector can surface a site the hub can't reach, not just hide it in the tree
+        // (CODE_REVIEW M10). The per-panel bandVantageFor rule below still hides a candidate that
+        // none of the selected vantages measures. A no-data LOCAL target stays excluded (it would be
+        // an empty "collecting…" panel); only a selected remote vantage can actually fill one.
+        const gridTargets = targets.filter((t) => gridShowsTarget(t, gridVantages));
         // Reconcile ONLY against an authoritative target list (the fetch above succeeded):
         // drop panels for targets no longer reported (e.g. removed on a SIGHUP reload, or a
         // target that became no-data). A failed /api/targets returned early, so a transient

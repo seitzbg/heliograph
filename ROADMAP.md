@@ -215,7 +215,9 @@ follow-up found several edge cases, now fixed in **Unreleased**:
   fingerprint), so only a pre-fingerprint agent reporting a *reused* path pauses until upgrade — see
   `docs/federation.md` "Stable target identity". Review follow-ups closed the id/path-overlap ingest
   disambiguation (M9), the NTP clock-stat identity/freshness binding (M3), and the Overview/deep-link
-  id keying (L8).
+  id keying (L8 — with the residual that a dormant bookmark to a target's *old* path, first reopened
+  only after the move, can't be resolved: the server keeps no old-path alias, so it opens blank or, if
+  the path was reused, resolves to the new occupant. Prefer the app's id-based links for saved URLs).
 
 ### Remaining follow-ups (non-blocking; none critical/high)
 - **Caddy image (#38):** the runtime `apk --upgrade c-ares/curl` + the three `xcaddy --with

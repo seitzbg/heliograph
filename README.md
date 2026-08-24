@@ -176,6 +176,10 @@ localhost, front it with TLS + auth. The repo's own [`docker-compose.yml`](docke
 adds a `federation` profile with a bundled Caddy reverse proxy (auto Let's Encrypt, per-vantage
 API keys, Basic Auth) — see [Federation deployment](#federation-deployment-reverse-proxy).
 
+Prefer a ready-made, copyable stack? [`examples/`](examples/) has two: **[`standalone/`](examples/standalone/)**
+(collector + TimescaleDB, the common single-host case) and **[`federation/`](examples/federation/)**
+(adds the Caddy reverse proxy for remote vantages) — each with its own `.env.example`.
+
 ### TimescaleDB (dev + integration test)
 
 ```sh

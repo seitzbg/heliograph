@@ -553,6 +553,9 @@ func main() {
 			// on -config in addition to the admin password gate above.
 			if *configPath != "" {
 				srv.ConfigGet = func() (json.RawMessage, int, error) { return cfgStore.Get(context.Background()) }
+				// Redact secret-capable probe params (an HTTP urlformat's userinfo/query) so the open
+				// config read doesn't disclose a credential to a non-admin viewer (CODE_REVIEW M11).
+				srv.ConfigRedact = config.RedactSecrets
 				// Both API applies (here) and the SIGHUP reload above take the function-scope
 				// applyMu around their whole build->(persist)->swap, so no two runtime
 				// replacements interleave and leave the live runtime out of sync with the
@@ -607,19 +610,30 @@ func main() {
 				// ConfigYAML backs the Config tab's read-only YAML view. Both sources are config
 				// documents stored as JSON, rendered to YAML by the same jsonToYAML path: "effective"
 				// is the merged file+DB config the collector built (snapshotted per build, so it
-				// tracks reloads); "db" is just the stored DB fragment. Neither holds secrets — same
-				// as ConfigGet.
-				srv.ConfigYAML = func(source string) ([]byte, error) {
+				// tracks reloads); "db" is just the stored DB fragment. When redact is set (a non-admin
+				// reader) secret-capable probe params are sanitized on the JSON before rendering, the
+				// same as ConfigGet (CODE_REVIEW M11).
+				srv.ConfigYAML = func(source string, redact bool) ([]byte, error) {
+					var doc json.RawMessage
 					if source == "effective" {
 						rt := current.Load()
 						if rt == nil || rt.effectiveJSON == nil {
 							return nil, fmt.Errorf("effective config unavailable")
 						}
-						return jsonToYAML(rt.effectiveJSON)
+						doc = rt.effectiveJSON
+					} else {
+						d, _, err := cfgStore.Get(context.Background())
+						if err != nil {
+							return nil, err
+						}
+						doc = d
 					}
-					doc, _, err := cfgStore.Get(context.Background())
-					if err != nil {
-						return nil, err
+					if redact {
+						red, err := config.RedactSecrets(doc)
+						if err != nil {
+							return nil, err
+						}
+						doc = red
 					}
 					return jsonToYAML(doc)
 				}

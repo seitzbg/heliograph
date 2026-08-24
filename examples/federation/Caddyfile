@@ -1,0 +1,33 @@
+# Reverse proxy for the Heliograph federation example.
+#
+# Caddy terminates TLS with an automatically issued (and auto-renewed) Let's Encrypt
+# certificate for $DOMAIN. smoked never does TLS itself; both the agent's API key and
+# the dashboard's Basic Auth ride inside the TLS Caddy terminates.
+#
+# For a local smoke test without hitting Let's Encrypt, set DOMAIN=localhost — Caddy
+# then serves an internal (self-signed) cert automatically instead of attempting ACME.
+{
+	# ACME account contact. Caddy issues/renews the cert automatically.
+	email {$ACME_EMAIL}
+	# This example uses the default HTTP-01 challenge (needs inbound port 80). For DNS-01
+	# (works behind NAT, supports wildcards) add an `acme_dns ...` line here AND run a Caddy
+	# image built with the matching caddy-dns plugin — the stock image below has none. See the
+	# repo's Caddy.Dockerfile and .env.example.
+}
+
+{$DOMAIN} {
+	# Remote agents: API-key auth (smoked checks the Bearer key). No Basic Auth, so this path
+	# is reachable by agents that don't have the dashboard password.
+	handle /agent/v1/* {
+		reverse_proxy smoked:8087
+	}
+
+	# Dashboard + read/query API + admin panel: gated by HTTP Basic Auth, since smoked's read
+	# API is otherwise unauthenticated. Served over the proxy's TLS.
+	handle {
+		basic_auth {
+			{$DASH_USER} {$DASH_PASSWORD_HASH}
+		}
+		reverse_proxy smoked:8087
+	}
+}
