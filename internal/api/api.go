@@ -262,9 +262,25 @@ func (srv *Server) Routes() *http.ServeMux {
 	}
 	if srv.webDir != "" {
 		// Serve the SPA/static assets at the root (same-origin with the API).
-		mux.Handle("GET /", http.FileServer(http.Dir(srv.webDir)))
+		mux.Handle("GET /", noCacheStatic(http.FileServer(http.Dir(srv.webDir))))
 	}
 	return mux
+}
+
+// noCacheStatic wraps a static file handler so browsers always revalidate the
+// dashboard assets before reusing them. FileServer emits only Last-Modified
+// (no Cache-Control, no ETag), so without this a browser applies heuristic
+// freshness and can keep running pre-upgrade dashboard.js/smoke.js against a
+// freshly-deployed server until a hard refresh. "no-cache" doesn't forbid
+// caching — it forces a conditional request (If-Modified-Since), which the
+// FileServer answers with a cheap 304 when the file is unchanged and a fresh
+// 200 the moment it changes. Assets are still cached; they're just never
+// served stale after a deploy.
+func noCacheStatic(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-cache")
+		h.ServeHTTP(w, r)
+	})
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
