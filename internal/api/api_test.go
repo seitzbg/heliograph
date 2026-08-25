@@ -101,6 +101,28 @@ func TestVersionEndpoint(t *testing.T) {
 	}
 }
 
+// TestRoutesDoesNotServeAgentRoutes is a single-host regression guard: the main dashboard mux
+// (Routes) must never serve the federation agent API. Those routes are wired only on the separate
+// mTLS listener's mux (AgentMux, started by cmd/smoked only when -agent-addr is set) — see the
+// comment in api.go's Routes. A future change re-registering /agent/v1/* on the plain-HTTP mux
+// would reopen the key-based agent API's attack surface without mTLS in front of it.
+func TestRoutesDoesNotServeAgentRoutes(t *testing.T) {
+	srv := New(store.NewMem(10), "")
+	h := srv.Routes()
+
+	for _, req := range []*http.Request{
+		httptest.NewRequest("GET", "/agent/v1/assignment", nil),
+		httptest.NewRequest("POST", "/agent/v1/results", nil),
+	} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("%s %s: status = %d, want 404 (agent routes must not be served on the main dashboard mux)",
+				req.Method, req.URL.Path, rec.Code)
+		}
+	}
+}
+
 func TestRollupHidesInternalError(t *testing.T) {
 	srv := New(errRollupStore{store.NewMem(10)}, "")
 	rec := httptest.NewRecorder()

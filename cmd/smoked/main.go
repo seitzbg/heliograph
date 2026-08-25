@@ -120,6 +120,8 @@ func main() {
 	resolveIPs := flag.Bool("resolve-ips", envBool("SMOKED_RESOLVE_IPS"), "show each target's IP in the graph title (or set SMOKED_RESOLVE_IPS=1): a pinned `ip:`, else a literal-IP host, else the resolved hostname (best-effort, refreshed on reload)")
 	absoluteTime := flag.Bool("absolute-time", envBoolOr("SMOKED_ABSOLUTE_TIME", true), "label graph x-axes with absolute clock time (default); set SMOKED_ABSOLUTE_TIME=0 (or -absolute-time=false) for relative -3h/now labels")
 	requireFingerprint := flag.Bool("require-fingerprint", false, "reject agent results that carry no measurement fingerprint (strict mode); default accepts them for pre-fingerprint agents. Flip on once every vantage's agent is upgraded (watch heliograph_agent_missing_fingerprint_total)")
+	agentAddr := flag.String("agent-addr", os.Getenv("SMOKED_AGENT_ADDR"), "listen address for the opt-in mTLS federation agent API, e.g. :8443; unset = single-host (no agent API)")
+	agentHostname := flag.String("agent-hostname", os.Getenv("SMOKED_AGENT_HOSTNAME"), "comma-separated SAN host[,IP] for smoked's CA-issued agent-API server cert (required when -agent-addr is set)")
 	configPath := flag.String("config", os.Getenv("SMOKED_CONFIG"), "path to a YAML config file, or a directory holding default.yaml + conf.d/*.yaml (or set SMOKED_CONFIG); replaces the built-in demo targets")
 	webhook := flag.String("webhook", os.Getenv("SMOKED_WEBHOOK_URL"), "generic JSON webhook URL (or set SMOKED_WEBHOOK_URL) for alerts named 'to: [webhook]'")
 	slackWebhook := flag.String("slack-webhook", os.Getenv("SMOKED_SLACK_WEBHOOK"), "Slack incoming-webhook URL (or set SMOKED_SLACK_WEBHOOK) for alerts named 'to: [slack]'")
@@ -463,11 +465,12 @@ func main() {
 		// Federation: only with a DB (the vantage registry is TimescaleDB-backed). The admin
 		// vantage-management API (list/register/revoke) additionally requires a configured
 		// admin password (fail-closed — no password means no admin routes). The agent routes
-		// (/agent/v1/assignment, /agent/v1/results) are currently unwired from any listener —
-		// the old Bearer-key auth that gated them was removed with the key-based federation
-		// path; an mTLS listener (a later task) re-lights them. Assignment/OnIngest/
-		// IngestCommit/RequireFingerprint/TargetVantages are still wired below so that
-		// listener needs no changes here when it lands.
+		// (/agent/v1/assignment, /agent/v1/results) are served only by the opt-in mTLS listener
+		// started just below (-agent-addr) — the old Bearer-key auth that gated them on the main
+		// mux was removed with the key-based federation path, and the main mux (srv.Routes())
+		// never registers them (see the comment there). Assignment/OnIngest/IngestCommit/
+		// RequireFingerprint/TargetVantages are wired below regardless of -agent-addr, so the
+		// listener needs no other changes here.
 		if *dsn != "" {
 			vst, err := vantage.New(ctx, *dsn)
 			if err != nil {
@@ -475,6 +478,48 @@ func main() {
 			}
 			defer vst.Close()
 			srv.Vantages = vst
+			// Opt-in mTLS federation agent listener: a separate HTTPS server, entirely apart
+			// from the plain-HTTP dashboard mux, serving only /agent/v1/* behind mutual TLS
+			// (AgentTLSConfig + AgentMux). -agent-addr unset (the default) means single-host —
+			// no agent API is exposed anywhere, and the dashboard server below is unaffected.
+			if *agentAddr != "" {
+				if *agentHostname == "" {
+					fatal("invalid agent listener flags", fmt.Errorf("-agent-hostname is required when -agent-addr is set (the agent-API server cert needs a SAN)"))
+				}
+				ca, err := vst.CA(ctx)
+				if err != nil {
+					fatal("agent CA", err)
+				}
+				var hostnames []string
+				for _, h := range strings.Split(*agentHostname, ",") {
+					if h = strings.TrimSpace(h); h != "" {
+						hostnames = append(hostnames, h)
+					}
+				}
+				if len(hostnames) == 0 {
+					fatal("invalid agent listener flags", fmt.Errorf("-agent-hostname must contain at least one hostname or IP"))
+				}
+				tlsCfg, err := srv.AgentTLSConfig(ca, hostnames)
+				if err != nil {
+					fatal("agent TLS config", err)
+				}
+				// The hub URL embedded in a downloaded vantage bundle, derived from the listen
+				// port (":8443" -> "8443"; falls back to the default agent port if unset) and
+				// the first configured hostname. Must be set before the dashboard server below
+				// starts serving, since the bundle-download admin route reads it live.
+				_, port, _ := net.SplitHostPort(*agentAddr)
+				if port == "" {
+					port = "8443"
+				}
+				srv.AgentHubURL = "https://" + hostnames[0] + ":" + port
+				agentSrv := &http.Server{Addr: *agentAddr, Handler: srv.AgentMux(), TLSConfig: tlsCfg}
+				go func() {
+					slog.Info("mTLS agent listener starting", "addr", *agentAddr, "hostnames", hostnames)
+					if err := agentSrv.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
+						fatal("mTLS agent listener failed", err)
+					}
+				}()
+			}
 			// Strict-mode toggle for the ingest path enabled just above: with it on, an agent
 			// round carrying no fingerprint is a visible permanent drop instead of accepted
 			// (CODE_REVIEW #2). Lenient by default.
