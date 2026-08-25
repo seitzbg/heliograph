@@ -745,6 +745,14 @@ func vantageCmd(args []string) int {
 	sub := args[0]
 	fs := flag.NewFlagSet("vantage "+sub, flag.ExitOnError)
 	dsn := fs.String("dsn", os.Getenv("SMOKED_DSN"), "TimescaleDB DSN (or set SMOKED_DSN)")
+	var hubFlag *string
+	var jsonOut *bool
+	var out *string
+	if sub == "add" {
+		hubFlag = fs.String("hub", "", "hub base URL to embed in agent.yaml, e.g. https://hub.example.com:8443")
+		jsonOut = fs.Bool("json", false, "emit the raw PEMs as JSON instead of agent.yaml")
+		out = fs.String("out", "", "write a tar.gz onboarding bundle to this path instead of stdout")
+	}
 	rest := args[1:]
 	var name string
 	if sub == "add" || sub == "revoke" {
@@ -775,16 +783,61 @@ func vantageCmd(args []string) int {
 			fmt.Fprintf(os.Stderr, "vantage add: %v\n", err)
 			return 1
 		}
-		// A basic PEM bundle for now — a later task upgrades this to a full agent.yaml/tar.gz.
 		certPEM, keyPEM, caPEM, err := st.IssueClientCert(ctx, name)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "vantage add: %v\n", err)
 			return 1
 		}
-		fmt.Printf("vantage %q registered. mTLS client identity (save these now):\n\n", name)
-		fmt.Printf("# client certificate (client.crt)\n%s\n", certPEM)
-		fmt.Printf("# client private key (client.key) — keep secret\n%s\n", keyPEM)
-		fmt.Printf("# hub CA certificate (ca.crt) — verify the hub against this\n%s\n", caPEM)
+
+		hub := *hubFlag
+		if hub == "" {
+			hub = "https://HUB-HOSTNAME:8443"
+			fmt.Fprintln(os.Stderr, "note: no -hub given; agent.yaml embeds a placeholder URL — pass -hub https://your-hub:8443 to set it")
+		}
+
+		switch {
+		case *out != "":
+			f, err := os.Create(*out)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "vantage add: %v\n", err)
+				return 1
+			}
+			if err := vantage.WriteBundleTarGz(f, hub, name, certPEM, keyPEM, caPEM); err != nil {
+				f.Close()
+				os.Remove(*out)
+				fmt.Fprintf(os.Stderr, "vantage add: %v\n", err)
+				return 1
+			}
+			if err := f.Close(); err != nil {
+				os.Remove(*out)
+				fmt.Fprintf(os.Stderr, "vantage add: %v\n", err)
+				return 1
+			}
+			fmt.Fprintf(os.Stderr, "wrote bundle %s for vantage %q\n", *out, name)
+		case *jsonOut:
+			doc := struct {
+				Vantage    string `json:"vantage"`
+				Hub        string `json:"hub"`
+				ClientCert string `json:"client_cert"`
+				ClientKey  string `json:"client_key"`
+				CACert     string `json:"ca_cert"`
+			}{
+				Vantage:    name,
+				Hub:        hub,
+				ClientCert: string(certPEM),
+				ClientKey:  string(keyPEM),
+				CACert:     string(caPEM),
+			}
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			if err := enc.Encode(doc); err != nil {
+				fmt.Fprintf(os.Stderr, "vantage add: %v\n", err)
+				return 1
+			}
+		default:
+			fmt.Fprintf(os.Stderr, "vantage %q registered — agent.yaml follows on stdout\n", name)
+			os.Stdout.Write(vantage.RenderAgentYAML(hub, name, certPEM, keyPEM, caPEM))
+		}
 		return 0
 	case "ls":
 		infos, err := st.List(ctx)

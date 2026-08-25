@@ -985,3 +985,71 @@ func TestConfigImportMergeThenApply(t *testing.T) {
 		t.Fatal("rejected conflict must not swap the runtime")
 	}
 }
+
+// TestVantageAddEmitsOnboardingBundle exercises `smoked vantage add` end to end against a real
+// database. Default form renders a ready-to-run agent.yaml (Task 7's RenderAgentYAML) to stdout;
+// -json emits the raw PEMs as JSON; -out writes a tar.gz onboarding bundle to a file instead of
+// stdout.
+func TestVantageAddEmitsOnboardingBundle(t *testing.T) {
+	dsn := os.Getenv("SMOKE_TEST_DSN")
+	if dsn == "" {
+		t.Skip("set SMOKE_TEST_DSN to run vantage add test")
+	}
+
+	var rc int
+	out := captureStdout(t, func() { rc = vantageCmd([]string{"add", "nyc", "-dsn", dsn}) })
+	if rc != 0 {
+		t.Fatalf("vantage add rc=%d", rc)
+	}
+	// yaml.v3 only quotes a scalar when required (ambiguous with a number/bool/etc.); a plain
+	// name like "nyc" is emitted bare, per internal/vantage/bundle_test.go's own roundtrip test.
+	for _, want := range []string{"vantage: nyc", "BEGIN CERTIFICATE", "BEGIN EC PRIVATE KEY"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("agent.yaml output missing %q\n---\n%s", want, out)
+		}
+	}
+
+	// -json emits the raw PEMs instead of agent.yaml.
+	var rcJSON int
+	outJSON := captureStdout(t, func() { rcJSON = vantageCmd([]string{"add", "nyc2", "-dsn", dsn, "-json"}) })
+	if rcJSON != 0 {
+		t.Fatalf("vantage add -json rc=%d", rcJSON)
+	}
+	var doc struct {
+		Vantage    string `json:"vantage"`
+		Hub        string `json:"hub"`
+		ClientCert string `json:"client_cert"`
+		ClientKey  string `json:"client_key"`
+		CACert     string `json:"ca_cert"`
+	}
+	if err := json.Unmarshal([]byte(outJSON), &doc); err != nil {
+		t.Fatalf("vantage add -json: invalid JSON: %v\n---\n%s", err, outJSON)
+	}
+	if doc.Vantage != "nyc2" {
+		t.Errorf("json vantage = %q, want nyc2", doc.Vantage)
+	}
+	if !strings.Contains(doc.ClientCert, "BEGIN CERTIFICATE") {
+		t.Errorf("json client_cert missing BEGIN CERTIFICATE:\n%s", doc.ClientCert)
+	}
+
+	// -out writes a tar.gz bundle to a file; stdout stays empty.
+	dir := t.TempDir()
+	outPath := filepath.Join(dir, "b.tar.gz")
+	var rcOut int
+	outOut := captureStdout(t, func() {
+		rcOut = vantageCmd([]string{"add", "nyc3", "-dsn", dsn, "-out", outPath})
+	})
+	if rcOut != 0 {
+		t.Fatalf("vantage add -out rc=%d", rcOut)
+	}
+	if strings.TrimSpace(outOut) != "" {
+		t.Errorf("vantage add -out should leave stdout empty, got %q", outOut)
+	}
+	data, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("bundle file not written: %v", err)
+	}
+	if len(data) < 2 || data[0] != 0x1f || data[1] != 0x8b {
+		t.Fatalf("bundle file is not gzip (first bytes %x)", data[:min(2, len(data))])
+	}
+}
