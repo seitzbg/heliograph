@@ -34,6 +34,9 @@ type VantageAdmin interface {
 	Register(ctx context.Context, name string) error
 	List(ctx context.Context) ([]vantage.Info, error)
 	Revoke(ctx context.Context, name string) (removed bool, err error)
+	// IsActive reports whether name is a known, non-revoked vantage — the authorization check
+	// requireAgent runs against a client cert's CommonName (mTLS federation auth).
+	IsActive(ctx context.Context, name string) (bool, error)
 }
 
 // ErrConfigInvalid and ErrConfigConflict are the sentinel results a ConfigApply
@@ -123,9 +126,9 @@ type Server struct {
 	// Assignment, if set, returns the target list, the effective probe-level config
 	// (probe kind -> its `probes.<Kind>` block), and a config_version for a vantage,
 	// computed over the live monitor set. Used by agentAssignment/agentResults, which are
-	// currently unwired from any route — the Bearer-key auth that used to gate them
-	// (requireAgent) was removed with the old key-based federation path; an mTLS listener (a
-	// later task) re-lights them.
+	// currently unwired from any route: requireAgent (agentauth.go) authorizes a caller by
+	// client-cert CN via srv.Vantages.IsActive, but nothing calls it yet — an mTLS listener (a
+	// later task) re-lights them behind it.
 	Assignment func(vantage string) (targets []model.Monitor, probeCfgs map[string]map[string]string, configVersion string)
 	// OnIngest, if set, is called with the accepted remote outcomes AFTER they are durably
 	// stored, so the hub evaluates alerts for remote vantages (each outcome carries its
@@ -278,10 +281,10 @@ func (srv *Server) Routes() *http.ServeMux {
 	if srv.AdminPassword != "" && len(srv.AdminKey) > 0 && srv.ConfigImport != nil {
 		mux.HandleFunc("POST /api/admin/config/import", srv.requireAdmin(srv.importConfig))
 	}
-	// The agent routes (/agent/v1/assignment, /agent/v1/results) are not registered here: the
-	// Bearer-key auth that used to gate them (requireAgent) was removed with the old key-based
-	// federation path. agentAssignment/agentResults stay as unexported methods — an mTLS
-	// listener (a later task) re-lights them on its own auth path.
+	// The agent routes (/agent/v1/assignment, /agent/v1/results) are not registered here:
+	// requireAgent (agentauth.go) now authorizes a caller by client-cert CN, but this mux is
+	// plain HTTP, so it never wires it up. agentAssignment/agentResults stay as unexported
+	// methods — an mTLS listener (a later task) re-lights them behind requireAgent.
 	if srv.webDir != "" {
 		// Serve the SPA/static assets at the root (same-origin with the API).
 		mux.Handle("GET /", noCacheStatic(http.FileServer(http.Dir(srv.webDir))))

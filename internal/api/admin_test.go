@@ -31,6 +31,9 @@ func (f *fakeKeys) Revoke(_ context.Context, name string) (bool, error) {
 	f.revoked = append(f.revoked, name)
 	return name == "nyc", nil
 }
+func (f *fakeKeys) IsActive(_ context.Context, name string) (bool, error) {
+	return name == "nyc", nil // mirrors List(), which only knows about "nyc"
+}
 
 func adminServer(pass string) (*Server, *fakeKeys) {
 	fk := &fakeKeys{}
