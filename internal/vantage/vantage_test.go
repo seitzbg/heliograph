@@ -3,7 +3,6 @@ package vantage
 import (
 	"context"
 	"os"
-	"strings"
 	"testing"
 )
 
@@ -18,78 +17,66 @@ func testStore(t *testing.T) *Store {
 		t.Fatalf("New: %v", err)
 	}
 	t.Cleanup(s.Close)
-	if _, err := s.pool.Exec(context.Background(), "TRUNCATE vantage_keys"); err != nil {
+	if _, err := s.pool.Exec(context.Background(), "TRUNCATE vantages"); err != nil {
 		t.Fatalf("truncate: %v", err)
 	}
 	return s
 }
 
-func TestAddVerifyListRevoke(t *testing.T) {
+func TestRegisterIsActiveListRevoke(t *testing.T) {
 	ctx := context.Background()
 	s := testStore(t)
 
-	key, err := s.Add(ctx, "nyc")
-	if err != nil {
-		t.Fatalf("Add: %v", err)
+	if err := s.Register(ctx, "nyc"); err != nil {
+		t.Fatalf("Register: %v", err)
 	}
-	if !strings.HasPrefix(key, "smk_") || len(strings.Split(key, "_")) != 3 {
-		t.Fatalf("key format = %q, want smk_<id>_<secret>", key)
-	}
-
-	if name, ok, err := s.Verify(ctx, key); err != nil || !ok || name != "nyc" {
-		t.Fatalf("Verify(valid) = (%q,%v,%v), want (nyc,true,nil)", name, ok, err)
-	}
-	if _, ok, _ := s.Verify(ctx, "garbage"); ok {
-		t.Error("Verify(garbage) ok=true, want false")
-	}
-	if _, ok, _ := s.Verify(ctx, key+"x"); ok {
-		t.Error("Verify(tampered secret) ok=true, want false")
+	// Re-registering an existing name is idempotent, not an error.
+	if err := s.Register(ctx, "nyc"); err != nil {
+		t.Fatalf("re-Register: %v", err)
 	}
 
-	// last_seen is set after a successful verify.
+	if active, err := s.IsActive(ctx, "nyc"); err != nil || !active {
+		t.Fatalf("IsActive(nyc) = (%v,%v), want (true,nil)", active, err)
+	}
+	if active, err := s.IsActive(ctx, "ghost"); err != nil || active {
+		t.Fatalf("IsActive(ghost) = (%v,%v), want (false,nil)", active, err)
+	}
+
+	// last_seen is set after a successful IsActive.
 	infos, err := s.List(ctx)
 	if err != nil || len(infos) != 1 || infos[0].Name != "nyc" {
 		t.Fatalf("List = %v (err %v), want one nyc", infos, err)
 	}
 	if infos[0].LastSeen.IsZero() {
-		t.Error("LastSeen is zero after a successful Verify")
-	}
-
-	// Re-Add rotates: the old key stops working, a new one works.
-	key2, err := s.Add(ctx, "nyc")
-	if err != nil {
-		t.Fatalf("re-Add: %v", err)
-	}
-	if _, ok, _ := s.Verify(ctx, key); ok {
-		t.Error("old key still verifies after rotation")
-	}
-	if _, ok, _ := s.Verify(ctx, key2); !ok {
-		t.Error("rotated key does not verify")
+		t.Error("LastSeen is zero after a successful IsActive")
 	}
 
 	if removed, err := s.Revoke(ctx, "nyc"); err != nil || !removed {
 		t.Fatalf("Revoke = (%v,%v), want (true,nil)", removed, err)
 	}
-	if _, ok, _ := s.Verify(ctx, key2); ok {
-		t.Error("revoked key still verifies")
+	if active, err := s.IsActive(ctx, "nyc"); err != nil || active {
+		t.Fatalf("IsActive(nyc) after Revoke = (%v,%v), want (false,nil)", active, err)
 	}
 	if removed, _ := s.Revoke(ctx, "nyc"); removed {
 		t.Error("second Revoke removed=true, want false")
 	}
 }
 
-// TestAddRejectsReservedName does not need a DB: Add validates the name (including
+// TestRegisterRejectsReservedName does not need a DB: Register validates the name (including
 // the reserved-name check) before ever touching the pool, so a nil-pool Store is
 // safe to call this on — a query against a nil pool would panic, so a call reaching
-// the DB would fail loudly rather than silently minting the key.
-func TestAddRejectsReservedName(t *testing.T) {
+// the DB would fail loudly rather than silently registering the name.
+func TestRegisterRejectsReservedName(t *testing.T) {
 	s := &Store{}
-	key, err := s.Add(context.Background(), "local")
-	if err == nil {
-		t.Fatal("Add(\"local\") err = nil, want an error rejecting the reserved vantage")
+	if err := s.Register(context.Background(), "local"); err == nil {
+		t.Fatal("Register(\"local\") err = nil, want an error rejecting the reserved vantage")
 	}
-	if key != "" {
-		t.Errorf("Add(\"local\") key = %q, want empty on rejection", key)
+}
+
+func TestRegisterRejectsInvalidName(t *testing.T) {
+	s := &Store{}
+	if err := s.Register(context.Background(), "bad name"); err == nil {
+		t.Fatal("Register(\"bad name\") err = nil, want an error rejecting the invalid name")
 	}
 }
 
@@ -103,15 +90,5 @@ func TestValidName(t *testing.T) {
 		if ValidName(bad) {
 			t.Errorf("ValidName(%q) = true, want false", bad)
 		}
-	}
-}
-
-func TestAgentSnippet(t *testing.T) {
-	out := AgentSnippet("nyc", "smk_abc_def")
-	if !strings.Contains(out, "nyc") || !strings.Contains(out, "smk_abc_def") {
-		t.Errorf("AgentSnippet missing name or key:\n%s", out)
-	}
-	if !strings.Contains(out, "hub:") {
-		t.Errorf("AgentSnippet missing hub: line:\n%s", out)
 	}
 }
