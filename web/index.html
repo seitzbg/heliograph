@@ -287,7 +287,6 @@
   .vadmin-reveal-backdrop { position:fixed; inset:0; background:rgba(0,0,0,.45); display:flex; align-items:center; justify-content:center; padding:20px; z-index:50; }
   .vadmin-reveal { max-width:640px; width:100%; box-shadow:var(--shadow); max-height:calc(100vh - 40px); overflow-y:auto; }
   .vadmin-warn { color:var(--warn); font-weight:600; font-size:13px; }
-  .vadmin-pre { background:var(--plot-bg); border:1px solid var(--border); border-radius:8px; padding:12px; font-family:ui-monospace,Menlo,monospace; font-size:12px; color:var(--ink); overflow-x:auto; white-space:pre-wrap; word-break:break-all; }
   .vadmin-reveal-actions { display:flex; gap:10px; margin-top:12px; }
   /* Config add/edit/group modals: stack each field's label above a full-width control, one field
      per line, so they read clearly instead of the labels + inputs flowing inline and wrapping. */
@@ -428,10 +427,10 @@
   <!-- VANTAGES (federation admin) -->
   <section id="viewVantages" class="hidden">
     <h2 class="vadmin-title">Vantages</h2>
-    <p class="lede">Federation vantages and their agent API keys. Managing keys requires the admin password.</p>
+    <p class="lede">Federation vantages and their mTLS client certificates. Adding or removing a vantage requires the admin password.</p>
 
     <div id="vantDisabled" class="panel vadmin-note hidden">
-      Admin key management is disabled. It requires federation (<code>-dsn</code>) and
+      Admin vantage management is disabled. It requires federation (<code>-dsn</code>) and
       <code>SMOKED_ADMIN_PASSWORD</code> on the hub; or provision from the host with
       <code>smoked vantage add / ls / revoke</code> (also needs <code>-dsn</code>).
     </div>
