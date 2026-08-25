@@ -29,6 +29,13 @@ All notable changes to **Heliograph** are recorded here. The format follows
   editable source would let the next save persist the mask over the secret (CODE_REVIEW M11).
 
 ### Fixed
+- **The Overview no longer reports a target as down from a vantage that doesn't measure it.** The hub
+  probes every configured target locally, so a target scoped to remote vantages only (e.g. an internal
+  resolver an off-LAN hub can't reach) recorded 100%-loss *local* rounds. Those made it dominate the
+  "Worst targets" board and read as 0% availability, and turned its nav-tree dot red — a false outage
+  for a target that is healthy from the vantages that actually measure it. `/api/charts` and `/api/sla`
+  now rank only targets measured from the requested vantage (matching the Graphs grid), and a tree dot
+  ignores a vantage the target isn't assigned to.
 - **The Graphs grid shows the focused vantage's NTP clock stat.** On the multi-vantage grid, a panel
   focused on a remote vantage now displays that vantage's clock offset/stratum instead of the hub's —
   the companion stat follows the panel's plotted series, matching the detail view (CODE_REVIEW M2).
