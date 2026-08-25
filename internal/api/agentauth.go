@@ -25,6 +25,12 @@ func vantageFrom(r *http.Request) string {
 // authorizing an admin session. A CN must belong to a currently active (registered, not
 // revoked) vantage; on success it is stamped onto the request context via vantageCtxKey exactly
 // as the old Bearer-key auth did, so vantageFrom/agentAssignment/agentResults need no changes.
+//
+// SAFE ONLY behind a listener whose tls.Config sets ClientAuth: tls.RequireAndVerifyClientCert
+// (the config AgentTLSConfig, in agentmtls.go, produces). A weaker ClientAuthType such as
+// RequireAnyClientCert still populates r.TLS.PeerCertificates but never verifies the chain
+// against the CA, so any self-signed cert bearing an arbitrary CN would sail through this check
+// and impersonate any vantage.
 func (srv *Server) requireAgent(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
