@@ -292,9 +292,11 @@ func (srv *Server) Routes() *http.ServeMux {
 		mux.HandleFunc("POST /api/admin/config/import", srv.requireAdmin(srv.importConfig))
 	}
 	// The agent routes (/agent/v1/assignment, /agent/v1/results) are not registered here:
-	// requireAgent (agentauth.go) now authorizes a caller by client-cert CN, but this mux is
-	// plain HTTP, so it never wires it up. agentAssignment/agentResults stay as unexported
-	// methods — an mTLS listener (a later task) re-lights them behind requireAgent.
+	// requireAgent (agentauth.go) authorizes a caller by client-cert CN, but this mux is plain
+	// HTTP, so it never wires it up. agentAssignment/agentResults stay as unexported methods —
+	// the opt-in mTLS listener cmd/smoked starts when -agent-addr is set (AgentMux, defined in
+	// this package's agentmtls.go) is what re-lights them behind requireAgent; single-host
+	// deployments (the default, no -agent-addr) never expose them at all.
 	if srv.webDir != "" {
 		// Serve the SPA/static assets at the root (same-origin with the API).
 		mux.Handle("GET /", noCacheStatic(http.FileServer(http.Dir(srv.webDir))))

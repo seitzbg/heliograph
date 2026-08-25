@@ -73,6 +73,19 @@ func validateRuntimeFlags(pings int, step, timeout time.Duration) error {
 	return nil
 }
 
+// validateAgentFlags checks the mTLS federation agent listener's one cross-flag dependency: its
+// whole wiring below lives inside the `-dsn` block in main (the vantage store created there is
+// what mints the CA the listener's server cert is issued from), so setting -agent-addr without
+// -dsn would otherwise silently no-op — the process starts up looking healthy, but the mTLS agent
+// API never listens, and the only symptom is "no vantage ever registers". Reject the combination
+// at the CLI boundary instead of leaving it to be discovered live.
+func validateAgentFlags(agentAddr, dsn string) error {
+	if agentAddr != "" && dsn == "" {
+		return fmt.Errorf("-agent-addr requires -dsn (federation needs the database for the vantage registry + CA)")
+	}
+	return nil
+}
+
 // envBool reads a boolean flag default from the environment, so a Compose/K8s deployment can drive
 // it via `environment:` rather than the command list. Follows strconv.ParseBool; empty or
 // unparseable = false.
@@ -144,6 +157,9 @@ func main() {
 	setupLogger(*logFormat, *logLevel)
 
 	if err := validateRuntimeFlags(*pings, *step, *timeout); err != nil {
+		fatal("invalid flags", err)
+	}
+	if err := validateAgentFlags(*agentAddr, *dsn); err != nil {
 		fatal("invalid flags", err)
 	}
 
@@ -513,6 +529,15 @@ func main() {
 				}
 				srv.AgentHubURL = "https://" + hostnames[0] + ":" + port
 				agentSrv := &http.Server{Addr: *agentAddr, Handler: srv.AgentMux(), TLSConfig: tlsCfg}
+				// Graceful shutdown on the same signal that stops the dashboard server below
+				// (ctx cancels on SIGINT/SIGTERM), so an in-flight agent result POST gets the
+				// same ~5s drain instead of being cut — mirrors the httpSrv.Shutdown hook.
+				go func() {
+					<-ctx.Done()
+					shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+					defer cancel()
+					_ = agentSrv.Shutdown(shutCtx)
+				}()
 				go func() {
 					slog.Info("mTLS agent listener starting", "addr", *agentAddr, "hostnames", hostnames)
 					if err := agentSrv.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {

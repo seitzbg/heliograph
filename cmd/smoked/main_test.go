@@ -682,6 +682,27 @@ func TestValidateRuntimeFlags(t *testing.T) {
 	}
 }
 
+// TestValidateAgentFlags covers Task 11 fix round 1 Finding 1: -agent-addr without -dsn must be
+// rejected up front, since the listener it enables is wired entirely inside the -dsn block in
+// main and would otherwise silently never start.
+func TestValidateAgentFlags(t *testing.T) {
+	cases := []struct {
+		name           string
+		agentAddr, dsn string
+		wantErr        bool
+	}{
+		{"neither set", "", "", false},
+		{"dsn only", "", "postgres://x", false},
+		{"both set", ":8443", "postgres://x", false},
+		{"agent-addr without dsn", ":8443", "", true},
+	}
+	for _, c := range cases {
+		if err := validateAgentFlags(c.agentAddr, c.dsn); (err != nil) != c.wantErr {
+			t.Errorf("%s: err=%v wantErr=%v", c.name, err, c.wantErr)
+		}
+	}
+}
+
 // TestApplyMuSerializesRuntimeSwaps models CODE_REVIEW #1: a slow "SIGHUP" build (A)
 // racing an "API apply" (B) that starts later. When both hold applyMu across their whole
 // build+swap, A cannot swap a stale runtime AFTER B: B blocks on the lock until A finishes,
