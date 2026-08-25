@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -66,7 +67,7 @@ func TestAgentRunPullsMeasuresPushes(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	a := New(Options{Hub: srv.URL, Key: "smk_k_s", Vantage: "nyc", Interval: 50 * time.Millisecond,
+	a := New(Options{Hub: srv.URL, TLSConfig: &tls.Config{}, Vantage: "nyc", Interval: 50 * time.Millisecond,
 		Timeout: time.Second, Workers: 4, BufferCap: 1000, FlushMax: 100})
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -86,14 +87,14 @@ func TestAgentRunPullsMeasuresPushes(t *testing.T) {
 // Options.Validate is the package boundary that stops a non-CLI caller from building a
 // dangerous agent — notably FlushMax<1, which panics peekBatch (CODE_REVIEW #9 / P2-9).
 func TestOptionsValidate(t *testing.T) {
-	ok := Options{Hub: "https://h", Key: "k", Interval: time.Minute, Timeout: time.Second, Workers: 1, BufferCap: 1, FlushMax: 1}
+	ok := Options{Hub: "https://h", TLSConfig: &tls.Config{}, Interval: time.Minute, Timeout: time.Second, Workers: 1, BufferCap: 1, FlushMax: 1}
 	if err := ok.Validate(); err != nil {
 		t.Fatalf("valid options rejected: %v", err)
 	}
 	bad := func(f func(*Options)) Options { o := ok; f(&o); return o }
 	cases := map[string]Options{
 		"no hub":                       bad(func(o *Options) { o.Hub = "" }),
-		"no key":                       bad(func(o *Options) { o.Key = "" }),
+		"no tls config":                bad(func(o *Options) { o.TLSConfig = nil }),
 		"zero interval":                bad(func(o *Options) { o.Interval = 0 }),
 		"neg timeout":                  bad(func(o *Options) { o.Timeout = -1 }),
 		"zero workers":                 bad(func(o *Options) { o.Workers = 0 }),
@@ -133,7 +134,7 @@ func TestFinalFlushDrainsAllBatches(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	a := New(Options{Hub: srv.URL, Key: "smk_k_s", Vantage: "nyc",
+	a := New(Options{Hub: srv.URL, TLSConfig: &tls.Config{}, Vantage: "nyc",
 		Timeout: time.Second, Workers: 1, BufferCap: 1000, FlushMax: 10})
 	// Buffer 25 rounds -> 3 batches of {10,10,5} must all be delivered.
 	for i := 0; i < 25; i++ {
@@ -206,7 +207,7 @@ func TestAgentRunRetriesOnPushFailure(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	a := New(Options{Hub: srv.URL, Key: "smk_k_s", Vantage: "nyc", Interval: 50 * time.Millisecond,
+	a := New(Options{Hub: srv.URL, TLSConfig: &tls.Config{}, Vantage: "nyc", Interval: 50 * time.Millisecond,
 		Timeout: time.Second, Workers: 4, BufferCap: 1000, FlushMax: 100})
 	// The window must comfortably cover the retry backoff: first push attempt
 	// ~1-1.5s in (measure loop's own tick + flush loop's idle poll), then two
@@ -265,7 +266,7 @@ func TestAgentRunTerminatesPromptlyOnCancel(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	a := New(Options{Hub: srv.URL, Key: "smk_k_s", Vantage: "nyc", Interval: 50 * time.Millisecond,
+	a := New(Options{Hub: srv.URL, TLSConfig: &tls.Config{}, Vantage: "nyc", Interval: 50 * time.Millisecond,
 		Timeout: time.Second, Workers: 4, BufferCap: 1000, FlushMax: 100})
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -334,7 +335,7 @@ func TestPollLoopWarnsOnVantageMismatch(t *testing.T) {
 	defer srv.Close()
 
 	// Configured "lax", but the hub (key-derived) assigns "nyc": expect a warning naming both.
-	a := New(Options{Hub: srv.URL, Key: "smk_k_s", Vantage: "lax", Interval: 50 * time.Millisecond,
+	a := New(Options{Hub: srv.URL, TLSConfig: &tls.Config{}, Vantage: "lax", Interval: 50 * time.Millisecond,
 		Timeout: time.Second, Workers: 2, BufferCap: 100, FlushMax: 10})
 	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
 	defer cancel()
@@ -373,7 +374,7 @@ func TestFlushLoopDropsPermanentlyRejectedBatch(t *testing.T) {
 		w.WriteHeader(http.StatusRequestEntityTooLarge) // 413: the hub will never accept it
 	}))
 	defer srv.Close()
-	a := New(Options{Hub: srv.URL, Key: "smk_k_s", Vantage: "nyc",
+	a := New(Options{Hub: srv.URL, TLSConfig: &tls.Config{}, Vantage: "nyc",
 		Timeout: time.Second, Workers: 1, BufferCap: 1000, FlushMax: 10})
 	for i := 0; i < 5; i++ {
 		a.buf.add(agentwire.RoundReport{Target: "t1", Pings: 1, RTTs: []float64{0.01}})
@@ -454,7 +455,7 @@ func TestFinalFlushSplitsOversizedBatchInsteadOfDroppingIt(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	a := New(Options{Hub: srv.URL, Key: "smk_k_s", Vantage: "nyc",
+	a := New(Options{Hub: srv.URL, TLSConfig: &tls.Config{}, Vantage: "nyc",
 		Timeout: time.Second, Workers: 1, BufferCap: 1000, FlushMax: 100})
 
 	const numOrdinary = 50
@@ -502,7 +503,7 @@ func TestSendBatchDropsMalformedBatchWholesaleWithoutSplitting(t *testing.T) {
 		w.WriteHeader(http.StatusBadRequest)
 	}))
 	defer srv.Close()
-	a := New(Options{Hub: srv.URL, Key: "smk_k_s", Vantage: "nyc",
+	a := New(Options{Hub: srv.URL, TLSConfig: &tls.Config{}, Vantage: "nyc",
 		Timeout: time.Second, Workers: 1, BufferCap: 100, FlushMax: 10})
 
 	batch := make([]agentwire.RoundReport, 5)
@@ -531,7 +532,7 @@ func TestSendBatchPropagatesTransientErrorWithoutSplittingOrDropping(t *testing.
 		w.WriteHeader(http.StatusServiceUnavailable)
 	}))
 	defer srv.Close()
-	a := New(Options{Hub: srv.URL, Key: "smk_k_s", Vantage: "nyc",
+	a := New(Options{Hub: srv.URL, TLSConfig: &tls.Config{}, Vantage: "nyc",
 		Timeout: time.Second, Workers: 1, BufferCap: 100, FlushMax: 10})
 
 	batch := make([]agentwire.RoundReport, 5)
@@ -614,7 +615,7 @@ func TestSendBatchTransientOnSecondSplitHalfRetriesWholeBatchWithoutLoss(t *test
 	}))
 	defer srv.Close()
 
-	a := New(Options{Hub: srv.URL, Key: "smk_k_s", Vantage: "nyc",
+	a := New(Options{Hub: srv.URL, TLSConfig: &tls.Config{}, Vantage: "nyc",
 		Timeout: time.Second, Workers: 1, BufferCap: 1000, FlushMax: 20})
 	for _, r := range rounds {
 		a.buf.add(r)
@@ -721,7 +722,7 @@ func TestAgentRunRecoversSpooledBacklog(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	a := New(Options{Hub: srv.URL, Key: "smk_k_s", Vantage: "nyc", Interval: 50 * time.Millisecond,
+	a := New(Options{Hub: srv.URL, TLSConfig: &tls.Config{}, Vantage: "nyc", Interval: 50 * time.Millisecond,
 		Timeout: time.Second, Workers: 2, BufferCap: 1000, FlushMax: 100, SpoolDir: dir})
 	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 	defer cancel()
@@ -742,7 +743,7 @@ func TestAgentSpoolDirUnusableIsFatal(t *testing.T) {
 		t.Fatal(err)
 	}
 	opts := Options{
-		Hub: "http://127.0.0.1:1", Key: "smk_k_s", Vantage: "nyc", Interval: time.Second,
+		Hub: "http://127.0.0.1:1", TLSConfig: &tls.Config{}, Vantage: "nyc", Interval: time.Second,
 		Timeout: time.Second, Workers: 1, BufferCap: 10, FlushMax: 10,
 		SpoolDir: filepath.Join(f, "under-a-file"),
 	}

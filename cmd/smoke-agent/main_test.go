@@ -7,15 +7,27 @@ import (
 	"time"
 )
 
+// writeTempFile writes content to a new file under dir and returns its path — used for the
+// -client-cert/-client-key/-ca-cert flags, which (unlike the YAML config's inline PEM) point
+// at files on disk.
+func writeTempFile(t *testing.T, dir, name, content string) string {
+	t.Helper()
+	p := filepath.Join(dir, name)
+	if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
 func TestResolveConfigFileAndFlagOverride(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "agent.yaml")
-	if err := os.WriteFile(p, []byte("hub: https://hub.example\nkey: smk_a_b\nvantage: nyc\ninterval: 30s\n"), 0o600); err != nil {
+	if err := os.WriteFile(p, []byte("hub: https://hub.example\nclient_cert: cert-pem\nclient_key: key-pem\nca_cert: ca-pem\nvantage: nyc\ninterval: 30s\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	// file only
 	c, err := resolveConfig(p, cliFlags{})
-	if err != nil || c.Hub != "https://hub.example" || c.Key != "smk_a_b" || c.Interval != 30*time.Second {
+	if err != nil || c.Hub != "https://hub.example" || c.ClientCert != "cert-pem" || c.ClientKey != "key-pem" || c.CACert != "ca-pem" || c.Interval != 30*time.Second {
 		t.Fatalf("file: %+v err=%v", c, err)
 	}
 	// flag override wins
@@ -23,9 +35,9 @@ func TestResolveConfigFileAndFlagOverride(t *testing.T) {
 	if err != nil || c.Hub != "https://other.example" {
 		t.Fatalf("override: %+v err=%v", c, err)
 	}
-	// missing hub/key is an error
+	// missing hub/client_cert is an error
 	if _, err := resolveConfig("", cliFlags{}); err == nil {
-		t.Fatal("expected error when hub/key absent")
+		t.Fatal("expected error when hub/client_cert absent")
 	}
 }
 
@@ -33,7 +45,11 @@ func TestResolveConfigFileAndFlagOverride(t *testing.T) {
 // value provided BY FLAG (applied after the file) is still rejected — including the
 // flush_max: -1 that would later panic peekBatch (CODE_REVIEW #9 / P2-9).
 func TestResolveConfigRejectsInvalidValues(t *testing.T) {
-	base := cliFlags{hub: "https://hub.example", key: "smk_a_b"}
+	dir := t.TempDir()
+	certPath := writeTempFile(t, dir, "cert.pem", "cert-pem")
+	keyPath := writeTempFile(t, dir, "key.pem", "key-pem")
+	caPath := writeTempFile(t, dir, "ca.pem", "ca-pem")
+	base := cliFlags{hub: "https://hub.example", clientCertPath: certPath, clientKeyPath: keyPath, caCertPath: caPath}
 	cases := []struct {
 		name string
 		f    cliFlags
@@ -66,7 +82,7 @@ func withTimeout(f cliFlags, v time.Duration) cliFlags  { f.timeout = v; return 
 func TestResolveConfigRejectsUnknownKey(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "agent.yaml")
-	if err := os.WriteFile(p, []byte("hub: https://hub.example\nkey: smk_a_b\nflushmax: 10\n"), 0o600); err != nil {
+	if err := os.WriteFile(p, []byte("hub: https://hub.example\nclient_cert: cert-pem\nclient_key: key-pem\nca_cert: ca-pem\nflushmax: 10\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := resolveConfig(p, cliFlags{}); err == nil {
@@ -79,7 +95,7 @@ func TestResolveConfigRejectsUnknownKey(t *testing.T) {
 func TestResolveConfigInsecureFlagOverride(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "agent.yaml")
-	if err := os.WriteFile(p, []byte("hub: https://hub.example\nkey: smk_a_b\ninsecure: true\n"), 0o600); err != nil {
+	if err := os.WriteFile(p, []byte("hub: https://hub.example\nclient_cert: cert-pem\nclient_key: key-pem\nca_cert: ca-pem\ninsecure: true\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	ptr := func(b bool) *bool { return &b }
@@ -94,11 +110,49 @@ func TestResolveConfigInsecureFlagOverride(t *testing.T) {
 	}
 	// Explicit -insecure=true against a file with no insecure key: true.
 	p2 := filepath.Join(dir, "agent2.yaml")
-	if err := os.WriteFile(p2, []byte("hub: https://hub.example\nkey: smk_a_b\n"), 0o600); err != nil {
+	if err := os.WriteFile(p2, []byte("hub: https://hub.example\nclient_cert: cert-pem\nclient_key: key-pem\nca_cert: ca-pem\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if c, err := resolveConfig(p2, cliFlags{insecure: ptr(true)}); err != nil || !c.Insecure {
 		t.Fatalf("explicit true: Insecure=%v err=%v, want true", c.Insecure, err)
+	}
+}
+
+// ca_cert is required unless -insecure — a normal (non-insecure) config with no CA must be
+// rejected, while an insecure one is fine without it.
+func TestResolveConfigCACertRequiredUnlessInsecure(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "agent.yaml")
+	if err := os.WriteFile(p, []byte("hub: https://hub.example\nclient_cert: cert-pem\nclient_key: key-pem\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolveConfig(p, cliFlags{}); err == nil {
+		t.Fatal("expected an error: ca_cert missing and not insecure")
+	}
+	ptr := func(b bool) *bool { return &b }
+	if _, err := resolveConfig(p, cliFlags{insecure: ptr(true)}); err != nil {
+		t.Fatalf("insecure config without ca_cert should resolve, got err=%v", err)
+	}
+}
+
+// client_cert and client_key are both required (mTLS) — missing either is an error.
+func TestResolveConfigRequiresClientCertAndKey(t *testing.T) {
+	dir := t.TempDir()
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"missing client_key", "hub: https://hub.example\nclient_cert: cert-pem\nca_cert: ca-pem\n"},
+		{"missing client_cert", "hub: https://hub.example\nclient_key: key-pem\nca_cert: ca-pem\n"},
+	}
+	for _, tc := range cases {
+		p := filepath.Join(dir, tc.name+".yaml")
+		if err := os.WriteFile(p, []byte(tc.body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := resolveConfig(p, cliFlags{}); err == nil {
+			t.Errorf("%s: expected a validation error, got none", tc.name)
+		}
 	}
 }
 
@@ -107,7 +161,7 @@ func TestResolveConfigInsecureFlagOverride(t *testing.T) {
 func TestResolveConfigRejectsMultipleDocuments(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "agent.yaml")
-	body := "hub: https://hub.example\nkey: smk_a_b\n---\nflushmax: 10\n"
+	body := "hub: https://hub.example\nclient_cert: cert-pem\nclient_key: key-pem\nca_cert: ca-pem\n---\nflushmax: 10\n"
 	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +172,7 @@ func TestResolveConfigRejectsMultipleDocuments(t *testing.T) {
 
 func TestResolveConfigSpoolDirFromFile(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "agent.yaml")
-	if err := os.WriteFile(p, []byte("hub: https://h.example\nkey: k\nspool_dir: /var/lib/smoke-agent/spool\n"), 0o644); err != nil {
+	if err := os.WriteFile(p, []byte("hub: https://h.example\nclient_cert: cert-pem\nclient_key: key-pem\nca_cert: ca-pem\nspool_dir: /var/lib/smoke-agent/spool\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := resolveConfig(p, cliFlags{})
@@ -132,7 +186,7 @@ func TestResolveConfigSpoolDirFromFile(t *testing.T) {
 
 func TestResolveConfigSpoolDirFlagOverrides(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "agent.yaml")
-	if err := os.WriteFile(p, []byte("hub: https://h.example\nkey: k\nspool_dir: /from/file\n"), 0o644); err != nil {
+	if err := os.WriteFile(p, []byte("hub: https://h.example\nclient_cert: cert-pem\nclient_key: key-pem\nca_cert: ca-pem\nspool_dir: /from/file\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := resolveConfig(p, cliFlags{spoolDir: strp("/from/flag")})
@@ -153,7 +207,7 @@ func strp(s string) *string { return &s }
 // left the YAML spool active (CODE_REVIEW #3).
 func TestResolveConfigEmptySpoolDirFlagDisablesFileSpool(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "agent.yaml")
-	if err := os.WriteFile(p, []byte("hub: https://h.example\nkey: k\nspool_dir: /from/file\n"), 0o644); err != nil {
+	if err := os.WriteFile(p, []byte("hub: https://h.example\nclient_cert: cert-pem\nclient_key: key-pem\nca_cert: ca-pem\nspool_dir: /from/file\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := resolveConfig(p, cliFlags{spoolDir: strp("")})
@@ -167,11 +221,43 @@ func TestResolveConfigEmptySpoolDirFlagDisablesFileSpool(t *testing.T) {
 
 func TestResolveConfigSpoolDirDefaultsEmpty(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "agent.yaml")
-	if err := os.WriteFile(p, []byte("hub: https://h.example\nkey: k\n"), 0o644); err != nil {
+	if err := os.WriteFile(p, []byte("hub: https://h.example\nclient_cert: cert-pem\nclient_key: key-pem\nca_cert: ca-pem\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	cfg, _ := resolveConfig(p, cliFlags{})
 	if cfg.SpoolDir != "" {
 		t.Fatalf("SpoolDir = %q, want empty (in-memory only)", cfg.SpoolDir)
+	}
+}
+
+// The -client-cert/-client-key/-ca-cert flags point at FILES on disk (unlike the YAML
+// config's inline PEM) and override the file's inline values with the file's contents.
+func TestResolveConfigClientCertFlagsReadFilesAndOverride(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "agent.yaml")
+	if err := os.WriteFile(p, []byte("hub: https://hub.example\nclient_cert: inline-cert\nclient_key: inline-key\nca_cert: inline-ca\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	certPath := writeTempFile(t, dir, "cert.pem", "file-cert")
+	keyPath := writeTempFile(t, dir, "key.pem", "file-key")
+	caPath := writeTempFile(t, dir, "ca.pem", "file-ca")
+
+	cfg, err := resolveConfig(p, cliFlags{clientCertPath: certPath, clientKeyPath: keyPath, caCertPath: caPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ClientCert != "file-cert" || cfg.ClientKey != "file-key" || cfg.CACert != "file-ca" {
+		t.Fatalf("cfg = %+v, want the flag files' contents to override the inline YAML PEM", cfg)
+	}
+}
+
+// A -client-cert flag pointing at a nonexistent file must be a startup error, not a silent
+// fallback to the file's (or an empty) inline value — a missing cert file should fail loudly.
+func TestResolveConfigClientCertFlagMissingFileIsError(t *testing.T) {
+	if _, err := resolveConfig("", cliFlags{
+		hub:            "https://hub.example",
+		clientCertPath: "/nonexistent/cert.pem",
+	}); err == nil {
+		t.Fatal("expected an error when -client-cert points at a nonexistent file")
 	}
 }

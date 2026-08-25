@@ -17,22 +17,21 @@ import (
 	"github.com/seitzbg/heliograph/internal/agentwire"
 )
 
-// Client talks to one hub with one vantage's API key.
+// Client talks to one hub, authenticating with one vantage's mTLS client certificate.
 type Client struct {
 	hub string // base URL, no trailing slash
-	key string
 	hc  *http.Client
 }
 
-// NewClient builds a client. insecure=true skips TLS verification (dev / self-signed
-// before ACME); normal operation uses public-CA verification (D5). timeout bounds a
-// single request.
-func NewClient(hub, key string, insecure bool, timeout time.Duration) *Client {
+// NewClient builds a client. tlsClient, when non-nil, is applied to the underlying
+// transport's TLSClientConfig — normally a client certificate plus the hub's CA pool (or,
+// for dev/self-signed setups, InsecureSkipVerify). timeout bounds a single request.
+func NewClient(hub string, tlsClient *tls.Config, timeout time.Duration) *Client {
 	tr := http.DefaultTransport.(*http.Transport).Clone()
-	if insecure {
-		tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} // #nosec G402 — opt-in
+	if tlsClient != nil {
+		tr.TLSClientConfig = tlsClient
 	}
-	return &Client{hub: strings.TrimRight(hub, "/"), key: key, hc: &http.Client{Timeout: timeout, Transport: tr}}
+	return &Client{hub: strings.TrimRight(hub, "/"), hc: &http.Client{Timeout: timeout, Transport: tr}}
 }
 
 // PullAssignment fetches this vantage's assignment. It replays etag in If-None-Match;
@@ -42,7 +41,6 @@ func (c *Client) PullAssignment(ctx context.Context, etag string) (agentwire.Ass
 	if err != nil {
 		return agentwire.Assignment{}, false, err
 	}
-	req.Header.Set("Authorization", "Bearer "+c.key)
 	if etag != "" {
 		req.Header.Set("If-None-Match", etag)
 	}
@@ -100,7 +98,6 @@ func (c *Client) PushResults(ctx context.Context, rounds []agentwire.RoundReport
 	if err != nil {
 		return agentwire.ResultsResponse{}, err
 	}
-	req.Header.Set("Authorization", "Bearer "+c.key)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.hc.Do(req)
 	if err != nil {
