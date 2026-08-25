@@ -37,11 +37,11 @@ click a graph to zoom):
 The **Config** tab edits DB-backed targets as a drag-to-reorder tree (merged live with the YAML
 config); each target keeps a stable, server-managed identity, so moving or renaming it in the tree
 preserves its existing graph rather than starting a new one. The **Vantages** panel manages
-federation agent keys — both behind the admin password:
+federation vantages — both behind the admin password:
 
 ![Heliograph Config tab — DB-backed target tree with drag-to-reorder](docs/img/config-tree-dark.png)
 
-![Heliograph Vantages panel — federation agent keys](docs/img/vantages-dark.png)
+![Heliograph Vantages panel — federation vantages](docs/img/vantages-dark.png)
 
 ## Features
 
@@ -173,8 +173,9 @@ recreate the volume (or `ALTER ROLE` inside the DB) to rotate it.
 
 This binds `127.0.0.1` because the dashboard + read API are unauthenticated; to reach it beyond
 localhost, front it with TLS + auth. The repo's own [`docker-compose.yml`](docker-compose.yml)
-adds a `federation` profile with a bundled Caddy reverse proxy (auto Let's Encrypt, per-vantage
-API keys, Basic Auth) — see [Federation deployment](#federation-deployment-reverse-proxy).
+adds a `federation` profile with a bundled Caddy reverse proxy (auto Let's Encrypt, Basic Auth) for
+the dashboard, plus smoked's own published mutual-TLS listener for remote agents (no API key) —
+see [Federation deployment](#federation-deployment-reverse-proxy).
 
 Prefer a ready-made, copyable stack? [`examples/`](examples/) has two: **[`standalone/`](examples/standalone/)**
 (collector + TimescaleDB, the common single-host case) and **[`federation/`](examples/federation/)**
@@ -196,16 +197,34 @@ The schema (one `samples` hypertable) is created automatically on first connect.
 
 ### Federation deployment (reverse proxy)
 
-Remote **vantages** (the `smoke-agent` collector) reach the hub over HTTPS with a per-vantage
-API key. `smoked` never terminates TLS itself — a reverse proxy does. The proxy serves two
-surfaces with two auth models: the **agent API** (`/agent/v1/*`) authenticated by the per-vantage
-API key, and the **dashboard + read API + admin panel** behind **HTTP Basic Auth** (smoked's read
-API has no auth of its own).
+Remote **vantages** (the `smoke-agent` collector) reach the hub over two independent surfaces
+that share no auth mechanism:
 
-> For the end-to-end walkthrough — declaring `vantages:`, minting a key, running an agent, and
-> reading the overlay — see the **[federation operator guide](docs/federation.md)**.
+- The **dashboard + read API + admin panel** (`:8087`) — `smoked` never terminates TLS itself, so
+  a reverse proxy sits in front, gating it with **HTTP Basic Auth** over TLS.
+- The **agent API** — `smoked`'s own dedicated mutual-TLS listener, enabled with
+  `-agent-addr :8443 -agent-hostname <domain>` (requires `-dsn`; smoked fatals at startup if
+  `-agent-addr` is set without it). smoked self-bootstraps a CA, issues its own server certificate
+  (SAN from `-agent-hostname`), and requires every connecting agent to present a CA-signed
+  **client certificate** — that certificate is the vantage's identity, so there is no API key to
+  mint, store, or leak. This listener is published directly to the internet; it is **not** proxied
+  by Caddy or any other reverse proxy.
 
-**Bundled Caddy** (automatic Let's Encrypt) — opt-in via the `federation` compose profile:
+> For the end-to-end walkthrough — declaring `vantages:`, onboarding a vantage, running an agent,
+> and reading the overlay — see the **[federation operator guide](docs/federation.md)**.
+
+**Onboarding a vantage is one click.** In the dashboard's admin panel, **Vantages → Add
+vantage**: type a name and it downloads a ready-to-run `<name>-vantage.tar.gz` — `agent.yaml`
+(hub URL, vantage name, and the client certificate/key/CA embedded as PEM) plus a
+`docker-compose.yml` and `README.txt`. Copy it to the vantage host, `tar xzf`, `docker compose up
+-d`. The CLI equivalent is `smoked vantage add <name> -out <name>-vantage.tar.gz` (or omit `-out`
+to print the rendered `agent.yaml` to stdout, or pass `-json` for the raw PEMs). Revocation is by
+removal: `smoked vantage revoke <name>` deletes it from the registry, and any certificate bearing
+that name is rejected on its very next request even though the certificate itself remains
+cryptographically valid.
+
+**Bundled Caddy** (automatic Let's Encrypt, dashboard only) — opt-in via the `federation` compose
+profile:
 
 ```sh
 cp .env.example .env            # set DOMAIN + ACME_EMAIL (DNS for DOMAIN must point here)
@@ -214,19 +233,18 @@ export DASH_PASSWORD_HASH="$(docker run --rm caddy:2.11-alpine caddy hash-passwo
 docker compose --profile federation up --build
 ```
 
-The default `docker compose up` starts no proxy (federation stays dark). With the profile, Caddy
-obtains and auto-renews the cert and reverse-proxies `https://$DOMAIN/` to smoked: `/agent/v1/*`
-by API key, everything else behind Basic Auth (`DASH_USER` / `DASH_PASSWORD_HASH`). Set
-`SMOKED_ADMIN_PASSWORD` in `.env` to enable the Config/Vantages admin GUI, and generate an
-independent persistent cookie-signing secret with `openssl rand -hex 32` as
-`SMOKED_ADMIN_SESSION_KEY`. If that key is omitted, login remains secure but sessions end whenever
-the collector restarts. A login stays valid for 12 hours by default; set `SMOKED_ADMIN_SESSION_TTL`
-to any Go duration (e.g. `24h`, `168h`, `30m`, minimum `1m`) to lengthen or shorten it. Over the
-proxy's TLS, the admin session cookie works remotely. smoked's own
-`127.0.0.1:8087` stays available **on
-the hub itself only** — it binds loopback, so it is not reachable from other LAN hosts; reach it
-remotely through the proxy or an SSH tunnel, never by rebinding it to `0.0.0.0` (the read API is
-unauthenticated).
+The default `docker compose up` starts no proxy and no agent listener (federation stays dark).
+With the profile, Caddy obtains and auto-renews the cert and reverse-proxies `https://$DOMAIN/` to
+smoked's dashboard, behind Basic Auth (`DASH_USER` / `DASH_PASSWORD_HASH`); smoked separately
+publishes its own mTLS agent listener on `:8443`, untouched by Caddy. Set `SMOKED_ADMIN_PASSWORD`
+in `.env` to enable the Config/Vantages admin GUI, and generate an independent persistent
+cookie-signing secret with `openssl rand -hex 32` as `SMOKED_ADMIN_SESSION_KEY`. If that key is
+omitted, login remains secure but sessions end whenever the collector restarts. A login stays
+valid for 12 hours by default; set `SMOKED_ADMIN_SESSION_TTL` to any Go duration (e.g. `24h`,
+`168h`, `30m`, minimum `1m`) to lengthen or shorten it. Over the proxy's TLS, the admin session
+cookie works remotely. smoked's own `127.0.0.1:8087` stays available **on the hub itself only** —
+it binds loopback, so it is not reachable from other LAN hosts; reach it remotely through the
+proxy or an SSH tunnel, never by rebinding it to `0.0.0.0` (the read API is unauthenticated).
 
 **Certificate challenge.** By default Caddy uses **HTTP-01** (needs inbound port 80 during
 issuance/renewal). To use **DNS-01** instead — no inbound port needed, works behind NAT, supports
@@ -242,22 +260,19 @@ CF_API_TOKEN=your-cloudflare-token
 
 See `.env.example` for every provider's exact line and credentials (route53/namecheap use a
 multi-field block). To add a provider not listed, add a `--with github.com/caddy-dns/<name>` line
-to `Caddy.Dockerfile` and rebuild.
+to `Caddy.Dockerfile` and rebuild. (This only affects the dashboard's certificate — the agent
+listener's certificate is self-issued by smoked's own CA and never touches Let's Encrypt.)
 
-**External proxy** — to front smoked with your own proxy instead, skip the profile and mirror the
-same split: forward `/agent/v1/*` (API-key auth) and put Basic Auth on the rest. Caddy:
+**External proxy** — to front the dashboard with your own proxy instead of the bundled Caddy,
+just gate `:8087` with Basic Auth; there's nothing agent-related to add, since agents bypass the
+dashboard proxy entirely and connect straight to smoked's `:8443` listener. Caddy:
 
 ```
 smoke.example.com {
-    handle /agent/v1/* {
-        reverse_proxy 127.0.0.1:8087
+    basic_auth {
+        admin <bcrypt-hash-from-caddy-hash-password>
     }
-    handle {
-        basic_auth {
-            admin <bcrypt-hash-from-caddy-hash-password>
-        }
-        reverse_proxy 127.0.0.1:8087
-    }
+    reverse_proxy 127.0.0.1:8087
 }
 ```
 
@@ -268,10 +283,6 @@ server {
     listen 443 ssl;
     server_name smoke.example.com;
     # ssl_certificate / ssl_certificate_key ...
-    location /agent/v1/ {                      # agents: API-key auth, no Basic Auth
-        proxy_pass http://127.0.0.1:8087;
-        proxy_set_header Authorization $http_authorization;
-    }
     location / {                               # dashboard + read API: Basic Auth
         auth_basic "heliograph";
         auth_basic_user_file /etc/nginx/.htpasswd;
@@ -279,6 +290,9 @@ server {
     }
 }
 ```
+
+Publish `-agent-addr`'s port (`:8443` by default) straight through your firewall/load balancer to
+smoked — do not route it through the proxy above.
 
 Example output:
 
@@ -318,7 +332,8 @@ internal/
   configstore/   versioned DB config fragment (config-in-DB, optimistic concurrency)
   api/           JSON HTTP API + agent + admin endpoints + static file serving
   federation/    per-vantage assignment builder + measurement fingerprint
-  vantage/        per-vantage API-key store (salted hash, constant-time verify)
+  vantage/        per-vantage registry + self-bootstrapped CA (mTLS client-cert auth; revoke by
+                  removing the name)
   agentwire/     shared hub<->agent wire types
   agent/         smoke-agent buffer + on-disk spool + hub client
   importer/
@@ -342,10 +357,11 @@ web/
 
 Two capabilities go past SmokePing, and both ship in the 1.0 line:
 
-- **Multi-vantage federation** — remote `smoke-agent` collectors report to the hub over HTTPS with
-  per-vantage API keys, and each detail graph overlays a median line per vantage. Transport is
-  HTTPS/JSON behind a required reverse proxy — a bundled Caddy (automatic Let's Encrypt / DNS-01) or
-  your own. See the **[federation operator guide](docs/federation.md)** and
+- **Multi-vantage federation** — remote `smoke-agent` collectors report to the hub over their own
+  mutually-authenticated TLS connection (a CA-signed client certificate is the vantage's identity,
+  no API key involved), and each detail graph overlays a median line per vantage. The dashboard
+  separately sits behind a required reverse proxy — a bundled Caddy (automatic Let's Encrypt /
+  DNS-01) or your own. See the **[federation operator guide](docs/federation.md)** and
   [Federation deployment](#federation-deployment-reverse-proxy).
 - **Database-sourced configuration** — targets, probes, and alerts can live in the store alongside
   YAML (additive, `conf.d`-style), edited from the in-browser **Config** tab, with

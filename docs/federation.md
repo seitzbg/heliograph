@@ -8,38 +8,50 @@ SmokePing "master + slaves" model, modernized.
   dashboard, and probes as the vantage **`local`**.
 - A **vantage** is a remote location. A headless **agent** (`smoke-agent`) there
   pulls a strict, hub-assigned target list, probes it with the same plugins as
-  the hub, and pushes results back over HTTPS with a per-vantage API key.
+  the hub, and pushes results back over its own **mutual-TLS** connection to the
+  hub — authenticated by a CA-signed client certificate, not a shared secret.
 - The hub **assigns** work: agents never run server-sent code, only a
   schema-validated target list. The hub is authoritative for each target's probe
   and host; an agent can't misattribute a result.
 
-Federation is **dark until configured**: with no `vantages:` declared and no
-agents connected, `smoked` behaves exactly as a single-node collector.
+Federation is **dark until configured**: with no `vantages:` declared, no
+`-agent-addr` set, and no agents connected, `smoked` behaves exactly as a
+single-node collector.
 
 > Federation requires a database — run `smoked` with `-dsn` (TimescaleDB). The
-> vantage key store lives there.
+> vantage registry and the hub's self-bootstrapped CA both live there.
+> `-agent-addr` (below) fatals at startup if `-dsn` is unset, since the mTLS
+> listener has nothing to authenticate agents against without it.
 
 ```
    config.yaml (targets w/ vantages:)
           │
-  ┌───────┴───────────────┐         Internet
-  │      HUB (smoked)      │            │
-  │  probes as `local`     │      ┌─────┴─────────┐
-  │  assignment builder    │◄─────┤ reverse proxy │  TLS (Let's Encrypt)
-  │  vantage/key store     │ HTTP │  /agent/v1/*  │  + Basic Auth on dashboard
-  │  :8087 (plain HTTP)    │      └─────┬─────────┘
-  └───────▲────────────────┘            │ https + API key
-          │ LAN dashboard        ┌───────┴──────────┐
-          │ browser              │ smoke-agent (nyc)│  pull → probe → push
-                                 └──────────────────┘
+  ┌───────┴────────────────────┐              Internet
+  │        HUB (smoked)         │                  │
+  │  probes as `local`          │         ┌────────┴────────┐
+  │  assignment builder         │         │ reverse proxy   │  TLS (Let's Encrypt)
+  │  vantage registry + CA      │         │ (dashboard only)│  + Basic Auth
+  │  :8087 (plain HTTP, LAN)    │         └────────┬────────┘
+  │  :8443 (own mTLS listener) ◄┼───────────────────┼── https + client cert
+  └───────▲──────────────────┬─┘                    │
+          │ LAN dashboard     │                ┌─────┴────────────┐
+          │ browser           └───────────────►│ smoke-agent (nyc)│  pull → probe → push
+                            direct mTLS, no proxy└───────────────────┘
 ```
 
 ## Prerequisites
 
-- A **hub** running `smoked -serve -dsn <TimescaleDB DSN>` (see the README).
-- A **public HTTPS endpoint** in front of the hub — the bundled Caddy profile or
-  your own reverse proxy. See the README's *Federation deployment (reverse
-  proxy)* section; `smoked` never terminates TLS itself.
+- A **hub** running `smoked -serve -dsn <TimescaleDB DSN> -agent-addr :8443
+  -agent-hostname <your-public-hostname>` (see the README). `-agent-addr`
+  requires `-dsn`. `-agent-hostname` becomes the SAN on the server certificate
+  smoked issues itself for this listener from its self-bootstrapped CA.
+- Port `8443` (or whatever `-agent-addr` names) reachable from the internet and
+  published straight through to smoked — it is **not** proxied by Caddy or any
+  other reverse proxy; smoked terminates this TLS itself.
+- A **public HTTPS endpoint in front of the dashboard only** — the bundled Caddy
+  profile or your own reverse proxy, gating `:8087` with TLS + Basic Auth. See
+  the README's *Federation deployment (reverse proxy)* section; `smoked` never
+  terminates TLS for the dashboard itself.
 - One or more **remote hosts** to run agents on. Each needs the external probe
   binaries for the probe kinds it will run (e.g. `fping` for ICMP, with
   `CAP_NET_RAW`; `irtt` for the IRTT probe). Native probes (TCP, DNS, HTTP, SSH)
@@ -76,81 +88,104 @@ targets:
 Reload the hub after editing config (`SIGHUP`, or restart). The assignment the
 agent pulls is versioned; the agent picks up changes within its poll interval.
 
-## Step 2 — Provision a vantage key
+## Step 2 — Onboard a vantage
 
-Each vantage authenticates with its own API key (`smk_<id>_<secret>`). Only a
-salted hash is stored; the plaintext is shown **once**. Provision it either way:
+Each vantage authenticates with its own **mTLS client certificate**, signed by
+the hub's self-bootstrapped CA (generated once on first use and persisted in
+the database). There is no shared secret to store, rotate, or leak — the
+certificate itself *is* the identity, and its CommonName is the vantage name.
+Onboard it either way:
+
+**GUI** (the Vantages tab — the easiest path): set `SMOKED_ADMIN_PASSWORD` on
+the hub to enable the admin panel. Also set `SMOKED_ADMIN_SESSION_KEY` to 32
+random bytes encoded as 64 hex characters (`openssl rand -hex 32`) if sessions
+should survive collector restarts; without it, the hub uses a secure ephemeral
+signing key and logs sessions out on restart. A login lasts 12 hours by
+default — set `SMOKED_ADMIN_SESSION_TTL` to any Go duration (`24h`, `168h`,
+`30m`, …, minimum `1m`) to change it. Log in, then **Add vantage**: type a
+name and it downloads a ready-to-run `<name>-vantage.tar.gz` — `agent.yaml`
+(with the client certificate, private key, and hub CA cert embedded) plus a
+`docker-compose.yml` and a `README.txt`. Copy the bundle to the vantage host,
+unpack it, and `docker compose up -d` — no key, ever. The panel also **list**s
+vantages (name, created, last-seen, target count) and **revoke**s one.
+It's reached through the proxy (behind the dashboard's Basic Auth, then its
+own admin password) or on `http://localhost:8087/` on the hub.
 
 **CLI** (on the hub host — shell access there is already trusted):
 
 ```console
-$ smoked vantage add nyc -dsn "$SMOKED_DSN"
-vantage "nyc" key (shown once — store it now):
-
-smk_1a2b3c4d5e6f_0123...deadbeef
-
-# smoke-agent config for vantage "nyc"
-hub: "https://your-hub.example"   # set to your https reverse-proxy endpoint
-vantage: "nyc"
-key: "smk_1a2b3c4d5e6f_0123...deadbeef"
+$ smoked vantage add nyc -dsn "$SMOKED_DSN" -hub https://your-hub.example:8443 -out nyc-vantage.tar.gz
+wrote bundle nyc-vantage.tar.gz for vantage "nyc"
 ```
 
-`-dsn` defaults to `$SMOKED_DSN`. List and revoke:
+That tar.gz is the same onboarding bundle the GUI downloads. Omit `-out` to
+print the rendered `agent.yaml` to stdout instead (handy for `scp`-ing just the
+file), or pass `-json` to emit the raw PEMs as JSON. `-dsn` defaults to
+`$SMOKED_DSN`. List and revoke:
 
 ```console
 $ smoked vantage ls
 NAME                     CREATED              LAST-SEEN
 nyc                      2026-08-08 14:02     never
 
-$ smoked vantage revoke nyc     # rotates: the old key stops working immediately
-revoked vantage "nyc"
+$ smoked vantage revoke nyc     # deletes it from the registry: any cert bearing
+revoked vantage "nyc"           # this CN is rejected on its very next request
 ```
 
-**GUI** (the Vantages tab): set `SMOKED_ADMIN_PASSWORD` on the hub to enable the
-admin panel. Also set `SMOKED_ADMIN_SESSION_KEY` to 32 random bytes encoded as 64 hex
-characters (`openssl rand -hex 32`) if sessions should survive collector restarts; without it,
-the hub uses a secure ephemeral signing key and logs sessions out on restart. A login lasts 12
-hours by default — set `SMOKED_ADMIN_SESSION_TTL` to any Go duration (`24h`, `168h`, `30m`, …,
-minimum `1m`) to change it. Log in, then
-**add** (reveals the key once — as a copyable/downloadable
-`agent.yaml` and a ready-to-run `docker-compose.yaml`, toggled in the dialog), **list**
-(name, created, last-seen, target count), **regenerate** (rotate), and **revoke**.
-The panel is reached through the proxy (behind the dashboard's Basic Auth, then
-its own admin password) or on `http://localhost:8087/` on the hub.
+Revocation is by **removal from the registry**, not certificate expiry or a
+CRL: `requireAgent` looks up the presented certificate's CommonName against the
+active vantage list on every request, so a revoked vantage is locked out
+immediately even though its certificate itself remains cryptographically
+valid until it expires. Re-running `vantage add <name>` for a revoked name
+re-registers it and issues it a fresh certificate.
 
 ## Step 3 — Run the agent at the vantage
 
-Build the agent and give it a config file (the `add` output is a ready template —
-just replace the `hub:` placeholder with your real HTTPS endpoint):
+Build the agent and give it the config file from the bundle (unpack it as-is,
+or copy just `agent.yaml` next to the binary):
 
 ```console
 $ go build ./cmd/smoke-agent
 ```
 
 ```yaml
-# /etc/smoke-agent.yaml
-hub: "https://smoke.example.com"     # your reverse-proxy endpoint (TLS)
+# agent.yaml (from the onboarding bundle)
+hub: "https://your-hub.example:8443"   # smoked's own mTLS listener — NOT the dashboard proxy
 vantage: "nyc"
-key: "smk_1a2b3c4d5e6f_0123...deadbeef"
+client_cert: |
+  -----BEGIN CERTIFICATE-----
+  ...
+  -----END CERTIFICATE-----
+client_key: |
+  -----BEGIN PRIVATE KEY-----
+  ...
+  -----END PRIVATE KEY-----
+ca_cert: |
+  -----BEGIN CERTIFICATE-----
+  ...
+  -----END CERTIFICATE-----
+spool_dir: /var/lib/smoke-agent/spool
 # optional (defaults shown):
 # interval: 60s      # how often to pull the assignment
 # timeout: 4s        # per-target probe timeout
 # workers: 50        # max concurrent probes
 # buffer: 100000     # store-and-forward capacity, in rounds
 # flush_max: 5000    # max rounds per push
-# insecure: false    # skip TLS verification (testing only)
+# insecure: false    # skip TLS verification of the hub (testing only)
 ```
 
 ```console
-$ smoke-agent -config /etc/smoke-agent.yaml
+$ smoke-agent -config agent.yaml
 ```
 
-Every flag can override the file: `-hub`, `-key`, `-vantage`, `-interval`,
-`-timeout`, `-workers`, `-buffer`, `-flush-max`, `-insecure`, `-spool-dir`, plus
-`-log-format` (text|json) and `-log-level`. The agent has **no listener** — it only makes
-outbound HTTPS calls, so it works behind NAT. On push failure it retains rounds
-in a bounded in-memory buffer and retries with backoff; when the buffer is full
-it drops the oldest and logs the drop.
+Every flag can override the file: `-hub`, `-client-cert`, `-client-key`,
+`-ca-cert` (each takes a *file path*, unlike the inline PEM in `agent.yaml`),
+`-vantage`, `-interval`, `-timeout`, `-workers`, `-buffer`, `-flush-max`,
+`-insecure`, `-spool-dir`, plus `-log-format` (text|json) and `-log-level`.
+The agent has **no listener** — it only makes outbound HTTPS calls, so it
+works behind NAT. On push failure it retains rounds in a bounded in-memory
+buffer and retries with backoff; when the buffer is full it drops the oldest
+and logs the drop.
 
 ### Durable buffering (`spool_dir`)
 
@@ -182,25 +217,40 @@ spool_dir: /var/lib/smoke-agent/spool
   view overlays a **median line per vantage** (distinct colors) with a chip
   legend that doubles as a focus selector; the smoke band renders for the focused
   vantage. Single-vantage targets and the Graphs grid are unchanged.
-- The hub logs `agent endpoints enabled at /agent/v1/assignment, /agent/v1/results`
-  at start when `-dsn` is set.
+- The hub logs `mTLS agent listener starting addr=:8443 hostnames=[...]` at
+  start when `-agent-addr` is set.
 
 ## Security model
 
-- **Per-vantage API key** over the proxy's TLS: salted-hash at rest, constant-time
-  verify, individually revocable. A bad/absent/revoked key → `401`.
+- **Mutual TLS, client-certificate identity.** Every vantage authenticates with
+  its own certificate, signed by the hub's self-bootstrapped CA (`vantage add`
+  or the dashboard's Add-vantage flow issues it). The mTLS listener requires
+  and verifies the client certificate at the TLS layer
+  (`RequireAndVerifyClientCert`) before any request reaches a handler; a
+  request presenting no certificate, or one not signed by the hub's CA, never
+  gets that far. There is no bearer token to leak, forward, or accidentally log.
+- **Authorization is the certificate's CommonName**, checked against the active
+  (registered, not revoked) vantage list on *every* request — so revoking a
+  vantage takes effect on its very next request even though the certificate
+  itself remains cryptographically valid. A CN that isn't a currently active
+  vantage → `403`; no client certificate at all → the TLS handshake itself
+  fails before an HTTP status is ever produced.
 - **The hub is authoritative** for each target's probe/host; the agent only sends
   raw round-trip times for its assigned targets. Unassigned or malformed results
   are dropped and counted.
-- **Dashboard/read API** carry no auth of their own — the reverse proxy gates them
-  with **HTTP Basic Auth**; only `/agent/v1/*` is exempt (it uses the API key).
-- **Admin key-management** (CLI has none — it's hub-shell-trusted; the API + GUI
+- **Two independent surfaces, two independent perimeters.** The dashboard/read
+  API carry no auth of their own — a reverse proxy in front of `:8087` gates
+  them with **HTTP Basic Auth**. The agent API is not reachable through that
+  proxy at all: it is smoked's own listener on a separate port (`-agent-addr`),
+  gated only by the mTLS handshake above. Compromising the dashboard's Basic
+  Auth credential does not grant access to the agent API, and vice versa.
+- **Admin vantage-management** (CLI has none — it's hub-shell-trusted; the API + GUI
   panel require `SMOKED_ADMIN_PASSWORD`, fail-closed when unset). Session cookies are signed by
   the independent `SMOKED_ADMIN_SESSION_KEY`; omitting it uses a process-local key, while rotation
   invalidates every existing admin session. `SMOKED_ADMIN_SESSION_TTL` sets how long a login stays
   valid (default 12h, minimum 1m).
-- `local` is reserved: you can't mint a `local` key, and a `local`-authenticated
-  agent is rejected.
+- `local` is reserved: you can't register a vantage named `local`, and a
+  `local`-authenticated agent is rejected.
 
 ## Upgrading an existing deployment
 
@@ -264,16 +314,26 @@ a path reuse can pause data.
 
 ## Troubleshooting
 
-- **Agent gets `401`** — key wrong, revoked, or rotated (`vantage add`/`regenerate`
-  mints a new one; update the agent). Confirm the `Authorization: Bearer smk_…`
-  reaches the hub (the proxy must forward `/agent/v1/*` unauthenticated by Basic
-  Auth).
+- **Agent's TLS handshake fails / connection reset before any HTTP response** —
+  the agent's `ca_cert` doesn't match the hub's actual CA (stale bundle from
+  before the hub's database was reset — the CA is generated once and persisted,
+  so a fresh database means a fresh CA and every existing bundle stops
+  verifying), or `-agent-hostname` doesn't include the hostname the agent
+  connects as. Re-onboard the vantage (`vantage add <name>` / dashboard Add
+  vantage) to get a bundle matching the hub's current CA.
+- **Agent gets `403 unknown or revoked vantage`** — the certificate is valid
+  and trusted, but its CommonName isn't a currently registered vantage (never
+  registered, or `vantage revoke`d). `vantage add <name>` (re-)registers it and
+  issues a fresh certificate; update the agent with the new bundle.
 - **Vantage never appears / `LAST-SEEN never`** — the agent can't reach the hub
-  (DNS/cert/proxy), or no target lists that vantage. Check the agent log and that
-  `vantages:` includes the name; reload the hub after config edits.
+  on its mTLS port (DNS/firewall/`-agent-addr` not published), or no target lists
+  that vantage. Check the agent log and that `vantages:` includes the name;
+  reload the hub after config edits.
 - **No overlay on a target** — that target's effective `vantages:` has only one
   entry, or the second vantage has no stored rows yet (give the agent a poll
   cycle).
-- **Certificate won't issue** — with HTTP-01 the domain's DNS must point at the
-  proxy and port 80 must be reachable; behind NAT use DNS-01 (`CADDY_ACME_DNS`,
-  see `.env.example`).
+- **Dashboard certificate won't issue** — this is the *proxy's* Let's Encrypt cert
+  for the dashboard, unrelated to the agent mTLS certs (which the hub issues
+  itself and never touches Let's Encrypt). With HTTP-01 the domain's DNS must
+  point at the proxy and port 80 must be reachable; behind NAT use DNS-01
+  (`CADDY_ACME_DNS`, see `.env.example`).

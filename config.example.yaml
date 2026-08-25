@@ -76,8 +76,8 @@ targets:
   # down the tree like `alerts`. Unset means `[local]` — the hub probes it itself. Add a remote
   # vantage's name to ALSO measure the target from a `smoke-agent` running elsewhere (another ISP or
   # region), so the dashboard overlays one median line per vantage on the same graph — e.g. comparing
-  # the path to a host from two ISPs. The name must match the `smoked vantage add <name>` you mint on
-  # the hub; provision the key and run the agent per docs/federation.md. Example — measure a subtree
+  # the path to a host from two ISPs. The name must match the `smoked vantage add <name>` you register
+  # on the hub; onboard the cert bundle and run the agent per docs/federation.md. Example — measure a subtree
   # from both the hub and a remote "nyc" agent (leave the internal-only targets on [local]):
   #   Websites:
   #     vantages: [local, nyc]        # both the hub AND the nyc agent probe these

@@ -1,21 +1,28 @@
-# Heliograph — federation (multi-vantage, public reverse proxy)
+# Heliograph — federation (multi-vantage, public reverse proxy + mTLS agent API)
 #
 # For measuring the same targets from several places: a hub plus one or more remote
-# `smoke-agent` vantages that report over HTTPS. This adds a bundled Caddy reverse
-# proxy in front of the collector, because remote agents (and remote browsers) need
-# TLS + auth that smoked does not provide itself. Most single-host users do NOT need
-# this — see ../standalone for the simpler stack.
+# `smoke-agent` vantages that report over their own mutually-authenticated TLS
+# connection. Most single-host users do NOT need this — see ../standalone for the
+# simpler stack.
 #
 #   cp .env.example .env      # set DOMAIN + ACME_EMAIL + DASH_PASSWORD_HASH (+ SMOKED_ADMIN_PASSWORD)
 #   docker compose up -d
 #   # -> open https://<your-domain>/
 #
-# The proxy serves two surfaces with two auth models (see ./Caddyfile):
-#   * /agent/v1/*  — remote agents, authenticated by a per-vantage API key (Bearer smk_...)
-#   * everything else (dashboard, read/query API, admin) — behind HTTP Basic Auth
-# Provision a vantage from the Vantages admin tab (set SMOKED_ADMIN_PASSWORD) or the
-# `smoked vantage` CLI, then run a smoke-agent with the minted key. The end-to-end
-# walkthrough is in docs/federation.md.
+# Two public surfaces, two different mechanisms — neither shares the other's auth:
+#   * the DASHBOARD (+ read/query API + admin panel) — fronted by the bundled Caddy
+#     (see ./Caddyfile), which terminates TLS (Let's Encrypt) and gates it with HTTP
+#     Basic Auth. smoked itself binds this only on loopback (127.0.0.1:8087).
+#   * the AGENT API — smoked's own dedicated mutual-TLS listener on :8443, published
+#     directly (NOT proxied by Caddy). smoked self-bootstraps a CA, issues its own
+#     server certificate (SAN = -agent-hostname) and requires every agent to present
+#     a CA-signed client certificate; the certificate IS the vantage's identity, so
+#     there is no separate API key to manage.
+# Onboard a vantage from the Vantages admin tab (set SMOKED_ADMIN_PASSWORD) — it
+# downloads a ready-to-run `<name>-vantage.tar.gz` bundle (agent.yaml with the client
+# cert/key/CA embedded + docker-compose.yml + README) — or mint the same bundle with
+# `smoked vantage add <name> -out <name>-vantage.tar.gz`. The end-to-end walkthrough
+# is in docs/federation.md.
 services:
   timescaledb:
     image: timescale/timescaledb:2.29.1-pg16
@@ -33,6 +40,10 @@ services:
 
   smoked:
     image: ghcr.io/seitzbg/heliograph:latest   # pin a release (e.g. :v1.0.16) for production
+    # Adds the mTLS agent listener to the image's default command (-serve -addr :8087
+    # -webdir /web). -agent-addr requires -dsn, which is already supplied below via
+    # SMOKED_DSN (the -dsn flag defaults to $SMOKED_DSN), so it needn't be repeated here.
+    command: ["-serve", "-addr", ":8087", "-webdir", "/web", "-agent-addr", ":8443", "-agent-hostname", "${DOMAIN}"]
     depends_on:
       timescaledb:
         condition: service_healthy
@@ -45,19 +56,23 @@ services:
       SMOKED_DOWNSAMPLE: "1"
       SMOKED_RESOLVE_IPS: "1"
       SMOKED_ABSOLUTE_TIME: ${SMOKED_ABSOLUTE_TIME:-1}
-      # Enable the admin GUI so you can mint/list/revoke vantage keys and edit DB targets from the
+      # Enable the admin GUI so you can onboard/list/revoke vantages and edit DB targets from the
       # browser. Required to provision vantages without the CLI. See .env.example.
       SMOKED_ADMIN_PASSWORD: ${SMOKED_ADMIN_PASSWORD:-}
       SMOKED_ADMIN_SESSION_KEY: ${SMOKED_ADMIN_SESSION_KEY:-}
       SMOKED_ADMIN_SESSION_TTL: ${SMOKED_ADMIN_SESSION_TTL:-}
-      # Mount a YAML tree that declares your targets and their `vantages:` to point Caddy's agents at:
+      # Mount a YAML tree that declares your targets and their `vantages:` to point agents at:
       # SMOKED_CONFIG: /etc/heliograph/config.yaml
     # volumes:
     #   - ./config.yaml:/etc/heliograph/config.yaml:ro
     ports:
-      # Loopback only — Caddy (below) is the public surface. Keep this for local admin on the hub;
-      # remote access always goes through the proxy's TLS + auth.
+      # Loopback only — Caddy (below) is the dashboard's public surface. Keep this for local
+      # admin on the hub; remote dashboard access always goes through the proxy's TLS + auth.
       - "127.0.0.1:8087:8087"
+      # Published directly to the internet: smoked's own mTLS listener for remote agents. This
+      # is NOT proxied by Caddy — agents connect straight to https://$DOMAIN:8443 and present a
+      # CA-signed client certificate.
+      - "8443:8443"
 
   caddy:
     # Stock Caddy: automatic Let's Encrypt via the HTTP-01 challenge (needs inbound ports 80 + 443,
@@ -70,7 +85,7 @@ services:
       - smoked
     ports:
       - "80:80"     # HTTP-01 challenge + HTTP->HTTPS redirect
-      - "443:443"   # public agent API + dashboard over TLS
+      - "443:443"   # public dashboard over TLS (agents use smoked's own :8443, not this proxy)
     environment:
       DOMAIN: ${DOMAIN}
       ACME_EMAIL: ${ACME_EMAIL}

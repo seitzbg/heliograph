@@ -19,6 +19,32 @@ All notable changes to **Heliograph** are recorded here. The format follows
   and `examples/federation/` (adds a Caddy reverse proxy for remote vantages) — each with its own
   `.env.example`, plus an `examples/README.md` that helps you pick. Federation is opt-in, so a
   standalone user is never faced with the TLS/ACME/Basic-Auth settings they don't need.
+- **Opt-in mutual-TLS federation, replacing the per-vantage API key.** Start the hub with
+  `-agent-addr :8443 -agent-hostname <domain>` (requires `-dsn`) to run a dedicated, mutual-TLS
+  listener for remote agents, entirely separate from the dashboard's HTTP server. The hub
+  self-bootstraps its own CA (generated once, persisted in the database) and issues both its own
+  server certificate — SAN taken from `-agent-hostname` — and a CA-signed client certificate for
+  each vantage; the listener requires and verifies that client certificate before any request
+  reaches a handler. The certificate's CommonName *is* the vantage's identity, checked against the
+  registry on every request, so revoking a vantage takes effect immediately without waiting on
+  certificate expiry.
+- **One-click vantage onboarding from the dashboard.** The Vantages admin tab's **Add vantage**
+  now downloads a ready-to-run `<name>-vantage.tar.gz` — `agent.yaml` (hub URL, vantage name, and
+  the client certificate/key/CA embedded as PEM) plus a matching `docker-compose.yml` and
+  `README.txt` — instead of revealing a key to copy. The CLI equivalent, `smoked vantage add
+  <name> -out <name>-vantage.tar.gz`, mints the identical bundle (or prints the rendered
+  `agent.yaml` to stdout, or `-json` for the raw PEMs).
+
+### Removed
+- **BREAKING: the per-vantage API key is gone.** `smoke-agent`'s `-key` flag and the config file's
+  `key:` field no longer exist — replaced by `-client-cert`/`-client-key`/`-ca-cert` (flags, file
+  paths) and `client_cert`/`client_key`/`ca_cert` (config, inline PEM). Every existing federated
+  vantage must be re-onboarded with a certificate bundle before it can report to an upgraded hub:
+  run `smoked vantage add <name>` (or use the dashboard's Add vantage) and redeploy the agent with
+  the new `agent.yaml`. The old `Authorization: Bearer smk_...` agent auth path, and the reverse
+  proxy's `/agent/v1/*` forwarding rule that carried it, are both removed — agents now connect
+  directly to the hub's own `-agent-addr` mTLS listener instead of going through the dashboard's
+  reverse proxy.
 
 ### Security
 - **Config reads redact credentials embedded in a probe URL.** The open config reads
