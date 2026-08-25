@@ -29,6 +29,12 @@ CREATE TABLE IF NOT EXISTS vantage_keys (
 	salt       bytea NOT NULL,
 	created_at timestamptz NOT NULL DEFAULT now(),
 	last_seen  timestamptz
+);
+CREATE TABLE IF NOT EXISTS vantage_ca (
+	id         int PRIMARY KEY DEFAULT 1,
+	cert_pem   bytea NOT NULL,
+	key_pem    bytea NOT NULL,
+	created_at timestamptz NOT NULL DEFAULT now()
 );`
 
 // reserved is the hub's own vantage name — it mirrors store.DefaultVantage.
