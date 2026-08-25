@@ -460,22 +460,21 @@ func main() {
 		// NTP probe offset/stratum, surfaced by /api/targets as display stats. The registry is
 		// package-level in ntpprobe, so this accessor stays valid across config reloads.
 		srv.NTPStat = ntpprobe.LatestFor
-		// Federation: only with a DB (the vantage key store is TimescaleDB-backed). The
-		// agent routes (below) light up unconditionally here; the admin key-management API
-		// additionally requires a configured admin password (fail-closed — no password
-		// means no admin routes).
+		// Federation: only with a DB (the vantage registry is TimescaleDB-backed). The admin
+		// vantage-management API (list/register/revoke) additionally requires a configured
+		// admin password (fail-closed — no password means no admin routes). The agent routes
+		// (/agent/v1/assignment, /agent/v1/results) are currently unwired from any listener —
+		// the old Bearer-key auth that gated them was removed with the key-based federation
+		// path; an mTLS listener (a later task) re-lights them. Assignment/OnIngest/
+		// IngestCommit/RequireFingerprint/TargetVantages are still wired below so that
+		// listener needs no changes here when it lands.
 		if *dsn != "" {
 			vst, err := vantage.New(ctx, *dsn)
 			if err != nil {
-				fatal("vantage key store", err)
+				fatal("vantage store", err)
 			}
 			defer vst.Close()
 			srv.Vantages = vst
-			// Agent endpoints (/agent/v1/assignment, /agent/v1/results) are independent of
-			// the admin API and its password gate below — they light up whenever -dsn is
-			// set, since a remote vantage's agent needs to authenticate and report results
-			// regardless of whether the (human) admin key-management API is enabled.
-			srv.VantageAuth = vst
 			// Strict-mode toggle for the ingest path enabled just above: with it on, an agent
 			// round carrying no fingerprint is a visible permanent drop instead of accepted
 			// (CODE_REVIEW #2). Lenient by default.
@@ -514,7 +513,6 @@ func main() {
 				}
 				return m
 			}
-			slog.Info("agent endpoints enabled at /agent/v1/assignment, /agent/v1/results")
 			srv.AdminPassword = os.Getenv("SMOKED_ADMIN_PASSWORD")
 			// Keep session signing independent from the human login password. A stable 32-byte
 			// SMOKED_ADMIN_SESSION_KEY lets cookies survive restarts; without one, use a safe
@@ -773,12 +771,20 @@ func vantageCmd(args []string) int {
 
 	switch sub {
 	case "add":
-		key, err := st.Add(ctx, name)
+		if err := st.Register(ctx, name); err != nil {
+			fmt.Fprintf(os.Stderr, "vantage add: %v\n", err)
+			return 1
+		}
+		// A basic PEM bundle for now — a later task upgrades this to a full agent.yaml/tar.gz.
+		certPEM, keyPEM, caPEM, err := st.IssueClientCert(ctx, name)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "vantage add: %v\n", err)
 			return 1
 		}
-		fmt.Printf("vantage %q key (shown once — store it now):\n\n%s\n\n%s\n", name, key, vantage.AgentSnippet(name, key))
+		fmt.Printf("vantage %q registered. mTLS client identity (save these now):\n\n", name)
+		fmt.Printf("# client certificate (client.crt)\n%s\n", certPEM)
+		fmt.Printf("# client private key (client.key) — keep secret\n%s\n", keyPEM)
+		fmt.Printf("# hub CA certificate (ca.crt) — verify the hub against this\n%s\n", caPEM)
 		return 0
 	case "ls":
 		infos, err := st.List(ctx)
