@@ -782,45 +782,19 @@
     return 'collecting…';
   }
 
-  // --- Vantage agent artifacts (pure; the reveal modal's two downloadable files) ---
+  // --- Vantage bundle download (pure) ---
 
-  // agentYaml renders the smoke-agent config for a freshly minted vantage. It mirrors the
-  // hub's vantage.AgentSnippet but fills `hub` with the real origin (the browser knows which
-  // hub you're on — the server only has a placeholder) and adds `spool_dir` so the durable
-  // spool volume in agentCompose is actually used. Scalars are JSON-quoted (== Go %q) so any
-  // name stays well-formed YAML. This file carries the key; keep it out of the compose.
-  function agentYaml(name, key, hub) {
-    return '# smoke-agent config for vantage ' + JSON.stringify(name) + '\n'
-      + 'hub: ' + JSON.stringify(hub) + '   # this hub — change if the agent reaches it by another URL\n'
-      + 'vantage: ' + JSON.stringify(name) + '\n'
-      + 'key: ' + JSON.stringify(key) + '\n'
-      + 'spool_dir: /var/lib/smoke-agent/spool\n';
-  }
-
-  // agentCompose renders a ready-to-run docker-compose.yaml for a vantage agent. It is the
-  // same for every vantage — the per-vantage data lives in the mounted agent.yaml, so this
-  // file holds no secret. The single published image ships both binaries, so we override the
-  // entrypoint to smoke-agent; cap_add/sysctls mirror the hub service so ICMP probes work.
-  function agentCompose() {
-    return [
-      '# docker-compose.yaml — heliograph vantage agent',
-      '# Save next to agent.yaml (the other tab), then:  docker compose up -d',
-      'services:',
-      '  smoke-agent:',
-      '    image: ghcr.io/seitzbg/heliograph:latest',
-      '    entrypoint: ["smoke-agent"]',
-      '    command: ["-config", "/etc/heliograph/agent.yaml"]',
-      '    volumes:',
-      '      - ./agent.yaml:/etc/heliograph/agent.yaml:ro',
-      '      - agent-spool:/var/lib/smoke-agent/spool',
-      '    cap_add: [NET_RAW]',
-      '    sysctls:',
-      '      net.ipv4.ping_group_range: "0 10001"',
-      '    restart: unless-stopped',
-      'volumes:',
-      '  agent-spool: {}',
-      '',
-    ].join('\n');
+  // vantageBundleFilename builds the download filename for a freshly minted vantage's
+  // onboarding bundle, mirroring the server's Content-Disposition (`<name>-vantage.tar.gz`,
+  // see addVantage in internal/api/api.go). The server's vantage.ValidName already restricts
+  // real vantage names, but this is building a FILENAME, not validating a vantage name — it
+  // sanitizes independently so an odd/hostile `name` (whatever reaches this helper) can never
+  // produce a path separator or other unsafe character in a browser download. Any character
+  // outside the safe set becomes '-'; an all-unsafe (or empty) name falls back to "vantage"
+  // rather than emitting a bare "-vantage.tar.gz".
+  function vantageBundleFilename(name) {
+    const safe = String(name == null ? '' : name).replace(/[^A-Za-z0-9._-]/g, '-') || 'vantage';
+    return safe + '-vantage.tar.gz';
   }
 
   // tkey is a target's STABLE routing/identity key from an /api/targets (or /api/series/all) DTO: its
@@ -861,7 +835,7 @@
     return (!vantage || vantage === 'local') ? local : remote;
   }
 
-  window.Dash = { RANGES, RANGE_ORDER, parseRoute, mergeSeries, gridSince, gridTemplateFor, maxColumnsFor, rangeLabels, fetchJSON, zoomResolution, pixelToTime, sharedYMax, buildTree, underPath, targetStatus, pickSeries, vantageList, orderVantages, defaultFocus, keepFocus, vantageColorVar, worstStatus, availableVantages, toggleGridVantage, vantageControlChips, bandVantageFor, gridShowsTarget, adminMode, adminSessionState, createAdminStateController, statusProbeOwnsView, relTime, listTargets, addTarget, editTarget, removeTarget, buildTargetNode, buildGroupNode, labelHTML, collectingNote, agentYaml, agentCompose, cfgTree, reweightSiblings, reorderSiblings, editNodeAtPath, removeNodeAtPath, renameNodeAtPath, addNodeAtPath, moveNode, moveInList, cfgDropDestination, cfgVisibleRows, cfgTreeKey, tkey, ntpStatHtml, ntpStatOf, ntpStatSelect };
+  window.Dash = { RANGES, RANGE_ORDER, parseRoute, mergeSeries, gridSince, gridTemplateFor, maxColumnsFor, rangeLabels, fetchJSON, zoomResolution, pixelToTime, sharedYMax, buildTree, underPath, targetStatus, pickSeries, vantageList, orderVantages, defaultFocus, keepFocus, vantageColorVar, worstStatus, availableVantages, toggleGridVantage, vantageControlChips, bandVantageFor, gridShowsTarget, adminMode, adminSessionState, createAdminStateController, statusProbeOwnsView, relTime, listTargets, addTarget, editTarget, removeTarget, buildTargetNode, buildGroupNode, labelHTML, collectingNote, vantageBundleFilename, cfgTree, reweightSiblings, reorderSiblings, editNodeAtPath, removeNodeAtPath, renameNodeAtPath, addNodeAtPath, moveNode, moveInList, cfgDropDestination, cfgVisibleRows, cfgTreeKey, tkey, ntpStatHtml, ntpStatOf, ntpStatSelect };
 
   // ---------------------------------------------------------------- init (DOM) --
   function init() {
@@ -1854,15 +1828,28 @@
     $('vantRetry').addEventListener('click', () => renderVantages());
     function reportMintError(isRegen, msg) {
       if (isRegen) window.alert('Regenerate failed: ' + msg);
-      else $('vantAddErr').textContent = msg;
+      else { $('vantAddNote').textContent = ''; $('vantAddErr').textContent = msg; }
     }
-    // mintVantage POSTs a name; the store creates or rotates (regenerate == re-POST the
-    // same name). On success it reveals the one-time key/snippet.
+    // reportMintSuccess mirrors reportMintError's isRegen split: regenerate is a table-row
+    // action (no dedicated status line nearby) so it gets an alert; add gets the inline note
+    // beside the form so it doesn't interrupt the flow of adding several vantages in a row.
+    function reportMintSuccess(isRegen, filename) {
+      const msg = 'Downloaded ' + filename + ' — run `docker compose up -d` in the extracted folder.';
+      if (isRegen) window.alert(msg);
+      else $('vantAddNote').textContent = msg;
+    }
+    // mintVantage POSTs a name; the store creates or rotates (regenerate == re-POST the same
+    // name, minting a fresh cert that invalidates the old one). The hub mints the vantage's
+    // mTLS client identity server-side and, via `?format=bundle` + `Accept: application/gzip`,
+    // hands back a ready-to-run tar.gz (agent.yaml + docker-compose.yml + README) instead of the
+    // old copy-paste key reveal — there is no client-side key material to build files from
+    // anymore, the server already assembled them.
     async function mintVantage(name, isRegen) {
       let r;
       try {
-        r = await fetch('/api/admin/vantages', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
+        r = await fetch('/api/admin/vantages?format=bundle', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Accept': 'application/gzip' },
           body: JSON.stringify({ name }),
         });
       } catch (err) { reportMintError(isRegen, 'Network error.'); return; }
@@ -1873,65 +1860,23 @@
         reportMintError(isRegen, msg);
         return;
       }
-      let data;
-      try { data = await r.json(); } catch (e) { reportMintError(isRegen, 'Malformed server response.'); return; }
-      $('vantName').value = '';
-      $('vantAddErr').textContent = '';
-      showReveal(data.name, data.key || '');
-    }
-    // Reveal-modal state: the one-time key + which file the toggle is showing. Held only while
-    // the modal is open; closeReveal() clears the key so it never lingers in memory or the DOM.
-    let revealName = '', revealKey = '', revealPane = 'agent';
-    const revealFile = () => (revealPane === 'compose' ? 'docker-compose.yaml' : 'agent.yaml');
-    // renderRevealPane paints the active file into the <pre> and syncs the tab state. agent.yaml
-    // carries the key (hub defaults to this page's origin — the browser knows the real hub; the
-    // server only had a placeholder); the compose file is keyless and identical for every vantage.
-    function renderRevealPane() {
-      $('vantRevealSnippet').textContent = revealPane === 'compose'
-        ? agentCompose()
-        : agentYaml(revealName, revealKey, window.location.origin);
-      $('vantTabAgent').setAttribute('aria-selected', String(revealPane === 'agent'));
-      $('vantTabCompose').setAttribute('aria-selected', String(revealPane === 'compose'));
-    }
-    function showReveal(name, key) {
-      revealName = name; revealKey = key; revealPane = 'agent';
-      $('vantRevealName').textContent = name;
-      renderRevealPane();
-      $('vantReveal').classList.remove('hidden');
-      $('vantRevealClose').focus();
-    }
-    function closeReveal() {
-      revealName = ''; revealKey = '';         // drop the key from memory
-      $('vantRevealSnippet').textContent = ''; // never leave key material in the DOM
-      $('vantReveal').classList.add('hidden');
-      renderVantages(); // refresh the list (new/rotated row, updated counts)
-    }
-    $('vantTabAgent').addEventListener('click', () => { revealPane = 'agent'; renderRevealPane(); });
-    $('vantTabCompose').addEventListener('click', () => { revealPane = 'compose'; renderRevealPane(); });
-    $('vantRevealClose').addEventListener('click', closeReveal);
-    $('vantReveal').addEventListener('click', (e) => { if (e.target === $('vantReveal')) closeReveal(); }); // backdrop
-    $('vantDownload').addEventListener('click', () => {
-      const blob = new Blob([$('vantRevealSnippet').textContent], { type: 'text/yaml' });
+      let blob;
+      try { blob = await r.blob(); } catch (e) { reportMintError(isRegen, 'Malformed server response.'); return; }
+      const filename = Dash.vantageBundleFilename(name);
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
-      a.href = url; a.download = revealFile();
+      a.href = url; a.download = filename;
       document.body.appendChild(a); a.click(); a.remove();
       URL.revokeObjectURL(url);
-    });
-    $('vantCopy').addEventListener('click', async () => {
-      const text = $('vantRevealSnippet').textContent;
-      try {
-        await navigator.clipboard.writeText(text);
-        $('vantCopy').textContent = 'Copied';
-        setTimeout(() => { $('vantCopy').textContent = 'Copy'; }, 1500);
-      } catch (e) {
-        const rng = document.createRange(); rng.selectNodeContents($('vantRevealSnippet'));
-        const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(rng);
-      }
-    });
+      $('vantName').value = '';
+      $('vantAddErr').textContent = '';
+      reportMintSuccess(isRegen, filename);
+      renderVantages(); // refresh the list (new/rotated row, updated counts)
+    }
     $('vantAdd').addEventListener('submit', (e) => {
       e.preventDefault();
       $('vantAddErr').textContent = '';
+      $('vantAddNote').textContent = '';
       const name = $('vantName').value.trim();
       if (!name) { $('vantAddErr').textContent = 'Name required.'; return; }
       if (!/^[A-Za-z0-9._-]+$/.test(name)) { $('vantAddErr').textContent = 'Use letters, digits, . _ - only.'; return; }
@@ -2613,8 +2558,6 @@
       } catch (e) { if (Dash.statusProbeOwnsView(expectedView, currentView())) $('statusText').textContent = 'collector unreachable — showing last known'; }
     }
     function route() {
-      // Never leave a one-time key in the DOM across navigations: clear any open reveal.
-      { const rev = $('vantReveal'); if (rev && !rev.classList.contains('hidden')) { $('vantRevealSnippet').textContent = ''; rev.classList.add('hidden'); } }
       { const cm = $('cfgModal'); if (cm && !cm.classList.contains('hidden')) cm.classList.add('hidden'); }
       { const cim = $('cfgImportModal'); if (cim && !cim.classList.contains('hidden')) cim.classList.add('hidden'); }
       const r = parseRoute(location.hash);

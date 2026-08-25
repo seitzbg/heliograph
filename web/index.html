@@ -448,32 +448,15 @@
       <form id="vantAdd" class="panel vadmin-row" autocomplete="off">
         <label class="vadmin-lbl" for="vantName">Add vantage</label>
         <input id="vantName" type="text" class="vadmin-input" placeholder="e.g. nyc" autocomplete="off">
-        <button type="submit" class="vadmin-btn">Add &amp; mint key</button>
+        <button type="submit" class="vadmin-btn">Add &amp; download bundle</button>
         <span id="vantAddErr" class="vadmin-err" role="alert"></span>
       </form>
+      <p id="vantAddNote" class="vadmin-note-inline" role="status" style="font-size:11.5px; color:var(--ink-soft); margin:4px 2px 0"></p>
       <p class="admin-hint">Viewing read-only — use <b>Log in</b> (top right) to add or manage vantages.</p>
     </div>
 
     <div id="vantError" class="panel vadmin-note hidden">
       Couldn't reach the admin API. <button id="vantRetry" class="vadmin-btn">Retry</button>
-    </div>
-
-    <div id="vantReveal" class="vadmin-reveal-backdrop hidden">
-      <div class="panel vadmin-reveal" role="dialog" aria-modal="true" aria-labelledby="vantRevealTitle">
-        <h3 id="vantRevealTitle">Agent key for <span id="vantRevealName"></span></h3>
-        <p class="vadmin-warn">Shown once — store it now. You can't retrieve it later; you can only regenerate a new one.</p>
-        <div class="tabs" role="tablist" id="vantRevealTabs" style="margin-top:2px; margin-bottom:10px">
-          <button id="vantTabAgent" role="tab" aria-selected="true">agent.yaml</button>
-          <button id="vantTabCompose" role="tab" aria-selected="false">docker-compose.yaml</button>
-        </div>
-        <pre id="vantRevealSnippet" class="vadmin-pre"></pre>
-        <p class="vadmin-note-inline" style="font-size:11.5px; color:var(--ink-soft); margin:8px 0 0">Save both files in one folder, then <code>docker compose up -d</code>. The key lives only in <code>agent.yaml</code>.</p>
-        <div class="vadmin-reveal-actions">
-          <button id="vantCopy" class="vadmin-btn">Copy</button>
-          <button id="vantDownload" class="vadmin-btn">Download</button>
-          <button id="vantRevealClose" class="vadmin-btn">Done</button>
-        </div>
-      </div>
     </div>
   </section>
 
