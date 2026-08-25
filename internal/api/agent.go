@@ -19,9 +19,9 @@ import (
 )
 
 // agentAssignment serves the calling vantage its target list. The vantage identity
-// comes from the authenticated key (requireAgent), never from a query param, so a
-// key can only ever fetch its own assignment. config_version is served as an ETag;
-// an agent that replays it in If-None-Match gets 304.
+// comes from the authenticated request context (vantageFrom), never from a query
+// param, so a caller can only ever fetch its own assignment. config_version is
+// served as an ETag; an agent that replays it in If-None-Match gets 304.
 func (srv *Server) agentAssignment(w http.ResponseWriter, r *http.Request) {
 	v := vantageFrom(r)
 	if v == store.DefaultVantage {

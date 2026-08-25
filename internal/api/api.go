@@ -28,10 +28,10 @@ import (
 	"github.com/seitzbg/heliograph/internal/vantage"
 )
 
-// VantageAdmin is the subset of the vantage key store the admin API uses. Kept an
+// VantageAdmin is the subset of the vantage registry the admin API uses. Kept an
 // interface so the handlers test with a fake and api needs no live DB.
 type VantageAdmin interface {
-	Add(ctx context.Context, name string) (fullKey string, err error)
+	Register(ctx context.Context, name string) error
 	List(ctx context.Context) ([]vantage.Info, error)
 	Revoke(ctx context.Context, name string) (removed bool, err error)
 }
@@ -120,13 +120,12 @@ type Server struct {
 	// one metric, so a config change takes effect immediately and a probe-level default is honored
 	// even before the target has any stored round. nil falls back to the stored round's kind.
 	EffectiveMetric func(target string) string
-	// VantageAuth, if set, gates the agent routes (requireAgent) behind an API-key check
-	// against the vantage key store. nil means the agent routes are not registered at
-	// all — fail-closed, same pattern as the admin API's AdminPassword gate.
-	VantageAuth VantageAuth
 	// Assignment, if set, returns the target list, the effective probe-level config
 	// (probe kind -> its `probes.<Kind>` block), and a config_version for a vantage,
-	// computed over the live monitor set. Required (with VantageAuth) for the agent routes.
+	// computed over the live monitor set. Used by agentAssignment/agentResults, which are
+	// currently unwired from any route — the Bearer-key auth that used to gate them
+	// (requireAgent) was removed with the old key-based federation path; an mTLS listener (a
+	// later task) re-lights them.
 	Assignment func(vantage string) (targets []model.Monitor, probeCfgs map[string]map[string]string, configVersion string)
 	// OnIngest, if set, is called with the accepted remote outcomes AFTER they are durably
 	// stored, so the hub evaluates alerts for remote vantages (each outcome carries its
@@ -279,10 +278,10 @@ func (srv *Server) Routes() *http.ServeMux {
 	if srv.AdminPassword != "" && len(srv.AdminKey) > 0 && srv.ConfigImport != nil {
 		mux.HandleFunc("POST /api/admin/config/import", srv.requireAdmin(srv.importConfig))
 	}
-	if srv.VantageAuth != nil && srv.Assignment != nil {
-		mux.HandleFunc("GET /agent/v1/assignment", srv.requireAgent(srv.agentAssignment))
-		mux.HandleFunc("POST /agent/v1/results", srv.requireAgent(srv.agentResults))
-	}
+	// The agent routes (/agent/v1/assignment, /agent/v1/results) are not registered here: the
+	// Bearer-key auth that used to gate them (requireAgent) was removed with the old key-based
+	// federation path. agentAssignment/agentResults stay as unexported methods — an mTLS
+	// listener (a later task) re-lights them on its own auth path.
 	if srv.webDir != "" {
 		// Serve the SPA/static assets at the root (same-origin with the API).
 		mux.Handle("GET /", noCacheStatic(http.FileServer(http.Dir(srv.webDir))))
@@ -1651,21 +1650,22 @@ func (srv *Server) addVantage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"invalid vantage name (use letters, digits, . _ -)"}`, http.StatusBadRequest)
 		return
 	}
-	key, err := srv.Vantages.Add(r.Context(), body.Name)
-	if err != nil {
+	if err := srv.Vantages.Register(r.Context(), body.Name); err != nil {
 		switch {
 		case errors.Is(err, vantage.ErrReserved):
 			http.Error(w, `{"error":"\"local\" is reserved for the hub"}`, http.StatusConflict)
 		case errors.Is(err, vantage.ErrInvalidName):
 			http.Error(w, `{"error":"invalid vantage name (use letters, digits, . _ -)"}`, http.StatusBadRequest)
 		default:
-			slog.Error("addVantage: store add failed", "err", err)
+			slog.Error("addVantage: store register failed", "err", err)
 			http.Error(w, `{"error":"store unavailable"}`, http.StatusServiceUnavailable)
 		}
 		return
 	}
-	w.Header().Set("Cache-Control", "no-store") // the one-time key is in this body — never cache it
-	writeJSON(w, map[string]any{"name": body.Name, "key": key, "snippet": vantage.AgentSnippet(body.Name, key)})
+	// Registering only reserves the name. Minting its mTLS client identity (cert + key) is a
+	// separate step done via the CLI (`smoked vantage add <name>`), which prints the PEM bundle
+	// once to stdout — the admin API never carries private key material.
+	writeJSON(w, map[string]any{"name": body.Name, "registered": true})
 }
 
 func (srv *Server) revokeVantage(w http.ResponseWriter, r *http.Request) {

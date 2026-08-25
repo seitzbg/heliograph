@@ -13,16 +13,16 @@ import (
 )
 
 type fakeKeys struct {
-	added   []string
-	revoked []string
+	registered []string
+	revoked    []string
 }
 
-func (f *fakeKeys) Add(_ context.Context, name string) (string, error) {
+func (f *fakeKeys) Register(_ context.Context, name string) error {
 	if name == "local" { // mirror the real store: the hub's own vantage is reserved
-		return "", vantage.ErrReserved
+		return vantage.ErrReserved
 	}
-	f.added = append(f.added, name)
-	return "smk_id_" + name, nil
+	f.registered = append(f.registered, name)
+	return nil
 }
 func (f *fakeKeys) List(context.Context) ([]vantage.Info, error) {
 	return []vantage.Info{{Name: "nyc"}}, nil
@@ -59,7 +59,7 @@ func login(t *testing.T, mux *http.ServeMux, pass string) *http.Cookie {
 	return nil
 }
 
-func TestAddVantageRejectsInvalidNameAndSetsNoStore(t *testing.T) {
+func TestAddVantageRejectsInvalidName(t *testing.T) {
 	srv, _ := adminServer("hunter2")
 	mux := srv.Routes()
 	cookie := login(t, mux, "hunter2")
@@ -73,7 +73,8 @@ func TestAddVantageRejectsInvalidNameAndSetsNoStore(t *testing.T) {
 		t.Fatalf("invalid vantage name = %d, want 400", w.Code)
 	}
 
-	// valid name -> 200 with Cache-Control: no-store (the one-time key is in the body)
+	// valid name -> 200 (registers the name; minting its mTLS client identity is a
+	// separate CLI step, so this response carries no secret to guard with no-store)
 	r = httptest.NewRequest("POST", "/api/admin/vantages", strings.NewReader(`{"name":"nyc"}`))
 	r.AddCookie(cookie)
 	w = httptest.NewRecorder()
@@ -81,11 +82,8 @@ func TestAddVantageRejectsInvalidNameAndSetsNoStore(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("valid add = %d, want 200", w.Code)
 	}
-	if w.Header().Get("Cache-Control") != "no-store" {
-		t.Errorf("add response Cache-Control = %q, want no-store", w.Header().Get("Cache-Control"))
-	}
 
-	// the login response is also no-store
+	// the login response is still no-store (the session cookie/token is a secret)
 	r = httptest.NewRequest("POST", "/api/admin/login", strings.NewReader(`{"password":"hunter2"}`))
 	w = httptest.NewRecorder()
 	mux.ServeHTTP(w, r)
@@ -107,8 +105,8 @@ func TestAddVantageReservedNameIsConflict(t *testing.T) {
 	if w.Code != http.StatusConflict {
 		t.Fatalf("reserved-name add = %d, want 409", w.Code)
 	}
-	if len(fk.added) != 0 {
-		t.Fatalf("reserved name must not be recorded as added, got %v", fk.added)
+	if len(fk.registered) != 0 {
+		t.Fatalf("reserved name must not be recorded as registered, got %v", fk.registered)
 	}
 }
 
@@ -233,11 +231,11 @@ func TestAdminLoginAndCRUD(t *testing.T) {
 	}
 	var addResp map[string]any
 	_ = json.NewDecoder(w.Body).Decode(&addResp)
-	if addResp["key"] != "smk_id_lon" {
-		t.Errorf("add key = %v, want smk_id_lon", addResp["key"])
+	if addResp["registered"] != true {
+		t.Errorf("add registered = %v, want true", addResp["registered"])
 	}
-	if len(fk.added) != 1 || fk.added[0] != "lon" {
-		t.Errorf("Add not called with lon: %v", fk.added)
+	if len(fk.registered) != 1 || fk.registered[0] != "lon" {
+		t.Errorf("Register not called with lon: %v", fk.registered)
 	}
 
 	// revoke via path value
