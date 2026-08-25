@@ -28,7 +28,20 @@ CREATE TABLE IF NOT EXISTS vantage_ca (
 	cert_pem   bytea NOT NULL,
 	key_pem    bytea NOT NULL,
 	created_at timestamptz NOT NULL DEFAULT now()
-);`
+);
+
+-- One-time migration from the pre-mTLS key store: preserve registered vantage
+-- names, then drop the obsolete key-hash table. No-op on a fresh DB, idempotent
+-- on reruns (the table is gone after the first upgrade).
+DO $$
+BEGIN
+	IF to_regclass('vantage_keys') IS NOT NULL THEN
+		INSERT INTO vantages (name, created_at, last_seen)
+			SELECT name, created_at, last_seen FROM vantage_keys
+			ON CONFLICT (name) DO NOTHING;
+		DROP TABLE vantage_keys;
+	END IF;
+END $$;`
 
 // reserved is the hub's own vantage name — it mirrors store.DefaultVantage.
 // Verified with `go build` that importing internal/store here does not actually
