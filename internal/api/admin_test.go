@@ -1,8 +1,12 @@
 package api
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -15,6 +19,7 @@ import (
 type fakeKeys struct {
 	registered []string
 	revoked    []string
+	issued     []string
 }
 
 func (f *fakeKeys) Register(_ context.Context, name string) error {
@@ -33,6 +38,20 @@ func (f *fakeKeys) Revoke(_ context.Context, name string) (bool, error) {
 }
 func (f *fakeKeys) IsActive(_ context.Context, name string) (bool, error) {
 	return name == "nyc", nil // mirrors List(), which only knows about "nyc"
+}
+
+// fakeCertPEM/fakeKeyPEM/fakeCAPEM are deterministic stand-ins for a minted mTLS identity —
+// recognizable markers, not real PEM, so tests can assert on their presence without paying for
+// real key generation.
+var (
+	fakeCertPEM = []byte("-----BEGIN CERTIFICATE-----\nFAKECERT\n-----END CERTIFICATE-----\n")
+	fakeKeyPEM  = []byte("-----BEGIN EC PRIVATE KEY-----\nFAKEKEY\n-----END EC PRIVATE KEY-----\n")
+	fakeCAPEM   = []byte("-----BEGIN CERTIFICATE-----\nFAKECA\n-----END CERTIFICATE-----\n")
+)
+
+func (f *fakeKeys) IssueClientCert(_ context.Context, name string) (certPEM, keyPEM, caPEM []byte, err error) {
+	f.issued = append(f.issued, name)
+	return fakeCertPEM, fakeKeyPEM, fakeCAPEM, nil
 }
 
 func adminServer(pass string) (*Server, *fakeKeys) {
@@ -76,8 +95,9 @@ func TestAddVantageRejectsInvalidName(t *testing.T) {
 		t.Fatalf("invalid vantage name = %d, want 400", w.Code)
 	}
 
-	// valid name -> 200 (registers the name; minting its mTLS client identity is a
-	// separate CLI step, so this response carries no secret to guard with no-store)
+	// valid name -> 200 (registers the name AND mints its mTLS client identity in the same
+	// response — see TestAddVantageReturnsBundle / TestAddVantageReturnsJSONWithPEMFields for the
+	// mint-time PEM payload itself)
 	r = httptest.NewRequest("POST", "/api/admin/vantages", strings.NewReader(`{"name":"nyc"}`))
 	r.AddCookie(cookie)
 	w = httptest.NewRecorder()
@@ -110,6 +130,168 @@ func TestAddVantageReservedNameIsConflict(t *testing.T) {
 	}
 	if len(fk.registered) != 0 {
 		t.Fatalf("reserved name must not be recorded as registered, got %v", fk.registered)
+	}
+	if len(fk.issued) != 0 {
+		t.Fatalf("a rejected register must not mint a client cert, got %v", fk.issued)
+	}
+}
+
+// TestAddVantageReturnsBundle covers the gzip-bundle path (Accept: application/gzip): a
+// successful mint streams a downloadable tar.gz — headers set before the body, gzip magic bytes,
+// and (unpacked) an agent.yaml carrying the minted PEM material.
+func TestAddVantageReturnsBundle(t *testing.T) {
+	srv, fk := adminServer("hunter2")
+	srv.AgentHubURL = "https://hub.example.test:8443"
+	mux := srv.Routes()
+	cookie := login(t, mux, "hunter2")
+
+	r := httptest.NewRequest("POST", "/api/admin/vantages", strings.NewReader(`{"name":"nyc"}`))
+	r.AddCookie(cookie)
+	r.Header.Set("Accept", "application/gzip")
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("bundle add = %d, want 200", w.Code)
+	}
+	if ct := w.Header().Get("Content-Type"); ct != "application/gzip" {
+		t.Errorf("Content-Type = %q, want application/gzip", ct)
+	}
+	if cd := w.Header().Get("Content-Disposition"); !strings.Contains(cd, "nyc-vantage.tar.gz") {
+		t.Errorf("Content-Disposition = %q, want it to contain nyc-vantage.tar.gz", cd)
+	}
+	body := w.Body.Bytes()
+	if len(body) < 2 || body[0] != 0x1f || body[1] != 0x8b {
+		t.Fatalf("body does not start with gzip magic bytes: %x", body[:min(len(body), 8)])
+	}
+	if len(fk.issued) != 1 || fk.issued[0] != "nyc" {
+		t.Fatalf("IssueClientCert not called with nyc: %v", fk.issued)
+	}
+
+	// Unpack and confirm agent.yaml made it into the archive with the minted PEM material.
+	gr, err := gzip.NewReader(bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("gzip.NewReader: %v", err)
+	}
+	tr := tar.NewReader(gr)
+	var agentYAML []byte
+	found := false
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("tar read: %v", err)
+		}
+		if hdr.Name == "agent.yaml" {
+			found = true
+			agentYAML, err = io.ReadAll(tr)
+			if err != nil {
+				t.Fatalf("read agent.yaml: %v", err)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("bundle has no agent.yaml entry")
+	}
+	if !bytes.Contains(agentYAML, []byte("FAKECERT")) || !bytes.Contains(agentYAML, []byte("FAKEKEY")) || !bytes.Contains(agentYAML, []byte("FAKECA")) {
+		t.Errorf("agent.yaml missing minted PEM material: %s", agentYAML)
+	}
+	if !bytes.Contains(agentYAML, []byte("hub.example.test")) {
+		t.Errorf("agent.yaml missing configured hub URL: %s", agentYAML)
+	}
+}
+
+// TestAddVantageBundleViaFormatQueryParam covers the ?format=bundle content-negotiation path
+// (no Accept header needed).
+func TestAddVantageBundleViaFormatQueryParam(t *testing.T) {
+	srv, _ := adminServer("hunter2")
+	mux := srv.Routes()
+	cookie := login(t, mux, "hunter2")
+
+	r := httptest.NewRequest("POST", "/api/admin/vantages?format=bundle", strings.NewReader(`{"name":"nyc"}`))
+	r.AddCookie(cookie)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("bundle add via query param = %d, want 200", w.Code)
+	}
+	if ct := w.Header().Get("Content-Type"); ct != "application/gzip" {
+		t.Errorf("Content-Type = %q, want application/gzip", ct)
+	}
+	body := w.Body.Bytes()
+	if len(body) < 2 || body[0] != 0x1f || body[1] != 0x8b {
+		t.Fatalf("body does not start with gzip magic bytes: %x", body[:min(len(body), 8)])
+	}
+}
+
+// TestAddVantageReturnsJSONWithPEMFields covers the JSON content-negotiation path: mint-time is
+// the one moment the admin API is allowed to carry private key material (spec §3b), so the JSON
+// response must include the minted cert/key/CA alongside the existing registered:true shape.
+func TestAddVantageReturnsJSONWithPEMFields(t *testing.T) {
+	srv, _ := adminServer("hunter2")
+	srv.AgentHubURL = "https://hub.example.test:8443"
+	mux := srv.Routes()
+	cookie := login(t, mux, "hunter2")
+
+	r := httptest.NewRequest("POST", "/api/admin/vantages", strings.NewReader(`{"name":"nyc"}`))
+	r.AddCookie(cookie)
+	r.Header.Set("Accept", "application/json")
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("json add = %d, want 200", w.Code)
+	}
+	var resp map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp["name"] != "nyc" {
+		t.Errorf("name = %v, want nyc", resp["name"])
+	}
+	if resp["registered"] != true {
+		t.Errorf("registered = %v, want true", resp["registered"])
+	}
+	if resp["hub"] != "https://hub.example.test:8443" {
+		t.Errorf("hub = %v, want https://hub.example.test:8443", resp["hub"])
+	}
+	cert, _ := resp["client_cert"].(string)
+	key, _ := resp["client_key"].(string)
+	ca, _ := resp["ca_cert"].(string)
+	if !strings.Contains(cert, "FAKECERT") {
+		t.Errorf("client_cert = %q, want it to contain FAKECERT", cert)
+	}
+	if !strings.Contains(key, "FAKEKEY") {
+		t.Errorf("client_key = %q, want it to contain FAKEKEY", key)
+	}
+	if !strings.Contains(ca, "FAKECA") {
+		t.Errorf("ca_cert = %q, want it to contain FAKECA", ca)
+	}
+}
+
+// TestAddVantageDefaultHubPlaceholder covers the unwired-AgentHubURL fallback: when main hasn't
+// set srv.AgentHubURL (Task 11), the response still carries a clearly-a-placeholder hub value
+// rather than an empty string a user might silently ship in a bundle.
+func TestAddVantageDefaultHubPlaceholder(t *testing.T) {
+	srv, _ := adminServer("hunter2")
+	mux := srv.Routes()
+	cookie := login(t, mux, "hunter2")
+
+	r := httptest.NewRequest("POST", "/api/admin/vantages", strings.NewReader(`{"name":"nyc"}`))
+	r.AddCookie(cookie)
+	r.Header.Set("Accept", "application/json")
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, r)
+
+	var resp map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp["hub"] != "https://HUB-HOSTNAME:8443" {
+		t.Errorf("hub = %v, want the placeholder https://HUB-HOSTNAME:8443", resp["hub"])
 	}
 }
 

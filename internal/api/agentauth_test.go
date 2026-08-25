@@ -52,6 +52,9 @@ func (f *fakeVantageAdmin) IsActive(_ context.Context, name string) (bool, error
 	}
 	return f.active[name], nil
 }
+func (f *fakeVantageAdmin) IssueClientCert(context.Context, string) (certPEM, keyPEM, caPEM []byte, err error) {
+	return nil, nil, nil, nil
+}
 
 // certRequest returns a request carrying a synthetic verified peer certificate with the given
 // CommonName, the way the mTLS listener's completed handshake would (a later task wires the

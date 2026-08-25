@@ -37,6 +37,11 @@ type VantageAdmin interface {
 	// IsActive reports whether name is a known, non-revoked vantage — the authorization check
 	// requireAgent runs against a client cert's CommonName (mTLS federation auth).
 	IsActive(ctx context.Context, name string) (bool, error)
+	// IssueClientCert mints a fresh mTLS client identity (leaf cert + key, each PEM-encoded) for
+	// name from the hub's federation CA, plus the CA's own cert PEM so the caller can verify the
+	// hub in turn. addVantage calls this immediately after Register so the one-click "add
+	// vantage" admin flow can hand back a ready-to-run onboarding bundle.
+	IssueClientCert(ctx context.Context, name string) (certPEM, keyPEM, caPEM []byte, err error)
 }
 
 // ErrConfigInvalid and ErrConfigConflict are the sentinel results a ConfigApply
@@ -84,6 +89,11 @@ type Server struct {
 	Vantages      VantageAdmin
 	AdminPassword string
 	AdminKey      []byte
+	// AgentHubURL is the hub's own externally-reachable base URL (scheme + host + mTLS port,
+	// e.g. "https://heliograph.bsd-unix.net:8443"), embedded into a minted vantage's agent.yaml
+	// so the agent knows where to report. Populated in main from -agent-hostname + ":8443"
+	// (Task 11); empty here means no flag was set, and addVantage falls back to a placeholder.
+	AgentHubURL string
 	// AdminSessionTTL is how long a login stays valid (token expiry + cookie Max-Age). Zero or
 	// negative means DefaultAdminSessionTTL; production loads SMOKED_ADMIN_SESSION_TTL.
 	AdminSessionTTL time.Duration
@@ -1665,10 +1675,43 @@ func (srv *Server) addVantage(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	// Registering only reserves the name. Minting its mTLS client identity (cert + key) is a
-	// separate step done via the CLI (`smoked vantage add <name>`), which prints the PEM bundle
-	// once to stdout — the admin API never carries private key material.
-	writeJSON(w, map[string]any{"name": body.Name, "registered": true})
+	// Mint the vantage's mTLS client identity right away, so the one-click "add vantage" admin
+	// flow can hand back a ready-to-run onboarding bundle in the same response. This is the ONE
+	// place the admin API carries private key material: mint time is the only moment smoked
+	// itself holds the client key, so it must be returned here or nowhere (spec §3b). The CLI
+	// (`smoked vantage add <name>`) mints the same way and prints the same PEM bundle to stdout;
+	// both paths are equally admin/operator-gated.
+	certPEM, keyPEM, caPEM, err := srv.Vantages.IssueClientCert(r.Context(), body.Name)
+	if err != nil {
+		slog.Error("addVantage: issue client cert failed", "name", body.Name, "err", err)
+		http.Error(w, `{"error":"mint failed"}`, http.StatusInternalServerError)
+		return
+	}
+
+	hub := srv.AgentHubURL
+	if hub == "" {
+		hub = "https://HUB-HOSTNAME:8443"
+	}
+
+	wantsBundle := strings.Contains(r.Header.Get("Accept"), "application/gzip") || r.URL.Query().Get("format") == "bundle"
+	if wantsBundle {
+		w.Header().Set("Content-Type", "application/gzip")
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", body.Name+"-vantage.tar.gz"))
+		// Headers (and the 200 status) are committed on the first Write below — a bundle-encoding
+		// failure past that point can only be logged, not turned into an error status.
+		if err := vantage.WriteBundleTarGz(w, hub, body.Name, certPEM, keyPEM, caPEM); err != nil {
+			slog.Error("addVantage: write bundle failed", "name", body.Name, "err", err)
+		}
+		return
+	}
+	writeJSON(w, map[string]any{
+		"name":        body.Name,
+		"registered":  true,
+		"hub":         hub,
+		"client_cert": string(certPEM),
+		"client_key":  string(keyPEM),
+		"ca_cert":     string(caPEM),
+	})
 }
 
 func (srv *Server) revokeVantage(w http.ResponseWriter, r *http.Request) {
