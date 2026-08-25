@@ -56,6 +56,52 @@ func (s *Store) CA(ctx context.Context) (*CA, error) {
 	return s.selectCA(ctx)
 }
 
+// IssueClientCert signs a fresh per-vantage client certificate (CN=name,
+// EKU clientAuth, ~10y validity) from the hub's federation CA, generating
+// and persisting the CA first if it doesn't exist yet. It returns the leaf
+// cert and key (each PEM-encoded) plus the CA's own cert PEM, so a caller
+// has everything needed to configure a vantage's mTLS client identity and
+// verify it against the hub's root.
+func (s *Store) IssueClientCert(ctx context.Context, name string) (certPEM, keyPEM, caPEM []byte, err error) {
+	ca, err := s.CA(ctx)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("vantage: issue client cert: %w", err)
+	}
+
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("vantage: issue client cert: generate key: %w", err)
+	}
+
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("vantage: issue client cert: generate serial: %w", err)
+	}
+
+	now := time.Now()
+	tmpl := &x509.Certificate{
+		SerialNumber: serial,
+		Subject:      pkix.Name{CommonName: name},
+		NotBefore:    now,
+		NotAfter:     now.AddDate(10, 0, 0),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca.Cert, &key.PublicKey, ca.Key)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("vantage: issue client cert: create certificate: %w", err)
+	}
+
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("vantage: issue client cert: marshal key: %w", err)
+	}
+
+	certPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	keyPEM = pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+	return certPEM, keyPEM, ca.CertPEM, nil
+}
+
 func (s *Store) selectCA(ctx context.Context) (*CA, error) {
 	var certPEM, keyPEM []byte
 	err := s.pool.QueryRow(ctx, `SELECT cert_pem, key_pem FROM vantage_ca WHERE id=1`).Scan(&certPEM, &keyPEM)
