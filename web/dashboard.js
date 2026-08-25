@@ -1838,12 +1838,16 @@
       if (isRegen) window.alert(msg);
       else $('vantAddNote').textContent = msg;
     }
-    // mintVantage POSTs a name; the store creates or rotates (regenerate == re-POST the same
-    // name, minting a fresh cert that invalidates the old one). The hub mints the vantage's
-    // mTLS client identity server-side and, via `?format=bundle` + `Accept: application/gzip`,
-    // hands back a ready-to-run tar.gz (agent.yaml + docker-compose.yml + README) instead of the
-    // old copy-paste key reveal — there is no client-side key material to build files from
-    // anymore, the server already assembled them.
+    // mintVantage POSTs a name; the store registers it (no-op if already registered) and always
+    // issues a FRESH client certificate for it (regenerate == re-POST the same name). There is no
+    // CRL and no per-certificate revocation: the hub authorizes purely by the presented
+    // certificate's CommonName against the active vantage registry (requireAgent), so a
+    // regenerate does NOT invalidate any certificate issued earlier for the same name — both
+    // remain valid until the vantage itself is revoked (removed from the registry). The hub mints
+    // the vantage's mTLS client identity server-side and, via `?format=bundle` +
+    // `Accept: application/gzip`, hands back a ready-to-run tar.gz (agent.yaml +
+    // docker-compose.yml + README) instead of the old copy-paste key reveal — there is no
+    // client-side key material to build files from anymore, the server already assembled them.
     async function mintVantage(name, isRegen) {
       let r;
       try {
@@ -1890,7 +1894,7 @@
       const regen = e.target.closest('[data-regen]');
       if (regen) {
         const name = regen.getAttribute('data-regen');
-        if (window.confirm('Regenerate the key for "' + name + '"? This invalidates the current key; the agent must be reconfigured with the new one.')) {
+        if (window.confirm('Issue a fresh certificate bundle for "' + name + '"? The current certificate keeps working until you revoke and re-add the vantage.')) {
           mintVantage(name, true);
         }
         return;

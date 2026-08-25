@@ -107,7 +107,11 @@ name and it downloads a ready-to-run `<name>-vantage.tar.gz` — `agent.yaml`
 (with the client certificate, private key, and hub CA cert embedded) plus a
 `docker-compose.yml` and a `README.txt`. Copy the bundle to the vantage host,
 unpack it, and `docker compose up -d` — no key, ever. The panel also **list**s
-vantages (name, created, last-seen, target count) and **revoke**s one.
+vantages (name, created, last-seen, target count), **regenerate**s one (issues
+and downloads a *fresh* certificate bundle for an existing name — the
+previously issued certificate keeps working, since there's no revocation list;
+to actually retire a credential, **revoke** the vantage and re-**add** it), and
+**revoke**s one (removes it from the registry — see Security model below).
 It's reached through the proxy (behind the dashboard's Basic Auth, then its
 own admin password) or on `http://localhost:8087/` on the hub.
 
@@ -121,7 +125,11 @@ wrote bundle nyc-vantage.tar.gz for vantage "nyc"
 That tar.gz is the same onboarding bundle the GUI downloads. Omit `-out` to
 print the rendered `agent.yaml` to stdout instead (handy for `scp`-ing just the
 file), or pass `-json` to emit the raw PEMs as JSON. `-dsn` defaults to
-`$SMOKED_DSN`. List and revoke:
+`$SMOKED_DSN`. Running `vantage add nyc` again for an **already-registered**
+name — the CLI equivalent of the dashboard's **regenerate** — always issues
+and returns a brand-new certificate; it does not touch or invalidate any
+certificate issued earlier for the same name (see "Revocation is by removal"
+below). List and revoke:
 
 ```console
 $ smoked vantage ls

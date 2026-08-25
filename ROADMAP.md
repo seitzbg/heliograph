@@ -41,26 +41,36 @@ panel, the bundled reverse proxy, and the operator guide are all in — the feat
 
 Design (settled): the hub **assigns** work — agents pull a strict, schema-validated assignment
 (no eval of server-sent config); targets declare `vantages: [...]` (inherited, default
-`[local]`); transport is **HTTPS/JSON with a per-vantage API key** behind a **required reverse
-proxy** (a bundled Caddy with Let's Encrypt, or your own) — superseding the earlier gRPC+mTLS
-sketch; agents poll a versioned assignment (`304` when unchanged); keys are managed by a
-`smoked vantage` CLI and a password-gated admin API. Federation requires `-dsn`.
+`[local]`); transport is **HTTPS/JSON secured by mutual TLS** — smoked runs its own dedicated
+agent-API listener (`-agent-addr`/`-agent-hostname`), self-bootstraps a CA, and issues each
+vantage a CA-signed client certificate that *is* its identity, with no API key or shared secret
+anywhere. The dashboard stays behind a separate, **required reverse proxy** (a bundled Caddy with
+Let's Encrypt, or your own) for Basic Auth; agents never go through it. Agents poll a versioned
+assignment (`304` when unchanged); vantages are managed by a `smoked vantage` CLI and a
+password-gated admin API, both of which mint the client certificate. Federation requires `-dsn`.
 
 - ✅ Per-round vantage dimension in the store (the hub probes as `local`)
 - ✅ `vantages:` config (inherited down the tree) + a pure per-vantage assignment builder + a
   content-version hash for the `304` check
-- ✅ Vantage API-key store (salted-hash, constant-time verify) + `smoked vantage add/ls/revoke`
-  CLI + a password-gated `/api/admin/vantages` API with a session login
+- ✅ Vantage registry + a self-bootstrapped CA (mTLS client-cert auth by CommonName;
+  revoke-by-removal — deleting a vantage rejects its certificate on the next request even though
+  the certificate itself remains valid) + `smoked vantage add/ls/revoke` CLI + a password-gated
+  `/api/admin/vantages` API with a session login
 - ✅ Agent-facing endpoints: `GET /agent/v1/assignment` (304-aware, carries effective probe-level
-  config) + `POST /agent/v1/results` (API-key auth, validated + idempotent ingest); vantage-aware
-  storage reads + continuous aggregates (default `local`) so multi-vantage data no longer
-  conflates; remote rounds are alert-evaluated per vantage after durable ingest
+  config) + `POST /agent/v1/results` (mutual-TLS client-certificate auth, validated + idempotent
+  ingest), served only by smoked's own opt-in `-agent-addr` mTLS listener, never the plain
+  dashboard mux; vantage-aware storage reads + continuous aggregates (default `local`) so
+  multi-vantage data no longer conflates; remote rounds are alert-evaluated per vantage after
+  durable ingest
 - ✅ `smoke-agent` binary: pull assignment → probe → push results + in-memory store-and-forward
 - ✅ Per-vantage overlay graphs (the `~slave` equivalent) in the detail views — a median line per
   vantage, the smoke band on the focused one, a chip legend/selector
-- ✅ Vantages admin GUI panel — a login-gated tab to add / list / regenerate / revoke vantages and copy the agent snippet (one-time key reveal); `/api/admin/vantages` reports a per-vantage target count
+- ✅ Vantages admin GUI panel — a login-gated tab to add / list / regenerate / revoke vantages and
+  download a ready-to-run mTLS onboarding bundle (`agent.yaml` + `docker-compose.yml` + README);
+  `/api/admin/vantages` reports a per-vantage target count
 - ✅ Bundled Caddy (Let's Encrypt HTTP-01/DNS-01, `federation` compose profile, dashboard behind
-  Basic Auth) + documented external-reverse-proxy deployment
+  Basic Auth) + documented external-reverse-proxy deployment; smoked's own mTLS agent listener is
+  published directly, never proxied
 - ✅ Docs: README federation-deployment section + an operator guide (`docs/federation.md`,
   provision a vantage end-to-end)
 
@@ -229,7 +239,8 @@ native `Ping` probe (retire the `FPing` binary + `setcap`) and the maintenance f
 
 ## Notes / decisions
 - Stack: Go collector · TimescaleDB (raw samples; bands via SQL quantiles) · REST+JSON API ·
-  vanilla-JS/canvas frontend · HTTPS/JSON + per-vantage API keys for federation. (See blueprint §1.)
+  vanilla-JS/canvas frontend · HTTPS/JSON + mutual-TLS client certificates for federation. (See
+  blueprint §1.)
 - Storage deliberately keeps the raw N samples per round — the smoke bands need the
   distribution, not just the median.
 - Probe binaries that are unavailable are skipped with a warning, never fatal.

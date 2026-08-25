@@ -108,7 +108,7 @@ Most flags also read a `SMOKED_*` env var (`SMOKED_DSN`, `SMOKED_CONFIG`, `SMOKE
 **Subcommands** (dispatched from `os.Args[1]`, before flag parsing):
 
 ```sh
-smoked vantage add|ls|revoke ...   # per-vantage federation API keys (needs -dsn)
+smoked vantage add|ls|revoke ...   # per-vantage mTLS registry + self-bootstrapped CA (needs -dsn)
 smoked config import ...           # import a YAML tree into the DB config store
 smoked import smokeping ...        # import an existing SmokePing install (config; --history for RRD backfill)
 ```

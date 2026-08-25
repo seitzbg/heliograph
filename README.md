@@ -218,10 +218,13 @@ vantage**: type a name and it downloads a ready-to-run `<name>-vantage.tar.gz` �
 (hub URL, vantage name, and the client certificate/key/CA embedded as PEM) plus a
 `docker-compose.yml` and `README.txt`. Copy it to the vantage host, `tar xzf`, `docker compose up
 -d`. The CLI equivalent is `smoked vantage add <name> -out <name>-vantage.tar.gz` (or omit `-out`
-to print the rendered `agent.yaml` to stdout, or pass `-json` for the raw PEMs). Revocation is by
+to print the rendered `agent.yaml` to stdout, or pass `-json` for the raw PEMs). The panel also
+**list**s vantages and lets you **regenerate** one — issuing and downloading a fresh certificate
+bundle for an existing name, which does *not* invalidate the certificate already deployed there
+(there's no revocation list; both stay valid until the vantage is revoked). Revocation is by
 removal: `smoked vantage revoke <name>` deletes it from the registry, and any certificate bearing
 that name is rejected on its very next request even though the certificate itself remains
-cryptographically valid.
+cryptographically valid. To fully retire a credential, revoke the vantage and re-add it.
 
 **Bundled Caddy** (automatic Let's Encrypt, dashboard only) — opt-in via the `federation` compose
 profile:
