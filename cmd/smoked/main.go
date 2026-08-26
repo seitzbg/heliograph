@@ -531,8 +531,20 @@ func main() {
 				if port == "" {
 					port = "8443"
 				}
-				srv.AgentHubURL = "https://" + hostnames[0] + ":" + port
-				agentSrv := &http.Server{Addr: *agentAddr, Handler: srv.AgentMux(), TLSConfig: tlsCfg}
+				// net.JoinHostPort brackets an IPv6 literal so the URL stays parseable by the agent.
+				srv.AgentHubURL = "https://" + net.JoinHostPort(hostnames[0], port)
+				// Bounded timeouts mirror httpSrv: this listener faces the public internet, so a client
+				// that stalls the TLS handshake or a results upload must not hold the connection open
+				// indefinitely.
+				agentSrv := &http.Server{
+					Addr:              *agentAddr,
+					Handler:           srv.AgentMux(),
+					TLSConfig:         tlsCfg,
+					ReadHeaderTimeout: 5 * time.Second,
+					ReadTimeout:       10 * time.Second,
+					WriteTimeout:      30 * time.Second,
+					IdleTimeout:       120 * time.Second,
+				}
 				// Graceful shutdown on the same signal that stops the dashboard server below
 				// (ctx cancels on SIGINT/SIGTERM), so an in-flight agent result POST gets the
 				// same ~5s drain instead of being cut — mirrors the httpSrv.Shutdown hook.

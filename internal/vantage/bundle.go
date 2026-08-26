@@ -138,17 +138,20 @@ func WriteBundleTarGz(w io.Writer, hub, name string, certPEM, keyPEM, caPEM []by
 
 	files := []struct {
 		name    string
+		mode    int64
 		content []byte
 	}{
-		{"agent.yaml", RenderAgentYAML(hub, name, certPEM, keyPEM, caPEM)},
-		{"docker-compose.yml", RenderAgentCompose(name)},
-		{"README.txt", renderReadme(hub, name)},
+		// agent.yaml embeds the vantage's client PRIVATE KEY, so it extracts owner-only (0600); the
+		// compose + README carry no secret and stay world-readable.
+		{"agent.yaml", 0o600, RenderAgentYAML(hub, name, certPEM, keyPEM, caPEM)},
+		{"docker-compose.yml", 0o644, RenderAgentCompose(name)},
+		{"README.txt", 0o644, renderReadme(hub, name)},
 	}
 
 	for _, f := range files {
 		hdr := &tar.Header{
 			Name:     f.name,
-			Mode:     0o644,
+			Mode:     f.mode,
 			Size:     int64(len(f.content)),
 			Typeflag: tar.TypeReg,
 			ModTime:  bundleModTime,
