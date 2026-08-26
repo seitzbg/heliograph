@@ -246,11 +246,11 @@ try {
   check('M14: a grid panel is painted before the failure', () => {
     if (gridBefore < 200) throw new Error(`grid panel not painted (${gridBefore}px) — cannot test preservation`);
   });
-  // Fail every series fetch and jump the clock +4h so the 3h cutoff would drop the whole cache; then
-  // wake to force a refresh. The failed fetch must leave the painted graph alone.
-  await page.route('**/api/series/all**', (r) => r.abort());
-  await page.route('**/api/series?**', (r) => r.abort());
-  await page.route('**/api/rollup?**', (r) => r.abort());
+  // Fail every series/rollup fetch and jump the clock +4h so the 3h cutoff would drop the whole cache;
+  // then wake to force a refresh. The failed fetch must leave the painted graph alone. One regex route
+  // (not overlapping globs) — a glob `?` is a wildcard, so `**/api/series?**` also matches
+  // `/api/series/all?…` and double-handles the request ("Route is already handled").
+  await page.route(/\/api\/(series|rollup)/, (r) => r.abort());
   await page.evaluate(() => { const real = Date.now(); Date.now = () => real + 4 * 3600 * 1000; });
   await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
   await sleep(1800); // let the failed refresh settle
