@@ -185,9 +185,13 @@ try {
     });
 
     // The demo collector has no admin backend, so the Vantages panel renders "disabled". Drive the
-    // responsive TABLE css directly: reveal the list markup and inject a realistic logged-in row (a
-    // long name + Regenerate/Revoke). The fix routes the table's width into its own .vadmin-tablewrap
-    // scroller, so the document must not widen while the table's content still exceeds the wrapper.
+    // responsive TABLE css directly: navigate to the Vantages view (so #viewVantages is actually laid
+    // out — on another view it is display:none and every child measures 0), reveal the list markup, and
+    // inject a realistic logged-in row (a long name + Regenerate/Revoke). The fix routes the table's
+    // width into its own .vadmin-tablewrap scroller, so the document must not widen while the table's
+    // content still exceeds the wrapper.
+    await page.goto(`${BASE}/#vantages`, { waitUntil: 'load' });
+    await page.waitForSelector('#viewVantages', { state: 'visible', timeout: 20_000 });
     const va = await page.evaluate(() => {
       document.getElementById('vantDisabled').classList.add('hidden');
       document.getElementById('vantList').classList.remove('hidden');
