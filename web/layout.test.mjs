@@ -224,17 +224,20 @@ try {
     if (stackBefore < 150) throw new Error(`no painted #stackGrid canvas (${stackBefore}px) — cannot test`);
   });
   // Stall every range fetch, then wake (visibilitychange -> renderStack(curTarget), the same-target
-  // periodic refresh path). Mid-stall, the reused canvas must still show the last-known graph.
-  await page.route('**/api/series?**', async (r) => { await sleep(2500); await r.abort(); });
-  await page.route('**/api/rollup?**', async (r) => { await sleep(2500); await r.abort(); });
+  // periodic refresh path). Mid-stall, the reused canvas must still show the last-known graph. One
+  // regex route (not a glob — a glob `?` is a wildcard); abort is guarded so a late abort of an
+  // already-superseded request can't throw an uncaught error into a later test.
+  const STALL = 1500;
+  const stallRoute = /\/api\/(series|rollup)\?/;
+  await page.route(stallRoute, async (r) => { await sleep(STALL); await r.abort().catch(() => {}); });
   await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
-  await sleep(700); // mid-fetch: the refresh has started but not committed
+  await sleep(600); // mid-fetch: the refresh has started but not committed
   const stackDuring = await paintedPx('#stackGrid canvas');
   check('M15: stacked canvases stay painted during a slow refresh (not cleared before new data)', () => {
     if (stackDuring < stackBefore * 0.5) throw new Error(`stack canvas blanked mid-refresh: ${stackBefore}px -> ${stackDuring}px`);
   });
-  await page.unroute('**/api/series?**');
-  await page.unroute('**/api/rollup?**');
+  await sleep(STALL); // let the stalled handlers finish before unrouting, so none leaks into the M14 test
+  await page.unroute(stallRoute);
 
   // --- CODE_REVIEW M14: a FAILED /api/series/all refresh must not age out the last-known grid graph,
   // even when the client clock has jumped past the 3h window (the suspended-background-tab scenario). ---
@@ -250,7 +253,7 @@ try {
   // then wake to force a refresh. The failed fetch must leave the painted graph alone. One regex route
   // (not overlapping globs) — a glob `?` is a wildcard, so `**/api/series?**` also matches
   // `/api/series/all?…` and double-handles the request ("Route is already handled").
-  await page.route(/\/api\/(series|rollup)/, (r) => r.abort());
+  await page.route(/\/api\/(series|rollup)/, (r) => r.abort().catch(() => {}));
   await page.evaluate(() => { const real = Date.now(); Date.now = () => real + 4 * 3600 * 1000; });
   await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
   await sleep(1800); // let the failed refresh settle
