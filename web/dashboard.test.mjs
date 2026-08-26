@@ -75,6 +75,25 @@ check('mergeSeries with no new rounds keeps the previous series (trimmed)', () =
   const merged = D.mergeSeries(prev, { buckets: [], N: 0 }, 0);
   assert.deepEqual(merged.buckets.map((b) => b.t), [1000, 2000, 3000]);
 });
+// nextGridSeries: a FAILED bulk fetch must not age/trim the cached series, but a successful empty
+// response may (CODE_REVIEW M14). Cutoff 5000 is newer than every cached bucket, so aging empties it —
+// which is exactly what must NOT happen on a failure (e.g. a background tab woken past the window).
+check('nextGridSeries: a failed fetch keeps the last-known series untouched (M14)', () => {
+  const prev = { buckets: [bkt(1000), bkt(2000)], N: 1 };
+  const kept = D.nextGridSeries(prev, null, false, 5000); // bulkOk=false => fetch failed
+  assert.equal(kept, prev, 'failed fetch returns the same series, unmutated');
+  assert.deepEqual(kept.buckets.map((b) => b.t), [1000, 2000]);
+});
+check('nextGridSeries: a successful empty response ages the cache to the window (M14)', () => {
+  const prev = { buckets: [bkt(1000), bkt(2000)], N: 1 };
+  const aged = D.nextGridSeries(prev, null, true, 5000); // bulkOk=true, no new rounds => age
+  assert.deepEqual(aged.buckets.map((b) => b.t), []); // both older than the 5000 cutoff -> dropped
+});
+check('nextGridSeries: incoming data is merged and aged normally (M14)', () => {
+  const prev = { buckets: [bkt(1000), bkt(2000)], N: 1 };
+  const merged = D.nextGridSeries(prev, { buckets: [bkt(6000)], N: 1 }, true, 5000);
+  assert.deepEqual(merged.buckets.map((b) => b.t), [6000]); // 1000/2000 trimmed, 6000 kept
+});
 
 // gridSince (#1): the incremental watermark is the OLDEST frontier among panels that
 // hold data, so the shared `since` never advances past the slowest-updating target — a

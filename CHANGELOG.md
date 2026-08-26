@@ -78,6 +78,18 @@ All notable changes to **Heliograph** are recorded here. The format follows
   guidance dropped the "double every `$` to `$$`" step for the single-quoted value — single quotes
   already stop Compose from interpolating `$`, so doubling produced a literal `$$…` and broke the
   dashboard's Basic Auth. Paste the hash single-quoted, exactly as generated (CODE_REVIEW M13).
+- **A failed Graphs refresh no longer blanks the last-known graphs.** A failed `/api/series/all`
+  request is now distinguished from a successful one with no new rounds, so it leaves the cached
+  series untouched instead of aging it out — a transient outage, or a background tab woken after more
+  than the 3h window, keeps showing last-known data rather than collapsing to "collecting data…".
+  Dashboard series fetches also carry a bounded timeout so a hung request can't wedge the refresh
+  loop, and the visible view refreshes immediately on tab wake (`visibilitychange`/`pageshow`)
+  (CODE_REVIEW M14).
+- **The stacked-detail view no longer flashes blank on its 30-second refresh.** A periodic refresh
+  now fetches the new data before repainting the existing canvases in place, instead of clearing the
+  grid first, so a slow or hung read leaves the current graphs visible; same-target refreshes are
+  serialized so sustained slow responses can't starve every generation and leave the panels blank
+  (CODE_REVIEW M15).
 
 ### Docs
 - Clarified that a deep link survives a target move only while its path is still current; a dormant

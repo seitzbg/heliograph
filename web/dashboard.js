@@ -61,6 +61,18 @@
     return { buckets, N };
   }
 
+  // nextGridSeries decides a grid panel's new per-vantage series after a refresh, distinguishing a
+  // FAILED bulk fetch from a successful one that simply had no new rounds for this target (CODE_REVIEW
+  // M14). `incoming` = a freshly fetched series (or null); `bulkOk` = the bulk /api/series/all request
+  // for this vantage actually answered. A failed fetch must NOT age/trim the cached series — otherwise
+  // a transient outage, or a background tab woken past the 3h window, silently empties the last-known
+  // graph even though the server never lost the data. Pure, so the cache transition is unit-testable.
+  function nextGridSeries(prev, incoming, bulkOk, cutoffMs) {
+    if (incoming) return mergeSeries(prev, incoming, cutoffMs);   // new data: merge + age to the window
+    if (bulkOk && prev) return mergeSeries(prev, null, cutoffMs); // answered, no new rounds: age the cache
+    return prev;                                                  // fetch failed: keep last-known untouched
+  }
+
   // gridSince is the incremental watermark for the bulk Graphs grid (#1): the OLDEST
   // round timestamp among panels that currently hold data. Using the oldest frontier
   // (not the global newest) means the shared `since` never advances past the
@@ -122,8 +134,17 @@
   // unavailable; decoding those as ordinary data turned a transient failure into an
   // empty target/SLA/chart list, blanking the dashboard. Rejecting lets each caller
   // keep its last-known state and show a degraded indicator instead.
+  // fetchWithTimeout wraps fetch with a bounded AbortController so a hung request REJECTS instead of
+  // wedging a busy flag or a refresh generation forever (CODE_REVIEW M14/M15). Every caller already
+  // treats a rejection as "transient — keep last known". 15s is well above a healthy response and
+  // below any cadence, so a stalled request is retried on the next tick rather than blocking it.
+  function fetchWithTimeout(url, opts, ms) {
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), ms || 15000);
+    return fetch(url, { ...(opts || {}), signal: ac.signal }).finally(() => clearTimeout(timer));
+  }
   async function fetchJSON(url) {
-    const r = await fetch(url, { cache: 'no-store' });
+    const r = await fetchWithTimeout(url, { cache: 'no-store' });
     if (!r.ok) throw new Error('HTTP ' + r.status + ' from ' + url);
     return r.json();
   }
@@ -844,7 +865,7 @@
     return (!vantage || vantage === 'local') ? local : remote;
   }
 
-  window.Dash = { RANGES, RANGE_ORDER, parseRoute, mergeSeries, gridSince, gridTemplateFor, maxColumnsFor, rangeLabels, fetchJSON, zoomResolution, pixelToTime, sharedYMax, buildTree, underPath, targetStatus, pickSeries, vantageList, orderVantages, defaultFocus, keepFocus, vantageColorVar, worstStatus, statusFor, availableVantages, toggleGridVantage, vantageControlChips, bandVantageFor, gridShowsTarget, adminMode, adminSessionState, createAdminStateController, statusProbeOwnsView, relTime, listTargets, addTarget, editTarget, removeTarget, buildTargetNode, buildGroupNode, labelHTML, collectingNote, vantageBundleFilename, cfgTree, reweightSiblings, reorderSiblings, editNodeAtPath, removeNodeAtPath, renameNodeAtPath, addNodeAtPath, moveNode, moveInList, cfgDropDestination, cfgVisibleRows, cfgTreeKey, tkey, ntpStatHtml, ntpStatOf, ntpStatSelect };
+  window.Dash = { RANGES, RANGE_ORDER, parseRoute, mergeSeries, gridSince, gridTemplateFor, maxColumnsFor, rangeLabels, fetchJSON, zoomResolution, pixelToTime, sharedYMax, nextGridSeries, buildTree, underPath, targetStatus, pickSeries, vantageList, orderVantages, defaultFocus, keepFocus, vantageColorVar, worstStatus, statusFor, availableVantages, toggleGridVantage, vantageControlChips, bandVantageFor, gridShowsTarget, adminMode, adminSessionState, createAdminStateController, statusProbeOwnsView, relTime, listTargets, addTarget, editTarget, removeTarget, buildTargetNode, buildGroupNode, labelHTML, collectingNote, vantageBundleFilename, cfgTree, reweightSiblings, reorderSiblings, editNodeAtPath, removeNodeAtPath, renameNodeAtPath, addNodeAtPath, moveNode, moveInList, cfgDropDestination, cfgVisibleRows, cfgTreeKey, tkey, ntpStatHtml, ntpStatOf, ntpStatSelect };
 
   // ---------------------------------------------------------------- init (DOM) --
   function init() {
@@ -866,13 +887,13 @@
       const vq = vantage ? '&vantage=' + enc(vantage) : '';
       const R = RANGES[key];
       if (R.mode === 'raw') {
-        const r = await fetch('/api/series?target=' + enc(name) + '&window=' + R.window + vq, { cache: 'no-store' });
+        const r = await fetchWithTimeout('/api/series?target=' + enc(name) + '&window=' + R.window + vq, { cache: 'no-store' });
         if (!r.ok) return null;
         return Smoke.fromApiSeries(await r.json());
       }
       // Bound the rollup to the range window server-side (Go duration, e.g. 240h for
       // 10 days) so we don't fetch the target's full retained history each refresh.
-      const r = await fetch('/api/rollup?target=' + enc(name) + '&res=' + R.res + '&window=' + (R.days * 24) + 'h' + vq, { cache: 'no-store' });
+      const r = await fetchWithTimeout('/api/rollup?target=' + enc(name) + '&res=' + R.res + '&window=' + (R.days * 24) + 'h' + vq, { cache: 'no-store' });
       if (r.status === 501) return { unsupported: true };
       if (!r.ok) return null;
       return Smoke.fromApiRollup(await r.json());
@@ -1201,7 +1222,7 @@
       const since = sinceMs != null ? '&since=' + sinceMs : '';
       // 'local' (the hub) is the default vantage — no param; a remote vantage is requested explicitly.
       const vq = (vantage && vantage !== 'local') ? '&vantage=' + enc(vantage) : '';
-      const r = await fetch('/api/series/all?window=' + RANGES['3h'].window + since + vq, { cache: 'no-store' });
+      const r = await fetchWithTimeout('/api/series/all?window=' + RANGES['3h'].window + since + vq, { cache: 'no-store' });
       if (!r.ok) return null;
       return r.json();
     }
@@ -1305,8 +1326,9 @@
               // window once (the server resolves the stable token; 'local' takes the default vantage).
               try { const s = await fetchRange(tkey(t), '3h', v === 'local' ? undefined : v); if (s && !s.unsupported) incoming = s; } catch (e) { /* transient */ }
             }
-            if (incoming) p.seriesByV[v] = mergeSeries(p.seriesByV[v], incoming, cutoffMs);
-            else if (p.seriesByV[v]) p.seriesByV[v] = mergeSeries(p.seriesByV[v], null, cutoffMs); // age out
+            // Only a bulk fetch that actually ANSWERED may age a cached series to the window; a failed
+            // fetch (bulk === null) leaves the last-known series untouched (CODE_REVIEW M14).
+            p.seriesByV[v] = nextGridSeries(p.seriesByV[v], incoming, !!bulk, cutoffMs);
           }));
         }
         // The band owner (p.series) + stat line are chosen PER PANEL in renderGridPanels: each panel
@@ -1594,20 +1616,17 @@
       const ref = stackCanvases.find((c) => c.key === '3h' && c.byV);
       host.innerHTML = vchipsHtml(stackVantages, stackFocus, (v) => lastMedian(ref && ref.byV[v]));
     }
-    async function renderStack(name) {
-      const gen = ++stackGen; // captured before any await — invalidates any earlier in-flight renderStack, same name or not
-      curTarget = name; stackCanvases.length = 0;
-      $('stackTitle').innerHTML = probeBadge(name) + displayLabel(name);
-      const grid = $('stackGrid'); grid.innerHTML = '';
-
-      await ensureVantages(name);
-      if (gen !== stackGen) return; // a newer renderStack call superseded this one — don't append its panels
-      const vs = Dash.orderVantages(vantagesFor(name));
-      stackVantages = vs;
-      await ensureVantageStats(vs); // remote vantages' NTP stats for the meta (M2); local uses ntpByName
-      if (gen !== stackGen) return;
-
-      const cells = RANGE_ORDER.map((key) => {
+    // ensureStackCells returns the four range cells in #stackGrid, building them once and REUSING
+    // them across refreshes. Reusing the canvases (rather than clearing the grid at the top of every
+    // renderStack) is what keeps the current graphs visible while a refresh fetches new data — no
+    // blank frame mid-fetch (CODE_REVIEW M15). The cells are target-agnostic (one per range); only the
+    // painted data changes, so the same four canvases serve every target.
+    let stackCells = null;
+    function ensureStackCells() {
+      const grid = $('stackGrid');
+      if (stackCells && stackCells.length === RANGE_ORDER.length && stackCells[0].el.parentNode === grid) return stackCells;
+      grid.innerHTML = '';
+      stackCells = RANGE_ORDER.map((key) => {
         const R = RANGES[key];
         const el = document.createElement('div'); el.className = 'panel spanel'; el.dataset.range = key;
         el.innerHTML = '<div class="charts-head"><h3>' + R.label + ' <span class="reslabel">' + R.desc + '</span></h3><span class="reslabel">click to zoom ⤢</span></div>' +
@@ -1615,46 +1634,72 @@
         grid.appendChild(el);
         return { key, R, el, canvas: el.querySelector('canvas'), meta: el.querySelector('.meta') };
       });
-      // Re-set with the probe badge now that ensureVantages() has seeded probeByName (covers a
-      // deep link, where the grid panel isn't cached yet at the first title paint above).
-      $('stackTitle').innerHTML = probeBadge(name) + displayLabel(name);
+      return stackCells;
+    }
+    let stackBusy = false; // a renderStack fetch is in flight (CODE_REVIEW M15 same-target serialization)
+    async function renderStack(name) {
+      // Serialize periodic refreshes for the SAME target: if one is already in flight, skip rather
+      // than bump the generation and discard the running one — under sustained slow reads that would
+      // livelock and never paint (CODE_REVIEW M15). A navigation to a DIFFERENT target falls through
+      // and supersedes via stackGen below.
+      if (stackBusy && name === curTarget) return;
+      const gen = ++stackGen; // invalidates any earlier in-flight renderStack, same name or not
+      curTarget = name;
+      stackBusy = true;
+      try {
+        $('stackTitle').innerHTML = probeBadge(name) + displayLabel(name);
+        const cells = ensureStackCells(); // reuse the existing canvases — stay visible until new data lands
+        await ensureVantages(name);
+        if (gen !== stackGen) return; // a newer renderStack call superseded this one
+        const vs = Dash.orderVantages(vantagesFor(name));
+        stackVantages = vs;
+        await ensureVantageStats(vs); // remote vantages' NTP stats for the meta (M2); local uses ntpByName
+        if (gen !== stackGen) return;
+        // Re-set with the probe badge now that ensureVantages() has seeded probeByName (covers a deep
+        // link, where the grid panel isn't cached yet at the first title paint above).
+        $('stackTitle').innerHTML = probeBadge(name) + displayLabel(name);
 
-      if (vs.length <= 1) {
-        // Single-vantage: no fetch fan-out, no overlays, no chips (renderStackChips() clears
-        // #stackVantages via the length<=1 check). Fetch the target's OWN vantage — which may
-        // be a remote one (a `vantages: [nyc]` target has no local data) — not the implicit
-        // local default, else a remote-only target's graphs would be blank (CODE_REVIEW #3 / P1-3).
+        // Collect this generation's entries locally; commit to stackCanvases only after painting, so a
+        // superseded generation never leaves half its panels in the shared array.
+        const newEntries = [];
+        if (vs.length <= 1) {
+          // Single-vantage: no fetch fan-out, no overlays, no chips. Fetch the target's OWN vantage —
+          // which may be a remote one (a `vantages: [nyc]` target has no local data) — not the implicit
+          // local default, else a remote-only target's graphs would be blank (CODE_REVIEW #3 / P1-3).
+          const focus = vs[0] && vs[0] !== 'local' ? vs[0] : '';
+          await Promise.all(cells.map(async (c) => {
+            let s = null; try { s = await fetchRange(name, c.key, focus); } catch (e) { /* transient */ }
+            if (gen !== stackGen) return; // superseded mid-fetch
+            const k = name + '|' + c.key;
+            const pick = pickSeries(s, lastGood.get(k)); lastGood.set(k, pick.cache); s = pick.series;
+            const entry = { canvas: c.canvas, meta: c.meta, R: c.R, key: c.key, series: s, failed: pick.failed, vantage: focus };
+            newEntries.push(entry);
+            renderStackCell(entry); // repaints the reused canvas in place (clear+draw is synchronous — no blank)
+          }));
+        } else {
+          stackFocus = Dash.keepFocus(stackFocus, vs); // preserve the user's chip across the 30s refresh
+          await Promise.all(cells.map(async (c) => {
+            const fetched = await Promise.all(vs.map((v) => fetchRange(name, c.key, v).catch(() => null)));
+            if (gen !== stackGen) return; // superseded mid-fetch
+            const byV = {}; let failed = false;
+            vs.forEach((v, i) => {
+              const k = name + '|' + c.key + '|' + v;
+              const pick = pickSeries(fetched[i], lastGood.get(k)); lastGood.set(k, pick.cache);
+              byV[v] = pick.series;
+              if (pick.failed) failed = true;
+            });
+            const entry = { canvas: c.canvas, meta: c.meta, R: c.R, key: c.key, byV, failed };
+            newEntries.push(entry);
+            renderStackCell(entry);
+          }));
+        }
+        if (gen !== stackGen) return; // a newer renderStack call superseded this one
+        // Commit: replace the shared entry list (read by renderStackChips) now this generation painted.
+        stackCanvases.length = 0; for (const e of newEntries) stackCanvases.push(e);
         renderStackChips();
-        const focus = vs[0] && vs[0] !== 'local' ? vs[0] : '';
-        await Promise.all(cells.map(async (c) => {
-          let s = null; try { s = await fetchRange(name, c.key, focus); } catch (e) { /* transient */ }
-          if (gen !== stackGen) return; // superseded mid-fetch — don't push/render into a detached/reused cell
-          const k = name + '|' + c.key;
-          const pick = pickSeries(s, lastGood.get(k)); lastGood.set(k, pick.cache); s = pick.series;
-          const entry = { canvas: c.canvas, meta: c.meta, R: c.R, key: c.key, series: s, failed: pick.failed, vantage: focus };
-          stackCanvases.push(entry);
-          renderStackCell(entry);
-        }));
-        return;
+      } finally {
+        if (gen === stackGen) stackBusy = false; // only the latest generation releases the guard
       }
-
-      stackFocus = Dash.keepFocus(stackFocus, vs); // preserve the user's chip across the 30s refresh
-      await Promise.all(cells.map(async (c) => {
-        const fetched = await Promise.all(vs.map((v) => fetchRange(name, c.key, v).catch(() => null)));
-        if (gen !== stackGen) return; // superseded mid-fetch — don't push/render into a detached/reused cell
-        const byV = {}; let failed = false;
-        vs.forEach((v, i) => {
-          const k = name + '|' + c.key + '|' + v;
-          const pick = pickSeries(fetched[i], lastGood.get(k)); lastGood.set(k, pick.cache);
-          byV[v] = pick.series;
-          if (pick.failed) failed = true;
-        });
-        const entry = { canvas: c.canvas, meta: c.meta, R: c.R, key: c.key, byV, failed };
-        stackCanvases.push(entry);
-        renderStackCell(entry);
-      }));
-      if (gen !== stackGen) return; // a newer renderStack call superseded this one — don't render its chips
-      renderStackChips();
     }
     // drawZoom renders the current zoomState onto the zoom canvas with its explicit
     // wall-clock domain [t0,t1] (a tier default, or a dragged sub-range). In multi-vantage
@@ -1750,10 +1795,10 @@
       const qs = '&from=' + Math.round(fromMs) + '&to=' + Math.round(toMs) + vq;
       try {
         if (zr.mode === 'raw') {
-          const r = await fetch('/api/series?target=' + enc(name) + qs, { cache: 'no-store' });
+          const r = await fetchWithTimeout('/api/series?target=' + enc(name) + qs, { cache: 'no-store' });
           return r.ok ? Smoke.fromApiSeries(await r.json()) : null;
         }
-        const r = await fetch('/api/rollup?target=' + enc(name) + '&res=' + zr.res + qs, { cache: 'no-store' });
+        const r = await fetchWithTimeout('/api/rollup?target=' + enc(name) + '&res=' + zr.res + qs, { cache: 'no-store' });
         if (r.status === 501) return { unsupported: true };
         return r.ok ? Smoke.fromApiRollup(await r.json()) : null;
       } catch (e) { return null; }
@@ -2737,6 +2782,19 @@
 
     // ---- refresh cadences (only the visible view does work) ----
     let rt; window.addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(rerender, 140); });
+    // A backgrounded/suspended tab wakes with throttled timers and a watermark/cutoff that may be far
+    // in the past; refresh the visible view immediately on wake rather than waiting for the next tick
+    // (the bounded fetch timeout above releases any busy flag a pre-suspend hung request left set), so
+    // the grid recovers on resume instead of aging its cache against a stale clock (CODE_REVIEW M14/M15).
+    function wakeRefresh() {
+      const v = currentView();
+      if (v === 'graphs') refreshGrid();
+      else if (v === 'overview') refreshOverview();
+      else if (v === 'stack') renderStack(curTarget);
+      else if (v === 'zoom' && !(zoomState && zoomState.custom)) { const r = parseRoute(location.hash); if (r.name) renderZoom(r.name, r.range); }
+    }
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) wakeRefresh(); });
+    window.addEventListener('pageshow', wakeRefresh);
     setInterval(() => { if (currentView() === 'graphs') refreshGrid(); }, 5000);
     setInterval(() => { if (currentView() === 'overview') refreshOverview(); }, 15000);
     setInterval(() => { const v = currentView(); if (v === 'config' || v === 'vantages') pingStatus(v); }, 15000);
