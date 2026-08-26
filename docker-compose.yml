@@ -93,6 +93,8 @@ services:
       # smoked's own mTLS agent listener (federation). Only serves traffic once
       # SMOKED_AGENT_ADDR is set above; otherwise nothing listens here and this is a
       # harmless closed port. Published directly — NOT proxied by Caddy.
+      # NOTE: this port must match the port in SMOKED_AGENT_ADDR — if you change it from
+      # the default (e.g. SMOKED_AGENT_ADDR=:9443), update both sides or agents can't connect.
       - "8443:8443"
     depends_on:
       timescaledb:

@@ -117,12 +117,23 @@ func TestWriteBundleTarGz(t *testing.T) {
 		t.Fatalf("WriteBundleTarGz: %v", err)
 	}
 
-	entries := untar(t, &buf)
+	entries, modes := untar(t, &buf)
 
 	wantNames := []string{"agent.yaml", "docker-compose.yml", "README.txt"}
 	for _, name := range wantNames {
 		if _, ok := entries[name]; !ok {
 			t.Errorf("bundle missing entry %q; got entries: %v", name, entryNames(entries))
+		}
+	}
+
+	// agent.yaml carries the client private key, so it must extract owner-only (0600); the other
+	// two carry no secret and stay 0644.
+	if modes["agent.yaml"] != 0o600 {
+		t.Errorf("agent.yaml tar mode = %04o, want 0600 (it holds the client private key)", modes["agent.yaml"])
+	}
+	for _, n := range []string{"docker-compose.yml", "README.txt"} {
+		if modes[n] != 0o644 {
+			t.Errorf("%s tar mode = %04o, want 0644", n, modes[n])
 		}
 	}
 
@@ -149,15 +160,16 @@ func TestWriteBundleTarGz(t *testing.T) {
 }
 
 // untar gunzips and untars r, returning a map of entry name to file content.
-func untar(t *testing.T, r io.Reader) map[string]string {
+func untar(t *testing.T, r io.Reader) (map[string]string, map[string]int64) {
 	t.Helper()
 	gz, err := gzip.NewReader(r)
 	if err != nil {
 		t.Fatalf("gzip.NewReader: %v", err)
 	}
-	defer gz.Close()
+	defer func() { _ = gz.Close() }()
 
 	entries := make(map[string]string)
+	modes := make(map[string]int64)
 	tr := tar.NewReader(gz)
 	for {
 		hdr, err := tr.Next()
@@ -172,8 +184,9 @@ func untar(t *testing.T, r io.Reader) map[string]string {
 			t.Fatalf("io.Copy: %v", err)
 		}
 		entries[hdr.Name] = content.String()
+		modes[hdr.Name] = hdr.Mode
 	}
-	return entries
+	return entries, modes
 }
 
 func entryNames(entries map[string]string) []string {

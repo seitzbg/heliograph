@@ -135,10 +135,10 @@ type Server struct {
 	EffectiveMetric func(target string) string
 	// Assignment, if set, returns the target list, the effective probe-level config
 	// (probe kind -> its `probes.<Kind>` block), and a config_version for a vantage,
-	// computed over the live monitor set. Used by agentAssignment/agentResults, which are
-	// currently unwired from any route: requireAgent (agentauth.go) authorizes a caller by
-	// client-cert CN via srv.Vantages.IsActive, but nothing calls it yet — an mTLS listener (a
-	// later task) re-lights them behind it.
+	// computed over the live monitor set. Used by agentAssignment/agentResults, which the mTLS
+	// agent listener serves via AgentMux (wired in cmd/smoked when -agent-addr is set) behind
+	// requireAgent — that authorizes a caller by client-cert CN via srv.Vantages.IsActive. These
+	// routes are deliberately NOT on the public Routes() mux.
 	Assignment func(vantage string) (targets []model.Monitor, probeCfgs map[string]map[string]string, configVersion string)
 	// OnIngest, if set, is called with the accepted remote outcomes AFTER they are durably
 	// stored, so the hub evaluates alerts for remote vantages (each outcome carries its

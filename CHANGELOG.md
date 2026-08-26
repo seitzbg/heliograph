@@ -20,8 +20,9 @@ All notable changes to **Heliograph** are recorded here. The format follows
   `.env.example`, plus an `examples/README.md` that helps you pick. Federation is opt-in, so a
   standalone user is never faced with the TLS/ACME/Basic-Auth settings they don't need.
 - **Opt-in mutual-TLS federation, replacing the per-vantage API key.** Start the hub with
-  `-agent-addr :8443 -agent-hostname <domain>` (requires `-dsn`) to run a dedicated, mutual-TLS
-  listener for remote agents, entirely separate from the dashboard's HTTP server. The hub
+  `-serve -agent-addr :8443 -agent-hostname <domain>` (requires `-dsn`; the listener runs only in
+  serve mode) to run a dedicated, mutual-TLS listener for remote agents, entirely separate from the
+  dashboard's HTTP server. The hub
   self-bootstraps its own CA (generated once, persisted in the database) and issues both its own
   server certificate — SAN taken from `-agent-hostname` — and a CA-signed client certificate for
   each vantage; the listener requires and verifies that client certificate before any request
