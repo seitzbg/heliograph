@@ -91,8 +91,9 @@ type Server struct {
 	AdminKey      []byte
 	// AgentHubURL is the hub's own externally-reachable base URL (scheme + host + mTLS port,
 	// e.g. "https://heliograph.bsd-unix.net:8443"), embedded into a minted vantage's agent.yaml
-	// so the agent knows where to report. Populated in main from -agent-hostname + ":8443"
-	// (Task 11); empty here means no flag was set, and addVantage falls back to a placeholder.
+	// so the agent knows where to report. Populated in main from the first -agent-hostname and the
+	// port of -agent-addr (so a non-default -agent-addr port is reflected); empty here means no flag
+	// was set, and addVantage falls back to a placeholder.
 	AgentHubURL string
 	// AdminSessionTTL is how long a login stays valid (token expiry + cookie Max-Age). Zero or
 	// negative means DefaultAdminSessionTTL; production loads SMOKED_ADMIN_SESSION_TTL.
