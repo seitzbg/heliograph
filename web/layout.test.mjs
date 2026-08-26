@@ -161,6 +161,63 @@ try {
     });
   }
 
+  // --- CODE_REVIEW M18: only #graphs was covered before; Overview's SLA row (fixed 116px+150px
+  // tracks) and the five-column Vantages table also overflowed narrow viewports. Assert neither
+  // forces page-level horizontal scroll, at the same phone widths. ---
+  for (const width of NARROW_WIDTHS) {
+    died();
+    await page.setViewportSize({ width, height: 720 });
+    await page.goto(`${BASE}/#overview`, { waitUntil: 'load' });
+    // Wait for the SLA leaderboard to populate (head + real rows), so the fixed availability/coverage
+    // tracks are actually laid out — an empty '—' row wouldn't exercise them.
+    await page.waitForSelector('#slaList li:not(.empty-row)', { timeout: 45_000 });
+    await sleep(300);
+    const ov = await page.evaluate(() => ({
+      vw: window.innerWidth,
+      sw: document.documentElement.scrollWidth,
+      rows: document.querySelectorAll('#slaList li').length,
+    }));
+    check(`M18: ${width}px Overview rendered its SLA leaderboard`, () => {
+      if (ov.rows < 2) throw new Error(`#slaList has ${ov.rows} rows (head+data expected) — cannot assert width`);
+    });
+    check(`M18: ${width}px Overview has no horizontal page overflow`, () => {
+      if (ov.sw > ov.vw + 1) throw new Error(`overview scrollWidth ${ov.sw} > viewport ${ov.vw}`);
+    });
+
+    // The demo collector has no admin backend, so the Vantages panel renders "disabled". Drive the
+    // responsive TABLE css directly: navigate to the Vantages view (so #viewVantages is actually laid
+    // out — on another view it is display:none and every child measures 0), reveal the list markup, and
+    // inject a realistic logged-in row (a long name + Regenerate/Revoke). The fix routes the table's
+    // width into its own .vadmin-tablewrap scroller, so the document must not widen while the table's
+    // content still exceeds the wrapper.
+    await page.goto(`${BASE}/#vantages`, { waitUntil: 'load' });
+    await page.waitForSelector('#viewVantages', { state: 'visible', timeout: 20_000 });
+    const va = await page.evaluate(() => {
+      document.getElementById('vantDisabled').classList.add('hidden');
+      document.getElementById('vantList').classList.remove('hidden');
+      document.getElementById('vantRows').innerHTML =
+        '<tr><td>munro-comcast-edge</td><td>Aug 26, 2026</td><td>2m ago</td><td>11</td>' +
+        '<td style="text-align:right; white-space:nowrap">' +
+        '<button class="vadmin-btn">Regenerate</button><button class="vadmin-btn">Revoke</button></td></tr>';
+      const wrap = document.querySelector('.vadmin-tablewrap');
+      const table = document.querySelector('.vadmin-table');
+      return {
+        vw: window.innerWidth,
+        sw: document.documentElement.scrollWidth,
+        wrapClientW: wrap.clientWidth,
+        tableScrollW: table.scrollWidth,
+      };
+    });
+    check(`M18: ${width}px Vantages table does not overflow the page`, () => {
+      if (va.sw > va.vw + 1) throw new Error(`vantages scrollWidth ${va.sw} > viewport ${va.vw}`);
+    });
+    check(`M18: ${width}px the wide Vantages table scrolls inside its wrapper`, () => {
+      // The realistic row + the table's min-width make it wider than the phone viewport; the fix must
+      // absorb that in the wrapper's own scroller (content wider than the wrapper), not the page.
+      if (va.tableScrollW <= va.wrapClientW) throw new Error(`table content ${va.tableScrollW}px did not exceed wrapper ${va.wrapClientW}px — the scroller isn't absorbing the width`);
+    });
+  }
+
   // Columns-picker state regression (review L4 + L2): a stored preference too wide for the current
   // viewport must keep the picker showing an ACTIVE, HONESTLY-LABELLED selection — not look unset,
   // and not announce a count that contradicts the rendered layout. Reproduce with graphCols=6 at a
@@ -249,6 +306,12 @@ try {
   check('M14: a grid panel is painted before the failure', () => {
     if (gridBefore < 200) throw new Error(`grid panel not painted (${gridBefore}px) — cannot test preservation`);
   });
+  // Capture the EXACT painted bytes, not just a pixel count: the earlier fix still repainted the
+  // panel against a fresh [now-3h,now] domain, collapsing the trace off the left edge while leaving
+  // an opaque axes/background — which a pixel count reads as "still painted" (a false green the
+  // reviewer flagged). The correct behavior is to skip the repaint entirely, so the canvas is
+  // byte-identical after a fully-failed refresh. dataURL equality proves that.
+  const gridDataURLBefore = await page.evaluate(() => document.querySelector('#graphGrid .gpanel canvas').toDataURL());
   // Fail every series/rollup fetch and jump the clock +4h so the 3h cutoff would drop the whole cache;
   // then wake to force a refresh. The failed fetch must leave the painted graph alone. One regex route
   // (not overlapping globs) — a glob `?` is a wildcard, so `**/api/series?**` also matches
@@ -258,9 +321,13 @@ try {
   await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
   await sleep(1800); // let the failed refresh settle
   const gridAfter = await paintedPx('#graphGrid .gpanel canvas');
+  const gridDataURLAfter = await page.evaluate(() => document.querySelector('#graphGrid .gpanel canvas').toDataURL());
   const statusTxt = await page.evaluate(() => (document.getElementById('statusText') || {}).textContent || '');
   check('M14: a failed refresh keeps the last-known grid graph painted (not blanked)', () => {
     if (gridAfter < gridBefore * 0.5) throw new Error(`grid graph collapsed after a failed refresh: ${gridBefore}px -> ${gridAfter}px`);
+  });
+  check('M14: a failed refresh leaves the trace untouched (no off-frame repaint)', () => {
+    if (gridDataURLAfter !== gridDataURLBefore) throw new Error(`grid canvas was repainted after a fully-failed refresh — the last-known trace should be left exactly as drawn, not re-rendered against a fresh time domain`);
   });
   check('M14: the status honestly reports degraded/last-known on a failed refresh', () => {
     if (!/last known/i.test(statusTxt)) throw new Error(`status did not report last-known: "${statusTxt}"`);

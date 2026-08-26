@@ -485,6 +485,44 @@ func TestListVantagesOmitsCountWithoutTargetVantages(t *testing.T) {
 	}
 }
 
+// TestListVantagesReportsFederationReady covers CODE_REVIEW M19: the list response must tell the UI
+// whether the hub actually runs an agent listener (AgentHubURL populated). Without one, a minted
+// bundle embeds a placeholder hub URL and can never connect, so the UI disables onboarding.
+func TestListVantagesReportsFederationReady(t *testing.T) {
+	get := func(srv *Server) bool {
+		t.Helper()
+		mux := srv.Routes()
+		cookie := login(t, mux, "hunter2")
+		r := httptest.NewRequest("GET", "/api/admin/vantages", nil)
+		r.AddCookie(cookie)
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, r)
+		if w.Code != http.StatusOK {
+			t.Fatalf("list = %d, want 200", w.Code)
+		}
+		var resp struct {
+			FederationReady bool `json:"federation_ready"`
+		}
+		if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		return resp.FederationReady
+	}
+
+	// No agent listener configured -> not ready.
+	srv, _ := adminServer("hunter2")
+	if get(srv) {
+		t.Error("federation_ready = true with empty AgentHubURL; want false")
+	}
+
+	// A configured listener -> ready.
+	srv, _ = adminServer("hunter2")
+	srv.AgentHubURL = "https://hub.example.test:8443"
+	if !get(srv) {
+		t.Error("federation_ready = false with AgentHubURL set; want true")
+	}
+}
+
 func TestListVantagesDeduplicatesVantagesPerTarget(t *testing.T) {
 	srv, _ := adminServer("hunter2")
 	srv.TargetVantages = func() map[string][]string {
