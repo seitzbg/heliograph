@@ -287,7 +287,6 @@
   .vadmin-reveal-backdrop { position:fixed; inset:0; background:rgba(0,0,0,.45); display:flex; align-items:center; justify-content:center; padding:20px; z-index:50; }
   .vadmin-reveal { max-width:640px; width:100%; box-shadow:var(--shadow); max-height:calc(100vh - 40px); overflow-y:auto; }
   .vadmin-warn { color:var(--warn); font-weight:600; font-size:13px; }
-  .vadmin-pre { background:var(--plot-bg); border:1px solid var(--border); border-radius:8px; padding:12px; font-family:ui-monospace,Menlo,monospace; font-size:12px; color:var(--ink); overflow-x:auto; white-space:pre-wrap; word-break:break-all; }
   .vadmin-reveal-actions { display:flex; gap:10px; margin-top:12px; }
   /* Config add/edit/group modals: stack each field's label above a full-width control, one field
      per line, so they read clearly instead of the labels + inputs flowing inline and wrapping. */
@@ -428,10 +427,10 @@
   <!-- VANTAGES (federation admin) -->
   <section id="viewVantages" class="hidden">
     <h2 class="vadmin-title">Vantages</h2>
-    <p class="lede">Federation vantages and their agent API keys. Managing keys requires the admin password.</p>
+    <p class="lede">Federation vantages and their mTLS client certificates. Adding or removing a vantage requires the admin password.</p>
 
     <div id="vantDisabled" class="panel vadmin-note hidden">
-      Admin key management is disabled. It requires federation (<code>-dsn</code>) and
+      Admin vantage management is disabled. It requires federation (<code>-dsn</code>) and
       <code>SMOKED_ADMIN_PASSWORD</code> on the hub; or provision from the host with
       <code>smoked vantage add / ls / revoke</code> (also needs <code>-dsn</code>).
     </div>
@@ -448,32 +447,15 @@
       <form id="vantAdd" class="panel vadmin-row" autocomplete="off">
         <label class="vadmin-lbl" for="vantName">Add vantage</label>
         <input id="vantName" type="text" class="vadmin-input" placeholder="e.g. nyc" autocomplete="off">
-        <button type="submit" class="vadmin-btn">Add &amp; mint key</button>
+        <button type="submit" class="vadmin-btn">Add &amp; download bundle</button>
         <span id="vantAddErr" class="vadmin-err" role="alert"></span>
       </form>
+      <p id="vantAddNote" class="vadmin-note-inline" role="status" style="font-size:11.5px; color:var(--ink-soft); margin:4px 2px 0"></p>
       <p class="admin-hint">Viewing read-only — use <b>Log in</b> (top right) to add or manage vantages.</p>
     </div>
 
     <div id="vantError" class="panel vadmin-note hidden">
       Couldn't reach the admin API. <button id="vantRetry" class="vadmin-btn">Retry</button>
-    </div>
-
-    <div id="vantReveal" class="vadmin-reveal-backdrop hidden">
-      <div class="panel vadmin-reveal" role="dialog" aria-modal="true" aria-labelledby="vantRevealTitle">
-        <h3 id="vantRevealTitle">Agent key for <span id="vantRevealName"></span></h3>
-        <p class="vadmin-warn">Shown once — store it now. You can't retrieve it later; you can only regenerate a new one.</p>
-        <div class="tabs" role="tablist" id="vantRevealTabs" style="margin-top:2px; margin-bottom:10px">
-          <button id="vantTabAgent" role="tab" aria-selected="true">agent.yaml</button>
-          <button id="vantTabCompose" role="tab" aria-selected="false">docker-compose.yaml</button>
-        </div>
-        <pre id="vantRevealSnippet" class="vadmin-pre"></pre>
-        <p class="vadmin-note-inline" style="font-size:11.5px; color:var(--ink-soft); margin:8px 0 0">Save both files in one folder, then <code>docker compose up -d</code>. The key lives only in <code>agent.yaml</code>.</p>
-        <div class="vadmin-reveal-actions">
-          <button id="vantCopy" class="vadmin-btn">Copy</button>
-          <button id="vantDownload" class="vadmin-btn">Download</button>
-          <button id="vantRevealClose" class="vadmin-btn">Done</button>
-        </div>
-      </div>
     </div>
   </section>
 

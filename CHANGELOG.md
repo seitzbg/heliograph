@@ -19,14 +19,42 @@ All notable changes to **Heliograph** are recorded here. The format follows
   and `examples/federation/` (adds a Caddy reverse proxy for remote vantages) — each with its own
   `.env.example`, plus an `examples/README.md` that helps you pick. Federation is opt-in, so a
   standalone user is never faced with the TLS/ACME/Basic-Auth settings they don't need.
+- **Opt-in mutual-TLS federation, replacing the per-vantage API key.** Start the hub with
+  `-agent-addr :8443 -agent-hostname <domain>` (requires `-dsn`) to run a dedicated, mutual-TLS
+  listener for remote agents, entirely separate from the dashboard's HTTP server. The hub
+  self-bootstraps its own CA (generated once, persisted in the database) and issues both its own
+  server certificate — SAN taken from `-agent-hostname` — and a CA-signed client certificate for
+  each vantage; the listener requires and verifies that client certificate before any request
+  reaches a handler. The certificate's CommonName *is* the vantage's identity, checked against the
+  registry on every request, so revoking a vantage takes effect immediately without waiting on
+  certificate expiry.
+- **One-click vantage onboarding from the dashboard.** The Vantages admin tab's **Add vantage**
+  now downloads a ready-to-run `<name>-vantage.tar.gz` — `agent.yaml` (hub URL, vantage name, and
+  the client certificate/key/CA embedded as PEM) plus a matching `docker-compose.yml` and
+  `README.txt` — instead of revealing a key to copy. The CLI equivalent, `smoked vantage add
+  <name> -out <name>-vantage.tar.gz`, mints the identical bundle (or prints the rendered
+  `agent.yaml` to stdout, or `-json` for the raw PEMs).
+
+### Removed
+- **BREAKING: the per-vantage API key is gone.** `smoke-agent`'s `-key` flag and the config file's
+  `key:` field no longer exist — replaced by `-client-cert`/`-client-key`/`-ca-cert` (flags, file
+  paths) and `client_cert`/`client_key`/`ca_cert` (config, inline PEM). Every existing federated
+  vantage must be re-onboarded with a certificate bundle before it can report to an upgraded hub:
+  run `smoked vantage add <name>` (or use the dashboard's Add vantage) and redeploy the agent with
+  the new `agent.yaml`. The old `Authorization: Bearer smk_...` agent auth path, and the reverse
+  proxy's `/agent/v1/*` forwarding rule that carried it, are both removed — agents now connect
+  directly to the hub's own `-agent-addr` mTLS listener instead of going through the dashboard's
+  reverse proxy.
 
 ### Security
 - **Config reads redact credentials embedded in a probe URL.** The open config reads
-  (`GET /api/admin/config`, its `?source=effective` variant, and `GET /api/admin/config.yaml`) now
-  strip HTTP `urlformat` userinfo and query strings for a non-admin reader, so a credential placed in
-  a probe URL (e.g. `https://user:pass@%host%/health?token=…`) is no longer shown to everyone who can
-  reach the dashboard. A logged-in admin still receives the real, editable config — redacting the
-  editable source would let the next save persist the mask over the secret (CODE_REVIEW M11).
+  (`GET /api/admin/config`, its `?source=effective` variant, and `GET /api/admin/config.yaml`) strip
+  HTTP `urlformat` userinfo, query strings, **and the URL path** for a non-admin reader — the path is
+  a common credential carrier (Discord/Slack/PagerDuty webhook tokens live there), so a value like
+  `https://%host%/hooks/TOKEN` is now shown as `https://%host%/[redacted]` rather than verbatim.
+  A credential placed anywhere in a probe URL is no longer shown to everyone who can reach the
+  dashboard. A logged-in admin still receives the real, editable config — redacting the editable
+  source would let the next save persist the mask over the secret (CODE_REVIEW M11).
 
 ### Fixed
 - **The Overview no longer reports a target as down from a vantage that doesn't measure it.** The hub
@@ -42,6 +70,26 @@ All notable changes to **Heliograph** are recorded here. The format follows
 - **Remote-only targets appear in the Graphs grid for their vantage.** Selecting a remote vantage now
   surfaces targets measured only from that vantage (a site the hub can't reach directly), instead of
   leaving them reachable only in the nav tree and detail view (CODE_REVIEW M10).
+- **Graphs overlay colors no longer collide when more than four vantages exist.** Overlay colors are
+  assigned from the selected (≤4) set instead of the full vantage catalog, so two simultaneously-drawn
+  overlays can't land on the same palette slot; a pre-existing saved selection of 5+ vantages is also
+  clamped to the cap on load (CODE_REVIEW M12).
+- **Federation `.env` bcrypt instructions no longer corrupt the hash.** The `DASH_PASSWORD_HASH`
+  guidance dropped the "double every `$` to `$$`" step for the single-quoted value — single quotes
+  already stop Compose from interpolating `$`, so doubling produced a literal `$$…` and broke the
+  dashboard's Basic Auth. Paste the hash single-quoted, exactly as generated (CODE_REVIEW M13).
+- **A failed Graphs refresh no longer blanks the last-known graphs.** A failed `/api/series/all`
+  request is now distinguished from a successful one with no new rounds, so it leaves the cached
+  series untouched instead of aging it out — a transient outage, or a background tab woken after more
+  than the 3h window, keeps showing last-known data rather than collapsing to "collecting data…".
+  Dashboard series fetches also carry a bounded timeout so a hung request can't wedge the refresh
+  loop, and the visible view refreshes immediately on tab wake (`visibilitychange`/`pageshow`)
+  (CODE_REVIEW M14).
+- **The stacked-detail view no longer flashes blank on its 30-second refresh.** A periodic refresh
+  now fetches the new data before repainting the existing canvases in place, instead of clearing the
+  grid first, so a slow or hung read leaves the current graphs visible; same-target refreshes are
+  serialized so sustained slow responses can't starve every generation and leave the panels blank
+  (CODE_REVIEW M15).
 
 ### Docs
 - Clarified that a deep link survives a target move only while its path is still current; a dormant

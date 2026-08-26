@@ -32,13 +32,16 @@ RUN xcaddy build \
 	--with google.golang.org/grpc@v1.82.1
 
 # Same digest as before (caddy:2.11-alpine hasn't been rebuilt upstream since 2026-06-24), so the
-# c-ares/curl/libcurl packages it ships are stale relative to the Alpine 3.23 apk repo. The
+# c-ares/curl/libcurl/openssl packages it ships are stale relative to the Alpine 3.23 apk repo. The
 # apk step below pins them forward to the patched versions already published on that same v3.23/main
-# branch (CVE-2026-33630, CVE-2026-5773, CVE-2026-6276). Drop this RUN once caddy:2.11-alpine (or a
-# later minor) is rebuilt with these fixed already, and update the digest instead.
+# branch (CVE-2026-33630, CVE-2026-5773, CVE-2026-6276, and CVE-2026-14456 — an openssl QUIC DoS; the
+# base still ships libcrypto3/libssl3 3.5.7-r0, verify with `apk policy libcrypto3`). Drop this RUN
+# once caddy:2.11-alpine (or a later minor) is rebuilt with these fixed already, and update the digest.
 FROM caddy:2.11-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
 RUN apk update && apk add --no-cache --upgrade \
 	c-ares=1.34.8-r0 \
 	curl=8.20.0-r0 \
-	libcurl=8.20.0-r0
+	libcurl=8.20.0-r0 \
+	libcrypto3=3.5.8-r0 \
+	libssl3=3.5.8-r0
 COPY --from=build /usr/bin/caddy /usr/bin/caddy

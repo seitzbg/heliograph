@@ -23,13 +23,21 @@ import (
 // accept-path tests stay valid as wall-clock advances (P1-4 rejects stale timestamps).
 func recentTS() string { return time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano) }
 
+// requestAs stamps r with the vantage identity an auth layer would attach to the request
+// context. The agent routes (/agent/v1/assignment, /agent/v1/results) are unwired from
+// srv.Routes() pending the mTLS listener (a later task), so these tests call
+// agentAssignment/agentResults directly instead of routing a Bearer-authenticated request
+// through the mux.
+func requestAs(r *http.Request, vantage string) *http.Request {
+	return r.WithContext(context.WithValue(r.Context(), vantageCtxKey, vantage))
+}
+
 func testAgentServer() *Server {
 	asg := map[string][]model.Monitor{
 		"nyc": {{Name: "cf", ProbeKind: "FPing", Host: "1.1.1.1", Pings: 20, Step: time.Minute, Vantages: []string{"nyc"}}},
 	}
 	probeCfgs := map[string]map[string]string{"FPing": {"binary": "/usr/sbin/fping"}}
 	return &Server{
-		VantageAuth: fakeAuth{name: "nyc", ok: true},
 		Assignment: func(v string) ([]model.Monitor, map[string]map[string]string, string) {
 			return asg[v], probeCfgs, "sha256:v1-" + v
 		},
@@ -38,10 +46,9 @@ func testAgentServer() *Server {
 
 func TestAssignmentServed(t *testing.T) {
 	srv := testAgentServer()
-	r := httptest.NewRequest("GET", "/agent/v1/assignment", nil)
-	r.Header.Set("Authorization", "Bearer smk_x_y")
+	r := requestAs(httptest.NewRequest("GET", "/agent/v1/assignment", nil), "nyc")
 	w := httptest.NewRecorder()
-	srv.Routes().ServeHTTP(w, r)
+	srv.agentAssignment(w, r)
 
 	if w.Code != 200 {
 		t.Fatalf("status=%d", w.Code)
@@ -74,11 +81,10 @@ func TestAssignmentServed(t *testing.T) {
 
 func TestAssignmentNotModified(t *testing.T) {
 	srv := testAgentServer()
-	r := httptest.NewRequest("GET", "/agent/v1/assignment", nil)
-	r.Header.Set("Authorization", "Bearer smk_x_y")
+	r := requestAs(httptest.NewRequest("GET", "/agent/v1/assignment", nil), "nyc")
 	r.Header.Set("If-None-Match", "sha256:v1-nyc")
 	w := httptest.NewRecorder()
-	srv.Routes().ServeHTTP(w, r)
+	srv.agentAssignment(w, r)
 	if w.Code != http.StatusNotModified {
 		t.Fatalf("status=%d want 304", w.Code)
 	}
@@ -119,8 +125,7 @@ func (f *fakeIngester) AddResults(_ context.Context, o []scheduler.Outcome) ([]s
 
 func ingestServer(ing store.Store) *Server {
 	return &Server{
-		store:       ing,
-		VantageAuth: fakeAuth{name: "nyc", ok: true},
+		store: ing,
 		Assignment: func(v string) ([]model.Monitor, map[string]map[string]string, string) {
 			// ID mirrors Name: an unmoved target's id falls back to its path (config.Monitors'
 			// resolution), so posting under the display name "cf" still hits the id-keyed
@@ -132,10 +137,16 @@ func ingestServer(ing store.Store) *Server {
 
 func postResults(t *testing.T, srv *Server, body string) *httptest.ResponseRecorder {
 	t.Helper()
-	r := httptest.NewRequest("POST", "/agent/v1/results", strings.NewReader(body))
-	r.Header.Set("Authorization", "Bearer smk_x_y")
+	return postResultsAs(t, srv, "nyc", body)
+}
+
+// postResultsAs is postResults for a caller that isn't the default test vantage "nyc" —
+// chiefly TestReservedVantageForbidden, which posts as the hub's own reserved vantage.
+func postResultsAs(t *testing.T, srv *Server, vantage, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	r := requestAs(httptest.NewRequest("POST", "/agent/v1/results", strings.NewReader(body)), vantage)
 	w := httptest.NewRecorder()
-	srv.Routes().ServeHTTP(w, r)
+	srv.agentResults(w, r)
 	return w
 }
 
@@ -256,10 +267,9 @@ func TestIngestDropsRoundExceedingAssignedPings(t *testing.T) {
 // identity, so the agent can echo it back and the hub can verify attribution on ingest.
 func TestAssignmentStampsFingerprint(t *testing.T) {
 	srv := testAgentServer()
-	r := httptest.NewRequest("GET", "/agent/v1/assignment", nil)
-	r.Header.Set("Authorization", "Bearer smk_x_y")
+	r := requestAs(httptest.NewRequest("GET", "/agent/v1/assignment", nil), "nyc")
 	w := httptest.NewRecorder()
-	srv.Routes().ServeHTTP(w, r)
+	srv.agentAssignment(w, r)
 
 	var got struct {
 		Targets []struct {
@@ -288,8 +298,7 @@ func TestIngestFingerprintAttribution(t *testing.T) {
 	ing := &fakeIngester{}
 	var alerted []scheduler.Outcome
 	srv := &Server{
-		store:       ing,
-		VantageAuth: fakeAuth{name: "nyc", ok: true},
+		store: ing,
 		Assignment: func(v string) ([]model.Monitor, map[string]map[string]string, string) {
 			return []model.Monitor{current}, probeCfgs, "sha256:v1"
 		},
@@ -600,20 +609,16 @@ func TestWithinSkew(t *testing.T) {
 }
 
 // TestReservedVantageForbidden covers the defense-in-depth check (belt-and-suspenders
-// alongside the mint-time block in vantage.Store.Add): an agent that somehow
+// alongside the mint-time block in vantage.Store.Register): an agent that somehow
 // authenticates as the hub's own "local" vantage must be refused before any
 // assignment lookup or store work, so its rounds can never conflate with the hub's
 // own authoritative data.
 func TestReservedVantageForbidden(t *testing.T) {
-	reserved := fakeAuth{name: "local", ok: true}
-
 	t.Run("assignment", func(t *testing.T) {
 		srv := testAgentServer()
-		srv.VantageAuth = reserved
-		r := httptest.NewRequest("GET", "/agent/v1/assignment", nil)
-		r.Header.Set("Authorization", "Bearer smk_x_y")
+		r := requestAs(httptest.NewRequest("GET", "/agent/v1/assignment", nil), "local")
 		w := httptest.NewRecorder()
-		srv.Routes().ServeHTTP(w, r)
+		srv.agentAssignment(w, r)
 		if w.Code != http.StatusForbidden {
 			t.Fatalf("status=%d want 403", w.Code)
 		}
@@ -622,8 +627,7 @@ func TestReservedVantageForbidden(t *testing.T) {
 	t.Run("results", func(t *testing.T) {
 		ing := &fakeIngester{}
 		srv := ingestServer(ing)
-		srv.VantageAuth = reserved
-		w := postResults(t, srv,
+		w := postResultsAs(t, srv, "local",
 			`{"results":[{"target":"cf","ts":"2026-08-07T12:00:00Z","pings":1,"rtts":[0.01]}]}`)
 		if w.Code != http.StatusForbidden {
 			t.Fatalf("status=%d want 403", w.Code)
@@ -642,8 +646,7 @@ func TestReservedVantageForbidden(t *testing.T) {
 func TestRemoteNTPStatTransportsAndClears(t *testing.T) {
 	st := store.NewMem(10)
 	srv := &Server{
-		store:       st,
-		VantageAuth: fakeAuth{name: "nyc", ok: true},
+		store: st,
 		Assignment: func(v string) ([]model.Monitor, map[string]map[string]string, string) {
 			// ID mirrors Name (unmoved target, matching config.Monitors' path fallback), so the
 			// remote NTP registry — now keyed by id on the write side — is still found by the
@@ -739,8 +742,7 @@ func offsetForClock(t *testing.T, srv *Server, url string) *float64 {
 func TestRemoteNTPStatKeepsNewestAcrossOutOfOrderDelivery(t *testing.T) {
 	m := model.Monitor{Name: "clock", ID: "clock", ProbeKind: "NTP", Host: "h", Pings: 2, Step: time.Minute, Vantages: []string{"nyc"}}
 	srv := &Server{
-		store:       store.NewMem(10),
-		VantageAuth: fakeAuth{name: "nyc", ok: true},
+		store: store.NewMem(10),
 		Assignment: func(v string) ([]model.Monitor, map[string]map[string]string, string) {
 			return []model.Monitor{m}, nil, "sha256:v1"
 		},
@@ -772,8 +774,7 @@ func TestRemoteNTPStatRefusedAfterSameHostPortChange(t *testing.T) {
 	// the ingest-time endpoint, then the target is moved to a new port before the read.
 	mon := model.Monitor{Name: "clock", ID: "clock", ProbeKind: "NTP", Host: "h", Params: map[string]string{"port": "123"}, Pings: 2, Step: time.Minute, Vantages: []string{"nyc"}}
 	srv := &Server{
-		store:       store.NewMem(10),
-		VantageAuth: fakeAuth{name: "nyc", ok: true},
+		store: store.NewMem(10),
 		Assignment: func(v string) ([]model.Monitor, map[string]map[string]string, string) {
 			return []model.Monitor{mon}, nil, "sha256:v1"
 		},
@@ -803,17 +804,15 @@ func TestAssignmentCarriesIDAndIngestKeysByIt(t *testing.T) {
 	st := store.NewMem(10)
 	m := model.Monitor{ID: "wid", Name: "grp/leaf", ProbeKind: "FPing", Host: "1.1.1.1", Pings: 3, Step: time.Minute, Vantages: []string{"nyc"}}
 	srv := &Server{
-		store:       st,
-		VantageAuth: fakeAuth{name: "nyc", ok: true},
+		store: st,
 		Assignment: func(v string) ([]model.Monitor, map[string]map[string]string, string) {
 			return []model.Monitor{m}, nil, "sha256:v1"
 		},
 	}
 
-	r := httptest.NewRequest("GET", "/agent/v1/assignment", nil)
-	r.Header.Set("Authorization", "Bearer smk_x_y")
+	r := requestAs(httptest.NewRequest("GET", "/agent/v1/assignment", nil), "nyc")
 	w := httptest.NewRecorder()
-	srv.Routes().ServeHTTP(w, r)
+	srv.agentAssignment(w, r)
 	if w.Code != 200 {
 		t.Fatalf("assignment status=%d body=%s", w.Code, w.Body)
 	}
@@ -861,8 +860,7 @@ func TestIngestOldAgentReportsMovedTargetByName(t *testing.T) {
 	probeCfgs := map[string]map[string]string{"FPing": {"binary": "/usr/sbin/fping"}}
 	ing := &fakeIngester{}
 	srv := &Server{
-		store:       ing,
-		VantageAuth: fakeAuth{name: "nyc", ok: true},
+		store: ing,
 		Assignment: func(v string) ([]model.Monitor, map[string]map[string]string, string) {
 			return []model.Monitor{m}, probeCfgs, "sha256:v1"
 		},
@@ -894,8 +892,7 @@ func TestIngestDropsFingerprintlessAmbiguousToken(t *testing.T) {
 	y := model.Monitor{ID: "y-uuid", Name: "a", ProbeKind: "FPing", Host: "2.2.2.2", Pings: 3, Step: time.Minute, Vantages: []string{"nyc"}}
 	ing := &fakeIngester{}
 	srv := &Server{
-		store:       ing,
-		VantageAuth: fakeAuth{name: "nyc", ok: true},
+		store: ing,
 		Assignment: func(v string) ([]model.Monitor, map[string]map[string]string, string) {
 			return []model.Monitor{x, y}, nil, "sha256:v1"
 		},
@@ -927,8 +924,7 @@ func TestIngestDisambiguatesAmbiguousTokenByFingerprint(t *testing.T) {
 	probeCfgs := map[string]map[string]string{"FPing": {"binary": "/usr/sbin/fping"}}
 	ing := &fakeIngester{}
 	srv := &Server{
-		store:       ing,
-		VantageAuth: fakeAuth{name: "nyc", ok: true},
+		store: ing,
 		Assignment: func(v string) ([]model.Monitor, map[string]map[string]string, string) {
 			return []model.Monitor{x, y}, probeCfgs, "sha256:v1"
 		},
@@ -959,8 +955,7 @@ func TestIngestDropsAmbiguousTokenWhenCandidatesShareFingerprint(t *testing.T) {
 	probeCfgs := map[string]map[string]string{"FPing": {"binary": "/usr/sbin/fping"}}
 	ing := &fakeIngester{}
 	srv := &Server{
-		store:       ing,
-		VantageAuth: fakeAuth{name: "nyc", ok: true},
+		store: ing,
 		Assignment: func(v string) ([]model.Monitor, map[string]map[string]string, string) {
 			return []model.Monitor{x, y}, probeCfgs, "sha256:v1"
 		},

@@ -8,12 +8,13 @@ optionally edit its `.env`, and `docker compose up -d`.
 |---|---|---|
 | **Use it when** | one collector on one host (most people) | you want remote **vantages** measuring the same targets |
 | **Services** | TimescaleDB + smoked | TimescaleDB + smoked + Caddy reverse proxy |
-| **Exposure** | `127.0.0.1:8087` (loopback) | public `https://<domain>/` via Caddy |
-| **Auth / TLS** | none — front it yourself if you expose it | Let's Encrypt TLS + Basic Auth (dashboard) + per-vantage API key (agents) |
+| **Exposure** | `127.0.0.1:8087` (loopback) | dashboard: public `https://<domain>/` via Caddy; agent API: smoked's own `https://<domain>:8443` |
+| **Auth / TLS** | none — front it yourself if you expose it | dashboard: Let's Encrypt TLS + Basic Auth (via Caddy); agents: mutual-TLS client certificate on smoked's own `:8443` listener (no Caddy, no API key) |
 | **Setup** | `.env` optional | `.env` required (DOMAIN, ACME_EMAIL, DASH_PASSWORD_HASH) |
 
-**Start here if you're not sure — most deployments are standalone.** Federation only
-matters when a second machine needs to probe your targets from its own network position.
+**Start here if you're not sure — most deployments are standalone; it needs none of the
+federation/mTLS setup below.** Federation only matters when a second machine needs to probe
+your targets from its own network position.
 
 ## Standalone
 
@@ -39,8 +40,11 @@ docker compose up -d
 # -> https://<your-domain>/
 ```
 
-Then mint a vantage key (Vantages admin tab, or `smoked vantage`) and run a
-`smoke-agent` with it. The full walkthrough — declaring `vantages:`, minting a key,
+Then onboard a vantage from the **Vantages** admin tab: give it a name and it hands back a
+ready-to-run `<name>-vantage.tar.gz` (agent.yaml with an embedded mTLS client certificate/key
++ the hub's CA cert, plus a docker-compose.yml and README) — no key to copy or mint. Unpack it
+on the vantage host and `docker compose up -d`. (CLI equivalent: `smoked vantage add <name> -out
+<name>-vantage.tar.gz`.) The full walkthrough — declaring `vantages:`, onboarding a vantage,
 running an agent, reading the overlay — is in [`docs/federation.md`](../docs/federation.md).
 
 > The example's Caddy uses the **HTTP-01** challenge (needs inbound ports 80 + 443). For

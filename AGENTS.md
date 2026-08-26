@@ -108,7 +108,7 @@ Most flags also read a `SMOKED_*` env var (`SMOKED_DSN`, `SMOKED_CONFIG`, `SMOKE
 **Subcommands** (dispatched from `os.Args[1]`, before flag parsing):
 
 ```sh
-smoked vantage add|ls|revoke ...   # per-vantage federation API keys (needs -dsn)
+smoked vantage add|ls|revoke ...   # per-vantage mTLS registry + self-bootstrapped CA (needs -dsn)
 smoked config import ...           # import a YAML tree into the DB config store
 smoked import smokeping ...        # import an existing SmokePing install (config; --history for RRD backfill)
 ```
@@ -125,8 +125,9 @@ docker build -f Caddy.Dockerfile -t heliograph-caddy .    # bundled reverse prox
 ```
 
 Prebuilt collector images are published to `ghcr.io/seitzbg/heliograph:latest` by CI. A minimal
-Compose stack (collector + TimescaleDB) and the `federation` profile (bundled Caddy, TLS, per-vantage
-keys) live in [`docker-compose.yml`](docker-compose.yml) / [`README.md`](README.md#docker-compose).
+Compose stack (collector + TimescaleDB) and the `federation` profile (bundled Caddy fronting the
+dashboard with TLS + Basic Auth; agents authenticate to smoked's own mTLS listener) live in
+[`docker-compose.yml`](docker-compose.yml) / [`README.md`](README.md#docker-compose).
 The read API and dashboard are **unauthenticated** — bind loopback and front with a reverse proxy for
 anything beyond localhost.
 

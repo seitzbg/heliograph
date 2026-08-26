@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -16,10 +17,12 @@ import (
 // Options configures an Agent: which hub to talk to, which vantage it measures
 // as, and the cadences/limits for polling, measuring, and buffering.
 type Options struct {
-	Hub      string
-	Key      string
-	Vantage  string
-	Insecure bool
+	Hub string
+	// TLSConfig authenticates this agent to the hub via mTLS — normally a client
+	// certificate for this vantage plus the hub's CA pool (or, for dev/self-signed
+	// setups, InsecureSkipVerify). Passed straight through to NewClient.
+	TLSConfig *tls.Config
+	Vantage   string
 
 	Interval time.Duration // assignment poll interval
 	Timeout  time.Duration // per-target probe timeout (and HTTP client timeout)
@@ -49,8 +52,8 @@ func (o Options) Validate() error {
 	switch {
 	case o.Hub == "":
 		return errors.New("agent: hub is required")
-	case o.Key == "":
-		return errors.New("agent: key is required")
+	case o.TLSConfig == nil:
+		return errors.New("agent: tls config is required (mTLS client certificate)")
 	case o.Interval <= 0:
 		return fmt.Errorf("agent: interval must be positive, got %s", o.Interval)
 	case o.Timeout <= 0:
@@ -96,7 +99,7 @@ type Agent struct {
 func New(opts Options) *Agent {
 	a := &Agent{
 		opts:        opts,
-		client:      NewClient(opts.Hub, opts.Key, opts.Insecure, opts.Timeout),
+		client:      NewClient(opts.Hub, opts.TLSConfig, opts.Timeout),
 		buf:         newBuffer(opts.BufferCap),
 		measureDone: make(chan struct{}),
 	}
@@ -172,12 +175,12 @@ func (a *Agent) pollLoop(ctx context.Context) {
 				if len(skipped) > 0 {
 					slog.Warn("assignment: skipped invalid targets", "skipped", skipped)
 				}
-				// The hub derives the vantage from the API key and returns it here; the
-				// configured `vantage` is only a label. Warn once if the operator's label
-				// disagrees (e.g. a key minted for a different vantage), so the logs can't
-				// quietly attribute this agent's rounds to the wrong vantage.
+				// The hub derives the vantage from the client cert's CommonName (mTLS) and
+				// returns it here; the configured `vantage` is only a label. Warn once if the
+				// operator's label disagrees (e.g. a cert minted for a different vantage), so
+				// the logs can't quietly attribute this agent's rounds to the wrong vantage.
 				if !vantageChecked && a.opts.Vantage != "" && a.opts.Vantage != asg.Vantage {
-					slog.Warn("configured vantage does not match the hub-assigned vantage; the hub's key-derived value wins",
+					slog.Warn("configured vantage does not match the hub-assigned vantage; the hub's cert-derived value wins",
 						"configured", a.opts.Vantage, "assigned", asg.Vantage)
 				}
 				vantageChecked = true

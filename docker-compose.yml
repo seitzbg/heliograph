@@ -1,12 +1,17 @@
 # One-command bring-up: TimescaleDB + the smoked collector serving the dashboard.
 #   docker compose up --build   ->   http://localhost:8087/
 #
-# Federation (multi-vantage) adds a bundled Caddy reverse proxy behind the
-# `federation` profile — it terminates TLS (automatic Let's Encrypt) and serves
-# the agent API (/agent/v1/*) by API key + the dashboard behind Basic Auth:
+# Federation (multi-vantage) has two independent parts, both opt-in:
+#   * the DASHBOARD goes public behind a bundled Caddy reverse proxy under the
+#     `federation` profile — it terminates TLS (automatic Let's Encrypt) and gates
+#     the dashboard with HTTP Basic Auth.
+#   * the AGENT API is smoked's own dedicated mutual-TLS listener, enabled by
+#     setting SMOKED_AGENT_ADDR/SMOKED_AGENT_HOSTNAME (see the `smoked` service
+#     below) and published directly — it is NOT proxied by Caddy.
 #   cp .env.example .env   # then set DOMAIN + ACME_EMAIL + DASH_PASSWORD_HASH
 #   docker compose --profile federation up --build
-# The default `docker compose up` above is unchanged and starts no proxy.
+# The default `docker compose up` above is unchanged and starts no proxy and no
+# agent listener (federation stays dark).
 services:
   timescaledb:
     # Pinned to a specific release AND digest, so a rebuild can't silently pull a different
@@ -52,9 +57,17 @@ services:
       # upper bound is rejected at container start with EINVAL (Docker rootful is fine).
       net.ipv4.ping_group_range: "0 10001"
     environment:
-      # Optional: enable the password-gated admin key-management API + Vantages
+      # Opt-in mTLS federation agent listener, entirely separate from the dashboard
+      # HTTP server above. Both empty (the default) means no listener at all — the
+      # single-host quickstart is unaffected. Set SMOKED_AGENT_ADDR (e.g. :8443) and
+      # SMOKED_AGENT_HOSTNAME (your public domain; becomes the SAN on smoked's
+      # self-issued server cert) in .env to enable it — needs SMOKED_DSN (set
+      # below) or smoked fatals at startup. See docs/federation.md.
+      SMOKED_AGENT_ADDR: ${SMOKED_AGENT_ADDR:-}
+      SMOKED_AGENT_HOSTNAME: ${SMOKED_AGENT_HOSTNAME:-}
+      # Optional: enable the password-gated admin vantage-management API + Vantages
       # GUI panel. Empty (the default) leaves it fail-closed/disabled. Set it in
-      # .env to provision vantages from the browser instead of the CLI.
+      # .env to onboard vantages from the browser instead of the CLI.
       SMOKED_ADMIN_PASSWORD: ${SMOKED_ADMIN_PASSWORD:-}
       # Independent 32-byte (64 hex character) cookie-signing key. Generate once with
       # `openssl rand -hex 32` and keep it stable for sessions to survive restarts.
@@ -77,15 +90,21 @@ services:
       # reverse proxy (TLS + auth; add rate limiting there if you need it) pointed at
       # 127.0.0.1:8087 rather than changing this to 0.0.0.0.
       - "127.0.0.1:8087:8087"
+      # smoked's own mTLS agent listener (federation). Only serves traffic once
+      # SMOKED_AGENT_ADDR is set above; otherwise nothing listens here and this is a
+      # harmless closed port. Published directly — NOT proxied by Caddy.
+      - "8443:8443"
     depends_on:
       timescaledb:
         condition: service_healthy
 
-  # Bundled reverse proxy for federation (opt-in via the `federation` profile).
-  # Terminates TLS with an auto-issued, auto-renewed Let's Encrypt cert for
-  # $DOMAIN and serves smoked with two auth models (see Caddyfile): /agent/v1/*
-  # by per-vantage API key, the dashboard/read/admin API behind HTTP Basic Auth.
-  # smoked itself never does TLS (the API key + Basic Auth ride inside Caddy's TLS).
+  # Bundled reverse proxy for the DASHBOARD ONLY (opt-in via the `federation`
+  # profile). Terminates TLS with an auto-issued, auto-renewed Let's Encrypt cert
+  # for $DOMAIN and gates the dashboard/read/admin API behind HTTP Basic Auth (see
+  # Caddyfile) — smoked itself never does TLS for the dashboard. Remote agents do
+  # NOT go through Caddy: they connect straight to smoked's own mTLS listener on
+  # :8443 (see the `smoked` service above) and authenticate with a CA-signed
+  # client certificate — no API key involved.
   caddy:
     profiles: ["federation"]
     # Built from Caddy.Dockerfile so DNS-challenge provider plugins are compiled
@@ -97,7 +116,7 @@ services:
     restart: unless-stopped
     ports:
       - "80:80"     # HTTP-01 challenge + HTTP->HTTPS redirect (not needed for DNS-01)
-      - "443:443"   # public agent API + dashboard over TLS
+      - "443:443"   # public dashboard over TLS (agents use smoked's own :8443, not this proxy)
     environment:
       # From .env (see .env.example). Set DOMAIN=localhost to smoke-test with a
       # self-signed cert instead of hitting Let's Encrypt.

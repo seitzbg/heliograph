@@ -2,57 +2,57 @@ package api
 
 import (
 	"context"
-	"log/slog"
 	"net/http"
-	"strings"
 )
-
-// VantageAuth verifies an agent's presented API key and returns the vantage it
-// authenticates as. *vantage.Store satisfies it; api keeps it an interface so the
-// handlers test with a fake and need no live DB.
-type VantageAuth interface {
-	Verify(ctx context.Context, presented string) (name string, ok bool, err error)
-}
 
 type agentCtxKey int
 
 const vantageCtxKey agentCtxKey = 0
 
-// vantageFrom returns the authenticated vantage name requireAgent stored on the
-// request context; "" if the request did not pass through requireAgent.
+// vantageFrom returns the authenticated vantage name stored on the request context by the
+// agent auth layer; "" if the request carries none. requireAgent (below) is what sets it, from
+// the CN of the client's verified mTLS certificate; agentAssignment/agentResults read the
+// identity through this same accessor.
 func vantageFrom(r *http.Request) string {
 	v, _ := r.Context().Value(vantageCtxKey).(string)
 	return v
 }
 
-func bearerToken(h string) string {
-	const p = "Bearer "
-	if len(h) >= len(p) && strings.EqualFold(h[:len(p)], p) {
-		return strings.TrimSpace(h[len(p):])
-	}
-	return ""
-}
-
-// requireAgent authenticates an agent request by its Bearer API key, storing the
-// resolved vantage on the context for the handler. 401 for any absent/malformed/
-// unknown/revoked key (no oracle); 503 if the key store is unreachable.
+// requireAgent authorizes a federation agent by the CommonName of its mTLS client certificate.
+// It does not perform the TLS handshake itself: the mTLS listener (wired separately, a later
+// task) already requires a CA-signed client cert before a request ever reaches a handler here —
+// this layer only authorizes the identity that cert presented, the same shape as requireAdmin
+// authorizing an admin session. A CN must belong to a currently active (registered, not
+// revoked) vantage; on success it is stamped onto the request context via vantageCtxKey exactly
+// as the old Bearer-key auth did, so vantageFrom/agentAssignment/agentResults need no changes.
+//
+// SAFE ONLY behind a listener whose tls.Config sets ClientAuth: tls.RequireAndVerifyClientCert
+// (the config AgentTLSConfig, in agentmtls.go, produces). A weaker ClientAuthType such as
+// RequireAnyClientCert still populates r.TLS.PeerCertificates but never verifies the chain
+// against the CA, so any self-signed cert bearing an arbitrary CN would sail through this check
+// and impersonate any vantage.
 func (srv *Server) requireAgent(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		key := bearerToken(r.Header.Get("Authorization"))
-		if key == "" {
-			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+		if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
+			http.Error(w, `{"error":"client certificate required"}`, http.StatusUnauthorized)
 			return
 		}
-		name, ok, err := srv.VantageAuth.Verify(r.Context(), key)
+		// Defensive: production only wires the mTLS listener (and thus ever calls requireAgent)
+		// once srv.Vantages exists, but don't let a misconfiguration panic a request handler.
+		if srv.Vantages == nil {
+			http.Error(w, `{"error":"vantage store unavailable"}`, http.StatusInternalServerError)
+			return
+		}
+		cn := r.TLS.PeerCertificates[0].Subject.CommonName
+		active, err := srv.Vantages.IsActive(r.Context(), cn)
 		if err != nil {
-			slog.Error("agent auth: verify failed", "err", err)
-			http.Error(w, `{"error":"auth unavailable"}`, http.StatusServiceUnavailable)
+			http.Error(w, `{"error":"store unavailable"}`, http.StatusServiceUnavailable)
 			return
 		}
-		if !ok {
-			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+		if !active {
+			http.Error(w, `{"error":"unknown or revoked vantage"}`, http.StatusForbidden)
 			return
 		}
-		next(w, r.WithContext(context.WithValue(r.Context(), vantageCtxKey, name)))
+		next(w, r.WithContext(context.WithValue(r.Context(), vantageCtxKey, cn)))
 	}
 }

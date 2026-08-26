@@ -7,6 +7,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"flag"
 	"fmt"
@@ -39,32 +41,42 @@ var version = "dev"
 // agentConfig is the resolved smoke-agent configuration: the merge of an
 // optional YAML file and CLI flag overrides, plus defaults.
 type agentConfig struct {
-	Hub      string
-	Key      string
-	Vantage  string
-	Interval time.Duration
-	Timeout  time.Duration
-	Insecure bool
-	Workers  int
-	Buffer   int
-	FlushMax int
-	SpoolDir string
+	Hub string
+	// ClientCert, ClientKey, and CACert hold inline PEM contents (not file paths) — either
+	// decoded straight from the YAML config's client_cert/client_key/ca_cert fields, or read
+	// from a file when the corresponding -client-cert/-client-key/-ca-cert flag is set.
+	ClientCert string
+	ClientKey  string
+	CACert     string
+	Vantage    string
+	Interval   time.Duration
+	Timeout    time.Duration
+	Insecure   bool
+	Workers    int
+	Buffer     int
+	FlushMax   int
+	SpoolDir   string
 }
 
 // fileConfig mirrors agentConfig for YAML decoding. Interval/Timeout are
 // strings here because yaml.v3 does not parse "30s" into a time.Duration
 // natively; resolveConfig parses them with time.ParseDuration after decode.
+// ClientCert/ClientKey/CACert carry inline PEM — these exact yaml tags match
+// RenderAgentYAML's onboarding-bundle contract byte for byte, so a downloaded
+// agent.yaml just works.
 type fileConfig struct {
-	Hub      string `yaml:"hub"`
-	Key      string `yaml:"key"`
-	Vantage  string `yaml:"vantage"`
-	Interval string `yaml:"interval"`
-	Timeout  string `yaml:"timeout"`
-	Insecure bool   `yaml:"insecure"`
-	Workers  int    `yaml:"workers"`
-	Buffer   int    `yaml:"buffer"`
-	FlushMax int    `yaml:"flush_max"`
-	SpoolDir string `yaml:"spool_dir"`
+	Hub        string `yaml:"hub"`
+	ClientCert string `yaml:"client_cert"`
+	ClientKey  string `yaml:"client_key"`
+	CACert     string `yaml:"ca_cert"`
+	Vantage    string `yaml:"vantage"`
+	Interval   string `yaml:"interval"`
+	Timeout    string `yaml:"timeout"`
+	Insecure   bool   `yaml:"insecure"`
+	Workers    int    `yaml:"workers"`
+	Buffer     int    `yaml:"buffer"`
+	FlushMax   int    `yaml:"flush_max"`
+	SpoolDir   string `yaml:"spool_dir"`
 }
 
 // cliFlags carries the CLI flag overrides for resolveConfig. A zero value for a field
@@ -73,14 +85,18 @@ type fileConfig struct {
 // `insecure: true` — a plain bool couldn't distinguish "false" from "not passed"
 // (CodeRabbit #5). spoolDir is a *string for the same reason: an explicit `-spool-dir=`
 // must be able to disable a file's `spool_dir` (select in-memory mode), which a plain
-// string treated as "not passed" could not (CODE_REVIEW #3).
+// string treated as "not passed" could not (CODE_REVIEW #3). clientCertPath/clientKeyPath/
+// caCertPath are FILE PATHS (unlike the yaml config's inline PEM) — for operators who keep
+// their mTLS material as separate files; resolveConfig reads them and overrides the
+// corresponding PEM string on cfg.
 type cliFlags struct {
-	hub, key, vantage string
-	interval, timeout time.Duration
-	insecure          *bool
-	workers, buffer   int
-	flushMax          int
-	spoolDir          *string
+	hub, vantage                              string
+	clientCertPath, clientKeyPath, caCertPath string
+	interval, timeout                         time.Duration
+	insecure                                  *bool
+	workers, buffer                           int
+	flushMax                                  int
+	spoolDir                                  *string
 }
 
 // resolveConfig builds the effective agentConfig: it starts from the YAML file at path
@@ -115,14 +131,16 @@ func resolveConfig(path string, f cliFlags) (agentConfig, error) {
 	}
 
 	cfg := agentConfig{
-		Hub:      fc.Hub,
-		Key:      fc.Key,
-		Vantage:  fc.Vantage,
-		Insecure: fc.Insecure,
-		Workers:  fc.Workers,
-		Buffer:   fc.Buffer,
-		FlushMax: fc.FlushMax,
-		SpoolDir: fc.SpoolDir,
+		Hub:        fc.Hub,
+		ClientCert: fc.ClientCert,
+		ClientKey:  fc.ClientKey,
+		CACert:     fc.CACert,
+		Vantage:    fc.Vantage,
+		Insecure:   fc.Insecure,
+		Workers:    fc.Workers,
+		Buffer:     fc.Buffer,
+		FlushMax:   fc.FlushMax,
+		SpoolDir:   fc.SpoolDir,
 	}
 	if fc.Interval != "" {
 		d, err := time.ParseDuration(fc.Interval)
@@ -143,8 +161,26 @@ func resolveConfig(path string, f cliFlags) (agentConfig, error) {
 	if f.hub != "" {
 		cfg.Hub = f.hub
 	}
-	if f.key != "" {
-		cfg.Key = f.key
+	if f.clientCertPath != "" {
+		data, err := os.ReadFile(f.clientCertPath)
+		if err != nil {
+			return agentConfig{}, fmt.Errorf("reading -client-cert %s: %w", f.clientCertPath, err)
+		}
+		cfg.ClientCert = string(data)
+	}
+	if f.clientKeyPath != "" {
+		data, err := os.ReadFile(f.clientKeyPath)
+		if err != nil {
+			return agentConfig{}, fmt.Errorf("reading -client-key %s: %w", f.clientKeyPath, err)
+		}
+		cfg.ClientKey = string(data)
+	}
+	if f.caCertPath != "" {
+		data, err := os.ReadFile(f.caCertPath)
+		if err != nil {
+			return agentConfig{}, fmt.Errorf("reading -ca-cert %s: %w", f.caCertPath, err)
+		}
+		cfg.CACert = string(data)
 	}
 	if f.vantage != "" {
 		cfg.Vantage = f.vantage
@@ -193,8 +229,11 @@ func resolveConfig(path string, f cliFlags) (agentConfig, error) {
 	if u, err := url.Parse(cfg.Hub); err != nil || !u.IsAbs() || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return agentConfig{}, fmt.Errorf("hub must be an absolute http(s) URL, got %q", cfg.Hub)
 	}
-	if cfg.Key == "" {
-		return agentConfig{}, fmt.Errorf("key is required")
+	if cfg.ClientCert == "" || cfg.ClientKey == "" {
+		return agentConfig{}, fmt.Errorf("client_cert and client_key are required (mTLS)")
+	}
+	if cfg.CACert == "" && !cfg.Insecure {
+		return agentConfig{}, fmt.Errorf("ca_cert is required unless -insecure")
 	}
 	if cfg.Interval <= 0 {
 		return agentConfig{}, fmt.Errorf("interval must be positive, got %s", cfg.Interval)
@@ -218,11 +257,13 @@ func resolveConfig(path string, f cliFlags) (agentConfig, error) {
 func main() {
 	configPath := flag.String("config", "", "path to a YAML config file")
 	hub := flag.String("hub", "", "hub base URL, e.g. https://hub.example (overrides config file)")
-	key := flag.String("key", "", "vantage API key (overrides config file)")
+	clientCertPath := flag.String("client-cert", "", "path to this vantage's mTLS client certificate PEM file (overrides config file's inline client_cert)")
+	clientKeyPath := flag.String("client-key", "", "path to this vantage's mTLS client private key PEM file (overrides config file's inline client_key)")
+	caCertPath := flag.String("ca-cert", "", "path to the hub CA certificate PEM file used to verify the hub (overrides config file's inline ca_cert)")
 	vantage := flag.String("vantage", "", "vantage name this agent measures as (overrides config file)")
 	interval := flag.Duration("interval", 0, "assignment poll interval (overrides config file; default 60s)")
 	timeout := flag.Duration("timeout", 0, "per-target probe timeout (overrides config file; default 4s)")
-	insecure := flag.Bool("insecure", false, "skip TLS certificate verification when talking to the hub")
+	insecure := flag.Bool("insecure", false, "skip TLS certificate verification when talking to the hub (dev / self-signed only)")
 	workers := flag.Int("workers", 0, "max concurrent probes (overrides config file; default 50)")
 	buffer := flag.Int("buffer", 0, "bounded store-and-forward buffer capacity in rounds (overrides config file; default 100000)")
 	flushMax := flag.Int("flush-max", 0, "max rounds per push to the hub (overrides config file; default 5000)")
@@ -254,7 +295,8 @@ func main() {
 	})
 
 	cfg, err := resolveConfig(*configPath, cliFlags{
-		hub: *hub, key: *key, vantage: *vantage,
+		hub: *hub, vantage: *vantage,
+		clientCertPath: *clientCertPath, clientKeyPath: *clientKeyPath, caCertPath: *caCertPath,
 		interval: *interval, timeout: *timeout, insecure: insecureOverride,
 		workers: *workers, buffer: *buffer, flushMax: *flushMax, spoolDir: spoolDirOverride,
 	})
@@ -265,11 +307,30 @@ func main() {
 
 	slog.Info("smoke-agent starting", "hub", cfg.Hub, "vantage", cfg.Vantage, "probes", strings.Join(probe.Registered(), ", "))
 
+	// Build the mTLS client identity: this vantage's client certificate always, plus
+	// either the hub's CA pool (normal operation) or InsecureSkipVerify (opt-in dev /
+	// self-signed setups only — never logs cfg.ClientCert/ClientKey/CACert).
+	cert, err := tls.X509KeyPair([]byte(cfg.ClientCert), []byte(cfg.ClientKey))
+	if err != nil {
+		slog.Error("smoke-agent: invalid client_cert/client_key", "err", err)
+		os.Exit(1)
+	}
+	tlsCfg := &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}
+	if cfg.Insecure {
+		tlsCfg.InsecureSkipVerify = true // #nosec G402 — opt-in dev/self-signed
+	} else {
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM([]byte(cfg.CACert)) {
+			slog.Error("smoke-agent: ca_cert: no valid certificate found")
+			os.Exit(1)
+		}
+		tlsCfg.RootCAs = pool
+	}
+
 	opts := agent.Options{
 		Hub:       cfg.Hub,
-		Key:       cfg.Key,
+		TLSConfig: tlsCfg,
 		Vantage:   cfg.Vantage,
-		Insecure:  cfg.Insecure,
 		Interval:  cfg.Interval,
 		Timeout:   cfg.Timeout,
 		Workers:   cfg.Workers,

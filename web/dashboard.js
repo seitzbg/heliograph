@@ -61,6 +61,18 @@
     return { buckets, N };
   }
 
+  // nextGridSeries decides a grid panel's new per-vantage series after a refresh, distinguishing a
+  // FAILED bulk fetch from a successful one that simply had no new rounds for this target (CODE_REVIEW
+  // M14). `incoming` = a freshly fetched series (or null); `bulkOk` = the bulk /api/series/all request
+  // for this vantage actually answered. A failed fetch must NOT age/trim the cached series — otherwise
+  // a transient outage, or a background tab woken past the 3h window, silently empties the last-known
+  // graph even though the server never lost the data. Pure, so the cache transition is unit-testable.
+  function nextGridSeries(prev, incoming, bulkOk, cutoffMs) {
+    if (incoming) return mergeSeries(prev, incoming, cutoffMs);   // new data: merge + age to the window
+    if (bulkOk && prev) return mergeSeries(prev, null, cutoffMs); // answered, no new rounds: age the cache
+    return prev;                                                  // fetch failed: keep last-known untouched
+  }
+
   // gridSince is the incremental watermark for the bulk Graphs grid (#1): the OLDEST
   // round timestamp among panels that currently hold data. Using the oldest frontier
   // (not the global newest) means the shared `since` never advances past the
@@ -122,8 +134,17 @@
   // unavailable; decoding those as ordinary data turned a transient failure into an
   // empty target/SLA/chart list, blanking the dashboard. Rejecting lets each caller
   // keep its last-known state and show a degraded indicator instead.
+  // fetchWithTimeout wraps fetch with a bounded AbortController so a hung request REJECTS instead of
+  // wedging a busy flag or a refresh generation forever (CODE_REVIEW M14/M15). Every caller already
+  // treats a rejection as "transient — keep last known". 15s is well above a healthy response and
+  // below any cadence, so a stalled request is retried on the next tick rather than blocking it.
+  function fetchWithTimeout(url, opts, ms) {
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), ms || 15000);
+    return fetch(url, { ...(opts || {}), signal: ac.signal }).finally(() => clearTimeout(timer));
+  }
   async function fetchJSON(url) {
-    const r = await fetch(url, { cache: 'no-store' });
+    const r = await fetchWithTimeout(url, { cache: 'no-store' });
     if (!r.ok) throw new Error('HTTP ' + r.status + ' from ' + url);
     return r.json();
   }
@@ -791,45 +812,19 @@
     return 'collecting…';
   }
 
-  // --- Vantage agent artifacts (pure; the reveal modal's two downloadable files) ---
+  // --- Vantage bundle download (pure) ---
 
-  // agentYaml renders the smoke-agent config for a freshly minted vantage. It mirrors the
-  // hub's vantage.AgentSnippet but fills `hub` with the real origin (the browser knows which
-  // hub you're on — the server only has a placeholder) and adds `spool_dir` so the durable
-  // spool volume in agentCompose is actually used. Scalars are JSON-quoted (== Go %q) so any
-  // name stays well-formed YAML. This file carries the key; keep it out of the compose.
-  function agentYaml(name, key, hub) {
-    return '# smoke-agent config for vantage ' + JSON.stringify(name) + '\n'
-      + 'hub: ' + JSON.stringify(hub) + '   # this hub — change if the agent reaches it by another URL\n'
-      + 'vantage: ' + JSON.stringify(name) + '\n'
-      + 'key: ' + JSON.stringify(key) + '\n'
-      + 'spool_dir: /var/lib/smoke-agent/spool\n';
-  }
-
-  // agentCompose renders a ready-to-run docker-compose.yaml for a vantage agent. It is the
-  // same for every vantage — the per-vantage data lives in the mounted agent.yaml, so this
-  // file holds no secret. The single published image ships both binaries, so we override the
-  // entrypoint to smoke-agent; cap_add/sysctls mirror the hub service so ICMP probes work.
-  function agentCompose() {
-    return [
-      '# docker-compose.yaml — heliograph vantage agent',
-      '# Save next to agent.yaml (the other tab), then:  docker compose up -d',
-      'services:',
-      '  smoke-agent:',
-      '    image: ghcr.io/seitzbg/heliograph:latest',
-      '    entrypoint: ["smoke-agent"]',
-      '    command: ["-config", "/etc/heliograph/agent.yaml"]',
-      '    volumes:',
-      '      - ./agent.yaml:/etc/heliograph/agent.yaml:ro',
-      '      - agent-spool:/var/lib/smoke-agent/spool',
-      '    cap_add: [NET_RAW]',
-      '    sysctls:',
-      '      net.ipv4.ping_group_range: "0 10001"',
-      '    restart: unless-stopped',
-      'volumes:',
-      '  agent-spool: {}',
-      '',
-    ].join('\n');
+  // vantageBundleFilename builds the download filename for a freshly minted vantage's
+  // onboarding bundle, mirroring the server's Content-Disposition (`<name>-vantage.tar.gz`,
+  // see addVantage in internal/api/api.go). The server's vantage.ValidName already restricts
+  // real vantage names, but this is building a FILENAME, not validating a vantage name — it
+  // sanitizes independently so an odd/hostile `name` (whatever reaches this helper) can never
+  // produce a path separator or other unsafe character in a browser download. Any character
+  // outside the safe set becomes '-'; an all-unsafe (or empty) name falls back to "vantage"
+  // rather than emitting a bare "-vantage.tar.gz".
+  function vantageBundleFilename(name) {
+    const safe = String(name == null ? '' : name).replace(/[^A-Za-z0-9._-]/g, '-') || 'vantage';
+    return safe + '-vantage.tar.gz';
   }
 
   // tkey is a target's STABLE routing/identity key from an /api/targets (or /api/series/all) DTO: its
@@ -870,7 +865,7 @@
     return (!vantage || vantage === 'local') ? local : remote;
   }
 
-  window.Dash = { RANGES, RANGE_ORDER, parseRoute, mergeSeries, gridSince, gridTemplateFor, maxColumnsFor, rangeLabels, fetchJSON, zoomResolution, pixelToTime, sharedYMax, buildTree, underPath, targetStatus, pickSeries, vantageList, orderVantages, defaultFocus, keepFocus, vantageColorVar, worstStatus, statusFor, availableVantages, toggleGridVantage, vantageControlChips, bandVantageFor, gridShowsTarget, adminMode, adminSessionState, createAdminStateController, statusProbeOwnsView, relTime, listTargets, addTarget, editTarget, removeTarget, buildTargetNode, buildGroupNode, labelHTML, collectingNote, agentYaml, agentCompose, cfgTree, reweightSiblings, reorderSiblings, editNodeAtPath, removeNodeAtPath, renameNodeAtPath, addNodeAtPath, moveNode, moveInList, cfgDropDestination, cfgVisibleRows, cfgTreeKey, tkey, ntpStatHtml, ntpStatOf, ntpStatSelect };
+  window.Dash = { RANGES, RANGE_ORDER, parseRoute, mergeSeries, gridSince, gridTemplateFor, maxColumnsFor, rangeLabels, fetchJSON, zoomResolution, pixelToTime, sharedYMax, nextGridSeries, buildTree, underPath, targetStatus, pickSeries, vantageList, orderVantages, defaultFocus, keepFocus, vantageColorVar, worstStatus, statusFor, availableVantages, toggleGridVantage, vantageControlChips, bandVantageFor, gridShowsTarget, adminMode, adminSessionState, createAdminStateController, statusProbeOwnsView, relTime, listTargets, addTarget, editTarget, removeTarget, buildTargetNode, buildGroupNode, labelHTML, collectingNote, vantageBundleFilename, cfgTree, reweightSiblings, reorderSiblings, editNodeAtPath, removeNodeAtPath, renameNodeAtPath, addNodeAtPath, moveNode, moveInList, cfgDropDestination, cfgVisibleRows, cfgTreeKey, tkey, ntpStatHtml, ntpStatOf, ntpStatSelect };
 
   // ---------------------------------------------------------------- init (DOM) --
   function init() {
@@ -892,13 +887,13 @@
       const vq = vantage ? '&vantage=' + enc(vantage) : '';
       const R = RANGES[key];
       if (R.mode === 'raw') {
-        const r = await fetch('/api/series?target=' + enc(name) + '&window=' + R.window + vq, { cache: 'no-store' });
+        const r = await fetchWithTimeout('/api/series?target=' + enc(name) + '&window=' + R.window + vq, { cache: 'no-store' });
         if (!r.ok) return null;
         return Smoke.fromApiSeries(await r.json());
       }
       // Bound the rollup to the range window server-side (Go duration, e.g. 240h for
       // 10 days) so we don't fetch the target's full retained history each refresh.
-      const r = await fetch('/api/rollup?target=' + enc(name) + '&res=' + R.res + '&window=' + (R.days * 24) + 'h' + vq, { cache: 'no-store' });
+      const r = await fetchWithTimeout('/api/rollup?target=' + enc(name) + '&res=' + R.res + '&window=' + (R.days * 24) + 'h' + vq, { cache: 'no-store' });
       if (r.status === 501) return { unsupported: true };
       if (!r.ok) return null;
       return Smoke.fromApiRollup(await r.json());
@@ -1048,7 +1043,9 @@
     // single-vantage deployment is unchanged. Remembered per browser.
     let availVantages = ['local'];
     function loadGridVantages() {
-      try { const s = JSON.parse(localStorage.getItem('grid-vantages')); if (Array.isArray(s) && s.length) return s; } catch (e) {}
+      // Clamp a persisted selection to the cap: a pre-#113 localStorage array could hold 5+ vantages,
+      // which would draw an overlay in a reused palette color until manually deselected (CODE_REVIEW M12).
+      try { const s = JSON.parse(localStorage.getItem('grid-vantages')); if (Array.isArray(s) && s.length) return s.slice(0, MAX_GRID_VANTAGES); } catch (e) {}
       return ['local'];
     }
     let gridVantages = loadGridVantages();
@@ -1225,7 +1222,7 @@
       const since = sinceMs != null ? '&since=' + sinceMs : '';
       // 'local' (the hub) is the default vantage — no param; a remote vantage is requested explicitly.
       const vq = (vantage && vantage !== 'local') ? '&vantage=' + enc(vantage) : '';
-      const r = await fetch('/api/series/all?window=' + RANGES['3h'].window + since + vq, { cache: 'no-store' });
+      const r = await fetchWithTimeout('/api/series/all?window=' + RANGES['3h'].window + since + vq, { cache: 'no-store' });
       if (!r.ok) return null;
       return r.json();
     }
@@ -1329,8 +1326,9 @@
               // window once (the server resolves the stable token; 'local' takes the default vantage).
               try { const s = await fetchRange(tkey(t), '3h', v === 'local' ? undefined : v); if (s && !s.unsupported) incoming = s; } catch (e) { /* transient */ }
             }
-            if (incoming) p.seriesByV[v] = mergeSeries(p.seriesByV[v], incoming, cutoffMs);
-            else if (p.seriesByV[v]) p.seriesByV[v] = mergeSeries(p.seriesByV[v], null, cutoffMs); // age out
+            // Only a bulk fetch that actually ANSWERED may age a cached series to the window; a failed
+            // fetch (bulk === null) leaves the last-known series untouched (CODE_REVIEW M14).
+            p.seriesByV[v] = nextGridSeries(p.seriesByV[v], incoming, !!bulk, cutoffMs);
           }));
         }
         // The band owner (p.series) + stat line are chosen PER PANEL in renderGridPanels: each panel
@@ -1430,15 +1428,18 @@
       }
       updateHiddenNote(hidden);
       // Which vantages overlay on each panel: every OTHER selected vantage that measures this target
-      // (not its band owner). Filter by the SHOWN set + what the target measures, but color by the
-      // full availVantages so a vantage keeps its color as others are toggled. Skip series a panel
-      // hasn't loaded / can't support.
+      // (not its band owner). Filter by the SHOWN set + what the target measures. Color from the SHOWN
+      // set (gridVantages, capped at MAX_GRID_VANTAGES) — not the full availVantages catalog — so no
+      // two simultaneously-drawn overlays can land on the same palette slot when the deployment has
+      // more than four vantages (CODE_REVIEW M12); the tradeoff is a vantage's color may shift when
+      // the selection changes. Matches how stack/zoom already colors by its shown set. Skip series a
+      // panel hasn't loaded / can't support.
       const overlaysFor = (p) => {
         if (gridVantages.length < 2) return undefined;
         const byV = p.seriesByV || {};
         const measures = new Set(vantagesByTarget.get(p.el.dataset.target) || ['local']);
         return gridVantages.filter((v) => v !== p.band && measures.has(v) && byV[v] && !byV[v].unsupported)
-          .map((v) => ({ series: byV[v], color: cssVar(vantageColorVar(v, availVantages)) }));
+          .map((v) => ({ series: byV[v], color: cssVar(vantageColorVar(v, gridVantages)) }));
       };
       // Unison shares one latency scale — but only across rtt panels. A signed offset panel uses
       // its own zero-centered scale and would otherwise blow up the shared max (a +5s offset =>
@@ -1472,8 +1473,10 @@
       const bar = $('gridVantageBar'); if (!bar) return;
       if (availVantages.length < 2) { bar.hidden = true; bar.innerHTML = ''; return; }
       bar.hidden = false;
+      // Swatch color from the SHOWN set so a selected chip matches its drawn line (CODE_REVIEW M12);
+      // an unselected chip previews the slot it would take if added.
       bar.innerHTML = vantageControlChips(availVantages, gridVantages, gridFocus(), MAX_GRID_VANTAGES,
-        (v) => cssVar(vantageColorVar(v, availVantages)));
+        (v) => cssVar(vantageColorVar(v, gridVantages.includes(v) ? gridVantages : gridVantages.concat([v]))));
     }
 
     // ---- config-tree menu (left nav) ----
@@ -1613,20 +1616,17 @@
       const ref = stackCanvases.find((c) => c.key === '3h' && c.byV);
       host.innerHTML = vchipsHtml(stackVantages, stackFocus, (v) => lastMedian(ref && ref.byV[v]));
     }
-    async function renderStack(name) {
-      const gen = ++stackGen; // captured before any await — invalidates any earlier in-flight renderStack, same name or not
-      curTarget = name; stackCanvases.length = 0;
-      $('stackTitle').innerHTML = probeBadge(name) + displayLabel(name);
-      const grid = $('stackGrid'); grid.innerHTML = '';
-
-      await ensureVantages(name);
-      if (gen !== stackGen) return; // a newer renderStack call superseded this one — don't append its panels
-      const vs = Dash.orderVantages(vantagesFor(name));
-      stackVantages = vs;
-      await ensureVantageStats(vs); // remote vantages' NTP stats for the meta (M2); local uses ntpByName
-      if (gen !== stackGen) return;
-
-      const cells = RANGE_ORDER.map((key) => {
+    // ensureStackCells returns the four range cells in #stackGrid, building them once and REUSING
+    // them across refreshes. Reusing the canvases (rather than clearing the grid at the top of every
+    // renderStack) is what keeps the current graphs visible while a refresh fetches new data — no
+    // blank frame mid-fetch (CODE_REVIEW M15). The cells are target-agnostic (one per range); only the
+    // painted data changes, so the same four canvases serve every target.
+    let stackCells = null;
+    function ensureStackCells() {
+      const grid = $('stackGrid');
+      if (stackCells && stackCells.length === RANGE_ORDER.length && stackCells[0].el.parentNode === grid) return stackCells;
+      grid.innerHTML = '';
+      stackCells = RANGE_ORDER.map((key) => {
         const R = RANGES[key];
         const el = document.createElement('div'); el.className = 'panel spanel'; el.dataset.range = key;
         el.innerHTML = '<div class="charts-head"><h3>' + R.label + ' <span class="reslabel">' + R.desc + '</span></h3><span class="reslabel">click to zoom ⤢</span></div>' +
@@ -1634,46 +1634,72 @@
         grid.appendChild(el);
         return { key, R, el, canvas: el.querySelector('canvas'), meta: el.querySelector('.meta') };
       });
-      // Re-set with the probe badge now that ensureVantages() has seeded probeByName (covers a
-      // deep link, where the grid panel isn't cached yet at the first title paint above).
-      $('stackTitle').innerHTML = probeBadge(name) + displayLabel(name);
+      return stackCells;
+    }
+    let stackBusy = false; // a renderStack fetch is in flight (CODE_REVIEW M15 same-target serialization)
+    async function renderStack(name) {
+      // Serialize periodic refreshes for the SAME target: if one is already in flight, skip rather
+      // than bump the generation and discard the running one — under sustained slow reads that would
+      // livelock and never paint (CODE_REVIEW M15). A navigation to a DIFFERENT target falls through
+      // and supersedes via stackGen below.
+      if (stackBusy && name === curTarget) return;
+      const gen = ++stackGen; // invalidates any earlier in-flight renderStack, same name or not
+      curTarget = name;
+      stackBusy = true;
+      try {
+        $('stackTitle').innerHTML = probeBadge(name) + displayLabel(name);
+        const cells = ensureStackCells(); // reuse the existing canvases — stay visible until new data lands
+        await ensureVantages(name);
+        if (gen !== stackGen) return; // a newer renderStack call superseded this one
+        const vs = Dash.orderVantages(vantagesFor(name));
+        stackVantages = vs;
+        await ensureVantageStats(vs); // remote vantages' NTP stats for the meta (M2); local uses ntpByName
+        if (gen !== stackGen) return;
+        // Re-set with the probe badge now that ensureVantages() has seeded probeByName (covers a deep
+        // link, where the grid panel isn't cached yet at the first title paint above).
+        $('stackTitle').innerHTML = probeBadge(name) + displayLabel(name);
 
-      if (vs.length <= 1) {
-        // Single-vantage: no fetch fan-out, no overlays, no chips (renderStackChips() clears
-        // #stackVantages via the length<=1 check). Fetch the target's OWN vantage — which may
-        // be a remote one (a `vantages: [nyc]` target has no local data) — not the implicit
-        // local default, else a remote-only target's graphs would be blank (CODE_REVIEW #3 / P1-3).
+        // Collect this generation's entries locally; commit to stackCanvases only after painting, so a
+        // superseded generation never leaves half its panels in the shared array.
+        const newEntries = [];
+        if (vs.length <= 1) {
+          // Single-vantage: no fetch fan-out, no overlays, no chips. Fetch the target's OWN vantage —
+          // which may be a remote one (a `vantages: [nyc]` target has no local data) — not the implicit
+          // local default, else a remote-only target's graphs would be blank (CODE_REVIEW #3 / P1-3).
+          const focus = vs[0] && vs[0] !== 'local' ? vs[0] : '';
+          await Promise.all(cells.map(async (c) => {
+            let s = null; try { s = await fetchRange(name, c.key, focus); } catch (e) { /* transient */ }
+            if (gen !== stackGen) return; // superseded mid-fetch
+            const k = name + '|' + c.key;
+            const pick = pickSeries(s, lastGood.get(k)); lastGood.set(k, pick.cache); s = pick.series;
+            const entry = { canvas: c.canvas, meta: c.meta, R: c.R, key: c.key, series: s, failed: pick.failed, vantage: focus };
+            newEntries.push(entry);
+            renderStackCell(entry); // repaints the reused canvas in place (clear+draw is synchronous — no blank)
+          }));
+        } else {
+          stackFocus = Dash.keepFocus(stackFocus, vs); // preserve the user's chip across the 30s refresh
+          await Promise.all(cells.map(async (c) => {
+            const fetched = await Promise.all(vs.map((v) => fetchRange(name, c.key, v).catch(() => null)));
+            if (gen !== stackGen) return; // superseded mid-fetch
+            const byV = {}; let failed = false;
+            vs.forEach((v, i) => {
+              const k = name + '|' + c.key + '|' + v;
+              const pick = pickSeries(fetched[i], lastGood.get(k)); lastGood.set(k, pick.cache);
+              byV[v] = pick.series;
+              if (pick.failed) failed = true;
+            });
+            const entry = { canvas: c.canvas, meta: c.meta, R: c.R, key: c.key, byV, failed };
+            newEntries.push(entry);
+            renderStackCell(entry);
+          }));
+        }
+        if (gen !== stackGen) return; // a newer renderStack call superseded this one
+        // Commit: replace the shared entry list (read by renderStackChips) now this generation painted.
+        stackCanvases.length = 0; for (const e of newEntries) stackCanvases.push(e);
         renderStackChips();
-        const focus = vs[0] && vs[0] !== 'local' ? vs[0] : '';
-        await Promise.all(cells.map(async (c) => {
-          let s = null; try { s = await fetchRange(name, c.key, focus); } catch (e) { /* transient */ }
-          if (gen !== stackGen) return; // superseded mid-fetch — don't push/render into a detached/reused cell
-          const k = name + '|' + c.key;
-          const pick = pickSeries(s, lastGood.get(k)); lastGood.set(k, pick.cache); s = pick.series;
-          const entry = { canvas: c.canvas, meta: c.meta, R: c.R, key: c.key, series: s, failed: pick.failed, vantage: focus };
-          stackCanvases.push(entry);
-          renderStackCell(entry);
-        }));
-        return;
+      } finally {
+        if (gen === stackGen) stackBusy = false; // only the latest generation releases the guard
       }
-
-      stackFocus = Dash.keepFocus(stackFocus, vs); // preserve the user's chip across the 30s refresh
-      await Promise.all(cells.map(async (c) => {
-        const fetched = await Promise.all(vs.map((v) => fetchRange(name, c.key, v).catch(() => null)));
-        if (gen !== stackGen) return; // superseded mid-fetch — don't push/render into a detached/reused cell
-        const byV = {}; let failed = false;
-        vs.forEach((v, i) => {
-          const k = name + '|' + c.key + '|' + v;
-          const pick = pickSeries(fetched[i], lastGood.get(k)); lastGood.set(k, pick.cache);
-          byV[v] = pick.series;
-          if (pick.failed) failed = true;
-        });
-        const entry = { canvas: c.canvas, meta: c.meta, R: c.R, key: c.key, byV, failed };
-        stackCanvases.push(entry);
-        renderStackCell(entry);
-      }));
-      if (gen !== stackGen) return; // a newer renderStack call superseded this one — don't render its chips
-      renderStackChips();
     }
     // drawZoom renders the current zoomState onto the zoom canvas with its explicit
     // wall-clock domain [t0,t1] (a tier default, or a dragged sub-range). In multi-vantage
@@ -1769,10 +1795,10 @@
       const qs = '&from=' + Math.round(fromMs) + '&to=' + Math.round(toMs) + vq;
       try {
         if (zr.mode === 'raw') {
-          const r = await fetch('/api/series?target=' + enc(name) + qs, { cache: 'no-store' });
+          const r = await fetchWithTimeout('/api/series?target=' + enc(name) + qs, { cache: 'no-store' });
           return r.ok ? Smoke.fromApiSeries(await r.json()) : null;
         }
-        const r = await fetch('/api/rollup?target=' + enc(name) + '&res=' + zr.res + qs, { cache: 'no-store' });
+        const r = await fetchWithTimeout('/api/rollup?target=' + enc(name) + '&res=' + zr.res + qs, { cache: 'no-store' });
         if (r.status === 501) return { unsupported: true };
         return r.ok ? Smoke.fromApiRollup(await r.json()) : null;
       } catch (e) { return null; }
@@ -1863,15 +1889,32 @@
     $('vantRetry').addEventListener('click', () => renderVantages());
     function reportMintError(isRegen, msg) {
       if (isRegen) window.alert('Regenerate failed: ' + msg);
-      else $('vantAddErr').textContent = msg;
+      else { $('vantAddNote').textContent = ''; $('vantAddErr').textContent = msg; }
     }
-    // mintVantage POSTs a name; the store creates or rotates (regenerate == re-POST the
-    // same name). On success it reveals the one-time key/snippet.
+    // reportMintSuccess mirrors reportMintError's isRegen split: regenerate is a table-row
+    // action (no dedicated status line nearby) so it gets an alert; add gets the inline note
+    // beside the form so it doesn't interrupt the flow of adding several vantages in a row.
+    function reportMintSuccess(isRegen, filename) {
+      const msg = 'Downloaded ' + filename + ' — run `docker compose up -d` in the extracted folder.';
+      if (isRegen) window.alert(msg);
+      else $('vantAddNote').textContent = msg;
+    }
+    // mintVantage POSTs a name; the store registers it (no-op if already registered) and always
+    // issues a FRESH client certificate for it (regenerate == re-POST the same name). There is no
+    // CRL and no per-certificate revocation: the hub authorizes purely by the presented
+    // certificate's CommonName against the active vantage registry (requireAgent), so a
+    // regenerate does NOT invalidate any certificate issued earlier for the same name — both
+    // remain valid until the vantage itself is revoked (removed from the registry). The hub mints
+    // the vantage's mTLS client identity server-side and, via `?format=bundle` +
+    // `Accept: application/gzip`, hands back a ready-to-run tar.gz (agent.yaml +
+    // docker-compose.yml + README) instead of the old copy-paste key reveal — there is no
+    // client-side key material to build files from anymore, the server already assembled them.
     async function mintVantage(name, isRegen) {
       let r;
       try {
-        r = await fetch('/api/admin/vantages', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
+        r = await fetch('/api/admin/vantages?format=bundle', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Accept': 'application/gzip' },
           body: JSON.stringify({ name }),
         });
       } catch (err) { reportMintError(isRegen, 'Network error.'); return; }
@@ -1882,65 +1925,23 @@
         reportMintError(isRegen, msg);
         return;
       }
-      let data;
-      try { data = await r.json(); } catch (e) { reportMintError(isRegen, 'Malformed server response.'); return; }
-      $('vantName').value = '';
-      $('vantAddErr').textContent = '';
-      showReveal(data.name, data.key || '');
-    }
-    // Reveal-modal state: the one-time key + which file the toggle is showing. Held only while
-    // the modal is open; closeReveal() clears the key so it never lingers in memory or the DOM.
-    let revealName = '', revealKey = '', revealPane = 'agent';
-    const revealFile = () => (revealPane === 'compose' ? 'docker-compose.yaml' : 'agent.yaml');
-    // renderRevealPane paints the active file into the <pre> and syncs the tab state. agent.yaml
-    // carries the key (hub defaults to this page's origin — the browser knows the real hub; the
-    // server only had a placeholder); the compose file is keyless and identical for every vantage.
-    function renderRevealPane() {
-      $('vantRevealSnippet').textContent = revealPane === 'compose'
-        ? agentCompose()
-        : agentYaml(revealName, revealKey, window.location.origin);
-      $('vantTabAgent').setAttribute('aria-selected', String(revealPane === 'agent'));
-      $('vantTabCompose').setAttribute('aria-selected', String(revealPane === 'compose'));
-    }
-    function showReveal(name, key) {
-      revealName = name; revealKey = key; revealPane = 'agent';
-      $('vantRevealName').textContent = name;
-      renderRevealPane();
-      $('vantReveal').classList.remove('hidden');
-      $('vantRevealClose').focus();
-    }
-    function closeReveal() {
-      revealName = ''; revealKey = '';         // drop the key from memory
-      $('vantRevealSnippet').textContent = ''; // never leave key material in the DOM
-      $('vantReveal').classList.add('hidden');
-      renderVantages(); // refresh the list (new/rotated row, updated counts)
-    }
-    $('vantTabAgent').addEventListener('click', () => { revealPane = 'agent'; renderRevealPane(); });
-    $('vantTabCompose').addEventListener('click', () => { revealPane = 'compose'; renderRevealPane(); });
-    $('vantRevealClose').addEventListener('click', closeReveal);
-    $('vantReveal').addEventListener('click', (e) => { if (e.target === $('vantReveal')) closeReveal(); }); // backdrop
-    $('vantDownload').addEventListener('click', () => {
-      const blob = new Blob([$('vantRevealSnippet').textContent], { type: 'text/yaml' });
+      let blob;
+      try { blob = await r.blob(); } catch (e) { reportMintError(isRegen, 'Malformed server response.'); return; }
+      const filename = Dash.vantageBundleFilename(name);
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
-      a.href = url; a.download = revealFile();
+      a.href = url; a.download = filename;
       document.body.appendChild(a); a.click(); a.remove();
       URL.revokeObjectURL(url);
-    });
-    $('vantCopy').addEventListener('click', async () => {
-      const text = $('vantRevealSnippet').textContent;
-      try {
-        await navigator.clipboard.writeText(text);
-        $('vantCopy').textContent = 'Copied';
-        setTimeout(() => { $('vantCopy').textContent = 'Copy'; }, 1500);
-      } catch (e) {
-        const rng = document.createRange(); rng.selectNodeContents($('vantRevealSnippet'));
-        const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(rng);
-      }
-    });
+      $('vantName').value = '';
+      $('vantAddErr').textContent = '';
+      reportMintSuccess(isRegen, filename);
+      renderVantages(); // refresh the list (new/rotated row, updated counts)
+    }
     $('vantAdd').addEventListener('submit', (e) => {
       e.preventDefault();
       $('vantAddErr').textContent = '';
+      $('vantAddNote').textContent = '';
       const name = $('vantName').value.trim();
       if (!name) { $('vantAddErr').textContent = 'Name required.'; return; }
       if (!/^[A-Za-z0-9._-]+$/.test(name)) { $('vantAddErr').textContent = 'Use letters, digits, . _ - only.'; return; }
@@ -1954,7 +1955,7 @@
       const regen = e.target.closest('[data-regen]');
       if (regen) {
         const name = regen.getAttribute('data-regen');
-        if (window.confirm('Regenerate the key for "' + name + '"? This invalidates the current key; the agent must be reconfigured with the new one.')) {
+        if (window.confirm('Issue a fresh certificate bundle for "' + name + '"? The current certificate keeps working until you revoke and re-add the vantage.')) {
           mintVantage(name, true);
         }
         return;
@@ -2622,8 +2623,6 @@
       } catch (e) { if (Dash.statusProbeOwnsView(expectedView, currentView())) $('statusText').textContent = 'collector unreachable — showing last known'; }
     }
     function route() {
-      // Never leave a one-time key in the DOM across navigations: clear any open reveal.
-      { const rev = $('vantReveal'); if (rev && !rev.classList.contains('hidden')) { $('vantRevealSnippet').textContent = ''; rev.classList.add('hidden'); } }
       { const cm = $('cfgModal'); if (cm && !cm.classList.contains('hidden')) cm.classList.add('hidden'); }
       { const cim = $('cfgImportModal'); if (cim && !cim.classList.contains('hidden')) cim.classList.add('hidden'); }
       const r = parseRoute(location.hash);
@@ -2783,6 +2782,19 @@
 
     // ---- refresh cadences (only the visible view does work) ----
     let rt; window.addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(rerender, 140); });
+    // A backgrounded/suspended tab wakes with throttled timers and a watermark/cutoff that may be far
+    // in the past; refresh the visible view immediately on wake rather than waiting for the next tick
+    // (the bounded fetch timeout above releases any busy flag a pre-suspend hung request left set), so
+    // the grid recovers on resume instead of aging its cache against a stale clock (CODE_REVIEW M14/M15).
+    function wakeRefresh() {
+      const v = currentView();
+      if (v === 'graphs') refreshGrid();
+      else if (v === 'overview') refreshOverview();
+      else if (v === 'stack') renderStack(curTarget);
+      else if (v === 'zoom' && !(zoomState && zoomState.custom)) { const r = parseRoute(location.hash); if (r.name) renderZoom(r.name, r.range); }
+    }
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) wakeRefresh(); });
+    window.addEventListener('pageshow', wakeRefresh);
     setInterval(() => { if (currentView() === 'graphs') refreshGrid(); }, 5000);
     setInterval(() => { if (currentView() === 'overview') refreshOverview(); }, 15000);
     setInterval(() => { const v = currentView(); if (v === 'config' || v === 'vantages') pingStatus(v); }, 15000);

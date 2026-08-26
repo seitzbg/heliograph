@@ -75,6 +75,25 @@ check('mergeSeries with no new rounds keeps the previous series (trimmed)', () =
   const merged = D.mergeSeries(prev, { buckets: [], N: 0 }, 0);
   assert.deepEqual(merged.buckets.map((b) => b.t), [1000, 2000, 3000]);
 });
+// nextGridSeries: a FAILED bulk fetch must not age/trim the cached series, but a successful empty
+// response may (CODE_REVIEW M14). Cutoff 5000 is newer than every cached bucket, so aging empties it —
+// which is exactly what must NOT happen on a failure (e.g. a background tab woken past the window).
+check('nextGridSeries: a failed fetch keeps the last-known series untouched (M14)', () => {
+  const prev = { buckets: [bkt(1000), bkt(2000)], N: 1 };
+  const kept = D.nextGridSeries(prev, null, false, 5000); // bulkOk=false => fetch failed
+  assert.equal(kept, prev, 'failed fetch returns the same series, unmutated');
+  assert.deepEqual(kept.buckets.map((b) => b.t), [1000, 2000]);
+});
+check('nextGridSeries: a successful empty response ages the cache to the window (M14)', () => {
+  const prev = { buckets: [bkt(1000), bkt(2000)], N: 1 };
+  const aged = D.nextGridSeries(prev, null, true, 5000); // bulkOk=true, no new rounds => age
+  assert.deepEqual(aged.buckets.map((b) => b.t), []); // both older than the 5000 cutoff -> dropped
+});
+check('nextGridSeries: incoming data is merged and aged normally (M14)', () => {
+  const prev = { buckets: [bkt(1000), bkt(2000)], N: 1 };
+  const merged = D.nextGridSeries(prev, { buckets: [bkt(6000)], N: 1 }, true, 5000);
+  assert.deepEqual(merged.buckets.map((b) => b.t), [6000]); // 1000/2000 trimmed, 6000 kept
+});
 
 // gridSince (#1): the incremental watermark is the OLDEST frontier among panels that
 // hold data, so the shared `since` never advances past the slowest-updating target — a
@@ -287,6 +306,19 @@ check('vantageColorVar: local neutral, others stable palette', () => {
   assert.notEqual(D.vantageColorVar('nyc', ord), D.vantageColorVar('fra', ord));
   assert.equal(D.vantageColorVar('nyc', ord), D.vantageColorVar('nyc', ord)); // stable
 });
+check('vantageColorVar: coloring by the SHOWN set avoids collisions from a >4 catalog (M12)', () => {
+  // The bug: coloring by the full catalog index mod 4 makes a sparse ≤4 selection collide.
+  const catalog = D.orderVantages(['local', 'a', 'b', 'c', 'd', 'e']); // 5 non-local, palette has 4
+  // Old behavior (color by the full catalog): 'a' (idx 0) and 'e' (idx 4) both map to --v-a.
+  assert.equal(D.vantageColorVar('a', catalog), D.vantageColorVar('e', catalog)); // documents the collision
+  // Fix: color from the SHOWN (selected, capped) set instead — no two drawn overlays share a slot.
+  const shown = D.orderVantages(['local', 'a', 'e']);
+  assert.notEqual(D.vantageColorVar('a', shown), D.vantageColorVar('e', shown));
+  // A full 4-vantage selection uses all four distinct palette slots.
+  const four = D.orderVantages(['a', 'b', 'c', 'd']);
+  const cols = new Set(four.map((v) => D.vantageColorVar(v, four)));
+  assert.equal(cols.size, 4);
+});
 
 check('adminMode maps HTTP status -> panel mode', () => {
   assert.equal(D.adminMode(200), 'list');
@@ -414,31 +446,21 @@ check('collectingNote: band panels name the history they are accumulating; raw s
   assert.equal(D.collectingNote('raw', '1h'), 'collecting…'); // res is irrelevant for raw panels
 });
 
-// --- Vantage agent artifacts: the two files the reveal modal offers (agent.yaml + compose) ---
-check('agentYaml: embeds name/hub/key + spool_dir, YAML double-quoted', () => {
-  const y = D.agentYaml('nyc', 'smk_abc123', 'https://hub.example');
-  assert.match(y, /^# smoke-agent config for vantage "nyc"$/m);
-  assert.match(y, /^hub: "https:\/\/hub\.example"/m);
-  assert.match(y, /^vantage: "nyc"$/m);
-  assert.match(y, /^key: "smk_abc123"$/m);
-  assert.match(y, /^spool_dir: \/var\/lib\/smoke-agent\/spool$/m); // pairs with the compose volume
+// --- Vantage bundle download: the filename for the server-minted tar.gz (agent.yaml +
+// docker-compose.yml + README) the Add-vantage flow downloads, replacing the old
+// client-built key-reveal files (agentYaml/agentCompose, removed). ---
+check('vantageBundleFilename: plain name', () => {
+  assert.equal(D.vantageBundleFilename('nyc'), 'nyc-vantage.tar.gz');
 });
-check('agentYaml: quotes are escaped so a hostile-ish name stays well-formed YAML', () => {
-  // ValidName blocks this at mint time, but the builder must not emit broken YAML regardless.
-  const y = D.agentYaml('a"b', 'k', 'http://h');
-  assert.match(y, /vantage: "a\\"b"/);
+check('vantageBundleFilename: sanitizes unsafe characters to "-"', () => {
+  assert.equal(D.vantageBundleFilename('a/b c'), 'a-b-c-vantage.tar.gz');
 });
-check('agentCompose: runnable compose that mounts agent.yaml and carries no secret', () => {
-  const c = D.agentCompose();
-  assert.match(c, /image: ghcr\.io\/seitzbg\/heliograph:latest/);
-  assert.match(c, /entrypoint: \["smoke-agent"\]/);
-  assert.match(c, /command: \["-config", "\/etc\/heliograph\/agent\.yaml"\]/);
-  assert.match(c, /\.\/agent\.yaml:\/etc\/heliograph\/agent\.yaml:ro/);   // the mount ties the two files together
-  assert.match(c, /agent-spool:\/var\/lib\/smoke-agent\/spool/);
-  assert.match(c, /cap_add: \[NET_RAW\]/);
-  assert.match(c, /net\.ipv4\.ping_group_range: "0 10001"/);              // native Ping probe needs this
-  assert.match(c, /restart: unless-stopped/);
-  assert.ok(!/smk_/.test(c), 'compose must never contain key material — the key lives only in agent.yaml');
+check('vantageBundleFilename: empty name falls back to "vantage"', () => {
+  assert.equal(D.vantageBundleFilename(''), 'vantage-vantage.tar.gz');
+});
+check('vantageBundleFilename: path traversal and other hostile characters are stripped', () => {
+  assert.equal(D.vantageBundleFilename('../../etc/passwd'), '..-..-etc-passwd-vantage.tar.gz');
+  assert.equal(D.vantageBundleFilename('a"b\\c;rm -rf /'), 'a-b-c-rm--rf---vantage.tar.gz');
 });
 
 check('buildTree preserves input (server) order of siblings, does not re-sort A–Z', () => {

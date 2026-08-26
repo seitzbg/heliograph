@@ -73,6 +73,23 @@ func validateRuntimeFlags(pings int, step, timeout time.Duration) error {
 	return nil
 }
 
+// validateAgentFlags checks the mTLS federation agent listener's cross-flag dependencies: its
+// whole wiring below lives inside the `-serve` block in main, nested inside the `-dsn` block (the
+// vantage store created there is what mints the CA the listener's server cert is issued from), so
+// setting -agent-addr without -dsn OR without -serve would otherwise silently no-op — the process
+// starts up looking healthy, but the mTLS agent API never listens, and the only symptom is "no
+// vantage ever registers". Reject both combinations at the CLI boundary instead of leaving them to
+// be discovered live.
+func validateAgentFlags(agentAddr, dsn string, serve bool) error {
+	if agentAddr != "" && !serve {
+		return fmt.Errorf("-agent-addr requires -serve (the mTLS agent listener only runs in serve mode)")
+	}
+	if agentAddr != "" && dsn == "" {
+		return fmt.Errorf("-agent-addr requires -dsn (federation needs the database for the vantage registry + CA)")
+	}
+	return nil
+}
+
 // envBool reads a boolean flag default from the environment, so a Compose/K8s deployment can drive
 // it via `environment:` rather than the command list. Follows strconv.ParseBool; empty or
 // unparseable = false.
@@ -120,6 +137,8 @@ func main() {
 	resolveIPs := flag.Bool("resolve-ips", envBool("SMOKED_RESOLVE_IPS"), "show each target's IP in the graph title (or set SMOKED_RESOLVE_IPS=1): a pinned `ip:`, else a literal-IP host, else the resolved hostname (best-effort, refreshed on reload)")
 	absoluteTime := flag.Bool("absolute-time", envBoolOr("SMOKED_ABSOLUTE_TIME", true), "label graph x-axes with absolute clock time (default); set SMOKED_ABSOLUTE_TIME=0 (or -absolute-time=false) for relative -3h/now labels")
 	requireFingerprint := flag.Bool("require-fingerprint", false, "reject agent results that carry no measurement fingerprint (strict mode); default accepts them for pre-fingerprint agents. Flip on once every vantage's agent is upgraded (watch heliograph_agent_missing_fingerprint_total)")
+	agentAddr := flag.String("agent-addr", os.Getenv("SMOKED_AGENT_ADDR"), "listen address for the opt-in mTLS federation agent API, e.g. :8443; unset = single-host (no agent API)")
+	agentHostname := flag.String("agent-hostname", os.Getenv("SMOKED_AGENT_HOSTNAME"), "comma-separated SAN host[,IP] for smoked's CA-issued agent-API server cert (required when -agent-addr is set)")
 	configPath := flag.String("config", os.Getenv("SMOKED_CONFIG"), "path to a YAML config file, or a directory holding default.yaml + conf.d/*.yaml (or set SMOKED_CONFIG); replaces the built-in demo targets")
 	webhook := flag.String("webhook", os.Getenv("SMOKED_WEBHOOK_URL"), "generic JSON webhook URL (or set SMOKED_WEBHOOK_URL) for alerts named 'to: [webhook]'")
 	slackWebhook := flag.String("slack-webhook", os.Getenv("SMOKED_SLACK_WEBHOOK"), "Slack incoming-webhook URL (or set SMOKED_SLACK_WEBHOOK) for alerts named 'to: [slack]'")
@@ -142,6 +161,9 @@ func main() {
 	setupLogger(*logFormat, *logLevel)
 
 	if err := validateRuntimeFlags(*pings, *step, *timeout); err != nil {
+		fatal("invalid flags", err)
+	}
+	if err := validateAgentFlags(*agentAddr, *dsn, *serve); err != nil {
 		fatal("invalid flags", err)
 	}
 
@@ -460,22 +482,73 @@ func main() {
 		// NTP probe offset/stratum, surfaced by /api/targets as display stats. The registry is
 		// package-level in ntpprobe, so this accessor stays valid across config reloads.
 		srv.NTPStat = ntpprobe.LatestFor
-		// Federation: only with a DB (the vantage key store is TimescaleDB-backed). The
-		// agent routes (below) light up unconditionally here; the admin key-management API
-		// additionally requires a configured admin password (fail-closed — no password
-		// means no admin routes).
+		// Federation: only with a DB (the vantage registry is TimescaleDB-backed). The admin
+		// vantage-management API (list/register/revoke) additionally requires a configured
+		// admin password (fail-closed — no password means no admin routes). The agent routes
+		// (/agent/v1/assignment, /agent/v1/results) are served only by the opt-in mTLS listener
+		// started just below (-agent-addr) — the old Bearer-key auth that gated them on the main
+		// mux was removed with the key-based federation path, and the main mux (srv.Routes())
+		// never registers them (see the comment there). Assignment/OnIngest/IngestCommit/
+		// RequireFingerprint/TargetVantages are wired below regardless of -agent-addr, so the
+		// listener needs no other changes here.
 		if *dsn != "" {
 			vst, err := vantage.New(ctx, *dsn)
 			if err != nil {
-				fatal("vantage key store", err)
+				fatal("vantage store", err)
 			}
 			defer vst.Close()
 			srv.Vantages = vst
-			// Agent endpoints (/agent/v1/assignment, /agent/v1/results) are independent of
-			// the admin API and its password gate below — they light up whenever -dsn is
-			// set, since a remote vantage's agent needs to authenticate and report results
-			// regardless of whether the (human) admin key-management API is enabled.
-			srv.VantageAuth = vst
+			// Opt-in mTLS federation agent listener: a separate HTTPS server, entirely apart
+			// from the plain-HTTP dashboard mux, serving only /agent/v1/* behind mutual TLS
+			// (AgentTLSConfig + AgentMux). -agent-addr unset (the default) means single-host —
+			// no agent API is exposed anywhere, and the dashboard server below is unaffected.
+			if *agentAddr != "" {
+				if *agentHostname == "" {
+					fatal("invalid agent listener flags", fmt.Errorf("-agent-hostname is required when -agent-addr is set (the agent-API server cert needs a SAN)"))
+				}
+				ca, err := vst.CA(ctx)
+				if err != nil {
+					fatal("agent CA", err)
+				}
+				var hostnames []string
+				for _, h := range strings.Split(*agentHostname, ",") {
+					if h = strings.TrimSpace(h); h != "" {
+						hostnames = append(hostnames, h)
+					}
+				}
+				if len(hostnames) == 0 {
+					fatal("invalid agent listener flags", fmt.Errorf("-agent-hostname must contain at least one hostname or IP"))
+				}
+				tlsCfg, err := srv.AgentTLSConfig(ca, hostnames)
+				if err != nil {
+					fatal("agent TLS config", err)
+				}
+				// The hub URL embedded in a downloaded vantage bundle, derived from the listen
+				// port (":8443" -> "8443"; falls back to the default agent port if unset) and
+				// the first configured hostname. Must be set before the dashboard server below
+				// starts serving, since the bundle-download admin route reads it live.
+				_, port, _ := net.SplitHostPort(*agentAddr)
+				if port == "" {
+					port = "8443"
+				}
+				srv.AgentHubURL = "https://" + hostnames[0] + ":" + port
+				agentSrv := &http.Server{Addr: *agentAddr, Handler: srv.AgentMux(), TLSConfig: tlsCfg}
+				// Graceful shutdown on the same signal that stops the dashboard server below
+				// (ctx cancels on SIGINT/SIGTERM), so an in-flight agent result POST gets the
+				// same ~5s drain instead of being cut — mirrors the httpSrv.Shutdown hook.
+				go func() {
+					<-ctx.Done()
+					shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+					defer cancel()
+					_ = agentSrv.Shutdown(shutCtx)
+				}()
+				go func() {
+					slog.Info("mTLS agent listener starting", "addr", *agentAddr, "hostnames", hostnames)
+					if err := agentSrv.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
+						fatal("mTLS agent listener failed", err)
+					}
+				}()
+			}
 			// Strict-mode toggle for the ingest path enabled just above: with it on, an agent
 			// round carrying no fingerprint is a visible permanent drop instead of accepted
 			// (CODE_REVIEW #2). Lenient by default.
@@ -514,7 +587,6 @@ func main() {
 				}
 				return m
 			}
-			slog.Info("agent endpoints enabled at /agent/v1/assignment, /agent/v1/results")
 			srv.AdminPassword = os.Getenv("SMOKED_ADMIN_PASSWORD")
 			// Keep session signing independent from the human login password. A stable 32-byte
 			// SMOKED_ADMIN_SESSION_KEY lets cookies survive restarts; without one, use a safe
@@ -747,6 +819,14 @@ func vantageCmd(args []string) int {
 	sub := args[0]
 	fs := flag.NewFlagSet("vantage "+sub, flag.ExitOnError)
 	dsn := fs.String("dsn", os.Getenv("SMOKED_DSN"), "TimescaleDB DSN (or set SMOKED_DSN)")
+	var hubFlag *string
+	var jsonOut *bool
+	var out *string
+	if sub == "add" {
+		hubFlag = fs.String("hub", "", "hub base URL to embed in agent.yaml, e.g. https://hub.example.com:8443")
+		jsonOut = fs.Bool("json", false, "emit the raw PEMs as JSON instead of agent.yaml")
+		out = fs.String("out", "", "write a tar.gz onboarding bundle to this path instead of stdout")
+	}
 	rest := args[1:]
 	var name string
 	if sub == "add" || sub == "revoke" {
@@ -773,12 +853,65 @@ func vantageCmd(args []string) int {
 
 	switch sub {
 	case "add":
-		key, err := st.Add(ctx, name)
+		if err := st.Register(ctx, name); err != nil {
+			fmt.Fprintf(os.Stderr, "vantage add: %v\n", err)
+			return 1
+		}
+		certPEM, keyPEM, caPEM, err := st.IssueClientCert(ctx, name)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "vantage add: %v\n", err)
 			return 1
 		}
-		fmt.Printf("vantage %q key (shown once — store it now):\n\n%s\n\n%s\n", name, key, vantage.AgentSnippet(name, key))
+
+		hub := *hubFlag
+		if hub == "" {
+			hub = "https://HUB-HOSTNAME:8443"
+			fmt.Fprintln(os.Stderr, "note: no -hub given; agent.yaml embeds a placeholder URL — pass -hub https://your-hub:8443 to set it")
+		}
+
+		switch {
+		case *out != "":
+			f, err := os.Create(*out)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "vantage add: %v\n", err)
+				return 1
+			}
+			if err := vantage.WriteBundleTarGz(f, hub, name, certPEM, keyPEM, caPEM); err != nil {
+				f.Close()
+				os.Remove(*out)
+				fmt.Fprintf(os.Stderr, "vantage add: %v\n", err)
+				return 1
+			}
+			if err := f.Close(); err != nil {
+				os.Remove(*out)
+				fmt.Fprintf(os.Stderr, "vantage add: %v\n", err)
+				return 1
+			}
+			fmt.Fprintf(os.Stderr, "wrote bundle %s for vantage %q\n", *out, name)
+		case *jsonOut:
+			doc := struct {
+				Vantage    string `json:"vantage"`
+				Hub        string `json:"hub"`
+				ClientCert string `json:"client_cert"`
+				ClientKey  string `json:"client_key"`
+				CACert     string `json:"ca_cert"`
+			}{
+				Vantage:    name,
+				Hub:        hub,
+				ClientCert: string(certPEM),
+				ClientKey:  string(keyPEM),
+				CACert:     string(caPEM),
+			}
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			if err := enc.Encode(doc); err != nil {
+				fmt.Fprintf(os.Stderr, "vantage add: %v\n", err)
+				return 1
+			}
+		default:
+			fmt.Fprintf(os.Stderr, "vantage %q registered — agent.yaml follows on stdout\n", name)
+			os.Stdout.Write(vantage.RenderAgentYAML(hub, name, certPEM, keyPEM, caPEM))
+		}
 		return 0
 	case "ls":
 		infos, err := st.List(ctx)

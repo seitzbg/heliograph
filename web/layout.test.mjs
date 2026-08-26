@@ -194,6 +194,77 @@ try {
       throw new Error(`aria-label should state it wraps to ${pick.effectiveCols}; got "${pick.ariaLabel}"`);
     }
   });
+
+  // Count a canvas's non-transparent pixels — a painted graph has many; a blanked "collecting data…"
+  // canvas has almost none. The ratio (during/before) tells a preserved graph from a blanked one
+  // without depending on exact rendering.
+  const paintedPx = (sel) => page.evaluate((s) => {
+    const c = document.querySelector(s);
+    if (!c || !c.width) return 0;
+    const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+    let n = 0; for (let i = 3; i < d.length; i += 4) if (d[i] > 8) n++;
+    return n;
+  }, sel);
+
+  // --- CODE_REVIEW M15: a periodic stacked-detail refresh must NOT blank the canvases before the new
+  // data has landed (renderStack used to clear #stackGrid at the top, so a slow refresh left it empty). ---
+  died();
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const targetName = await page.evaluate(async () => {
+    const b = await (await fetch('/api/targets')).json();
+    const t = (b.targets || []).find((x) => !x.no_data) || (b.targets || [])[0];
+    return t && t.name;
+  });
+  check('M15: found a demo target for the stacked view', () => { if (!targetName) throw new Error('no demo target'); });
+  await page.goto(`${BASE}/#target=${encodeURIComponent(targetName)}`, { waitUntil: 'load' });
+  await page.waitForSelector('#stackGrid canvas', { timeout: 45_000 });
+  await sleep(1200); // let a range canvas paint real data
+  const stackBefore = await paintedPx('#stackGrid canvas');
+  check('M15: the stacked view painted a range canvas', () => {
+    if (stackBefore < 150) throw new Error(`no painted #stackGrid canvas (${stackBefore}px) — cannot test`);
+  });
+  // Stall every range fetch, then wake (visibilitychange -> renderStack(curTarget), the same-target
+  // periodic refresh path). Mid-stall, the reused canvas must still show the last-known graph. One
+  // regex route (not a glob — a glob `?` is a wildcard); abort is guarded so a late abort of an
+  // already-superseded request can't throw an uncaught error into a later test.
+  const STALL = 1500;
+  const stallRoute = /\/api\/(series|rollup)\?/;
+  await page.route(stallRoute, async (r) => { await sleep(STALL); await r.abort().catch(() => {}); });
+  await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+  await sleep(600); // mid-fetch: the refresh has started but not committed
+  const stackDuring = await paintedPx('#stackGrid canvas');
+  check('M15: stacked canvases stay painted during a slow refresh (not cleared before new data)', () => {
+    if (stackDuring < stackBefore * 0.5) throw new Error(`stack canvas blanked mid-refresh: ${stackBefore}px -> ${stackDuring}px`);
+  });
+  await sleep(STALL); // let the stalled handlers finish before unrouting, so none leaks into the M14 test
+  await page.unroute(stallRoute);
+
+  // --- CODE_REVIEW M14: a FAILED /api/series/all refresh must not age out the last-known grid graph,
+  // even when the client clock has jumped past the 3h window (the suspended-background-tab scenario). ---
+  died();
+  await page.goto(`${BASE}/#graphs`, { waitUntil: 'load' });
+  await page.waitForSelector('#graphGrid .gpanel canvas', { timeout: 45_000 });
+  await sleep(1500); // let a grid panel paint real data
+  const gridBefore = await paintedPx('#graphGrid .gpanel canvas');
+  check('M14: a grid panel is painted before the failure', () => {
+    if (gridBefore < 200) throw new Error(`grid panel not painted (${gridBefore}px) — cannot test preservation`);
+  });
+  // Fail every series/rollup fetch and jump the clock +4h so the 3h cutoff would drop the whole cache;
+  // then wake to force a refresh. The failed fetch must leave the painted graph alone. One regex route
+  // (not overlapping globs) — a glob `?` is a wildcard, so `**/api/series?**` also matches
+  // `/api/series/all?…` and double-handles the request ("Route is already handled").
+  await page.route(/\/api\/(series|rollup)/, (r) => r.abort().catch(() => {}));
+  await page.evaluate(() => { const real = Date.now(); Date.now = () => real + 4 * 3600 * 1000; });
+  await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+  await sleep(1800); // let the failed refresh settle
+  const gridAfter = await paintedPx('#graphGrid .gpanel canvas');
+  const statusTxt = await page.evaluate(() => (document.getElementById('statusText') || {}).textContent || '');
+  check('M14: a failed refresh keeps the last-known grid graph painted (not blanked)', () => {
+    if (gridAfter < gridBefore * 0.5) throw new Error(`grid graph collapsed after a failed refresh: ${gridBefore}px -> ${gridAfter}px`);
+  });
+  check('M14: the status honestly reports degraded/last-known on a failed refresh', () => {
+    if (!/last known/i.test(statusTxt)) throw new Error(`status did not report last-known: "${statusTxt}"`);
+  });
 } catch (e) {
   failed++;
   console.error('FAIL - layout test setup:', e.message);

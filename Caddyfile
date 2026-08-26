@@ -1,17 +1,16 @@
-# Bundled reverse proxy for Heliograph federation.
+# Bundled reverse proxy for Heliograph federation — fronts the DASHBOARD ONLY.
 #
 #   docker compose --profile federation up
 #
 # Caddy terminates TLS with an automatically issued (and auto-renewed) Let's
-# Encrypt certificate for $DOMAIN. smoked never does TLS itself; both the agent's
-# API key and the dashboard's Basic Auth ride inside the TLS Caddy terminates.
+# Encrypt certificate for $DOMAIN, and gates the dashboard/read/admin API/
+# /metrics behind HTTP Basic Auth (smoked's read API has no auth of its own).
+# Set DASH_USER + DASH_PASSWORD_HASH (see .env.example).
 #
-# Two public surfaces, two auth models:
-#   * /agent/v1/*  — remote agents, authenticated by a per-vantage API key that
-#                    smoked verifies (Authorization: Bearer smk_...). No Basic Auth.
-#   * everything else (dashboard, read API, /api/admin/*, /metrics) — behind HTTP
-#                    Basic Auth here, because smoked's read API has no auth of its
-#                    own. Set DASH_USER + DASH_PASSWORD_HASH (see .env.example).
+# Remote agents do NOT go through Caddy: they connect straight to smoked's own
+# mutual-TLS listener on :8443 (see docker-compose.yml's `smoked` service) and
+# authenticate with a CA-signed client certificate — no API key, no Basic Auth,
+# no Caddy in the path at all. See docs/federation.md.
 #
 # Set DOMAIN and ACME_EMAIL in .env. For a local smoke test without hitting
 # Let's Encrypt, set DOMAIN=localhost — Caddy then serves an internal
@@ -27,18 +26,10 @@
 }
 
 {$DOMAIN} {
-	# Remote agents: API-key auth (smoked checks the Bearer key). No Basic Auth,
-	# so this path is reachable by agents that don't have the dashboard password.
-	handle /agent/v1/* {
-		reverse_proxy smoked:8087
-	}
-
 	# Dashboard + read/query API + admin panel: gated by HTTP Basic Auth, since
 	# smoked's read API is otherwise unauthenticated. Served over the proxy's TLS.
-	handle {
-		basic_auth {
-			{$DASH_USER} {$DASH_PASSWORD_HASH}
-		}
-		reverse_proxy smoked:8087
+	basic_auth {
+		{$DASH_USER} {$DASH_PASSWORD_HASH}
 	}
+	reverse_proxy smoked:8087
 }

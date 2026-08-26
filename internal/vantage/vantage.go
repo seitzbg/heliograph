@@ -1,18 +1,14 @@
-// Package vantage is the TimescaleDB-backed registry of federation vantages and their
-// API keys. The daemon and the `smoked vantage` CLI are separate processes that share
-// this store, so a minted key is usable immediately with no reload. Only a salted hash
-// of each key's secret is persisted — the plaintext is shown once and cannot be recovered.
+// Package vantage is the TimescaleDB-backed registry of federation vantages, plus the hub's
+// federation CA (ca.go). The daemon and the `smoked vantage` CLI are separate processes that
+// share this store, so a registered name and a minted client cert are usable immediately with
+// no reload. mTLS (a later task) authenticates an agent's connection against the CA; this store
+// only tracks which vantage names exist and when each was last seen.
 package vantage
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/sha256"
-	"crypto/subtle"
-	"encoding/hex"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -22,26 +18,42 @@ import (
 )
 
 const schema = `
-CREATE TABLE IF NOT EXISTS vantage_keys (
+CREATE TABLE IF NOT EXISTS vantages (
 	name       text PRIMARY KEY,
-	key_id     text NOT NULL UNIQUE,
-	key_hash   bytea NOT NULL,
-	salt       bytea NOT NULL,
 	created_at timestamptz NOT NULL DEFAULT now(),
 	last_seen  timestamptz
-);`
+);
+CREATE TABLE IF NOT EXISTS vantage_ca (
+	id         int PRIMARY KEY DEFAULT 1,
+	cert_pem   bytea NOT NULL,
+	key_pem    bytea NOT NULL,
+	created_at timestamptz NOT NULL DEFAULT now()
+);
+
+-- One-time migration from the pre-mTLS key store: preserve registered vantage
+-- names, then drop the obsolete key-hash table. No-op on a fresh DB, idempotent
+-- on reruns (the table is gone after the first upgrade).
+DO $$
+BEGIN
+	IF to_regclass('vantage_keys') IS NOT NULL THEN
+		INSERT INTO vantages (name, created_at, last_seen)
+			SELECT name, created_at, last_seen FROM vantage_keys
+			ON CONFLICT (name) DO NOTHING;
+		DROP TABLE IF EXISTS vantage_keys;
+	END IF;
+END $$;`
 
 // reserved is the hub's own vantage name — it mirrors store.DefaultVantage.
 // Verified with `go build` that importing internal/store here does not actually
-// create an import cycle, but this package is the key-minting/auth store and
+// create an import cycle, but this package is the vantage registry/CA store and
 // deliberately doesn't depend on internal/store (the timeseries sink) for one
 // scalar, so the value is duplicated here as a small documented const instead.
-// Minting a key named reserved would let an agent authenticate as the hub's own
-// vantage, conflating its ingested rounds with the hub's authoritative
+// Registering a vantage named reserved would let an agent authenticate as the hub's
+// own vantage, conflating its ingested rounds with the hub's authoritative
 // locally-probed data.
 const reserved = "local"
 
-// ErrInvalidName and ErrReserved are client-input errors from Add: a bad name shape, or the
+// ErrInvalidName and ErrReserved are client-input errors from Register: a bad name shape, or the
 // reserved hub name "local". The admin API maps these to a 400/409 rather than a generic 5xx, so the
 // operator sees a useful reason instead of "store unavailable" (CODE_REVIEW L5).
 var (
@@ -49,7 +61,7 @@ var (
 	ErrReserved    = errors.New(`vantage: "local" is reserved for the hub`)
 )
 
-// Info is a vantage's public metadata — never its key material.
+// Info is a vantage's public metadata.
 type Info struct {
 	Name     string
 	Created  time.Time
@@ -72,81 +84,40 @@ func New(ctx context.Context, dsn string) (*Store, error) {
 
 func (s *Store) Close() { s.pool.Close() }
 
-func randHex(nBytes int) (string, error) {
-	b := make([]byte, nBytes)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(b), nil
-}
-
-func hashSecret(salt []byte, secret string) []byte {
-	sum := sha256.Sum256(append(append([]byte{}, salt...), []byte(secret)...))
-	return sum[:]
-}
-
-// Add mints a fresh key for name — rotating any existing one — and returns the one-time
-// full key `smk_<keyId>_<secret>`. Only the salted hash is stored.
-func (s *Store) Add(ctx context.Context, name string) (string, error) {
+// Register idempotently reserves name in the vantage registry — a re-Register of an existing
+// name is a no-op, not an error, so provisioning is safe to retry. It rejects a malformed name
+// or the reserved hub name "local" before ever touching the pool.
+func (s *Store) Register(ctx context.Context, name string) error {
 	if !ValidName(name) {
-		return "", ErrInvalidName
+		return ErrInvalidName
 	}
 	if name == reserved {
-		return "", ErrReserved
+		return ErrReserved
 	}
-	keyID, err := randHex(6)
-	if err != nil {
-		return "", err
+	if _, err := s.pool.Exec(ctx,
+		`INSERT INTO vantages (name) VALUES ($1) ON CONFLICT (name) DO NOTHING`, name); err != nil {
+		return fmt.Errorf("vantage: register: %w", err)
 	}
-	secret, err := randHex(32)
-	if err != nil {
-		return "", err
-	}
-	salt := make([]byte, 16)
-	if _, err := rand.Read(salt); err != nil {
-		return "", err
-	}
-	_, err = s.pool.Exec(ctx, `
-		INSERT INTO vantage_keys (name, key_id, key_hash, salt, created_at, last_seen)
-		VALUES ($1,$2,$3,$4, now(), NULL)
-		ON CONFLICT (name) DO UPDATE SET key_id=$2, key_hash=$3, salt=$4, created_at=now(), last_seen=NULL`,
-		name, keyID, hashSecret(salt, secret), salt)
-	if err != nil {
-		return "", fmt.Errorf("vantage: add: %w", err)
-	}
-	return "smk_" + keyID + "_" + secret, nil
+	return nil
 }
 
-// Verify parses a presented key, looks it up by key id, constant-time compares the salted
-// hash, and on success bumps last_seen. It returns ok=false for any malformed, unknown, or
-// mismatched key — never revealing which, to avoid an authentication oracle.
-func (s *Store) Verify(ctx context.Context, presented string) (name string, ok bool, err error) {
-	parts := strings.Split(presented, "_")
-	if len(parts) != 3 || parts[0] != "smk" || parts[1] == "" || parts[2] == "" {
-		return "", false, nil
-	}
-	keyID, secret := parts[1], parts[2]
-	var (
-		gotName    string
-		hash, salt []byte
-	)
-	err = s.pool.QueryRow(ctx, `SELECT name, key_hash, salt FROM vantage_keys WHERE key_id=$1`, keyID).
-		Scan(&gotName, &hash, &salt)
+// IsActive bumps last_seen for name and reports whether it is a known (registered, not revoked)
+// vantage. false, nil (not an error) for an unknown name.
+func (s *Store) IsActive(ctx context.Context, name string) (bool, error) {
+	var active bool
+	err := s.pool.QueryRow(ctx,
+		`UPDATE vantages SET last_seen=now() WHERE name=$1 RETURNING true`, name).Scan(&active)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return "", false, nil
+		return false, nil
 	}
 	if err != nil {
-		return "", false, fmt.Errorf("vantage: verify: %w", err)
+		return false, fmt.Errorf("vantage: is active: %w", err)
 	}
-	if subtle.ConstantTimeCompare(hashSecret(salt, secret), hash) != 1 {
-		return "", false, nil
-	}
-	_, _ = s.pool.Exec(ctx, `UPDATE vantage_keys SET last_seen=now() WHERE key_id=$1`, keyID) // best-effort
-	return gotName, true, nil
+	return active, nil
 }
 
 func (s *Store) List(ctx context.Context) ([]Info, error) {
-	rows, err := s.pool.Query(ctx, `SELECT name, created_at, last_seen FROM vantage_keys ORDER BY name`)
+	rows, err := s.pool.Query(ctx, `SELECT name, created_at, last_seen FROM vantages ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
@@ -167,7 +138,7 @@ func (s *Store) List(ctx context.Context) ([]Info, error) {
 }
 
 func (s *Store) Revoke(ctx context.Context, name string) (bool, error) {
-	tag, err := s.pool.Exec(ctx, `DELETE FROM vantage_keys WHERE name=$1`, name)
+	tag, err := s.pool.Exec(ctx, `DELETE FROM vantages WHERE name=$1`, name)
 	if err != nil {
 		return false, err
 	}
@@ -176,16 +147,6 @@ func (s *Store) Revoke(ctx context.Context, name string) (bool, error) {
 
 // ValidName reports whether name is an acceptable vantage identifier. It delegates to
 // store.ValidVantageName, the single source of truth shared with config loading and the
-// read API — names flow into API keys, URLs, DB rows, and the YAML agent snippet, so a name
+// read API — names flow into cert Subject CNs, URLs, DB rows, and file paths, so a name
 // can't carry spaces, colons, or newlines.
 func ValidName(name string) bool { return store.ValidVantageName(name) }
-
-// AgentSnippet renders a ready-to-paste smoke-agent config block for a freshly minted key.
-// Names are validated (ValidName) at mint time, but the scalars are still quoted so the
-// snippet is well-formed YAML regardless of the input. The hub value is a placeholder —
-// callers paste this block into agent.yaml and replace it with their own reverse-proxy
-// endpoint — but its presence makes the block a complete smoke-agent config on its own.
-func AgentSnippet(name, fullKey string) string {
-	return fmt.Sprintf("# smoke-agent config for vantage %q\nhub: %q   # set to your https reverse-proxy endpoint\nvantage: %q\nkey: %q\n",
-		name, "https://your-hub.example", name, fullKey)
-}

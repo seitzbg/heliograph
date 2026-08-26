@@ -28,12 +28,20 @@ import (
 	"github.com/seitzbg/heliograph/internal/vantage"
 )
 
-// VantageAdmin is the subset of the vantage key store the admin API uses. Kept an
+// VantageAdmin is the subset of the vantage registry the admin API uses. Kept an
 // interface so the handlers test with a fake and api needs no live DB.
 type VantageAdmin interface {
-	Add(ctx context.Context, name string) (fullKey string, err error)
+	Register(ctx context.Context, name string) error
 	List(ctx context.Context) ([]vantage.Info, error)
 	Revoke(ctx context.Context, name string) (removed bool, err error)
+	// IsActive reports whether name is a known, non-revoked vantage — the authorization check
+	// requireAgent runs against a client cert's CommonName (mTLS federation auth).
+	IsActive(ctx context.Context, name string) (bool, error)
+	// IssueClientCert mints a fresh mTLS client identity (leaf cert + key, each PEM-encoded) for
+	// name from the hub's federation CA, plus the CA's own cert PEM so the caller can verify the
+	// hub in turn. addVantage calls this immediately after Register so the one-click "add
+	// vantage" admin flow can hand back a ready-to-run onboarding bundle.
+	IssueClientCert(ctx context.Context, name string) (certPEM, keyPEM, caPEM []byte, err error)
 }
 
 // ErrConfigInvalid and ErrConfigConflict are the sentinel results a ConfigApply
@@ -81,6 +89,11 @@ type Server struct {
 	Vantages      VantageAdmin
 	AdminPassword string
 	AdminKey      []byte
+	// AgentHubURL is the hub's own externally-reachable base URL (scheme + host + mTLS port,
+	// e.g. "https://heliograph.bsd-unix.net:8443"), embedded into a minted vantage's agent.yaml
+	// so the agent knows where to report. Populated in main from -agent-hostname + ":8443"
+	// (Task 11); empty here means no flag was set, and addVantage falls back to a placeholder.
+	AgentHubURL string
 	// AdminSessionTTL is how long a login stays valid (token expiry + cookie Max-Age). Zero or
 	// negative means DefaultAdminSessionTTL; production loads SMOKED_ADMIN_SESSION_TTL.
 	AdminSessionTTL time.Duration
@@ -120,13 +133,12 @@ type Server struct {
 	// one metric, so a config change takes effect immediately and a probe-level default is honored
 	// even before the target has any stored round. nil falls back to the stored round's kind.
 	EffectiveMetric func(target string) string
-	// VantageAuth, if set, gates the agent routes (requireAgent) behind an API-key check
-	// against the vantage key store. nil means the agent routes are not registered at
-	// all — fail-closed, same pattern as the admin API's AdminPassword gate.
-	VantageAuth VantageAuth
 	// Assignment, if set, returns the target list, the effective probe-level config
 	// (probe kind -> its `probes.<Kind>` block), and a config_version for a vantage,
-	// computed over the live monitor set. Required (with VantageAuth) for the agent routes.
+	// computed over the live monitor set. Used by agentAssignment/agentResults, which are
+	// currently unwired from any route: requireAgent (agentauth.go) authorizes a caller by
+	// client-cert CN via srv.Vantages.IsActive, but nothing calls it yet — an mTLS listener (a
+	// later task) re-lights them behind it.
 	Assignment func(vantage string) (targets []model.Monitor, probeCfgs map[string]map[string]string, configVersion string)
 	// OnIngest, if set, is called with the accepted remote outcomes AFTER they are durably
 	// stored, so the hub evaluates alerts for remote vantages (each outcome carries its
@@ -279,10 +291,12 @@ func (srv *Server) Routes() *http.ServeMux {
 	if srv.AdminPassword != "" && len(srv.AdminKey) > 0 && srv.ConfigImport != nil {
 		mux.HandleFunc("POST /api/admin/config/import", srv.requireAdmin(srv.importConfig))
 	}
-	if srv.VantageAuth != nil && srv.Assignment != nil {
-		mux.HandleFunc("GET /agent/v1/assignment", srv.requireAgent(srv.agentAssignment))
-		mux.HandleFunc("POST /agent/v1/results", srv.requireAgent(srv.agentResults))
-	}
+	// The agent routes (/agent/v1/assignment, /agent/v1/results) are not registered here:
+	// requireAgent (agentauth.go) authorizes a caller by client-cert CN, but this mux is plain
+	// HTTP, so it never wires it up. agentAssignment/agentResults stay as unexported methods —
+	// the opt-in mTLS listener cmd/smoked starts when -agent-addr is set (AgentMux, defined in
+	// this package's agentmtls.go) is what re-lights them behind requireAgent; single-host
+	// deployments (the default, no -agent-addr) never expose them at all.
 	if srv.webDir != "" {
 		// Serve the SPA/static assets at the root (same-origin with the API).
 		mux.Handle("GET /", noCacheStatic(http.FileServer(http.Dir(srv.webDir))))
@@ -1690,21 +1704,55 @@ func (srv *Server) addVantage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"invalid vantage name (use letters, digits, . _ -)"}`, http.StatusBadRequest)
 		return
 	}
-	key, err := srv.Vantages.Add(r.Context(), body.Name)
-	if err != nil {
+	if err := srv.Vantages.Register(r.Context(), body.Name); err != nil {
 		switch {
 		case errors.Is(err, vantage.ErrReserved):
 			http.Error(w, `{"error":"\"local\" is reserved for the hub"}`, http.StatusConflict)
 		case errors.Is(err, vantage.ErrInvalidName):
 			http.Error(w, `{"error":"invalid vantage name (use letters, digits, . _ -)"}`, http.StatusBadRequest)
 		default:
-			slog.Error("addVantage: store add failed", "err", err)
+			slog.Error("addVantage: store register failed", "err", err)
 			http.Error(w, `{"error":"store unavailable"}`, http.StatusServiceUnavailable)
 		}
 		return
 	}
-	w.Header().Set("Cache-Control", "no-store") // the one-time key is in this body — never cache it
-	writeJSON(w, map[string]any{"name": body.Name, "key": key, "snippet": vantage.AgentSnippet(body.Name, key)})
+	// Mint the vantage's mTLS client identity right away, so the one-click "add vantage" admin
+	// flow can hand back a ready-to-run onboarding bundle in the same response. This is the ONE
+	// place the admin API carries private key material: mint time is the only moment smoked
+	// itself holds the client key, so it must be returned here or nowhere (spec §3b). The CLI
+	// (`smoked vantage add <name>`) mints the same way and prints the same PEM bundle to stdout;
+	// both paths are equally admin/operator-gated.
+	certPEM, keyPEM, caPEM, err := srv.Vantages.IssueClientCert(r.Context(), body.Name)
+	if err != nil {
+		slog.Error("addVantage: issue client cert failed", "name", body.Name, "err", err)
+		http.Error(w, `{"error":"mint failed"}`, http.StatusInternalServerError)
+		return
+	}
+
+	hub := srv.AgentHubURL
+	if hub == "" {
+		hub = "https://HUB-HOSTNAME:8443"
+	}
+
+	wantsBundle := strings.Contains(r.Header.Get("Accept"), "application/gzip") || r.URL.Query().Get("format") == "bundle"
+	if wantsBundle {
+		w.Header().Set("Content-Type", "application/gzip")
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", body.Name+"-vantage.tar.gz"))
+		// Headers (and the 200 status) are committed on the first Write below — a bundle-encoding
+		// failure past that point can only be logged, not turned into an error status.
+		if err := vantage.WriteBundleTarGz(w, hub, body.Name, certPEM, keyPEM, caPEM); err != nil {
+			slog.Error("addVantage: write bundle failed", "name", body.Name, "err", err)
+		}
+		return
+	}
+	writeJSON(w, map[string]any{
+		"name":        body.Name,
+		"registered":  true,
+		"hub":         hub,
+		"client_cert": string(certPEM),
+		"client_key":  string(keyPEM),
+		"ca_cert":     string(caPEM),
+	})
 }
 
 func (srv *Server) revokeVantage(w http.ResponseWriter, r *http.Request) {

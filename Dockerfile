@@ -25,7 +25,13 @@ FROM alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc
 # container's bounding set — see compose cap_add), so the collector can drop to a
 # non-root user instead of running as root for ICMP. libcap is only needed to run
 # setcap, so install it in a throwaway virtual package and remove it after.
-RUN apk add --no-cache fping ca-certificates tzdata \
+# Forward-pin openssl to the patched apk already published on v3.22/main (CVE-2026-14456, an
+# unbounded-memory QUIC DoS): the alpine:3.22 base image still ships libcrypto3/libssl3 3.5.7-r0 and
+# has not been rebuilt with 3.5.8-r0 yet, so bumping the base tag/digest alone doesn't fix it — verify
+# with `docker run --rm alpine:3.22 apk policy libcrypto3`. Drop this once the base ships 3.5.8-r0 and
+# bump the digest instead.
+RUN apk add --no-cache --upgrade libcrypto3=3.5.8-r0 libssl3=3.5.8-r0 \
+ && apk add --no-cache fping ca-certificates tzdata \
  && apk add --no-cache --virtual .setcap libcap \
  && setcap cap_net_raw+ep "$(command -v fping)" \
  && apk del .setcap \
