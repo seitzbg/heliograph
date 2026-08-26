@@ -88,6 +88,13 @@
   .rank li { display:grid; align-items:baseline; gap:10px; padding:6px 8px; border-radius:7px; font-family:ui-monospace,Menlo,monospace; font-size:12.5px; }
   .rank.worst li { grid-template-columns:20px 1fr auto; }
   .rank.sla li { grid-template-columns:20px minmax(0,1fr) 116px 150px; align-items:center; }
+  /* Phone widths: the two fixed tracks (116px+150px) forced page-level horizontal scroll (CODE_REVIEW
+     M18). Drop to rank + target + availability on row one, and let the coverage bar span a full second
+     row instead of a fixed track. */
+  @media (max-width:560px){
+    .rank.sla li { grid-template-columns:20px minmax(0,1fr) auto; }
+    .rank.sla li > *:last-child { grid-column:1 / -1; } /* coverage (bar or header label) drops to its own row */
+  }
   .rank li:nth-child(odd) { background:color-mix(in srgb, var(--ink) 4%, transparent); }
   .rank li.head { font-size:10px; letter-spacing:.09em; text-transform:uppercase; color:var(--ink-faint); background:none; }
   .rank .n { color:var(--ink-faint); font-size:11px; text-align:right; }
@@ -131,6 +138,8 @@
   .gpanel .meta, .spanel .meta { display:flex; gap:16px; flex-wrap:wrap; margin:7px 0 8px; }
   .stat { font-family:ui-monospace,Menlo,monospace; } .stat .k { font-size:10px; letter-spacing:.1em; text-transform:uppercase; color:var(--ink-faint); display:block; }
   .stat .v { font-size:14px; color:var(--ink); font-variant-numeric:tabular-nums; } .stat .v.warn{color:var(--warn);} .stat .v.bad{color:var(--bad);}
+  .stat.band-owner .v { display:inline-flex; align-items:center; gap:5px; font-size:12.5px; } /* per-panel band-owner marker (L11) */
+  .stat.band-owner .v i { width:9px; height:9px; border-radius:2px; flex:0 0 auto; }
   canvas { width:100%; display:block; border-radius:8px; }
   .empty { color:var(--ink-faint); font-family:ui-monospace,monospace; font-size:12px; padding:40px 0; text-align:center; }
   .back { display:inline-flex; align-items:center; gap:7px; font-family:ui-monospace,Menlo,monospace; font-size:12.5px; color:var(--ink-soft); background:transparent; border:0; cursor:pointer; padding:0; margin-top:16px; }
@@ -256,7 +265,11 @@
   .vadmin-btn:hover { background:var(--accent); color:var(--bg); }
   .vadmin-btn:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
   .vadmin-err { color:var(--bad); font-size:12.5px; }
-  .vadmin-table { width:100%; border-collapse:collapse; font-size:13px; }
+  /* Five columns + a two-button action cell overflowed the page at phone widths (CODE_REVIEW M18).
+     Keep the table's shape but scroll it INSIDE its panel so the document body never scrolls sideways. */
+  .vadmin-tablewrap { overflow-x:auto; }
+  .vadmin-table { width:100%; min-width:460px; border-collapse:collapse; font-size:13px; }
+  .vadmin-table td:last-child { white-space:nowrap; }
   .vadmin-table th { text-align:left; font-family:ui-monospace,Menlo,monospace; font-size:10px; letter-spacing:.12em; text-transform:uppercase; color:var(--ink-faint); padding:6px 10px; border-bottom:1px solid var(--border); }
   .vadmin-table td { padding:8px 10px; border-bottom:1px solid var(--border); color:var(--ink); vertical-align:middle; }
   .vadmin-table td.vadmin-empty { color:var(--ink-faint); text-align:center; }
@@ -438,7 +451,7 @@
     <div id="vantLogin" class="panel vadmin-note hidden">Admin access required — use <b>Log in</b> at the top right to manage vantages.</div>
 
     <div id="vantList" class="hidden">
-      <div class="panel">
+      <div class="panel vadmin-tablewrap">
         <table class="vadmin-table" aria-label="Vantages">
           <thead><tr><th>Name</th><th>Created</th><th>Last seen</th><th>Targets</th><th></th></tr></thead>
           <tbody id="vantRows"></tbody>
@@ -451,6 +464,10 @@
         <span id="vantAddErr" class="vadmin-err" role="alert"></span>
       </form>
       <p id="vantAddNote" class="vadmin-note-inline" role="status" style="font-size:11.5px; color:var(--ink-soft); margin:4px 2px 0"></p>
+      <p id="vantNoListener" class="vadmin-note hidden" role="status">
+        This hub has no agent listener (<code>-agent-hostname</code> / <code>SMOKED_AGENT_HOSTNAME</code> unset), so a
+        downloaded bundle would embed a placeholder hub URL and can't connect. Set it and restart to onboard vantages.
+      </p>
       <p class="admin-hint">Viewing read-only — use <b>Log in</b> (top right) to add or manage vantages.</p>
     </div>
 

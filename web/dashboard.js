@@ -138,10 +138,24 @@
   // wedging a busy flag or a refresh generation forever (CODE_REVIEW M14/M15). Every caller already
   // treats a rejection as "transient — keep last known". 15s is well above a healthy response and
   // below any cadence, so a stalled request is retried on the next tick rather than blocking it.
+  // The abort MUST stay armed through the body read: fetch resolves on response HEADERS, so a peer
+  // that sends 200 headers then stalls the body would hang r.json()/r.blob() forever with the timer
+  // already cleared (CODE_REVIEW M16). So the body-reading methods are wrapped to clear the timer only
+  // once they settle; a caller that never reads the body lets the timer fire a harmless abort on the
+  // already-complete request.
   function fetchWithTimeout(url, opts, ms) {
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(), ms || 15000);
-    return fetch(url, { ...(opts || {}), signal: ac.signal }).finally(() => clearTimeout(timer));
+    let cleared = false;
+    const clear = () => { if (!cleared) { cleared = true; clearTimeout(timer); } };
+    return fetch(url, { ...(opts || {}), signal: ac.signal }).then((r) => {
+      for (const m of ['json', 'text', 'blob', 'arrayBuffer', 'formData']) {
+        const orig = r[m];
+        if (typeof orig !== 'function') continue;
+        r[m] = function () { return orig.apply(r, arguments).finally(clear); };
+      }
+      return r;
+    }, (e) => { clear(); throw e; });
   }
   async function fetchJSON(url) {
     const r = await fetchWithTimeout(url, { cache: 'no-store' });
@@ -368,6 +382,15 @@
     const measures = new Set((targetVantages && targetVantages.length) ? targetVantages : ['local']);
     for (const v of (shown || [])) if (measures.has(v)) return v;
     return null;
+  }
+  // bandOwnerHint names the vantage a panel actually draws as its band+median WHEN that differs from
+  // the global focus the toolbar labels `band`. The toolbar marks gridFocus() (the first selected
+  // vantage) as `band`, but a panel whose target the focus doesn't measure draws a DIFFERENT selected
+  // vantage as its band — so the global label contradicts that panel (CODE_REVIEW L11). Returns the
+  // band owner's name for those panels, else '' (single-vantage, or the focus IS this panel's band).
+  function bandOwnerHint(band, focus, shownCount) {
+    if (!band || (shownCount || 0) < 2 || band === focus) return '';
+    return band;
   }
 
   // gridShowsTarget decides whether a target is a Graphs-grid panel candidate for the current
@@ -865,7 +888,7 @@
     return (!vantage || vantage === 'local') ? local : remote;
   }
 
-  window.Dash = { RANGES, RANGE_ORDER, parseRoute, mergeSeries, gridSince, gridTemplateFor, maxColumnsFor, rangeLabels, fetchJSON, zoomResolution, pixelToTime, sharedYMax, nextGridSeries, buildTree, underPath, targetStatus, pickSeries, vantageList, orderVantages, defaultFocus, keepFocus, vantageColorVar, worstStatus, statusFor, availableVantages, toggleGridVantage, vantageControlChips, bandVantageFor, gridShowsTarget, adminMode, adminSessionState, createAdminStateController, statusProbeOwnsView, relTime, listTargets, addTarget, editTarget, removeTarget, buildTargetNode, buildGroupNode, labelHTML, collectingNote, vantageBundleFilename, cfgTree, reweightSiblings, reorderSiblings, editNodeAtPath, removeNodeAtPath, renameNodeAtPath, addNodeAtPath, moveNode, moveInList, cfgDropDestination, cfgVisibleRows, cfgTreeKey, tkey, ntpStatHtml, ntpStatOf, ntpStatSelect };
+  window.Dash = { RANGES, RANGE_ORDER, parseRoute, mergeSeries, gridSince, gridTemplateFor, maxColumnsFor, rangeLabels, fetchWithTimeout, fetchJSON, zoomResolution, pixelToTime, sharedYMax, nextGridSeries, buildTree, underPath, targetStatus, pickSeries, vantageList, orderVantages, defaultFocus, keepFocus, vantageColorVar, worstStatus, statusFor, availableVantages, toggleGridVantage, vantageControlChips, bandVantageFor, bandOwnerHint, gridShowsTarget, adminMode, adminSessionState, createAdminStateController, statusProbeOwnsView, relTime, listTargets, addTarget, editTarget, removeTarget, buildTargetNode, buildGroupNode, labelHTML, collectingNote, vantageBundleFilename, cfgTree, reweightSiblings, reorderSiblings, editNodeAtPath, removeNodeAtPath, renameNodeAtPath, addNodeAtPath, moveNode, moveInList, cfgDropDestination, cfgVisibleRows, cfgTreeKey, tkey, ntpStatHtml, ntpStatOf, ntpStatSelect };
 
   // ---------------------------------------------------------------- init (DOM) --
   function init() {
@@ -1228,8 +1251,15 @@
     }
     function gridMeta(p, s) {
       const st = Smoke.seriesStats(s); const lcls = st.lossAvg > 2 ? 'bad' : st.lossAvg > 0.5 ? 'warn' : '';
+      // When this panel's band owner isn't the vantage the toolbar globally labels `band`, name it here
+      // so the legend doesn't contradict the graph (CODE_REVIEW L11) — swatch in the owner's overlay color.
+      const owner = Dash.bandOwnerHint(p.band, gridFocus(), gridVantages.length);
+      const ownerStat = owner
+        ? '<span class="stat band-owner"><span class="k">band</span><span class="v"><i style="background:' + cssVar(vantageColorVar(owner, gridVantages)) + '"></i>' + esc(owner) + '</span></span>'
+        : '';
       p.meta.innerHTML = '<span class="stat"><span class="k">median</span><span class="v">' + fmtMs(st.medAvg, ntpSigned(p.el.dataset.target)) + ' ms</span></span>' +
         '<span class="stat"><span class="k">loss</span><span class="v ' + lcls + '">' + fmt(st.lossAvg, 2) + ' %</span></span>' +
+        ownerStat +
         // The clock stat must follow the panel's BAND vantage (its plotted series), not the hub-local
         // reading — otherwise a remote-focused NTP panel shows the hub's offset/stratum (M2 regression).
         ntpStatsHtmlForVantage(p.el.dataset.target, p.band);
@@ -1338,7 +1368,12 @@
         // Don't claim "updated" when every vantage's series fetch failed (network/non-2xx): the panels
         // are showing last-known data, so say so instead of lying (#5).
         if (!anyBulk) $('statusText').textContent = targets.length + ' targets · graph data degraded (last known) · ' + new Date().toLocaleTimeString();
-        renderGridPanels();     // render the visible (scoped) panels, sharing a Y-axis
+        // Skip the panel repaint when EVERY series fetch failed on an already-loaded grid: the cached
+        // series are unchanged, and re-rendering them against a fresh [now-3h, now] domain collapses
+        // hours-old samples onto the left frame edge — a blank plot that hides the last-known trace
+        // (CODE_REVIEW M14). Leaving the canvases untouched keeps the last good paint. The tree still
+        // refreshes: its dots come from /api/targets (which succeeded here), not the series fetch.
+        if (anyBulk || !gridLoaded) renderGridPanels(); // render the visible (scoped) panels, sharing a Y-axis
         renderTreeIfChanged();  // refresh the menu dots when a target's status changed
       } finally { gridBusy = false; }
     }
@@ -1636,7 +1671,8 @@
       });
       return stackCells;
     }
-    let stackBusy = false; // a renderStack fetch is in flight (CODE_REVIEW M15 same-target serialization)
+    let stackBusy = false;         // a renderStack fetch is in flight (CODE_REVIEW M15 same-target serialization)
+    let stackShownTarget = null;   // the target whose data is currently painted on the reused canvases
     async function renderStack(name) {
       // Serialize periodic refreshes for the SAME target: if one is already in flight, skip rather
       // than bump the generation and discard the running one — under sustained slow reads that would
@@ -1649,9 +1685,19 @@
       try {
         $('stackTitle').innerHTML = probeBadge(name) + displayLabel(name);
         const cells = ensureStackCells(); // reuse the existing canvases — stay visible until new data lands
+        // On a genuine target CHANGE, blank the reused canvases up front so the PREVIOUS target's
+        // graphs aren't shown under the new target's title while its data loads (CODE_REVIEW M15). A
+        // same-target refresh leaves them painted (no blank flash).
+        if (name !== stackShownTarget) {
+          stackShownTarget = name;
+          stackCanvases.length = 0;
+          for (const c of cells) { c.meta.innerHTML = ''; drawNote(c.canvas, 'loading…', 170); }
+        }
         await ensureVantages(name);
         if (gen !== stackGen) return; // a newer renderStack call superseded this one
-        const vs = Dash.orderVantages(vantagesFor(name));
+        // Cap to the palette size (like the Graphs grid) so a target measured by >4 vantages never
+        // draws two detail overlays in the same color (CODE_REVIEW M12).
+        const vs = Dash.orderVantages(vantagesFor(name)).slice(0, MAX_GRID_VANTAGES);
         stackVantages = vs;
         await ensureVantageStats(vs); // remote vantages' NTP stats for the meta (M2); local uses ntpByName
         if (gen !== stackGen) return;
@@ -1725,6 +1771,7 @@
     }
     // Four axis labels for an arbitrary [t0,t1]: clock times for short spans, dates for long.
     // rangeLabels is defined at module scope (shared with the grid/stack absolute-time toggle).
+    let zoomShownTarget = null;
     async function renderZoom(name, range) {
       const gen = ++zoomGen; // captured before any await — invalidates any earlier in-flight zoom call (renderZoom or zoomTo), same name/range or not
       curTarget = name; curRange = range; const R = RANGES[range];
@@ -1732,6 +1779,10 @@
       $('zoomMeta').innerHTML = ''; $('zoomReset').hidden = true;
       $('zoomRes').textContent = 'drag on the graph to zoom into a time range';
       const canvas = $('zoomCanvas');
+      // On a target CHANGE, blank the canvas immediately so the previous target's chart isn't left
+      // painted under the new title through the async fetch (CODE_REVIEW M15 — the meta above is
+      // already cleared; the canvas was not). A same-target periodic refresh keeps its chart.
+      if (name !== zoomShownTarget) { zoomShownTarget = name; drawNote(canvas, 'loading…', 220); }
 
       await ensureVantages(name);
       if (gen !== zoomGen) return; // a newer zoom call superseded this one
@@ -1739,7 +1790,9 @@
       // zoom deep link renders above before they were populated, so it would show the bare
       // name (matching renderStack's two-phase title set).
       $('zoomTitle').innerHTML = probeBadge(name) + displayLabel(name) + ' <span class="reslabel">· ' + R.label + '</span>';
-      const vs = Dash.orderVantages(vantagesFor(name));
+      // Cap to the palette size (like the Graphs grid) so a target measured by >4 vantages never
+      // draws two detail overlays in the same color (CODE_REVIEW M12).
+      const vs = Dash.orderVantages(vantagesFor(name)).slice(0, MAX_GRID_VANTAGES);
       zoomVantages = vs;
       await ensureVantageStats(vs); // remote vantages' NTP stats for the meta (M2); local uses ntpByName
       if (gen !== zoomGen) return;
@@ -1884,6 +1937,13 @@
       try { data = await r.json(); } catch (e) { vShow('vantError'); return; }
       vadmin.rows = data.vantages || [];
       renderVantageRows();
+      // M19: when the hub runs no agent listener, a minted bundle embeds a placeholder hub URL and
+      // can never connect — disable onboarding and explain, rather than hand out a dead bundle. The
+      // existing rows stay visible/read-only (a listener may be added later without losing them).
+      const ready = data.federation_ready !== false;
+      $('vantNoListener').classList.toggle('hidden', ready);
+      $('vantName').disabled = !ready;
+      $('vantAdd').querySelector('button[type="submit"]').disabled = !ready;
       vShow('vantList');
     }
     $('vantRetry').addEventListener('click', () => renderVantages());
@@ -2799,7 +2859,20 @@
     setInterval(() => { if (currentView() === 'overview') refreshOverview(); }, 15000);
     setInterval(() => { const v = currentView(); if (v === 'config' || v === 'vantages') pingStatus(v); }, 15000);
     setInterval(refreshAdminState, 60000); // keep the global indicator honest as a 12h session expires
-    setInterval(() => { const v = currentView(); if (v === 'stack') renderStack(curTarget); else if (v === 'zoom' && !(zoomState && zoomState.custom)) { const r = parseRoute(location.hash); renderZoom(r.name, r.range); } }, 30000);
+    // renderStack serializes its own periodic refresh (stackBusy). For zoom, serialize the PERIODIC
+    // refresh here so a slow read can't be superseded by the next 30s tick before it paints — the
+    // livelock M15 fixed for stack (CODE_REVIEW M17). A user navigation/drag calls renderZoom directly
+    // (not through this guard), so it still supersedes immediately via zoomGen.
+    let zoomRefreshing = false;
+    setInterval(() => {
+      const v = currentView();
+      if (v === 'stack') { renderStack(curTarget); return; }
+      if (v === 'zoom' && !(zoomState && zoomState.custom) && !zoomRefreshing) {
+        const r = parseRoute(location.hash);
+        zoomRefreshing = true;
+        Promise.resolve(renderZoom(r.name, r.range)).finally(() => { zoomRefreshing = false; });
+      }
+    }, 30000);
 
     themeLabel();
     route();

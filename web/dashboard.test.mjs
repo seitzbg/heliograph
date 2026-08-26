@@ -160,6 +160,29 @@ await checkAsync('fetchJSON returns decoded JSON on a 2xx response', async () =>
   assert.deepEqual(await D.fetchJSON('/api/targets'), { targets: [{ name: 'a' }] });
 });
 
+// fetchWithTimeout (CODE_REVIEW M16): fetch() resolves when the RESPONSE HEADERS arrive, so a timer
+// cleared at that point leaves a stalled BODY read to hang forever. The fix keeps the AbortController
+// armed until the body method settles. Reproduces a stalled body: headers resolve, .json() only
+// rejects on abort — so the still-armed timer must fire and reject it (the old code would hang).
+await checkAsync('fetchWithTimeout aborts a stalled response BODY, not just headers (M16)', async () => {
+  globalThis.fetch = (url, opts) => {
+    const signal = opts.signal;
+    const stalled = () => new Promise((_resolve, reject) => {
+      if (signal.aborted) return reject(new Error('aborted'));
+      signal.addEventListener('abort', () => reject(new Error('aborted')));
+    });
+    return Promise.resolve({ ok: true, status: 200, json: stalled, text: stalled });
+  };
+  const r = await D.fetchWithTimeout('/api/series', {}, 40); // headers resolve immediately
+  await assert.rejects(() => r.json(), 'a stalled body must reject via the still-armed timeout, not hang');
+});
+// The success path must still CLEAR the timer, or a slow later tick would abort an already-read body.
+await checkAsync('fetchWithTimeout: a body that completes settles normally', async () => {
+  globalThis.fetch = async () => ({ ok: true, status: 200, json: async () => ({ ok: 1 }) });
+  const r = await D.fetchWithTimeout('/api/series', {}, 40);
+  assert.deepEqual(await r.json(), { ok: 1 });
+});
+
 // buildTree: the config-tree menu (left nav). Splits each target name on '/', nests
 // folders, and marks the exact path that is itself a monitored target.
 check('buildTree nests names into folders and marks targets', () => {
@@ -931,6 +954,21 @@ check('bandVantageFor: first selected vantage that measures the target, else nul
   // missing/empty vantage list defaults to local
   assert.equal(D.bandVantageFor(undefined, ['local']), 'local');
   assert.equal(D.bandVantageFor([], ['munro-comcast']), null);
+});
+
+// bandOwnerHint (CODE_REVIEW L11): the toolbar labels the global focus vantage `band`, but a panel
+// whose target the focus doesn't measure draws a DIFFERENT vantage as its band. The per-panel marker
+// names that owner only when it would otherwise contradict the toolbar.
+check('bandOwnerHint: names the owner only when it differs from the global focus in multi-vantage mode', () => {
+  // The reported case: focus 'local' is selected but a remote-only target draws 'nyc' as its band.
+  assert.equal(D.bandOwnerHint('nyc', 'local', 2), 'nyc');
+  // No contradiction to flag when the focus IS this panel's band owner.
+  assert.equal(D.bandOwnerHint('local', 'local', 2), '');
+  // Single-vantage mode has no global band/line split, so nothing to disambiguate.
+  assert.equal(D.bandOwnerHint('local', 'local', 1), '');
+  assert.equal(D.bandOwnerHint('nyc', 'nyc', 1), '');
+  // A hidden panel (no band owner) never shows a marker.
+  assert.equal(D.bandOwnerHint(null, 'local', 3), '');
 });
 
 // gridShowsTarget (CODE_REVIEW M10): a remote-only target must become a grid panel candidate once a

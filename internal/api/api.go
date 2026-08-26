@@ -1690,7 +1690,11 @@ func (srv *Server) listVantages(w http.ResponseWriter, r *http.Request) {
 		}
 		out = append(out, row)
 	}
-	writeJSON(w, map[string]any{"vantages": out})
+	// federation_ready reports whether the hub actually runs an mTLS agent listener
+	// (-agent-hostname set → AgentHubURL populated). When false, a minted bundle embeds a
+	// placeholder hub URL and can never connect, so the UI disables onboarding rather than
+	// handing out a dead bundle (CODE_REVIEW M19).
+	writeJSON(w, map[string]any{"vantages": out, "federation_ready": srv.AgentHubURL != ""})
 }
 
 func (srv *Server) addVantage(w http.ResponseWriter, r *http.Request) {
