@@ -287,6 +287,19 @@ check('vantageColorVar: local neutral, others stable palette', () => {
   assert.notEqual(D.vantageColorVar('nyc', ord), D.vantageColorVar('fra', ord));
   assert.equal(D.vantageColorVar('nyc', ord), D.vantageColorVar('nyc', ord)); // stable
 });
+check('vantageColorVar: coloring by the SHOWN set avoids collisions from a >4 catalog (M12)', () => {
+  // The bug: coloring by the full catalog index mod 4 makes a sparse ≤4 selection collide.
+  const catalog = D.orderVantages(['local', 'a', 'b', 'c', 'd', 'e']); // 5 non-local, palette has 4
+  // Old behavior (color by the full catalog): 'a' (idx 0) and 'e' (idx 4) both map to --v-a.
+  assert.equal(D.vantageColorVar('a', catalog), D.vantageColorVar('e', catalog)); // documents the collision
+  // Fix: color from the SHOWN (selected, capped) set instead — no two drawn overlays share a slot.
+  const shown = D.orderVantages(['local', 'a', 'e']);
+  assert.notEqual(D.vantageColorVar('a', shown), D.vantageColorVar('e', shown));
+  // A full 4-vantage selection uses all four distinct palette slots.
+  const four = D.orderVantages(['a', 'b', 'c', 'd']);
+  const cols = new Set(four.map((v) => D.vantageColorVar(v, four)));
+  assert.equal(cols.size, 4);
+});
 
 check('adminMode maps HTTP status -> panel mode', () => {
   assert.equal(D.adminMode(200), 'list');

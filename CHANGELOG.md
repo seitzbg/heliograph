@@ -48,11 +48,13 @@ All notable changes to **Heliograph** are recorded here. The format follows
 
 ### Security
 - **Config reads redact credentials embedded in a probe URL.** The open config reads
-  (`GET /api/admin/config`, its `?source=effective` variant, and `GET /api/admin/config.yaml`) now
-  strip HTTP `urlformat` userinfo and query strings for a non-admin reader, so a credential placed in
-  a probe URL (e.g. `https://user:pass@%host%/health?token=…`) is no longer shown to everyone who can
-  reach the dashboard. A logged-in admin still receives the real, editable config — redacting the
-  editable source would let the next save persist the mask over the secret (CODE_REVIEW M11).
+  (`GET /api/admin/config`, its `?source=effective` variant, and `GET /api/admin/config.yaml`) strip
+  HTTP `urlformat` userinfo, query strings, **and the URL path** for a non-admin reader — the path is
+  a common credential carrier (Discord/Slack/PagerDuty webhook tokens live there), so a value like
+  `https://%host%/hooks/TOKEN` is now shown as `https://%host%/[redacted]` rather than verbatim.
+  A credential placed anywhere in a probe URL is no longer shown to everyone who can reach the
+  dashboard. A logged-in admin still receives the real, editable config — redacting the editable
+  source would let the next save persist the mask over the secret (CODE_REVIEW M11).
 
 ### Fixed
 - **The Overview no longer reports a target as down from a vantage that doesn't measure it.** The hub
@@ -68,6 +70,14 @@ All notable changes to **Heliograph** are recorded here. The format follows
 - **Remote-only targets appear in the Graphs grid for their vantage.** Selecting a remote vantage now
   surfaces targets measured only from that vantage (a site the hub can't reach directly), instead of
   leaving them reachable only in the nav tree and detail view (CODE_REVIEW M10).
+- **Graphs overlay colors no longer collide when more than four vantages exist.** Overlay colors are
+  assigned from the selected (≤4) set instead of the full vantage catalog, so two simultaneously-drawn
+  overlays can't land on the same palette slot; a pre-existing saved selection of 5+ vantages is also
+  clamped to the cap on load (CODE_REVIEW M12).
+- **Federation `.env` bcrypt instructions no longer corrupt the hash.** The `DASH_PASSWORD_HASH`
+  guidance dropped the "double every `$` to `$$`" step for the single-quoted value — single quotes
+  already stop Compose from interpolating `$`, so doubling produced a literal `$$…` and broke the
+  dashboard's Basic Auth. Paste the hash single-quoted, exactly as generated (CODE_REVIEW M13).
 
 ### Docs
 - Clarified that a deep link survives a target move only while its path is still current; a dormant

@@ -9,8 +9,9 @@ import (
 
 // secretParamRedactors maps a probe param name that can embed credentials to the function that
 // sanitizes its value for a non-admin config read (CODE_REVIEW M11). Today only the HTTP probe's
-// urlformat qualifies: it can carry HTTP userinfo (user:pass@) and a query string (?token=…), both
-// of which the request path actually uses. Add a probe's secret-capable param here when introduced.
+// urlformat qualifies: it can carry a credential in its userinfo (user:pass@), its query (?token=…),
+// or its path (…/hooks/TOKEN), all of which the request actually uses. Add a probe's secret-capable
+// param here when introduced.
 var secretParamRedactors = map[string]func(string) string{
 	"urlformat": redactURLFormat,
 }
@@ -55,20 +56,33 @@ func redactValue(v any) {
 	}
 }
 
-// redactURLFormat strips HTTP userinfo and the query string from a urlformat template, keeping the
-// scheme, host and path so the read-only view stays informative (e.g. https://%host%/health). The
-// %host% placeholder is preserved. A value with neither userinfo nor query round-trips unchanged; a
-// value that does not parse is fully masked rather than risk leaking part of a secret.
+// redactURLFormat sanitizes a urlformat template for a non-admin config read. It strips HTTP
+// userinfo (user:pass@), the query string, and the fragment, and masks a non-root path — path
+// segments are a common credential carrier (Discord/Slack/PagerDuty webhook tokens live in the path,
+// not the userinfo or query), and a field-name table cannot tell an informative "/health" from a
+// secret "/hooks/TOKEN" (CODE_REVIEW M11). The scheme, host and port stay visible so the read-only
+// view still shows what is probed (e.g. https://%host%/[redacted]), and the %host% placeholder is
+// preserved. A value that can carry no credential (scheme://%host%, optionally with a port or a bare
+// "/") round-trips unchanged; a value that does not parse is fully masked.
 func redactURLFormat(v string) string {
 	const ph = "heliograph-host-placeholder.invalid"
 	u, err := url.Parse(strings.ReplaceAll(v, "%host%", ph))
 	if err != nil {
 		return "[redacted]"
 	}
-	if u.User == nil && u.RawQuery == "" {
-		return v // nothing sensitive to strip; keep the template byte-for-byte
+	nonRootPath := u.Path != "" && u.Path != "/"
+	if u.User == nil && u.RawQuery == "" && u.Fragment == "" && !nonRootPath {
+		return v // nothing that can carry a credential; keep the template byte-for-byte
 	}
-	u.User = nil
-	u.RawQuery = ""
-	return strings.ReplaceAll(u.String(), ph, "%host%")
+	// Rebuild from the safe components only (scheme://host[:port]), masking any non-root path.
+	// Building the string by hand keeps the "[redacted]" marker literal (url.String would %-escape
+	// the brackets).
+	red := u.Scheme + "://" + u.Host
+	switch {
+	case nonRootPath:
+		red += "/[redacted]"
+	case u.Path == "/":
+		red += "/"
+	}
+	return strings.ReplaceAll(red, ph, "%host%")
 }

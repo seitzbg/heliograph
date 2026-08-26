@@ -1022,7 +1022,9 @@
     // single-vantage deployment is unchanged. Remembered per browser.
     let availVantages = ['local'];
     function loadGridVantages() {
-      try { const s = JSON.parse(localStorage.getItem('grid-vantages')); if (Array.isArray(s) && s.length) return s; } catch (e) {}
+      // Clamp a persisted selection to the cap: a pre-#113 localStorage array could hold 5+ vantages,
+      // which would draw an overlay in a reused palette color until manually deselected (CODE_REVIEW M12).
+      try { const s = JSON.parse(localStorage.getItem('grid-vantages')); if (Array.isArray(s) && s.length) return s.slice(0, MAX_GRID_VANTAGES); } catch (e) {}
       return ['local'];
     }
     let gridVantages = loadGridVantages();
@@ -1404,15 +1406,18 @@
       }
       updateHiddenNote(hidden);
       // Which vantages overlay on each panel: every OTHER selected vantage that measures this target
-      // (not its band owner). Filter by the SHOWN set + what the target measures, but color by the
-      // full availVantages so a vantage keeps its color as others are toggled. Skip series a panel
-      // hasn't loaded / can't support.
+      // (not its band owner). Filter by the SHOWN set + what the target measures. Color from the SHOWN
+      // set (gridVantages, capped at MAX_GRID_VANTAGES) — not the full availVantages catalog — so no
+      // two simultaneously-drawn overlays can land on the same palette slot when the deployment has
+      // more than four vantages (CODE_REVIEW M12); the tradeoff is a vantage's color may shift when
+      // the selection changes. Matches how stack/zoom already colors by its shown set. Skip series a
+      // panel hasn't loaded / can't support.
       const overlaysFor = (p) => {
         if (gridVantages.length < 2) return undefined;
         const byV = p.seriesByV || {};
         const measures = new Set(vantagesByTarget.get(p.el.dataset.target) || ['local']);
         return gridVantages.filter((v) => v !== p.band && measures.has(v) && byV[v] && !byV[v].unsupported)
-          .map((v) => ({ series: byV[v], color: cssVar(vantageColorVar(v, availVantages)) }));
+          .map((v) => ({ series: byV[v], color: cssVar(vantageColorVar(v, gridVantages)) }));
       };
       // Unison shares one latency scale — but only across rtt panels. A signed offset panel uses
       // its own zero-centered scale and would otherwise blow up the shared max (a +5s offset =>
@@ -1446,8 +1451,10 @@
       const bar = $('gridVantageBar'); if (!bar) return;
       if (availVantages.length < 2) { bar.hidden = true; bar.innerHTML = ''; return; }
       bar.hidden = false;
+      // Swatch color from the SHOWN set so a selected chip matches its drawn line (CODE_REVIEW M12);
+      // an unselected chip previews the slot it would take if added.
       bar.innerHTML = vantageControlChips(availVantages, gridVantages, gridFocus(), MAX_GRID_VANTAGES,
-        (v) => cssVar(vantageColorVar(v, availVantages)));
+        (v) => cssVar(vantageColorVar(v, gridVantages.includes(v) ? gridVantages : gridVantages.concat([v]))));
     }
 
     // ---- config-tree menu (left nav) ----

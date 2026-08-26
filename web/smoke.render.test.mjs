@@ -399,5 +399,25 @@ check('non-signed axis clamps negatives to the floor (latency unchanged)', () =>
   assert.ok(ml[1].y >= 177, `negative median should clamp to the ~178 floor on a 0-based axis, got ${ml[1].y}`);
 });
 
+// --- CODE_REVIEW L10: the #112 median-clipping fix (commit a2bee4a shipped no tests). robustRange
+// must fold the median line's extremes into the y-axis so a genuine median peak is not clipped to
+// the top frame, while a lone outlier SAMPLE is still trimmed so it can't blow up the scale. ---
+const normBucket = () => ({ centered: [10, 11, 10, 12], samples: [10, 11, 10, 12], lost: 0, median: 10, pings: 4 });
+check('robustRange folds a median peak into the y-axis so it is not clipped (L10 / #112)', () => {
+  const buckets = Array.from({ length: 30 }, normBucket);
+  buckets.push({ centered: [79, 80, 81], samples: [79, 80, 81], lost: 0, median: 80, pings: 3 }); // a brief real spike
+  const [lo, hi] = Smoke.robustRange({ buckets, N: 4 }, false);
+  assert.equal(lo, 0, 'latency axis is 0-based');
+  // The spike's 3 samples sit below the 96.5th percentile of 123 samples, so only the median fold
+  // lifts the ceiling: ~94.4 with the fix, ~14 (clipped) without it.
+  assert.ok(hi >= 80, `median peak (80ms) must fit under the top frame, got hi=${hi}`);
+});
+check('robustRange still trims a lone outlier SAMPLE so the band scale is not blown (L10)', () => {
+  const buckets = Array.from({ length: 30 }, normBucket);
+  buckets.push({ centered: [10, 11, 5000, 10], samples: [10, 11, 5000, 10], lost: 0, median: 10, pings: 4 }); // one glitch sample
+  const [, hi] = Smoke.robustRange({ buckets, N: 4 }, false);
+  assert.ok(hi < 100, `a single 5000ms sample must be trimmed, not set the scale, got hi=${hi}`);
+});
+
 if (failed) { console.error(`\n${failed} test(s) failed`); process.exit(1); }
 console.log('\nall smoke.render tests passed');
