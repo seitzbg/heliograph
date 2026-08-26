@@ -229,7 +229,7 @@ func resolveConfig(path string, f cliFlags) (agentConfig, error) {
 	// Must be https: the agent authenticates with a client certificate, and a client cert is only
 	// presented over TLS — an http hub would silently drop mTLS. (-insecure still uses TLS, just
 	// without verifying the hub's cert, so it stays https.)
-	if u, err := url.Parse(cfg.Hub); err != nil || !u.IsAbs() || u.Scheme != "https" || u.Host == "" {
+	if u, err := url.Parse(cfg.Hub); err != nil || !u.IsAbs() || u.Scheme != "https" || u.Hostname() == "" {
 		return agentConfig{}, fmt.Errorf("hub must be an absolute https URL, got %q", cfg.Hub)
 	}
 	if cfg.ClientCert == "" || cfg.ClientKey == "" {
