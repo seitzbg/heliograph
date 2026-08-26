@@ -679,6 +679,26 @@ func stddevMs(sortedSec []float64) *float64 {
 	return &sd
 }
 
+// measuredFromVantage reports whether a target with assigned vantage set `vs` is
+// measured from `vant`. An empty/absent set means the implicit single-vantage default
+// (local), mirroring seriesCatalog — so a legacy unscoped target is measured only from
+// local. The Overview boards use this to drop a target from a vantage that doesn't
+// measure it: the hub probes every configured target locally, so a target assigned only
+// to a remote vantage still records 100%-loss LOCAL rounds (it's unreachable from the
+// hub) that would otherwise read as a false worst-loss / zero-availability outage.
+func measuredFromVantage(vs []string, vant string) bool {
+	want := store.VantageOrDefault(vant)
+	if len(vs) == 0 {
+		return want == store.DefaultVantage
+	}
+	for _, v := range vs {
+		if store.VantageOrDefault(v) == want {
+			return true
+		}
+	}
+	return false
+}
+
 // charts ranks targets by their most recent round — SmokePing's "charts" (worst
 // offenders). `by` selects the sort key: loss (default), median, or stddev. `n`
 // caps the result (default 10). Targets with no value for the chosen key (a lost
@@ -712,8 +732,18 @@ func (srv *Server) charts(w http.ResponseWriter, r *http.Request) {
 	// A store-scanned outcome carries only its id, so take the display name from the live catalog
 	// (id -> path); identity plays no part in ranking, only the label the user reads.
 	paths := srv.displayPaths()
+	// Drop targets this vantage doesn't measure, so a remote-only target's failed local rounds
+	// don't rank as a worst-loss outage on the local Overview (see measuredFromVantage). Guarded:
+	// no TargetVantages (bare setups/tests) means no scoping is known, so rank everything as before.
+	var tv map[string][]string
+	if srv.TargetVantages != nil {
+		tv = srv.TargetVantages()
+	}
 	var rows []scored
 	for _, o := range latest {
+		if tv != nil && !measuredFromVantage(tv[o.Target.Key()], vant) {
+			continue
+		}
 		e := chartEntry{
 			ID:      o.Target.Key(),
 			Name:    displayName(paths, o.Target.Key()),
@@ -871,9 +901,18 @@ func (srv *Server) sla(w http.ResponseWriter, r *http.Request) {
 	// from the live catalog (id -> path). A store-scanned outcome has an EMPTY Name, so keying the
 	// aggregates on it would miss every target and return an empty report under the DB backend.
 	paths := srv.displayPaths()
+	// Drop targets this vantage doesn't measure (see charts / measuredFromVantage): a remote-only
+	// target's failed local rounds would otherwise show as 0% availability on the local Overview.
+	var tv map[string][]string
+	if srv.TargetVantages != nil {
+		tv = srv.TargetVantages()
+	}
 	out := make([]slaEntry, 0)
 	for _, o := range active {
 		id := o.Target.Key()
+		if tv != nil && !measuredFromVantage(tv[id], vant) {
+			continue
+		}
 		var (
 			measured, up   int
 			sumLoss        float64

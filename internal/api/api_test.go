@@ -660,6 +660,89 @@ func contains(s []string, want string) bool {
 	return false
 }
 
+// The Overview boards (charts + sla) rank against a read vantage. A target the hub
+// probes locally but that is assigned only to a REMOTE vantage records 100%-loss
+// LOCAL rounds (it's unreachable from the hub) — those must not surface at the local
+// vantage as a worst-loss / zero-availability entry (they read as a false outage). A
+// target genuinely assigned to local with the same failed round MUST still show. From
+// the vantage that measures it, the remote-assigned target reappears.
+func TestChartsAndSLASkipTargetsNotMeasuredFromVantage(t *testing.T) {
+	st := store.NewMem(100)
+	now := time.Now()
+	lostLocal := func(name string) scheduler.Outcome {
+		return scheduler.Outcome{Target: probe.Target{Name: name, Host: "h"}, ProbeName: "DNS",
+			When: now.Add(-1 * time.Minute), Computed: sample.Compute(4, nil)}
+	}
+	st.Add([]scheduler.Outcome{
+		lostLocal("resolver"),  // hub can't reach it locally; assigned only to nyc
+		lostLocal("blackhole"), // legitimately 100% from local; assigned to local
+		// resolver measured healthy from nyc, where it belongs
+		{Target: probe.Target{Name: "resolver", Host: "h"}, ProbeName: "DNS", Vantage: "nyc",
+			When: now.Add(-1 * time.Minute), Computed: sample.Compute(4, []float64{0.01, 0.02, 0.03, 0.04})},
+	})
+	srv := New(st, "")
+	srv.Active = func() map[string]bool { return map[string]bool{"resolver": true, "blackhole": true} }
+	srv.TargetVantages = func() map[string][]string {
+		return map[string][]string{"resolver": {"nyc"}, "blackhole": {"local"}}
+	}
+
+	chartNames := func(q string) []string {
+		rec := httptest.NewRecorder()
+		srv.Routes().ServeHTTP(rec, httptest.NewRequest("GET", "/api/charts"+q, nil))
+		if rec.Code != 200 {
+			t.Fatalf("charts%s: status %d", q, rec.Code)
+		}
+		var m struct {
+			Charts []struct {
+				Name string `json:"name"`
+			} `json:"charts"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &m); err != nil {
+			t.Fatalf("charts%s: %v", q, err)
+		}
+		var out []string
+		for _, c := range m.Charts {
+			out = append(out, c.Name)
+		}
+		return out
+	}
+	slaNames := func(q string) []string {
+		rec := httptest.NewRecorder()
+		srv.Routes().ServeHTTP(rec, httptest.NewRequest("GET", "/api/sla"+q, nil))
+		if rec.Code != 200 {
+			t.Fatalf("sla%s: status %d", q, rec.Code)
+		}
+		var m struct {
+			Targets []struct {
+				Name string `json:"name"`
+			} `json:"targets"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &m); err != nil {
+			t.Fatalf("sla%s: %v", q, err)
+		}
+		var out []string
+		for _, e := range m.Targets {
+			out = append(out, e.Name)
+		}
+		return out
+	}
+
+	// Local vantage: the local-assigned blackhole stays; the nyc-only resolver is dropped.
+	if got := chartNames("?by=loss"); !contains(got, "blackhole") || contains(got, "resolver") {
+		t.Errorf("charts@local = %v, want blackhole present and resolver absent", got)
+	}
+	if got := slaNames("?window=24h"); !contains(got, "blackhole") || contains(got, "resolver") {
+		t.Errorf("sla@local = %v, want blackhole present and resolver absent", got)
+	}
+	// From nyc — the vantage that actually measures it — the resolver reappears.
+	if got := chartNames("?by=loss&vantage=nyc"); !contains(got, "resolver") {
+		t.Errorf("charts@nyc = %v, want resolver present", got)
+	}
+	if got := slaNames("?window=24h&vantage=nyc"); !contains(got, "resolver") {
+		t.Errorf("sla@nyc = %v, want resolver present", got)
+	}
+}
+
 func TestSLAOf(t *testing.T) {
 	t0 := time.Unix(1_700_000_000, 0)
 	mk := func(off time.Duration, lossPct float64, pings int) scheduler.Outcome {

@@ -209,6 +209,32 @@ check('targetStatus: degraded reflects SUSTAINED loss, not one dropped ping', ()
   assert.equal(D.targetStatus({ loss_pct: 0 }), 'ok');
 });
 
+// statusFor gates targetStatus behind vantage membership: the hub probes every target
+// locally, so a target assigned only to a remote vantage has a 100%-loss LOCAL round that
+// targetStatus would call 'down'. From a vantage NOT in the target's set, its status is
+// meaningless -> 'nodata', so the tree dot doesn't flag a false outage.
+check('statusFor: nodata off the assigned set, targetStatus on it', () => {
+  const resolver = { loss_pct: 100, vantages: ['nyc'] };       // failed local probe, assigned to nyc
+  assert.equal(D.statusFor(resolver, 'local'), 'nodata');      // local doesn't measure it
+  assert.equal(D.statusFor(resolver, 'nyc'), 'down');          // nyc does -> its real status
+  const local = { loss_pct: 100, vantages: ['local'] };        // genuinely down from local
+  assert.equal(D.statusFor(local, 'local'), 'down');
+  // Empty/absent set defaults to [local] (single-vantage deployment unchanged).
+  assert.equal(D.statusFor({ loss_pct: 0 }, 'local'), 'ok');
+  assert.equal(D.statusFor({ loss_pct: 0, vantages: [] }, 'nyc'), 'nodata');
+});
+
+// The tree dot is worstStatus across each vantage's statusFor. A resolver healthy from its
+// two remote vantages but "100% loss" from the local probe it isn't assigned to must read
+// as ok, not down (the reported bug).
+check('statusFor + worstStatus: a remote-only target reads healthy, not a false outage', () => {
+  const resolver = { loss_pct: 100, vantages: ['munro-comcast', 'munro-fios'] };
+  const dots = ['local', 'munro-comcast', 'munro-fios'].map((v) => D.statusFor(resolver, v));
+  assert.deepEqual(dots, ['nodata', 'down', 'down']); // per-vantage: local unmeasured; remotes see the DTO's loss
+  // In the real flow each remote DTO carries that vantage's own (healthy) loss; simulate ok there.
+  assert.equal(D.worstStatus(['nodata', 'ok', 'ok']), 'ok');
+});
+
 // parseRoute: the Graphs view carries an optional folder scope for the config-tree menu,
 // deep-linkable and decoded once (like target names).
 check('parseRoute: graphs carries an optional folder path', () => {

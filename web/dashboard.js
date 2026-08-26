@@ -213,6 +213,15 @@
     return 'ok';
   }
 
+  // statusFor is targetStatus gated by vantage membership. The hub probes EVERY configured
+  // target locally, so a target assigned only to remote vantages still records a 100%-loss
+  // local round that targetStatus would read as 'down'. From a vantage not in the target's
+  // set that status is meaningless, so it's 'nodata' — the tree dot rolls up the worst across
+  // vantages, and this keeps a not-measured-here vantage from flagging a false outage.
+  function statusFor(t, vantage) {
+    return vantageList(t).includes(vantage) ? targetStatus(t) : 'nodata';
+  }
+
   // pickSeries decides what a detail graph renders and caches for one range: a fresh non-null
   // series is rendered and cached (except the 'unsupported' sentinel, which is not real data);
   // a null fresh — a transient fetch failure (a non-2xx like a brief 503) — falls back to the
@@ -835,7 +844,7 @@
     return (!vantage || vantage === 'local') ? local : remote;
   }
 
-  window.Dash = { RANGES, RANGE_ORDER, parseRoute, mergeSeries, gridSince, gridTemplateFor, maxColumnsFor, rangeLabels, fetchJSON, zoomResolution, pixelToTime, sharedYMax, buildTree, underPath, targetStatus, pickSeries, vantageList, orderVantages, defaultFocus, keepFocus, vantageColorVar, worstStatus, availableVantages, toggleGridVantage, vantageControlChips, bandVantageFor, gridShowsTarget, adminMode, adminSessionState, createAdminStateController, statusProbeOwnsView, relTime, listTargets, addTarget, editTarget, removeTarget, buildTargetNode, buildGroupNode, labelHTML, collectingNote, vantageBundleFilename, cfgTree, reweightSiblings, reorderSiblings, editNodeAtPath, removeNodeAtPath, renameNodeAtPath, addNodeAtPath, moveNode, moveInList, cfgDropDestination, cfgVisibleRows, cfgTreeKey, tkey, ntpStatHtml, ntpStatOf, ntpStatSelect };
+  window.Dash = { RANGES, RANGE_ORDER, parseRoute, mergeSeries, gridSince, gridTemplateFor, maxColumnsFor, rangeLabels, fetchJSON, zoomResolution, pixelToTime, sharedYMax, buildTree, underPath, targetStatus, pickSeries, vantageList, orderVantages, defaultFocus, keepFocus, vantageColorVar, worstStatus, statusFor, availableVantages, toggleGridVantage, vantageControlChips, bandVantageFor, gridShowsTarget, adminMode, adminSessionState, createAdminStateController, statusProbeOwnsView, relTime, listTargets, addTarget, editTarget, removeTarget, buildTargetNode, buildGroupNode, labelHTML, collectingNote, vantageBundleFilename, cfgTree, reweightSiblings, reorderSiblings, editNodeAtPath, removeNodeAtPath, renameNodeAtPath, addNodeAtPath, moveNode, moveInList, cfgDropDestination, cfgVisibleRows, cfgTreeKey, tkey, ntpStatHtml, ntpStatOf, ntpStatSelect };
 
   // ---------------------------------------------------------------- init (DOM) --
   function init() {
@@ -1231,7 +1240,7 @@
         for (const t of targets) {
           indexTarget(t); const id = tkey(t); nameById.set(id, t.name);
           if (!statById.has(id)) statById.set(id, []);
-          statById.get(id).push(targetStatus(t));
+          statById.get(id).push(statusFor(t, 'local'));
         }
         const otherV = availVantages.filter((v) => v !== 'local');
         if (otherV.length) {
@@ -1241,7 +1250,7 @@
             const list = lists[i];
             if (!list) return;
             for (const t of list) {
-              const arr = statById.get(tkey(t)); if (arr) arr.push(targetStatus(t));
+              const arr = statById.get(tkey(t)); if (arr) arr.push(statusFor(t, v));
               // Reuse the list already fetched here to record this vantage's NTP clock stat, so a
               // remote-focused grid panel's offset/stratum matches its plotted series (M2). Keyed by
               // vantage, so the local reading (ntpByName) is untouched.
