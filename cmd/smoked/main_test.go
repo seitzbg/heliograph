@@ -682,22 +682,27 @@ func TestValidateRuntimeFlags(t *testing.T) {
 	}
 }
 
-// TestValidateAgentFlags covers Task 11 fix round 1 Finding 1: -agent-addr without -dsn must be
-// rejected up front, since the listener it enables is wired entirely inside the -dsn block in
-// main and would otherwise silently never start.
+// TestValidateAgentFlags covers Task 11 fix round 1 Finding 1 (-agent-addr without -dsn) and the
+// follow-up hardening fix: -agent-addr without -serve must also be rejected, since the listener it
+// enables is wired entirely inside the -serve block (nested inside -dsn) in main and would
+// otherwise silently never start.
 func TestValidateAgentFlags(t *testing.T) {
 	cases := []struct {
 		name           string
 		agentAddr, dsn string
+		serve          bool
 		wantErr        bool
 	}{
-		{"neither set", "", "", false},
-		{"dsn only", "", "postgres://x", false},
-		{"both set", ":8443", "postgres://x", false},
-		{"agent-addr without dsn", ":8443", "", true},
+		{"neither set", "", "", false, false},
+		{"dsn only", "", "postgres://x", false, false},
+		{"dsn and serve, no agent-addr", "", "postgres://x", true, false},
+		{"all three set", ":8443", "postgres://x", true, false},
+		{"agent-addr and dsn without serve", ":8443", "postgres://x", false, true},
+		{"agent-addr and serve without dsn", ":8443", "", true, true},
+		{"agent-addr alone", ":8443", "", false, true},
 	}
 	for _, c := range cases {
-		if err := validateAgentFlags(c.agentAddr, c.dsn); (err != nil) != c.wantErr {
+		if err := validateAgentFlags(c.agentAddr, c.dsn, c.serve); (err != nil) != c.wantErr {
 			t.Errorf("%s: err=%v wantErr=%v", c.name, err, c.wantErr)
 		}
 	}

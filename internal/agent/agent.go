@@ -175,12 +175,12 @@ func (a *Agent) pollLoop(ctx context.Context) {
 				if len(skipped) > 0 {
 					slog.Warn("assignment: skipped invalid targets", "skipped", skipped)
 				}
-				// The hub derives the vantage from the API key and returns it here; the
-				// configured `vantage` is only a label. Warn once if the operator's label
-				// disagrees (e.g. a key minted for a different vantage), so the logs can't
-				// quietly attribute this agent's rounds to the wrong vantage.
+				// The hub derives the vantage from the client cert's CommonName (mTLS) and
+				// returns it here; the configured `vantage` is only a label. Warn once if the
+				// operator's label disagrees (e.g. a cert minted for a different vantage), so
+				// the logs can't quietly attribute this agent's rounds to the wrong vantage.
 				if !vantageChecked && a.opts.Vantage != "" && a.opts.Vantage != asg.Vantage {
-					slog.Warn("configured vantage does not match the hub-assigned vantage; the hub's key-derived value wins",
+					slog.Warn("configured vantage does not match the hub-assigned vantage; the hub's cert-derived value wins",
 						"configured", a.opts.Vantage, "assigned", asg.Vantage)
 				}
 				vantageChecked = true

@@ -32,9 +32,9 @@ type agentYAMLDoc struct {
 // RenderAgentYAML renders the smoke-agent config for a freshly minted vantage under the mTLS
 // federation model: hub URL, vantage name, the vantage's client certificate + private key, and
 // the hub's CA cert (so the agent can verify the hub in turn), plus the durable spool path the
-// matching docker-compose.yml volume-mounts. It mirrors the browser-side agentYaml() in
-// web/dashboard.js, but that renderer predates mTLS and still emits a shared `key`; this is the
-// server-side successor and intentionally does not.
+// matching docker-compose.yml volume-mounts. This is the sole source of agent.yaml: the dashboard
+// no longer builds it client-side, it just downloads the server-built tar.gz bundle this feeds
+// (see BuildBundle below and the download handler in internal/api/api.go).
 func RenderAgentYAML(hub, name string, certPEM, keyPEM, caPEM []byte) []byte {
 	doc := agentYAMLDoc{
 		Hub:        hub,

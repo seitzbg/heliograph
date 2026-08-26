@@ -73,13 +73,17 @@ func validateRuntimeFlags(pings int, step, timeout time.Duration) error {
 	return nil
 }
 
-// validateAgentFlags checks the mTLS federation agent listener's one cross-flag dependency: its
-// whole wiring below lives inside the `-dsn` block in main (the vantage store created there is
-// what mints the CA the listener's server cert is issued from), so setting -agent-addr without
-// -dsn would otherwise silently no-op — the process starts up looking healthy, but the mTLS agent
-// API never listens, and the only symptom is "no vantage ever registers". Reject the combination
-// at the CLI boundary instead of leaving it to be discovered live.
-func validateAgentFlags(agentAddr, dsn string) error {
+// validateAgentFlags checks the mTLS federation agent listener's cross-flag dependencies: its
+// whole wiring below lives inside the `-serve` block in main, nested inside the `-dsn` block (the
+// vantage store created there is what mints the CA the listener's server cert is issued from), so
+// setting -agent-addr without -dsn OR without -serve would otherwise silently no-op — the process
+// starts up looking healthy, but the mTLS agent API never listens, and the only symptom is "no
+// vantage ever registers". Reject both combinations at the CLI boundary instead of leaving them to
+// be discovered live.
+func validateAgentFlags(agentAddr, dsn string, serve bool) error {
+	if agentAddr != "" && !serve {
+		return fmt.Errorf("-agent-addr requires -serve (the mTLS agent listener only runs in serve mode)")
+	}
 	if agentAddr != "" && dsn == "" {
 		return fmt.Errorf("-agent-addr requires -dsn (federation needs the database for the vantage registry + CA)")
 	}
@@ -159,7 +163,7 @@ func main() {
 	if err := validateRuntimeFlags(*pings, *step, *timeout); err != nil {
 		fatal("invalid flags", err)
 	}
-	if err := validateAgentFlags(*agentAddr, *dsn); err != nil {
+	if err := validateAgentFlags(*agentAddr, *dsn, *serve); err != nil {
 		fatal("invalid flags", err)
 	}
 

@@ -39,7 +39,7 @@ BEGIN
 		INSERT INTO vantages (name, created_at, last_seen)
 			SELECT name, created_at, last_seen FROM vantage_keys
 			ON CONFLICT (name) DO NOTHING;
-		DROP TABLE vantage_keys;
+		DROP TABLE IF EXISTS vantage_keys;
 	END IF;
 END $$;`
 

@@ -279,3 +279,81 @@ func TestAgentMuxRoundTrip(t *testing.T) {
 		t.Fatalf("status = %d, want 200 for an active vantage's CA-issued client cert", resp.StatusCode)
 	}
 }
+
+// TestAgentMuxRoundTripRejectsNoClientCert is the negative twin of TestAgentMuxRoundTrip: the same
+// live mTLS listener (AgentTLSConfig's RequireAndVerifyClientCert) must refuse a client that
+// presents no certificate at all — the TLS handshake itself has to fail, before requireAgent's
+// application-level checks ever get a chance to run.
+func TestAgentMuxRoundTripRejectsNoClientCert(t *testing.T) {
+	ca := testCA(t)
+	srv := &Server{
+		Vantages: &fakeVantageAdmin{active: map[string]bool{"nyc": true}},
+		Assignment: func(v string) ([]model.Monitor, map[string]map[string]string, string) {
+			return nil, nil, "sha256:v1"
+		},
+	}
+
+	cfg, err := srv.AgentTLSConfig(ca, []string{"127.0.0.1"})
+	if err != nil {
+		t.Fatalf("AgentTLSConfig: %v", err)
+	}
+
+	ts := httptest.NewUnstartedServer(srv.AgentMux())
+	ts.TLS = cfg
+	ts.StartTLS()
+	defer ts.Close()
+
+	rootPool := x509.NewCertPool()
+	rootPool.AddCert(ca.Cert)
+	client := ts.Client()
+	client.Transport.(*http.Transport).TLSClientConfig = &tls.Config{
+		RootCAs: rootPool,
+		// Deliberately no Certificates: the server requires one (RequireAndVerifyClientCert).
+	}
+
+	resp, err := client.Get(ts.URL + "/agent/v1/assignment")
+	if err == nil {
+		resp.Body.Close()
+		t.Fatalf("GET with no client cert succeeded (status %d), want the TLS handshake to fail", resp.StatusCode)
+	}
+}
+
+// TestAgentMuxRoundTripRejectsWrongCACert covers the other negative handshake case: a well-formed
+// client cert signed by a DIFFERENT CA than the one AgentTLSConfig trusts must also fail the
+// handshake — a leaked or self-issued key is not enough to impersonate a vantage; the cert has to
+// chain to the hub's own federation CA.
+func TestAgentMuxRoundTripRejectsWrongCACert(t *testing.T) {
+	ca := testCA(t)
+	otherCA := testCA(t)
+	srv := &Server{
+		Vantages: &fakeVantageAdmin{active: map[string]bool{"nyc": true}},
+		Assignment: func(v string) ([]model.Monitor, map[string]map[string]string, string) {
+			return nil, nil, "sha256:v1"
+		},
+	}
+
+	cfg, err := srv.AgentTLSConfig(ca, []string{"127.0.0.1"})
+	if err != nil {
+		t.Fatalf("AgentTLSConfig: %v", err)
+	}
+
+	ts := httptest.NewUnstartedServer(srv.AgentMux())
+	ts.TLS = cfg
+	ts.StartTLS()
+	defer ts.Close()
+
+	wrongCert := issueTestClientCert(t, otherCA, "nyc")
+	rootPool := x509.NewCertPool()
+	rootPool.AddCert(ca.Cert)
+	client := ts.Client()
+	client.Transport.(*http.Transport).TLSClientConfig = &tls.Config{
+		Certificates: []tls.Certificate{wrongCert},
+		RootCAs:      rootPool,
+	}
+
+	resp, err := client.Get(ts.URL + "/agent/v1/assignment")
+	if err == nil {
+		resp.Body.Close()
+		t.Fatalf("GET with a wrong-CA client cert succeeded (status %d), want the TLS handshake to fail", resp.StatusCode)
+	}
+}
