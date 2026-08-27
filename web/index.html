@@ -138,8 +138,7 @@
   .gpanel .meta, .spanel .meta { display:flex; gap:16px; flex-wrap:wrap; margin:7px 0 8px; }
   .stat { font-family:ui-monospace,Menlo,monospace; } .stat .k { font-size:10px; letter-spacing:.1em; text-transform:uppercase; color:var(--ink-faint); display:block; }
   .stat .v { font-size:14px; color:var(--ink); font-variant-numeric:tabular-nums; } .stat .v.warn{color:var(--warn);} .stat .v.bad{color:var(--bad);}
-  .stat.band-owner .v { display:inline-flex; align-items:center; gap:5px; font-size:12.5px; } /* per-panel band-owner marker (L11) */
-  .stat.band-owner .v i { width:9px; height:9px; border-radius:2px; flex:0 0 auto; }
+  .stat.band-owner .v { font-size:12.5px; } /* per-panel band-owner marker, text only (L11/L12) */
   canvas { width:100%; display:block; border-radius:8px; }
   .empty { color:var(--ink-faint); font-family:ui-monospace,monospace; font-size:12px; padding:40px 0; text-align:center; }
   .back { display:inline-flex; align-items:center; gap:7px; font-family:ui-monospace,Menlo,monospace; font-size:12.5px; color:var(--ink-soft); background:transparent; border:0; cursor:pointer; padding:0; margin-top:16px; }

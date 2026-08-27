@@ -1252,10 +1252,12 @@
     function gridMeta(p, s) {
       const st = Smoke.seriesStats(s); const lcls = st.lossAvg > 2 ? 'bad' : st.lossAvg > 0.5 ? 'warn' : '';
       // When this panel's band owner isn't the vantage the toolbar globally labels `band`, name it here
-      // so the legend doesn't contradict the graph (CODE_REVIEW L11) — swatch in the owner's overlay color.
+      // so the legend doesn't contradict the graph (CODE_REVIEW L11). Text only, no swatch: on this
+      // panel the owner is drawn as the BAND in the neutral median color, not its VPAL overlay color,
+      // so a colored swatch would match no mark on the panel (CODE_REVIEW L12).
       const owner = Dash.bandOwnerHint(p.band, gridFocus(), gridVantages.length);
       const ownerStat = owner
-        ? '<span class="stat band-owner"><span class="k">band</span><span class="v"><i style="background:' + cssVar(vantageColorVar(owner, gridVantages)) + '"></i>' + esc(owner) + '</span></span>'
+        ? '<span class="stat band-owner"><span class="k">band</span><span class="v">' + esc(owner) + '</span></span>'
         : '';
       p.meta.innerHTML = '<span class="stat"><span class="k">median</span><span class="v">' + fmtMs(st.medAvg, ntpSigned(p.el.dataset.target)) + ' ms</span></span>' +
         '<span class="stat"><span class="k">loss</span><span class="v ' + lcls + '">' + fmt(st.lossAvg, 2) + ' %</span></span>' +
@@ -1944,6 +1946,10 @@
       $('vantNoListener').classList.toggle('hidden', ready);
       $('vantName').disabled = !ready;
       $('vantAdd').querySelector('button[type="submit"]').disabled = !ready;
+      // Regenerate is an equivalent bundle-mint path (re-POST of an existing name), so gate it too —
+      // otherwise a listener-less hub still hands out a dead bundle via a row action (CODE_REVIEW M20).
+      // The server refuses these mints regardless; this keeps the UI honest about why.
+      for (const b of document.querySelectorAll('#vantRows [data-regen]')) b.disabled = !ready;
       vShow('vantList');
     }
     $('vantRetry').addEventListener('click', () => renderVantages());
