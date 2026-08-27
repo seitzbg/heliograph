@@ -207,6 +207,7 @@ func TestAddVantageReturnsBundle(t *testing.T) {
 // (no Accept header needed).
 func TestAddVantageBundleViaFormatQueryParam(t *testing.T) {
 	srv, _ := adminServer("hunter2")
+	srv.AgentHubURL = "https://hub.example.test:8443" // a bundle mint now requires a listener (M20)
 	mux := srv.Routes()
 	cookie := login(t, mux, "hunter2")
 
@@ -224,6 +225,53 @@ func TestAddVantageBundleViaFormatQueryParam(t *testing.T) {
 	body := w.Body.Bytes()
 	if len(body) < 2 || body[0] != 0x1f || body[1] != 0x8b {
 		t.Fatalf("body does not start with gzip magic bytes: %x", body[:min(len(body), 8)])
+	}
+}
+
+// TestAddVantageBundleRefusedWithoutListener covers CODE_REVIEW M20: with no agent listener
+// (AgentHubURL empty) the bundle's hub URL would only be a placeholder the agent can never reach,
+// so a bundle mint must be REFUSED — not handed out — regardless of the client-side gate, and
+// before any vantage is registered or a cert issued. The plain JSON path is unaffected (it does not
+// claim "ready to run"); only the tar.gz/gzip bundle is refused.
+func TestAddVantageBundleRefusedWithoutListener(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		accept string
+		url    string
+	}{
+		{"accept gzip", "application/gzip", "/api/admin/vantages"},
+		{"format=bundle", "", "/api/admin/vantages?format=bundle"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, fk := adminServer("hunter2") // AgentHubURL left empty: no listener
+			mux := srv.Routes()
+			cookie := login(t, mux, "hunter2")
+
+			r := httptest.NewRequest("POST", tc.url, strings.NewReader(`{"name":"nyc"}`))
+			r.AddCookie(cookie)
+			if tc.accept != "" {
+				r.Header.Set("Accept", tc.accept)
+			}
+			w := httptest.NewRecorder()
+			mux.ServeHTTP(w, r)
+
+			if w.Code != http.StatusConflict {
+				t.Fatalf("bundle mint without a listener = %d, want 409", w.Code)
+			}
+			if ct := w.Header().Get("Content-Type"); strings.Contains(ct, "gzip") {
+				t.Errorf("Content-Type = %q, want a JSON error, not a gzip bundle", ct)
+			}
+			if body := w.Body.Bytes(); len(body) >= 2 && body[0] == 0x1f && body[1] == 0x8b {
+				t.Errorf("a gzip bundle was written despite no listener: %x", body[:min(len(body), 8)])
+			}
+			// Refused before minting: no vantage registered, no cert issued.
+			if len(fk.issued) != 0 {
+				t.Errorf("IssueClientCert was called (%v); a refused mint must not issue a cert", fk.issued)
+			}
+			if len(fk.registered) != 0 {
+				t.Errorf("Register was called (%v); a refused mint must not register the vantage", fk.registered)
+			}
+		})
 	}
 }
 

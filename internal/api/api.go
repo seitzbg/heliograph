@@ -1709,6 +1709,18 @@ func (srv *Server) addVantage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"invalid vantage name (use letters, digits, . _ -)"}`, http.StatusBadRequest)
 		return
 	}
+	wantsBundle := strings.Contains(r.Header.Get("Accept"), "application/gzip") || r.URL.Query().Get("format") == "bundle"
+	// Refuse to mint an onboarding BUNDLE when the hub runs no agent listener: without
+	// -agent-hostname the bundle's hub URL is only a placeholder (https://HUB-HOSTNAME:8443) and the
+	// agent could never connect. The dashboard already disables onboarding via federation_ready, but
+	// the CLI, a per-row Regenerate, and direct API callers reach here too — this is the real
+	// enforcement point, so a dead "ready-to-run" bundle is never handed out (CODE_REVIEW M20,
+	// completing M19). Refuse BEFORE Register/IssueClientCert so no state is created for a vantage
+	// that can't be onboarded yet.
+	if wantsBundle && srv.AgentHubURL == "" {
+		http.Error(w, `{"error":"no agent listener configured — set -agent-hostname (SMOKED_AGENT_HOSTNAME) and restart before onboarding a vantage"}`, http.StatusConflict)
+		return
+	}
 	if err := srv.Vantages.Register(r.Context(), body.Name); err != nil {
 		switch {
 		case errors.Is(err, vantage.ErrReserved):
@@ -1739,7 +1751,6 @@ func (srv *Server) addVantage(w http.ResponseWriter, r *http.Request) {
 		hub = "https://HUB-HOSTNAME:8443"
 	}
 
-	wantsBundle := strings.Contains(r.Header.Get("Accept"), "application/gzip") || r.URL.Query().Get("format") == "bundle"
 	if wantsBundle {
 		w.Header().Set("Content-Type", "application/gzip")
 		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", body.Name+"-vantage.tar.gz"))
