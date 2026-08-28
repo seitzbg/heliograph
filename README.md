@@ -34,6 +34,12 @@ click a graph to zoom):
 
 ![Heliograph per-target graph grid](docs/img/dashboard-graphs-dark.png)
 
+Every graph can **overlay a median line per federation vantage**, so you read one target from
+several networks at once — here `github.com` from the hub plus two remote uplinks (Comcast and
+FiOS), each vantage a distinct line over its own smoke band:
+
+![Heliograph multi-vantage federation overlay — one target across three uplinks](docs/img/federation-overlay-dark.png)
+
 The **Config** tab edits DB-backed targets as a drag-to-reorder tree (merged live with the YAML
 config); each target keeps a stable, server-managed identity, so moving or renaming it in the tree
 preserves its existing graph rather than starting a new one. The **Vantages** panel manages
