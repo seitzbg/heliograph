@@ -85,8 +85,9 @@ alerts:
 - **`type: loss`** / **`type: rtt`** — SmokePing's shape-matching pattern DSL,
   a comma-separated sequence matched against the most recent samples,
   right-anchored (newest sample last):
-  - `>50%`, `<10`, `==0%`, `!=200` — a plain comparison against one sample
-    (loss values are percent, rtt values are **milliseconds**).
+  - `>50%`, `>=50%`, `<10`, `<=10`, `==0%`, `!=200` — a plain comparison against
+    one sample using any of `>`, `>=`, `<`, `<=`, `==`, `!=` (loss values are
+    percent, rtt values are **milliseconds**).
   - `*` — exactly one arbitrary sample (any value).
   - `*12*` — skip 0 to 12 arbitrary samples (lets the pattern "float" past
     noise between two hard comparisons).
@@ -167,7 +168,7 @@ SMOKED_SMTP_ADDR=smtp.example.com:587     # host:port, required
 SMOKED_SMTP_FROM=alerts@example.com       # required
 SMOKED_SMTP_TO=you@example.com,oncall@example.com   # comma-separated, required
 SMOKED_SMTP_USER=...                      # optional: enables authenticated submission
-SMOKED_SMTP_PASS=...                      # optional: required if SMOKED_SMTP_USER is set
+SMOKED_SMTP_PASS=...                      # optional: password paired with SMOKED_SMTP_USER
 SMOKED_SMTP_INSECURE=1                    # optional: skip STARTTLS cert verification
 ```
 
@@ -217,9 +218,15 @@ POSTs a JSON body per event to any endpoint you control:
 }
 ```
 
-`rtt_ms` is `null` for a fully-lost round rather than an invalid number. Every
-request carries an `X-Idempotency-Key` header, stable across retries and
-repeats of the same firing/resolved transition, so a receiver can dedupe.
+`rtt_ms` is `null` for a fully-lost round rather than an invalid number, and
+`vantage` is omitted entirely when the event has no vantage label (rather than
+sent as an empty string). Every request carries an `X-Idempotency-Key` header
+that stays constant across the automatic retries of a single delivery, so a
+receiver can dedupe a redelivered event. Each round's notification is a distinct
+event with its own key, though — the key includes the round timestamp — so the
+header does **not** coalesce the repeated notifications a level-triggered
+(`edgetrigger: false`) alert emits every round; use `edgetrigger: true` if you
+want one notification per firing/resolved transition.
 Reference it as `webhook` in `to:`/`alertee:`.
 
 ## Delivery behavior (all non-log notifiers)
