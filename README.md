@@ -60,6 +60,8 @@ federation vantages — both behind the admin password:
 - **Eight built-in probes**, from native ICMP to NTP clock offset. See [Probes](#probes).
 - **Alerting.** Hysteresis loss/latency matchers and a right-anchored pattern DSL, edge-triggered
   with priority inhibition and per-target recipients. Notifiers: log, webhook, Slack, Discord, email.
+  See the **[alerting operator guide](docs/alerting.md)** for defining alerts and configuring each
+  notifier channel.
 - **Inheritable config.** A YAML target tree where `probe`/`step`/`params`/`alerts` cascade to
   children and each leaf is schema-validated; load it from a file or a `conf.d/` directory, or edit
   it live from a DB-backed Config tab.
