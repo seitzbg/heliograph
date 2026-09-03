@@ -13,6 +13,7 @@ import (
 	"io"
 	"log/slog"
 	"math"
+	"net"
 	"net/http"
 	"sort"
 	"strconv"
@@ -1697,6 +1698,42 @@ func (srv *Server) listVantages(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"vantages": out, "federation_ready": srv.AgentHubURL != ""})
 }
 
+// requestIsSecure reports whether a request reached the hub over a secure transport, so a response
+// carrying vantage private-key material may be written back. smoked itself never terminates TLS (the
+// dashboard runs plain HTTP behind a TLS-terminating reverse proxy — Caddy or nginx), so the real
+// client-facing scheme is read from the proxy's X-Forwarded-Proto header. Direct TLS (r.TLS, set
+// only if smoked is ever fronted by nothing) is honored for completeness, and a loopback peer is
+// trusted regardless of scheme because such a request never crosses the wire (local dev / a
+// single-host deploy without a proxy). The endpoint is admin-gated, so the forwarded header is
+// trusted from whatever proxy fronts smoked: an attacker able to both reach smoked's port directly
+// and forge an admin session is already inside the trust boundary.
+func requestIsSecure(r *http.Request) bool {
+	if r.TLS != nil {
+		return true
+	}
+	// X-Forwarded-Proto can be a comma-separated list when the request crossed more than one proxy;
+	// the leftmost value is the original, client-facing scheme.
+	if xfp := r.Header.Get("X-Forwarded-Proto"); xfp != "" {
+		if i := strings.IndexByte(xfp, ','); i >= 0 {
+			xfp = xfp[:i]
+		}
+		if strings.EqualFold(strings.TrimSpace(xfp), "https") {
+			return true
+		}
+	}
+	return isLoopbackAddr(r.RemoteAddr)
+}
+
+// isLoopbackAddr reports whether a "host:port" (or bare host) remote address is a loopback IP.
+func isLoopbackAddr(remoteAddr string) bool {
+	host := remoteAddr
+	if h, _, err := net.SplitHostPort(remoteAddr); err == nil {
+		host = h
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
 func (srv *Server) addVantage(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Name string `json:"name"`
@@ -1707,6 +1744,16 @@ func (srv *Server) addVantage(w http.ResponseWriter, r *http.Request) {
 	}
 	if !vantage.ValidName(body.Name) {
 		http.Error(w, `{"error":"invalid vantage name (use letters, digits, . _ -)"}`, http.StatusBadRequest)
+		return
+	}
+	// Refuse to mint over a plaintext connection: BOTH responses this handler can send — the tar.gz
+	// bundle's agent.yaml and the JSON fallback's client_key — carry the vantage's PRIVATE KEY, which
+	// must never cross the wire in the clear. smoked serves plain HTTP behind a TLS-terminating proxy,
+	// so requestIsSecure trusts the proxy's X-Forwarded-Proto (also honoring direct TLS and a loopback
+	// peer). Refuse BEFORE Register/IssueClientCert so no state is created for a mint we won't return.
+	// The `smoked vantage add` CLI writes the same bundle to a file/stdout for local/headless use.
+	if !requestIsSecure(r) {
+		http.Error(w, `{"error":"HTTPS required to mint a vantage (its bundle carries the vantage's private key); use the 'smoked vantage add' CLI for local/plaintext access"}`, http.StatusForbidden)
 		return
 	}
 	wantsBundle := strings.Contains(r.Header.Get("Accept"), "application/gzip") || r.URL.Query().Get("format") == "bundle"

@@ -31,5 +31,8 @@
 	basic_auth {
 		{$DASH_USER} {$DASH_PASSWORD_HASH}
 	}
+	# reverse_proxy sets X-Forwarded-Proto automatically — smoked reads it to confirm the request
+	# arrived over HTTPS before it will mint a vantage's private-key bundle (a plaintext mint is
+	# refused with 403). A hand-rolled proxy must forward this header explicitly.
 	reverse_proxy smoked:8087
 }
