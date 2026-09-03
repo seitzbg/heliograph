@@ -275,15 +275,20 @@ to `Caddy.Dockerfile` and rebuild. (This only affects the dashboard's certificat
 listener's certificate is self-issued by smoked's own CA and never touches Let's Encrypt.)
 
 **External proxy** — to front the dashboard with your own proxy instead of the bundled Caddy,
-just gate `:8087` with Basic Auth; there's nothing agent-related to add, since agents bypass the
-dashboard proxy entirely and connect straight to smoked's `:8443` listener. Caddy:
+gate `:8087` with Basic Auth **and forward `X-Forwarded-Proto`**; there's nothing agent-related to
+add, since agents bypass the dashboard proxy entirely and connect straight to smoked's `:8443`
+listener. The `X-Forwarded-Proto` header is how smoked — which never terminates TLS itself — learns
+the request reached you over HTTPS: the vantage-onboarding bundle embeds a vantage's private key, so
+**minting one is refused over plaintext** (`403`). Caddy's `reverse_proxy` sets the header
+automatically; nginx needs an explicit `proxy_set_header`. (Loopback on the hub is exempt — it never
+crosses the wire — and the `smoked vantage add` CLI is the local/headless escape hatch.) Caddy:
 
 ```
 smoke.example.com {
     basic_auth {
         admin <bcrypt-hash-from-caddy-hash-password>
     }
-    reverse_proxy 127.0.0.1:8087
+    reverse_proxy 127.0.0.1:8087   # sets X-Forwarded-Proto automatically
 }
 ```
 
@@ -297,6 +302,8 @@ server {
     location / {                               # dashboard + read API: Basic Auth
         auth_basic "heliograph";
         auth_basic_user_file /etc/nginx/.htpasswd;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;   # required: vantage-bundle mint refuses plaintext
         proxy_pass http://127.0.0.1:8087;
     }
 }

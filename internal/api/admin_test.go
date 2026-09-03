@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -81,6 +82,12 @@ func login(t *testing.T, mux *http.ServeMux, pass string) *http.Cookie {
 	return nil
 }
 
+// markSecure marks r as having arrived over the TLS-terminating proxy (X-Forwarded-Proto: https) —
+// the transport addVantage requires before it will mint a vantage's private key (see
+// TestAddVantageRequiresHTTPS). Production requests always carry this header (nginx/Caddy set it),
+// so any test exercising a mint that must get PAST the transport check sets it here.
+func markSecure(r *http.Request) { r.Header.Set("X-Forwarded-Proto", "https") }
+
 func TestAddVantageRejectsInvalidName(t *testing.T) {
 	srv, _ := adminServer("hunter2")
 	mux := srv.Routes()
@@ -100,6 +107,7 @@ func TestAddVantageRejectsInvalidName(t *testing.T) {
 	// mint-time PEM payload itself)
 	r = httptest.NewRequest("POST", "/api/admin/vantages", strings.NewReader(`{"name":"nyc"}`))
 	r.AddCookie(cookie)
+	markSecure(r)
 	w = httptest.NewRecorder()
 	mux.ServeHTTP(w, r)
 	if w.Code != http.StatusOK {
@@ -123,6 +131,7 @@ func TestAddVantageReservedNameIsConflict(t *testing.T) {
 	cookie := login(t, mux, "hunter2")
 	r := httptest.NewRequest("POST", "/api/admin/vantages", strings.NewReader(`{"name":"local"}`))
 	r.AddCookie(cookie)
+	markSecure(r) // reach the reserved-name check; the transport gate runs first
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, r)
 	if w.Code != http.StatusConflict {
@@ -148,6 +157,7 @@ func TestAddVantageReturnsBundle(t *testing.T) {
 	r := httptest.NewRequest("POST", "/api/admin/vantages", strings.NewReader(`{"name":"nyc"}`))
 	r.AddCookie(cookie)
 	r.Header.Set("Accept", "application/gzip")
+	markSecure(r)
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, r)
 
@@ -213,6 +223,7 @@ func TestAddVantageBundleViaFormatQueryParam(t *testing.T) {
 
 	r := httptest.NewRequest("POST", "/api/admin/vantages?format=bundle", strings.NewReader(`{"name":"nyc"}`))
 	r.AddCookie(cookie)
+	markSecure(r)
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, r)
 
@@ -249,6 +260,7 @@ func TestAddVantageBundleRefusedWithoutListener(t *testing.T) {
 
 			r := httptest.NewRequest("POST", tc.url, strings.NewReader(`{"name":"nyc"}`))
 			r.AddCookie(cookie)
+			markSecure(r) // reach the no-listener check; the transport gate runs first
 			if tc.accept != "" {
 				r.Header.Set("Accept", tc.accept)
 			}
@@ -275,6 +287,110 @@ func TestAddVantageBundleRefusedWithoutListener(t *testing.T) {
 	}
 }
 
+// TestAddVantageRequiresHTTPS covers the transport precondition on the ONE endpoint that mints a
+// vantage's private key. Both the tar.gz bundle (Accept: application/gzip / ?format=bundle) and the
+// JSON fallback carry that key, so a plaintext request must be refused (403) BEFORE anything is
+// minted — no cert issued, no vantage registered. smoked serves plain HTTP behind a TLS-terminating
+// proxy, so "insecure" here is the default off-box request: a non-loopback peer with no
+// X-Forwarded-Proto reporting https.
+func TestAddVantageRequiresHTTPS(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		accept string
+		url    string
+	}{
+		{"json fallback", "application/json", "/api/admin/vantages"},
+		{"accept gzip bundle", "application/gzip", "/api/admin/vantages"},
+		{"format=bundle", "", "/api/admin/vantages?format=bundle"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, fk := adminServer("hunter2")
+			srv.AgentHubURL = "https://hub.example.test:8443" // isolate transport as the sole reason to refuse
+			mux := srv.Routes()
+			cookie := login(t, mux, "hunter2")
+
+			// httptest's default RemoteAddr (192.0.2.1) is non-loopback and no X-Forwarded-Proto is
+			// set: a plaintext request arriving from off-box.
+			r := httptest.NewRequest("POST", tc.url, strings.NewReader(`{"name":"nyc"}`))
+			r.AddCookie(cookie)
+			if tc.accept != "" {
+				r.Header.Set("Accept", tc.accept)
+			}
+			w := httptest.NewRecorder()
+			mux.ServeHTTP(w, r)
+
+			if w.Code != http.StatusForbidden {
+				t.Fatalf("plaintext mint = %d, want 403", w.Code)
+			}
+			if body := w.Body.Bytes(); len(body) >= 2 && body[0] == 0x1f && body[1] == 0x8b {
+				t.Errorf("a gzip bundle leaked over plaintext: %x", body[:min(len(body), 8)])
+			}
+			if !strings.Contains(w.Body.String(), "HTTPS") {
+				t.Errorf("error body = %q, want it to mention HTTPS", w.Body.String())
+			}
+			// Refused before minting: no key material was ever generated.
+			if len(fk.issued) != 0 {
+				t.Errorf("IssueClientCert called (%v); a plaintext-refused mint must not issue a cert", fk.issued)
+			}
+			if len(fk.registered) != 0 {
+				t.Errorf("Register called (%v); a plaintext-refused mint must not register", fk.registered)
+			}
+		})
+	}
+}
+
+// TestAddVantageAllowsSecureTransport covers the accepted signals: an https X-Forwarded-Proto from
+// the terminating proxy (including a case-variant and a multi-proxy comma list whose leftmost value
+// is the original client scheme), direct TLS on smoked itself, and a loopback peer over plain HTTP
+// (which never crosses the wire — the local-dev / single-host-without-a-proxy case).
+func TestAddVantageAllowsSecureTransport(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		xfp        string // X-Forwarded-Proto header value; "" = unset
+		remoteAddr string // override peer address; "" = httptest default (non-loopback)
+		tls        bool
+	}{
+		{name: "x-forwarded-proto https", xfp: "https"},
+		{name: "x-forwarded-proto HTTPS uppercase", xfp: "HTTPS"},
+		{name: "x-forwarded-proto comma list", xfp: "https, http"},
+		{name: "direct TLS on smoked", tls: true},
+		{name: "loopback ipv4 over http", remoteAddr: "127.0.0.1:5555"},
+		{name: "loopback ipv6 over http", remoteAddr: "[::1]:5555"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, fk := adminServer("hunter2")
+			srv.AgentHubURL = "https://hub.example.test:8443"
+			mux := srv.Routes()
+			cookie := login(t, mux, "hunter2")
+
+			r := httptest.NewRequest("POST", "/api/admin/vantages?format=bundle", strings.NewReader(`{"name":"nyc"}`))
+			r.AddCookie(cookie)
+			if tc.xfp != "" {
+				r.Header.Set("X-Forwarded-Proto", tc.xfp)
+			}
+			if tc.remoteAddr != "" {
+				r.RemoteAddr = tc.remoteAddr
+			}
+			if tc.tls {
+				r.TLS = &tls.ConnectionState{}
+			}
+			w := httptest.NewRecorder()
+			mux.ServeHTTP(w, r)
+
+			if w.Code != http.StatusOK {
+				t.Fatalf("secure mint = %d, want 200", w.Code)
+			}
+			body := w.Body.Bytes()
+			if len(body) < 2 || body[0] != 0x1f || body[1] != 0x8b {
+				t.Fatalf("secure bundle body missing gzip magic: %x", body[:min(len(body), 8)])
+			}
+			if len(fk.issued) != 1 || fk.issued[0] != "nyc" {
+				t.Errorf("secure mint issued %v, want exactly [nyc]", fk.issued)
+			}
+		})
+	}
+}
+
 // TestAddVantageReturnsJSONWithPEMFields covers the JSON content-negotiation path: mint-time is
 // the one moment the admin API is allowed to carry private key material (spec §3b), so the JSON
 // response must include the minted cert/key/CA alongside the existing registered:true shape.
@@ -287,6 +403,7 @@ func TestAddVantageReturnsJSONWithPEMFields(t *testing.T) {
 	r := httptest.NewRequest("POST", "/api/admin/vantages", strings.NewReader(`{"name":"nyc"}`))
 	r.AddCookie(cookie)
 	r.Header.Set("Accept", "application/json")
+	markSecure(r)
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, r)
 
@@ -331,6 +448,7 @@ func TestAddVantageDefaultHubPlaceholder(t *testing.T) {
 	r := httptest.NewRequest("POST", "/api/admin/vantages", strings.NewReader(`{"name":"nyc"}`))
 	r.AddCookie(cookie)
 	r.Header.Set("Accept", "application/json")
+	markSecure(r)
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, r)
 
@@ -457,6 +575,7 @@ func TestAdminLoginAndCRUD(t *testing.T) {
 	// add
 	r = httptest.NewRequest("POST", "/api/admin/vantages", strings.NewReader(`{"name":"lon"}`))
 	r.AddCookie(cookie)
+	markSecure(r)
 	w = httptest.NewRecorder()
 	mux.ServeHTTP(w, r)
 	if w.Code != http.StatusOK {

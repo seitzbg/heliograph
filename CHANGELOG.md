@@ -6,6 +6,18 @@ All notable changes to **Heliograph** are recorded here. The format follows
 
 ## [Unreleased]
 
+### Security
+- **Minting a vantage now requires HTTPS.** `POST /api/admin/vantages` — the endpoint that issues a
+  vantage's mTLS client identity, returned either as the downloadable `<name>-vantage.tar.gz` bundle
+  or (JSON fallback) as raw PEMs — refuses to mint over a plaintext connection (`403`), so the
+  embedded **private key never crosses the wire in the clear**. smoked serves plain HTTP behind a
+  TLS-terminating reverse proxy, so it reads the client scheme from `X-Forwarded-Proto: https`
+  (direct TLS on smoked itself is also honored); a **loopback** peer stays exempt (it never crosses
+  the wire), and the `smoked vantage add` CLI — which writes the bundle to a file/stdout — remains
+  the local/headless path. Operators fronting the dashboard with their own nginx must forward
+  `proxy_set_header X-Forwarded-Proto $scheme;` (Caddy's `reverse_proxy` sets it automatically); see
+  *Federation deployment (reverse proxy)* in the README and `docs/federation.md`.
+
 ### Changed
 - **The Graphs vantage selector caps at 4 simultaneous vantages.** The overlay palette has four
   distinct colors (plus the neutral color for `local`), so a 5th overlaid vantage would reuse a color

@@ -115,6 +115,14 @@ to actually retire a credential, **revoke** the vantage and re-**add** it), and
 It's reached through the proxy (behind the dashboard's Basic Auth, then its
 own admin password) or on `http://localhost:8087/` on the hub.
 
+Because the bundle embeds the vantage's private key, **minting one is refused
+over plaintext HTTP** (`403`) — the request must arrive over HTTPS. smoked
+never terminates TLS itself, so it reads the client scheme from the reverse
+proxy's `X-Forwarded-Proto: https` header; make sure your proxy forwards it
+(the bundled Caddy and the README's nginx example both do). Loopback on the hub
+(`http://localhost:8087/`) is exempt — it never crosses the wire — and the
+`smoked vantage add` CLI below is the local/headless escape hatch.
+
 **CLI** (on the hub host — shell access there is already trusted):
 
 ```console
@@ -257,6 +265,12 @@ spool_dir: /var/lib/smoke-agent/spool
   the independent `SMOKED_ADMIN_SESSION_KEY`; omitting it uses a process-local key, while rotation
   invalidates every existing admin session. `SMOKED_ADMIN_SESSION_TTL` sets how long a login stays
   valid (default 12h, minimum 1m).
+- **Minting a vantage requires HTTPS.** The onboarding bundle — and the JSON
+  fallback — carry the vantage's private key, so `POST /api/admin/vantages`
+  refuses to mint over a plaintext connection (`403`). smoked reads the client
+  scheme from the terminating proxy's `X-Forwarded-Proto`; a loopback peer is
+  exempt (never on the wire), and the hub-shell `vantage add` CLI bypasses HTTP
+  entirely.
 - `local` is reserved: you can't register a vantage named `local`, and a
   `local`-authenticated agent is rejected.
 
