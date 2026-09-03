@@ -3,8 +3,8 @@
 Setup, build, test, and run instructions for coding agents (and humans) working on
 **Heliograph** — a Go + TimescaleDB reimplementation of SmokePing. This file is the quick
 operational contract; [`README.md`](README.md) has the deep dives, [`docs/federation.md`](docs/federation.md)
-covers multi-vantage deployment, and [`CHANGELOG.md`](CHANGELOG.md) / [`ROADMAP.md`](ROADMAP.md)
-track what shipped and what's next.
+covers multi-vantage deployment, [`docs/alerting.md`](docs/alerting.md) covers alert configuration and
+notifiers, and [`CHANGELOG.md`](CHANGELOG.md) / [`ROADMAP.md`](ROADMAP.md) track what shipped and what's next.
 
 > Names: the Go module is `github.com/seitzbg/heliograph`, the hub/collector binary is `smoked`, and the
 > remote-vantage collector is `smoke-agent`. The product name is Heliograph.

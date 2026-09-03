@@ -91,8 +91,40 @@ All notable changes to **Heliograph** are recorded here. The format follows
   grid first, so a slow or hung read leaves the current graphs visible; same-target refreshes are
   serialized so sustained slow responses can't starve every generation and leave the panels blank
   (CODE_REVIEW M15).
+- **Graph peaks are no longer clipped to the top of the frame.** The detail and grid y-axis
+  auto-scale now folds the median line's own extremes into the range (not just the smoke-band
+  quantiles), so a latency spike that rises above the band is drawn in full instead of being clamped
+  flat against the top edge.
+- **A stalled response body can no longer wedge the Graphs refresh.** The request abort timeout now
+  stays armed through the body read (`json()`/`text()`/`blob()`), not just until the response headers
+  arrive, so a connection that delivers headers and then stalls mid-body is aborted at the configured
+  timeout instead of hanging the refresh loop (CODE_REVIEW M16). A completed response that reads no
+  body now clears its abort timer immediately rather than holding it until the timeout fires
+  (CODE_REVIEW L12).
+- **The zoomed (fixed-range) detail view no longer starves its own refresh under slow responses.**
+  The 30-second periodic refresh admits only one fixed-range refresh at a time, so sustained slow
+  reads can't pile up; an explicit navigation or drag-zoom still supersedes an in-flight refresh
+  (CODE_REVIEW M17).
+- **The Overview and the logged-in Vantages table no longer overflow narrow viewports.** Overview
+  moves its coverage figure to a second SLA row and the Vantages table scrolls inside its own panel,
+  so both surfaces fit at 320–360 px wide instead of pushing the page sideways (CODE_REVIEW M18).
+- **The dashboard and API refuse to mint an onboarding bundle when the hub runs no agent listener.**
+  With no `-agent-hostname`/`-agent-addr` configured, Add — and, for an existing vantage, Regenerate —
+  previously still downloaded a `<name>-vantage.tar.gz` whose embedded hub URL pointed at a
+  placeholder no agent could reach. The Vantages tab now disables onboarding while `federation_ready`
+  is false, and the mint endpoint rejects the request server-side with `409 Conflict` (naming the
+  missing `-agent-hostname`/`-agent-addr` prerequisite) *before* issuing any certificate, so a dead
+  bundle or half-registered vantage is never produced (CODE_REVIEW M19, M20).
+- **The per-panel band-owner label on the Graphs grid can no longer contradict the graph.** When a
+  panel's smoke band belongs to a vantage other than the toolbar's focused one, the panel carries a
+  small text `band <vantage>` marker naming the actual band owner (drawn in the neutral median color,
+  no swatch), instead of letting the shared legend imply the focused vantage (CODE_REVIEW L11).
 
 ### Docs
+- Added an **alerting operator guide** ([`docs/alerting.md`](docs/alerting.md), linked from the
+  README): how to define alert matchers and the pattern DSL, wire up each notifier
+  (log/webhook/Slack/Discord/email), the idempotency-key behavior on retries, and the relevant
+  `SMOKED_*` / `SMOKED_SMTP_*` environment variables.
 - Clarified that a deep link survives a target move only while its path is still current; a dormant
   bookmark to a target's *old* path, first reopened after the move, can go blank or resolve to a
   reused path — prefer the app's id-based links for saved URLs (CODE_REVIEW L8).

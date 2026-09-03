@@ -234,8 +234,9 @@ follow-up found several edge cases, now fixed in **Unreleased**:
   golang.org/x/net|x/text|grpc` floors are interim patches over a stale pinned base — drop them once
   `caddy:2.11-alpine` (or a newer Caddy release) ships the fixes natively, and bump the digest instead.
 
-The NTP probe (the last Phase 6 feature) has shipped. The remaining Phase 6 items above are the
-native `Ping` probe (retire the `FPing` binary + `setcap`) and the maintenance follow-ups.
+Every Phase 6 feature above has shipped — including the native `Ping` probe (an unprivileged
+in-process ICMP echo that lets a deployment retire the `FPing` binary + `setcap`) and the NTP probe.
+The only open work is the non-blocking maintenance follow-up below.
 
 ## Notes / decisions
 - Stack: Go collector · TimescaleDB (raw samples; bands via SQL quantiles) · REST+JSON API ·
