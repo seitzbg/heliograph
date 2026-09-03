@@ -6,17 +6,7 @@ All notable changes to **Heliograph** are recorded here. The format follows
 
 ## [Unreleased]
 
-### Security
-- **Minting a vantage now requires HTTPS.** `POST /api/admin/vantages` — the endpoint that issues a
-  vantage's mTLS client identity, returned either as the downloadable `<name>-vantage.tar.gz` bundle
-  or (JSON fallback) as raw PEMs — refuses to mint over a plaintext connection (`403`), so the
-  embedded **private key never crosses the wire in the clear**. smoked serves plain HTTP behind a
-  TLS-terminating reverse proxy, so it reads the client scheme from `X-Forwarded-Proto: https`
-  (direct TLS on smoked itself is also honored); a **loopback** peer stays exempt (it never crosses
-  the wire), and the `smoked vantage add` CLI — which writes the bundle to a file/stdout — remains
-  the local/headless path. Operators fronting the dashboard with their own nginx must forward
-  `proxy_set_header X-Forwarded-Proto $scheme;` (Caddy's `reverse_proxy` sets it automatically); see
-  *Federation deployment (reverse proxy)* in the README and `docs/federation.md`.
+## [2.0.0] - 2026-09-03
 
 ### Changed
 - **The Graphs vantage selector caps at 4 simultaneous vantages.** The overlay palette has four
@@ -60,6 +50,16 @@ All notable changes to **Heliograph** are recorded here. The format follows
   reverse proxy.
 
 ### Security
+- **Minting a vantage now requires HTTPS.** `POST /api/admin/vantages` — the endpoint that issues a
+  vantage's mTLS client identity, returned either as the downloadable `<name>-vantage.tar.gz` bundle
+  or (JSON fallback) as raw PEMs — refuses to mint over a plaintext connection (`403`), so the
+  embedded **private key never crosses the wire in the clear**. smoked serves plain HTTP behind a
+  TLS-terminating reverse proxy, so it reads the client scheme from `X-Forwarded-Proto: https`
+  (direct TLS on smoked itself is also honored); a **loopback** peer stays exempt (it never crosses
+  the wire), and the `smoked vantage add` CLI — which writes the bundle to a file/stdout — remains
+  the local/headless path. Operators fronting the dashboard with their own nginx must forward
+  `proxy_set_header X-Forwarded-Proto $scheme;` (Caddy's `reverse_proxy` sets it automatically); see
+  *Federation deployment (reverse proxy)* in the README and `docs/federation.md`.
 - **Config reads redact credentials embedded in a probe URL.** The open config reads
   (`GET /api/admin/config`, its `?source=effective` variant, and `GET /api/admin/config.yaml`) strip
   HTTP `urlformat` userinfo, query strings, **and the URL path** for a non-admin reader — the path is
@@ -1623,7 +1623,8 @@ the smoke-graph look, a fast/parallel poller, and probes as plugins.
 - Full re-implementation reference / code map maintained outside the repo at
   `~/.claude/plans/smokeping-codemap/`.
 
-[Unreleased]: https://github.com/seitzbg/heliograph/compare/v1.0.16...main
+[Unreleased]: https://github.com/seitzbg/heliograph/compare/v2.0.0...main
+[2.0.0]: https://github.com/seitzbg/heliograph/compare/v1.0.16...v2.0.0
 [1.0.16]: https://github.com/seitzbg/heliograph/compare/v1.0.15...v1.0.16
 [1.0.15]: https://github.com/seitzbg/heliograph/compare/v1.0.14...v1.0.15
 [1.0.14]: https://github.com/seitzbg/heliograph/compare/v1.0.13...v1.0.14
