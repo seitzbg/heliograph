@@ -14,11 +14,13 @@
 # The builder digest below (refreshed 2026-08) carries Go 1.26.6, clearing the stdlib
 # net/http+x/net/idna and x/net/dns/dnsmessage CVEs (CVE-2026-39821, CVE-2026-46600) that the
 # prior pin's Go 1.26.5 toolchain had. Caddy 2.11.4's own go.sum still pins vulnerable
-# golang.org/x/net, golang.org/x/text and google.golang.org/grpc versions (they're Caddy's compiled-in
-# deps, not something a base-image bump alone fixes — no 2.12 release exists yet to pick up a bump
-# upstream), so three extra --with lines below force Go's minimal-version-selection to the patched
-# versions (CVE-2026-46600, CVE-2026-56852, GHSA-hrxh-6v49-42gf). Re-check these floors whenever
-# Caddy releases a version that bundles the fix natively, and drop them then.
+# golang.org/x/net, golang.org/x/text, golang.org/x/crypto and google.golang.org/grpc versions
+# (they're Caddy's compiled-in deps, not something a base-image bump alone fixes — no 2.12 release
+# exists yet to pick up a bump upstream), so four extra --with lines below force Go's
+# minimal-version-selection to the patched versions (CVE-2026-46600, CVE-2026-56852,
+# GHSA-hrxh-6v49-42gf, and — added 2026-09 after Trivy flagged the built binary — CVE-2026-56854, an
+# auth bypass in golang.org/x/crypto/ssh, plus CVE-2026-84304 in google.golang.org/grpc). Re-check
+# these floors whenever Caddy releases a version that bundles the fix natively, and drop them then.
 FROM caddy:2.11-builder@sha256:c7ae80243a530d532d20062d56d6198b3ab161eb6971d28716ef7ec55599fea4 AS build
 RUN xcaddy build \
 	--with github.com/caddy-dns/cloudflare@v0.2.4 \
@@ -29,7 +31,8 @@ RUN xcaddy build \
 	--with github.com/caddy-dns/gandi@v1.1.0 \
 	--with golang.org/x/net/http2@v0.56.0 \
 	--with golang.org/x/text/language@v0.39.0 \
-	--with google.golang.org/grpc@v1.82.1
+	--with golang.org/x/crypto/ssh@v0.56.0 \
+	--with google.golang.org/grpc@v1.83.2
 
 # Same digest as before (caddy:2.11-alpine hasn't been rebuilt upstream since 2026-06-24), so the
 # c-ares/curl/libcurl/openssl packages it ships are stale relative to the Alpine 3.23 apk repo. The
