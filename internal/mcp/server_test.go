@@ -37,6 +37,8 @@ func TestServerRegistersExpectedTools(t *testing.T) {
 	}
 	for _, name := range []string{
 		"heliograph_status",
+		"heliograph_sla",
+		"heliograph_vantages",
 	} {
 		if !got[name] {
 			t.Errorf("tool %q not registered", name)
