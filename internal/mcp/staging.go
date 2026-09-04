@@ -74,7 +74,13 @@ func (st *staging) baseVersion() int {
 func (st *staging) reset() {
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	*st = staging{}
+	// Clear fields in place rather than `*st = staging{}`: that would replace st.mu
+	// itself with a fresh, unlocked mutex, so the deferred Unlock() above would then
+	// fire on a mutex that was never locked and panic ("unlock of unlocked mutex").
+	st.active = false
+	st.baseVer = 0
+	st.baseDoc = nil
+	st.workDoc = nil
 }
 
 // setDoc mints ids for new host nodes, validates locally, and stores the working doc.

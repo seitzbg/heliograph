@@ -73,3 +73,39 @@ func registerConfigDiscard(s *sdk.Server, st *staging) {
 		return textResult("staged changes discarded"), discardOut{Discarded: true}, nil
 	})
 }
+
+// applyStaged PUTs the staged working doc to the live hub with its base version. On
+// success it clears the staging buffer; on ErrConfigInvalid/ErrConfigConflict (or any
+// other putConfig error) the buffer is left untouched so the caller can inspect or
+// retry after re-review.
+func applyStaged(ctx context.Context, c *Client, st *staging) (int, error) {
+	if !st.isActive() {
+		return 0, fmt.Errorf("nothing staged")
+	}
+	newVer, err := c.putConfig(ctx, st.working(), st.baseVersion())
+	if err != nil {
+		return 0, err // ErrConfigInvalid / ErrConfigConflict surfaced verbatim; buffer kept
+	}
+	st.reset()
+	return newVer, nil
+}
+
+type applyOut struct {
+	NewVersion int `json:"new_version"`
+}
+
+func registerConfigApply(s *sdk.Server, c *Client, st *staging) {
+	sdk.AddTool(s, &sdk.Tool{
+		Name:        "config_apply",
+		Description: "Commit the staged config changes to the LIVE Heliograph hub (PUT /api/admin/config). THIS IS THE ONLY TOOL THAT WRITES TO THE LIVE HUB — every config_stage_*/config_review/config_discard tool is local-only. Requires an admin password. On a validation error the server's message is returned and the staging buffer is kept; on a version conflict, re-run config_review then re-stage. On success the buffer is cleared.",
+		Annotations: &sdk.ToolAnnotations{ReadOnlyHint: false, DestructiveHint: boolPtr(true)},
+	}, func(ctx context.Context, _ *sdk.CallToolRequest, _ struct{}) (*sdk.CallToolResult, applyOut, error) {
+		v, err := applyStaged(ctx, c, st)
+		if err != nil {
+			return nil, applyOut{}, err
+		}
+		return textResult(fmt.Sprintf("applied — config is now version %d", v)), applyOut{NewVersion: v}, nil
+	})
+}
+
+func boolPtr(b bool) *bool { return &b }

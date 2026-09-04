@@ -4,13 +4,12 @@ import sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
 // NewServer builds the MCP server and registers every Heliograph tool.
 //
-// Registration is incremental across tasks: this task ships registerStatus,
-// registerSLA, registerVantages, registerSeries, registerTriage,
-// registerConfigGet, registerConfigReview, registerConfigDiscard,
+// Registration: registerStatus, registerSLA, registerVantages, registerSeries,
+// registerTriage, registerConfigGet, registerConfigReview, registerConfigDiscard,
 // registerConfigStage (config_stage_add_target/edit_target/remove_target),
-// and registerConfigReplace (config_stage_replace). A later task adds
-// registerConfigApply as its tool lands — it shares the staging buffer `st`
-// created below.
+// registerConfigReplace (config_stage_replace), and registerConfigApply
+// (config_apply — the only tool that writes to the live hub). The config_*
+// tools share the staging buffer `st` created below.
 func NewServer(c *Client, version string) *sdk.Server {
 	s := sdk.NewServer(&sdk.Implementation{Name: "heliograph", Version: version}, nil)
 	registerStatus(s, c)
@@ -24,5 +23,6 @@ func NewServer(c *Client, version string) *sdk.Server {
 	registerConfigDiscard(s, st)
 	registerConfigStage(s, c, st)
 	registerConfigReplace(s, c, st)
+	registerConfigApply(s, c, st)
 	return s
 }
