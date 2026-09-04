@@ -42,6 +42,8 @@ func TestServerRegistersExpectedTools(t *testing.T) {
 		"heliograph_series",
 		"heliograph_triage",
 		"heliograph_config_get",
+		"config_review",
+		"config_discard",
 	} {
 		if !got[name] {
 			t.Errorf("tool %q not registered", name)
