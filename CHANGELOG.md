@@ -6,6 +6,22 @@ All notable changes to **Heliograph** are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **MCP server (`smoked mcp`).** A stdio [Model Context Protocol](https://modelcontextprotocol.io/)
+  server wrapping Heliograph's HTTP API, so an MCP-aware assistant can diagnose the network and —
+  with an admin password — propose and apply config changes. 13 tools: read-only diagnosis
+  (`heliograph_status`, `heliograph_sla`, `heliograph_series`, `heliograph_triage`,
+  `heliograph_vantages`), config read (`heliograph_config_get`), and config write
+  (`config_stage_add_target`, `config_stage_edit_target`, `config_stage_remove_target`,
+  `config_stage_replace`, `config_review`, `config_apply`, `config_discard`). Config edits go
+  through a local, in-process stage → review → apply flow — every `config_stage_*`/`config_review`/
+  `config_discard` tool is local-only (staged and validated with the daemon's own config parser),
+  and `config_apply` is the *only* tool that writes to the live hub (`PUT /api/admin/config`,
+  optimistic concurrency; the hub's own validation stays authoritative). Auth via `-url`/
+  `-basic-user`/`-basic-pass`/`-admin-pass` (each with a matching `HELIOGRAPH_*` env var); config
+  writes require `-admin-pass`. See the [README's MCP server section](README.md#mcp-server) and
+  [`examples/mcp/`](examples/mcp/).
+
 ## [2.0.0] - 2026-09-03
 
 ### Changed
