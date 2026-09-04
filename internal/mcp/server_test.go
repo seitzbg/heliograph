@@ -47,6 +47,7 @@ func TestServerRegistersExpectedTools(t *testing.T) {
 		"config_stage_add_target",
 		"config_stage_edit_target",
 		"config_stage_remove_target",
+		"config_stage_replace",
 	} {
 		if !got[name] {
 			t.Errorf("tool %q not registered", name)

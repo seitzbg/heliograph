@@ -245,6 +245,41 @@ func stageRemoveTarget(st *staging, ref string) error {
 	return st.setDoc(next)
 }
 
+// stageReplace parses a YAML or JSON doc (JSON is valid YAML) into a generic map,
+// normalizes it to JSON, and stages it wholesale via st.setDoc, which mints ids for any
+// new host nodes and validates locally. This replaces the ENTIRE working doc — it is the
+// escape hatch for config shapes (alert routing, probe defaults, etc.) the typed
+// config_stage_* tools don't cover.
+func stageReplace(st *staging, raw string) error {
+	var doc map[string]any
+	if err := yaml.Unmarshal([]byte(raw), &doc); err != nil {
+		return fmt.Errorf("%w: parse: %v", ErrConfigInvalid, err)
+	}
+	asJSON, err := json.Marshal(doc)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrConfigInvalid, err)
+	}
+	return st.setDoc(asJSON)
+}
+
+func registerConfigReplace(s *sdk.Server, c *Client, st *staging) {
+	sdk.AddTool(s, &sdk.Tool{
+		Name:        "config_stage_replace",
+		Description: "Stage a wholesale replacement of the config DB fragment with a supplied YAML or JSON doc (use for alert routing, probe defaults, or anything the typed tools don't cover). Validated locally; LOCAL ONLY until config_apply.",
+		Annotations: &sdk.ToolAnnotations{ReadOnlyHint: false},
+	}, func(ctx context.Context, _ *sdk.CallToolRequest, in struct {
+		Doc string `json:"doc" jsonschema:"the full config DB fragment as YAML or JSON"`
+	}) (*sdk.CallToolResult, stageResult, error) {
+		if err := st.ensure(ctx, c); err != nil {
+			return nil, stageResult{}, err
+		}
+		if err := stageReplace(st, in.Doc); err != nil {
+			return nil, stageResult{}, err
+		}
+		return stageResultFor(st)
+	})
+}
+
 func registerConfigStage(s *sdk.Server, c *Client, st *staging) {
 	sdk.AddTool(s, &sdk.Tool{
 		Name:        "config_stage_add_target",

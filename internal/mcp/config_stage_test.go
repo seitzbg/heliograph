@@ -165,3 +165,21 @@ func TestStageEditTargetMoveKeepsID(t *testing.T) {
 		t.Fatalf("id changed across move: before=%q after=%v", id, afterN["id"])
 	}
 }
+
+// TestStageReplaceAcceptsYAML proves stageReplace parses a YAML doc (JSON is valid YAML,
+// so this also covers JSON input), replaces the whole working doc, mints ids, and validates
+// via setDoc -- the raw-doc escape hatch for anything the typed stage_* tools don't cover.
+// The brief's example used `probe: http`, an unregistered kind that would fail setDoc's
+// local validation; "Ping" is registered (internal/probe/pingprobe) and needs no params.
+func TestStageReplaceAcceptsYAML(t *testing.T) {
+	c, st := stagedClient(t, `{"targets":{"children":{}}}`)
+	_ = st.ensure(context.Background(), c)
+	yamlDoc := "targets:\n  children:\n    Sites:\n      children:\n        ex:\n          host: example.com\n          probe: Ping\n"
+	if err := stageReplace(st, yamlDoc); err != nil {
+		t.Fatalf("stageReplace: %v", err)
+	}
+	f, _ := flatten(st.working())
+	if _, ok := f["Sites/ex"]; !ok {
+		t.Fatalf("replace did not take: %v", keysOf(f))
+	}
+}
