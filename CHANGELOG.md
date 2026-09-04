@@ -6,6 +6,8 @@ All notable changes to **Heliograph** are recorded here. The format follows
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-09-04
+
 ### Added
 - **MCP server (`smoked mcp`).** A stdio [Model Context Protocol](https://modelcontextprotocol.io/)
   server wrapping Heliograph's HTTP API, so an MCP-aware assistant can diagnose the network and —
@@ -19,8 +21,9 @@ All notable changes to **Heliograph** are recorded here. The format follows
   and `config_apply` is the *only* tool that writes to the live hub (`PUT /api/admin/config`,
   optimistic concurrency; the hub's own validation stays authoritative). Auth via `-url`/
   `-basic-user`/`-basic-pass`/`-admin-pass` (each with a matching `HELIOGRAPH_*` env var); config
-  writes require `-admin-pass`. See the [README's MCP server section](README.md#mcp-server) and
-  [`examples/mcp/`](examples/mcp/).
+  writes require `-admin-pass`. Credentials are sent only over HTTPS — a plaintext `http://` hub URL
+  is refused when Basic Auth or an admin password is set (loopback excepted). See the
+  [README's MCP server section](README.md#mcp-server) and [`examples/mcp/`](examples/mcp/).
 
 ## [2.0.0] - 2026-09-03
 
@@ -1639,7 +1642,8 @@ the smoke-graph look, a fast/parallel poller, and probes as plugins.
 - Full re-implementation reference / code map maintained outside the repo at
   `~/.claude/plans/smokeping-codemap/`.
 
-[Unreleased]: https://github.com/seitzbg/heliograph/compare/v2.0.0...main
+[Unreleased]: https://github.com/seitzbg/heliograph/compare/v2.1.0...main
+[2.1.0]: https://github.com/seitzbg/heliograph/compare/v2.0.0...v2.1.0
 [2.0.0]: https://github.com/seitzbg/heliograph/compare/v1.0.16...v2.0.0
 [1.0.16]: https://github.com/seitzbg/heliograph/compare/v1.0.15...v1.0.16
 [1.0.15]: https://github.com/seitzbg/heliograph/compare/v1.0.14...v1.0.15
