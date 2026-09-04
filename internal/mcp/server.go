@@ -6,10 +6,10 @@ import sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 //
 // Registration is incremental across tasks: this task ships registerStatus,
 // registerSLA, registerVantages, registerSeries, registerTriage,
-// registerConfigGet, registerConfigReview, and registerConfigDiscard. Later
-// tasks add their own register* calls here as their tools land (the
-// config_stage_*/config_apply family) — they share the staging buffer `st`
-// created below.
+// registerConfigGet, registerConfigReview, registerConfigDiscard, and
+// registerConfigStage (config_stage_add_target/edit_target/remove_target).
+// A later task adds registerConfigApply as its tool lands — it shares the
+// staging buffer `st` created below.
 func NewServer(c *Client, version string) *sdk.Server {
 	s := sdk.NewServer(&sdk.Implementation{Name: "heliograph", Version: version}, nil)
 	registerStatus(s, c)
@@ -21,5 +21,6 @@ func NewServer(c *Client, version string) *sdk.Server {
 	st := newStaging()
 	registerConfigReview(s, c, st)
 	registerConfigDiscard(s, st)
+	registerConfigStage(s, c, st)
 	return s
 }

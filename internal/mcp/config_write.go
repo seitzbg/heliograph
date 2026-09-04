@@ -28,7 +28,7 @@ func registerConfigReview(s *sdk.Server, c *Client, st *staging) {
 		Description: "Show the currently staged config changes: which targets were added/removed/changed, the working config, and whether the live config version has drifted since staging (a pending conflict). Local-only; nothing is written. Call config_apply to commit.",
 		Annotations: &sdk.ToolAnnotations{ReadOnlyHint: true},
 	}, func(ctx context.Context, _ *sdk.CallToolRequest, _ struct{}) (*sdk.CallToolResult, reviewOut, error) {
-		if !st.active {
+		if !st.isActive() {
 			return textResult("no staged changes"), reviewOut{Staged: false}, nil
 		}
 		added, removed, changed, err := st.diff()

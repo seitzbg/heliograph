@@ -57,6 +57,14 @@ func (st *staging) working() json.RawMessage {
 	return st.workDoc
 }
 
+// isActive reports whether a staging session has been started (via ensure), guarded by
+// st.mu so it is safe to call concurrently with ensure/reset from other tool dispatches.
+func (st *staging) isActive() bool {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.active
+}
+
 func (st *staging) baseVersion() int {
 	st.mu.Lock()
 	defer st.mu.Unlock()
@@ -91,6 +99,19 @@ func validateDoc(doc json.RawMessage) error {
 	}
 	if err := config.AppendDBFragment(base, doc); err != nil {
 		return fmt.Errorf("%w: %v", ErrConfigInvalid, err)
+	}
+	if len(base.Targets.Children) == 0 {
+		// This local base is defaults-only (config.Parse(nil) above — no file-defined
+		// targets from default.yaml/conf.d), so a DB fragment that removes its last
+		// target leaves THIS view of the tree wholly empty. Monitors() rejects a wholly
+		// empty tree as invalid — a real "zero targets anywhere" check that's a false
+		// positive here: the real hub's base almost always carries file-defined targets,
+		// so its merged tree won't be empty. A fragment can only ever contribute
+		// targets.children (validateFragment forbids probes/alerts/tree-wide fields), so
+		// an empty fragment also has nothing left for the probe-level checks above to
+		// flag. Skip Monitors() and let config_apply's real PUT stay authoritative for
+		// "the hub ends up with zero targets everywhere."
+		return nil
 	}
 	if _, err := base.Monitors(); err != nil {
 		return fmt.Errorf("%w: %v", ErrConfigInvalid, err)
