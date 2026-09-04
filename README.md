@@ -346,7 +346,12 @@ same `/api/*` endpoints the dashboard uses; there's no separate auth model or se
 | `-url` | `HELIOGRAPH_URL` | yes | Hub base URL, e.g. `https://heliograph.example` |
 | `-basic-user` | `HELIOGRAPH_BASIC_USER` | no | Reverse-proxy Basic Auth username, if the hub sits behind one |
 | `-basic-pass` | `HELIOGRAPH_BASIC_PASS` | no | Reverse-proxy Basic Auth password |
-| `-admin-pass` | `HELIOGRAPH_ADMIN_PASS` | no | Admin password — enables the `config_stage_*`/`config_apply` tools and unredacted admin reads. Omit it to run read-only. |
+| `-admin-pass` | `HELIOGRAPH_ADMIN_PASS` | no | Admin password — required only for `config_apply` (the tool that actually writes to the hub) and for unredacted admin reads. `config_stage_*`, `config_review`, and `config_discard` work locally without it. Omit it to run read-only. |
+
+Point `-url` at the hub's **root** (e.g. `https://heliograph.example`), not a sub-path mount — the
+client's admin-route detection matches `/api/admin` at the start of the request path, and a base
+URL with a sub-path prefix (`https://heliograph.example/some/path`) shifts every `/api/admin/...`
+request past that prefix, breaking it.
 
 ### Tools
 
@@ -380,6 +385,11 @@ same `/api/*` endpoints the dashboard uses; there's no separate auth model or se
 | `config_apply` | **Commit the staged changes to the live hub** (`PUT /api/admin/config`). |
 | `config_discard` | Discard all staged changes and reset the staging buffer. |
 
+`config_stage_replace` mints a fresh id for any host node without one, so a hand-authored replacement
+doc that omits an existing target's `id` orphans that target's history on apply. To preserve
+identity, base the replacement on `heliograph_config_get source=db format=json` — its output
+includes each target's `id`.
+
 ### Safety model: staging is local, only `config_apply` writes
 
 Every `config_stage_*` tool, `config_review`, and `config_discard` operates on an **in-process,
@@ -395,8 +405,11 @@ server's error is surfaced verbatim if it rejects the apply. A version conflict 
 changed the config since you staged) comes back as an error; `config_review`'s `drifted: true`
 flags that before you even try.
 
-Config writes require `-admin-pass` / `HELIOGRAPH_ADMIN_PASS` — without it, `config_stage_*` and
-`config_apply` return an error and the server is effectively read-only.
+`GET /api/admin/config[.yaml]` is an open, unauthenticated read (only the `PUT` is admin-gated), so
+`config_stage_*`, `config_review`, and `config_discard` all work locally without `-admin-pass` /
+`HELIOGRAPH_ADMIN_PASS` — you can build up and inspect a full staged change with no admin password
+configured. `-admin-pass` / `HELIOGRAPH_ADMIN_PASS` is required for exactly one thing: `config_apply`,
+which returns an error without it.
 
 ### `claude mcp add`
 
@@ -426,8 +439,10 @@ Equivalent JSON client config (e.g. `.mcp.json`, or Claude Desktop's `claude_des
 ```
 
 Drop the Basic Auth / admin-pass entries for a hub with no reverse-proxy auth or no admin GUI
-enabled. Omitting `-admin-pass`/`HELIOGRAPH_ADMIN_PASS` runs the server read-only: diagnosis and
-config-read tools work, and every `config_stage_*`/`config_apply` call errors.
+enabled. Omitting `-admin-pass`/`HELIOGRAPH_ADMIN_PASS` leaves diagnosis, config-read, and
+`config_stage_*`/`config_review`/`config_discard` all working (they only ever read the open
+`GET /api/admin/config` endpoint); only `config_apply` — the tool that writes to the live hub —
+errors without it.
 
 A minimal, copy-pasteable version of this config lives in [`examples/mcp/`](examples/mcp/).
 

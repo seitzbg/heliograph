@@ -23,8 +23,10 @@ model.
 Replace the four placeholders and drop whichever `env` entries don't apply — `HELIOGRAPH_BASIC_USER`/
 `HELIOGRAPH_BASIC_PASS` only matter if your hub sits behind a reverse proxy with Basic Auth (see
 [Federation deployment](../../README.md#federation-deployment-reverse-proxy)), and
-`HELIOGRAPH_ADMIN_PASS` is only needed to enable the config-write tools (`config_stage_*`,
-`config_apply`) and unredacted admin reads; omit it to run read-only. `smoked` must be on `PATH`, or
+`HELIOGRAPH_ADMIN_PASS` is only needed for `config_apply` (the tool that actually writes to the
+live hub) and for unredacted admin reads. `config_stage_*`, `config_review`, and `config_discard`
+work locally without it — they only read the open `GET /api/admin/config` endpoint; omit it to run
+read-only. `smoked` must be on `PATH`, or
 replace `"command": "smoked"` with an absolute path to the binary.
 
 Or add it with the Claude Code CLI instead of hand-editing JSON:

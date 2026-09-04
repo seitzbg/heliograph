@@ -95,6 +95,45 @@ func (st *staging) setDoc(doc json.RawMessage) error {
 	return nil
 }
 
+// mutate atomically applies a tree-mutation fn to the CURRENT working doc: parse, apply,
+// remarshal, mint ids for any new host nodes, validate, and only then store — all under a
+// single lock cycle. The go-sdk (v1.7.0, jsonrpc2.Async) dispatches tool-call handlers
+// concurrently, so stageAddTarget/stageEditTarget/stageRemoveTarget previously read
+// st.workDoc via st.working() (lock, copy, unlock), mutated it unlocked, and stored the
+// result via st.setDoc() (lock, store, unlock) — a read-modify-write split across two lock
+// cycles that loses updates when two calls interleave (whichever setDoc runs last wins,
+// silently discarding every other goroutine's change). mutate closes that window by holding
+// st.mu for the whole parse->apply->marshal->mint->validate->store sequence.
+//
+// fn (and everything else in this method) must be pure CPU work — no network calls — since
+// it runs while st.mu is held; ensure() does the one network call staging needs (seeding
+// from the live DB config) separately, before any mutate.
+func (st *staging) mutate(fn func(root *config.Node) error) error {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	next, err := mutateDoc(st.workDoc, fn)
+	if err != nil {
+		return err
+	}
+	minted, _ := configstore.MintNewIDs(next)
+	if err := validateDoc(minted); err != nil {
+		return err
+	}
+	st.workDoc = minted
+	return nil
+}
+
+// snapshotForApply returns the working doc, its base version, and whether a staging session
+// is active, all read under a single lock cycle. applyStaged uses it instead of separately
+// calling st.working() and st.baseVersion() (two lock cycles), which could otherwise
+// interleave with a concurrent config_discard's st.reset() between the two reads and PUT a
+// doc/version pair that no longer corresponds to any staged session.
+func (st *staging) snapshotForApply() (doc json.RawMessage, version int, ok bool) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.workDoc, st.baseVer, st.active
+}
+
 // validateDoc runs the daemon's own parser + monitor validation against a defaults-only
 // base. It does NOT include the hub's file-defined targets, so the server's apply stays
 // authoritative; this catches structural and probe-param errors before any PUT.

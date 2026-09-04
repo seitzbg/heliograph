@@ -79,10 +79,16 @@ func registerConfigDiscard(s *sdk.Server, st *staging) {
 // other putConfig error) the buffer is left untouched so the caller can inspect or
 // retry after re-review.
 func applyStaged(ctx context.Context, c *Client, st *staging) (int, error) {
-	if !st.isActive() {
+	// doc/version are read together under one lock (snapshotForApply) rather than via
+	// separate st.working()/st.baseVersion() calls: two lock cycles would leave a window
+	// for a concurrent config_discard's st.reset() to land in between, PUTting a doc that no
+	// longer corresponds to an active staging session (or pairing a stale version with a
+	// doc from a session that was already discarded and restarted).
+	doc, version, ok := st.snapshotForApply()
+	if !ok {
 		return 0, fmt.Errorf("nothing staged")
 	}
-	newVer, err := c.putConfig(ctx, st.working(), st.baseVersion())
+	newVer, err := c.putConfig(ctx, doc, version)
 	if err != nil {
 		return 0, err // ErrConfigInvalid / ErrConfigConflict surfaced verbatim; buffer kept
 	}

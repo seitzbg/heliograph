@@ -123,7 +123,7 @@ func stageAddTarget(st *staging, in addTargetIn) error {
 	if in.Name == "" || in.Host == "" || in.Probe == "" {
 		return fmt.Errorf("%w: name, host and probe are required", ErrConfigInvalid)
 	}
-	next, err := mutateDoc(st.working(), func(root *config.Node) error {
+	return st.mutate(func(root *config.Node) error {
 		grp := ensureGroup(root, in.GroupPath)
 		if grp.Children == nil {
 			grp.Children = map[string]*config.Node{}
@@ -146,10 +146,6 @@ func stageAddTarget(st *staging, in addTargetIn) error {
 		grp.Children[in.Name] = node
 		return nil
 	})
-	if err != nil {
-		return err
-	}
-	return st.setDoc(next) // mints id + validates
 }
 
 type editTargetIn struct {
@@ -158,6 +154,7 @@ type editTargetIn struct {
 	Probe        string            `json:"probe,omitempty"`
 	Params       map[string]string `json:"params,omitempty" jsonschema:"replaces the params map when given"`
 	Title        string            `json:"title,omitempty"`
+	Step         string            `json:"step,omitempty" jsonschema:"per-target polling interval as a Go duration, e.g. 60s"`
 	Pings        int               `json:"pings,omitempty"`
 	Measure      string            `json:"measure,omitempty"`
 	Vantages     []string          `json:"vantages,omitempty" jsonschema:"replaces the vantage list when given"`
@@ -166,7 +163,7 @@ type editTargetIn struct {
 }
 
 func stageEditTarget(st *staging, in editTargetIn) error {
-	next, err := mutateDoc(st.working(), func(root *config.Node) error {
+	return st.mutate(func(root *config.Node) error {
 		parent, name, node, ok := findNode(root, in.Target)
 		if !ok || node.Host == "" {
 			return fmt.Errorf("%w: target %q not found", ErrConfigInvalid, in.Target)
@@ -182,6 +179,11 @@ func stageEditTarget(st *staging, in editTargetIn) error {
 		}
 		if in.Title != "" {
 			node.Title = in.Title
+		}
+		if in.Step != "" {
+			if err := node.Step.UnmarshalYAML(yamlScalar(in.Step)); err != nil {
+				return fmt.Errorf("%w: bad step %q: %v", ErrConfigInvalid, in.Step, err)
+			}
 		}
 		if in.Pings != 0 {
 			node.Pings = in.Pings
@@ -210,7 +212,8 @@ func stageEditTarget(st *staging, in editTargetIn) error {
 			// silently overwrite it — its whole subtree and stable ID — with nothing
 			// downstream catching it (validateDoc/Monitors only ever see the survivor).
 			// Check before mutating anything so a rejected move leaves the working doc
-			// untouched (the error propagates out of mutateDoc before setDoc is called).
+			// untouched (the error propagates out of mutateDoc, so st.mutate never stores
+			// the doc it built).
 			if existing, ok := dst.Children[dstName]; ok && existing != node {
 				return fmt.Errorf("%w: cannot move/rename %q: %q already exists in the destination group", ErrConfigInvalid, in.Target, dstName)
 			}
@@ -223,14 +226,10 @@ func stageEditTarget(st *staging, in editTargetIn) error {
 		pruneEmpty(root)
 		return nil
 	})
-	if err != nil {
-		return err
-	}
-	return st.setDoc(next)
 }
 
 func stageRemoveTarget(st *staging, ref string) error {
-	next, err := mutateDoc(st.working(), func(root *config.Node) error {
+	return st.mutate(func(root *config.Node) error {
 		parent, name, node, ok := findNode(root, ref)
 		if !ok || node.Host == "" {
 			return fmt.Errorf("%w: target %q not found", ErrConfigInvalid, ref)
@@ -239,10 +238,6 @@ func stageRemoveTarget(st *staging, ref string) error {
 		pruneEmpty(root)
 		return nil
 	})
-	if err != nil {
-		return err
-	}
-	return st.setDoc(next)
 }
 
 // stageReplace parses a YAML or JSON doc (JSON is valid YAML) into a generic map,
@@ -265,7 +260,7 @@ func stageReplace(st *staging, raw string) error {
 func registerConfigReplace(s *sdk.Server, c *Client, st *staging) {
 	sdk.AddTool(s, &sdk.Tool{
 		Name:        "config_stage_replace",
-		Description: "Stage a wholesale replacement of the config DB fragment with a supplied YAML or JSON doc (use for alert routing, probe defaults, or anything the typed tools don't cover). Validated locally; LOCAL ONLY until config_apply.",
+		Description: "Stage a wholesale replacement of the config DB fragment with a supplied YAML or JSON doc (use for alert routing, probe defaults, or anything the typed tools don't cover). Validated locally; LOCAL ONLY until config_apply. CAVEAT: to preserve each target's identity/history, base the replacement doc on heliograph_config_get source=db format=json (it includes each target's id) — a hand-authored doc that omits existing id fields mints fresh ones on apply, orphaning that target's history.",
 		Annotations: &sdk.ToolAnnotations{ReadOnlyHint: false},
 	}, func(ctx context.Context, _ *sdk.CallToolRequest, in struct {
 		Doc string `json:"doc" jsonschema:"the full config DB fragment as YAML or JSON"`
@@ -297,7 +292,7 @@ func registerConfigStage(s *sdk.Server, c *Client, st *staging) {
 
 	sdk.AddTool(s, &sdk.Tool{
 		Name:        "config_stage_edit_target",
-		Description: "Stage an edit to an existing target (host, params, probe, pings, measure, vantages, or move/rename). LOCAL ONLY until config_apply.",
+		Description: "Stage an edit to an existing target (host, params, probe, step, pings, measure, vantages, or move/rename). LOCAL ONLY until config_apply.",
 		Annotations: &sdk.ToolAnnotations{ReadOnlyHint: false},
 	}, func(ctx context.Context, _ *sdk.CallToolRequest, in editTargetIn) (*sdk.CallToolResult, stageResult, error) {
 		if err := st.ensure(ctx, c); err != nil {

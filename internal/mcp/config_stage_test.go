@@ -166,6 +166,51 @@ func TestStageEditTargetMoveKeepsID(t *testing.T) {
 	}
 }
 
+// TestStageEditTargetUpdatesStep covers the Step field on editTargetIn (absent until this
+// fix — addTargetIn already supported staging a per-target polling interval on create, but
+// editTargetIn had no way to change it after the fact).
+func TestStageEditTargetUpdatesStep(t *testing.T) {
+	c, st := stagedClient(t, `{"targets":{"children":{"g":{"children":{"a":{"host":"1.1.1.1","probe":"Ping"}}}}}}`)
+	if err := st.ensure(context.Background(), c); err != nil {
+		t.Fatal(err)
+	}
+	if err := stageEditTarget(st, editTargetIn{Target: "g/a", Step: "30s"}); err != nil {
+		t.Fatalf("stageEditTarget: %v", err)
+	}
+	var root struct {
+		Targets struct {
+			Children map[string]struct {
+				Children map[string]struct {
+					Step string `json:"step"`
+				} `json:"children"`
+			} `json:"children"`
+		} `json:"targets"`
+	}
+	if err := json.Unmarshal(st.working(), &root); err != nil {
+		t.Fatalf("decode working doc: %v", err)
+	}
+	if got := root.Targets.Children["g"].Children["a"].Step; got != "30s" {
+		t.Fatalf("step not updated: got %q", got)
+	}
+}
+
+// TestStageEditTargetBadStepIsRejected mirrors stageAddTarget's step-parse-failure handling:
+// an unparseable duration must be rejected as ErrConfigInvalid, not silently ignored or
+// panicking.
+func TestStageEditTargetBadStepIsRejected(t *testing.T) {
+	c, st := stagedClient(t, `{"targets":{"children":{"g":{"children":{"a":{"host":"1.1.1.1","probe":"Ping"}}}}}}`)
+	if err := st.ensure(context.Background(), c); err != nil {
+		t.Fatal(err)
+	}
+	err := stageEditTarget(st, editTargetIn{Target: "g/a", Step: "not-a-duration"})
+	if err == nil {
+		t.Fatal("expected an error for an unparseable step")
+	}
+	if !errors.Is(err, ErrConfigInvalid) {
+		t.Fatalf("expected error to wrap ErrConfigInvalid, got: %v", err)
+	}
+}
+
 // TestStageReplaceAcceptsYAML proves stageReplace parses a YAML doc (JSON is valid YAML,
 // so this also covers JSON input), replaces the whole working doc, mints ids, and validates
 // via setDoc -- the raw-doc escape hatch for anything the typed stage_* tools don't cover.
