@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"sync"
@@ -19,6 +20,11 @@ import (
 	_ "github.com/seitzbg/heliograph/internal/probe/allprobes"
 )
 
+// errStaleStaging is returned by a staging write whose session was reset (discarded or
+// applied) out from under it — e.g. a config_discard that lands, under concurrent tool
+// dispatch, between a stage tool's ensure and its store.
+var errStaleStaging = errors.New("staging session is no longer active (it was discarded or applied); re-stage your changes")
+
 // staging holds a process-lifetime, in-memory working copy of the DB config fragment
 // being edited by config_stage_*/config_review/config_apply/config_discard (Tasks 7–10).
 // It is shared across those tools via a single instance created in NewServer.
@@ -28,6 +34,11 @@ type staging struct {
 	baseVer int
 	baseDoc json.RawMessage
 	workDoc json.RawMessage
+	// seq is a monotonic write-sequence for the current session: bumped whenever the
+	// buffer changes (seed, every store, reset). snapshotForApply captures it so
+	// applyStaged can reset ONLY if no later write landed (resetIfUnchanged), and so a
+	// store into a reset session is rejected via the active flag it guards.
+	seq uint64
 }
 
 func newStaging() *staging { return &staging{} }
@@ -48,6 +59,7 @@ func (st *staging) ensure(ctx context.Context, c *Client) error {
 	st.workDoc = append(json.RawMessage(nil), doc...)
 	st.baseVer = ver
 	st.active = true
+	st.seq++
 	return nil
 }
 
@@ -81,9 +93,31 @@ func (st *staging) reset() {
 	st.baseVer = 0
 	st.baseDoc = nil
 	st.workDoc = nil
+	st.seq++
 }
 
-// setDoc mints ids for new host nodes, validates locally, and stores the working doc.
+// resetIfUnchanged clears the buffer only if it is still the same active session, with no
+// write since the snapshot at wantSeq. applyStaged uses it after a successful PUT so a
+// stage or discard that landed during the PUT (bumping seq) is preserved rather than wiped
+// by an unconditional reset. Returns whether it reset.
+func (st *staging) resetIfUnchanged(wantSeq uint64) bool {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if !st.active || st.seq != wantSeq {
+		return false
+	}
+	st.active = false
+	st.baseVer = 0
+	st.baseDoc = nil
+	st.workDoc = nil
+	st.seq++
+	return true
+}
+
+// setDoc mints ids for new host nodes, validates locally, and stores the working doc. It
+// refuses (errStaleStaging) if the session was reset between the caller's ensure and here,
+// so a wholesale replace (config_stage_replace) can't store into — and report as staged —
+// a buffer a concurrent discard already cleared.
 func (st *staging) setDoc(doc json.RawMessage) error {
 	minted, _ := configstore.MintNewIDs(doc)
 	if err := validateDoc(minted); err != nil {
@@ -91,7 +125,11 @@ func (st *staging) setDoc(doc json.RawMessage) error {
 	}
 	st.mu.Lock()
 	defer st.mu.Unlock()
+	if !st.active {
+		return errStaleStaging
+	}
 	st.workDoc = minted
+	st.seq++
 	return nil
 }
 
@@ -111,6 +149,9 @@ func (st *staging) setDoc(doc json.RawMessage) error {
 func (st *staging) mutate(fn func(root *config.Node) error) error {
 	st.mu.Lock()
 	defer st.mu.Unlock()
+	if !st.active {
+		return errStaleStaging
+	}
 	next, err := mutateDoc(st.workDoc, fn)
 	if err != nil {
 		return err
@@ -120,18 +161,20 @@ func (st *staging) mutate(fn func(root *config.Node) error) error {
 		return err
 	}
 	st.workDoc = minted
+	st.seq++
 	return nil
 }
 
-// snapshotForApply returns the working doc, its base version, and whether a staging session
-// is active, all read under a single lock cycle. applyStaged uses it instead of separately
+// snapshotForApply returns the working doc, its base version, the session revision (seq), and
+// whether a staging session is active, all read under a single lock cycle. applyStaged uses it
+// instead of separately
 // calling st.working() and st.baseVersion() (two lock cycles), which could otherwise
 // interleave with a concurrent config_discard's st.reset() between the two reads and PUT a
 // doc/version pair that no longer corresponds to any staged session.
-func (st *staging) snapshotForApply() (doc json.RawMessage, version int, ok bool) {
+func (st *staging) snapshotForApply() (doc json.RawMessage, version int, seq uint64, ok bool) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	return st.workDoc, st.baseVer, st.active
+	return st.workDoc, st.baseVer, st.seq, st.active
 }
 
 // validateDoc runs the daemon's own parser + monitor validation against a defaults-only

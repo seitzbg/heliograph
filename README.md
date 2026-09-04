@@ -353,6 +353,10 @@ client's admin-route detection matches `/api/admin` at the start of the request 
 URL with a sub-path prefix (`https://heliograph.example/some/path`) shifts every `/api/admin/...`
 request past that prefix, breaking it.
 
+Use an **`https://`** URL whenever Basic Auth or an admin password is configured: the client
+refuses a plaintext `http://` base URL when credentials are set, so they are never transmitted in
+cleartext (loopback hosts are exempt for local development).
+
 ### Tools
 
 13 tools, grouped by what they touch:
@@ -364,7 +368,7 @@ request past that prefix, breaking it.
 | `heliograph_status` | Current per-target snapshot: probe, median latency, loss %, recent loss %, NTP offset/stratum, and which vantages measure it. |
 | `heliograph_sla` | Per-target availability over a window (worst-first): availability %, rounds up/measured, coverage, average loss. |
 | `heliograph_series` | Per-round latency/loss history for one target; compact by default (`t`/median/loss/pings), `detail=true` adds per-ping `rtts_ms`. |
-| `heliograph_triage` | Classifies every target healthy/degraded/down/no-data across vantages, splits GLOBAL problems (bad from every vantage → a target issue) from VANTAGE-SPECIFIC ones (bad from one vantage → a path/ISP issue), and flags stale collectors. Start here for an open-ended "what's wrong?" question. |
+| `heliograph_triage` | Classifies every target healthy/degraded/down/no-data across vantages, splits GLOBAL problems (bad from every vantage that returned a reading → a target issue) from VANTAGE-SPECIFIC ones (bad from some vantages but healthy or no-data from others → a path/ISP issue), and flags stale collectors. Start here for an open-ended "what's wrong?" question. |
 | `heliograph_vantages` | Lists measurement vantages: name, created, last-seen, target count, and whether the hub's federation agent listener is up. |
 
 **Config read**

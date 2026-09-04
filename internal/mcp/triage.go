@@ -44,6 +44,7 @@ func analyzeTriage(byVantage map[string][]Target) []Problem {
 		name    string
 		bad     []string // vantages where unhealthy
 		healthy int      // vantages where healthy
+		noData  int      // vantages that returned no data for this target
 		worst   string
 	}
 	rank := map[string]int{"down": 3, "degraded": 2, "no_data": 1, "healthy": 0}
@@ -59,6 +60,8 @@ func analyzeTriage(byVantage map[string][]Target) []Problem {
 			if st == "healthy" || st == "no_data" {
 				if st == "healthy" {
 					a.healthy++
+				} else {
+					a.noData++
 				}
 				continue
 			}
@@ -73,8 +76,12 @@ func analyzeTriage(byVantage map[string][]Target) []Problem {
 		if len(a.bad) == 0 {
 			continue
 		}
+		// global = every vantage that returned a reading saw it bad. A healthy reading
+		// means a path/ISP difference (vantage-specific); a no-data reading means we can't
+		// confirm the target is bad there, so it also downgrades to vantage-specific rather
+		// than overstating a "global" (target-wide) fault.
 		scope := "vantage-specific"
-		if a.healthy == 0 {
+		if a.healthy == 0 && a.noData == 0 {
 			scope = "global"
 		}
 		sort.Strings(a.bad)
@@ -99,6 +106,25 @@ func displayNameOf(t Target) string {
 	return t.ID
 }
 
+// triageVantageNames resolves which vantages to query. An empty filter selects all known
+// vantages (or a single unfiltered read when none are configured). A non-empty filter that
+// matches no known vantage is an error rather than a silent widening to all vantages.
+func triageVantageNames(vs []Vantage, filter string) ([]string, error) {
+	names := []string{}
+	for _, v := range vs {
+		if filter == "" || v.Name == filter {
+			names = append(names, v.Name)
+		}
+	}
+	if filter != "" && len(names) == 0 {
+		return nil, fmt.Errorf("unknown vantage %q", filter)
+	}
+	if len(names) == 0 { // no vantages configured and no filter → single unfiltered read
+		names = []string{""}
+	}
+	return names, nil
+}
+
 type triageIn struct {
 	Vantage string `json:"vantage,omitempty" jsonschema:"restrict triage to a single vantage (default: all vantages)"`
 }
@@ -111,21 +137,16 @@ type triageOut struct {
 func registerTriage(s *sdk.Server, c *Client) {
 	sdk.AddTool(s, &sdk.Tool{
 		Name:        "heliograph_triage",
-		Description: "Fast network health triage: classifies every target across vantages (healthy/degraded/down/no-data), separates GLOBAL problems (bad from every vantage → target issue) from VANTAGE-SPECIFIC ones (bad from one vantage → path/ISP issue), and flags stale collectors. Start here for an open-ended 'what's wrong?' investigation.",
+		Description: "Fast network health triage: classifies every target across vantages (healthy/degraded/down/no-data), separates GLOBAL problems (bad from every vantage that returned a reading → target issue) from VANTAGE-SPECIFIC ones (bad from some vantages but healthy or no-data from others → path/ISP issue), and flags stale collectors. Start here for an open-ended 'what's wrong?' investigation.",
 		Annotations: &sdk.ToolAnnotations{ReadOnlyHint: true},
 	}, func(ctx context.Context, _ *sdk.CallToolRequest, in triageIn) (*sdk.CallToolResult, triageOut, error) {
 		vs, _, err := fetchVantages(ctx, c)
 		if err != nil {
 			return nil, triageOut{}, err
 		}
-		names := []string{}
-		for _, v := range vs {
-			if in.Vantage == "" || v.Name == in.Vantage {
-				names = append(names, v.Name)
-			}
-		}
-		if len(names) == 0 { // no vantage list wired; fall back to a single unfiltered read
-			names = []string{""}
+		names, err := triageVantageNames(vs, in.Vantage)
+		if err != nil {
+			return nil, triageOut{}, err
 		}
 		byV := map[string][]Target{}
 		for _, n := range names {

@@ -25,6 +25,11 @@ type Round struct {
 // precedence over window when both are given. The API returns rounds oldest->newest;
 // when capped to maxRounds, the newest rounds are kept (the tail of that slice).
 func fetchSeries(ctx context.Context, c *Client, target, vantage, window string, from, to int64, detail bool, maxRounds int) (string, []Round, error) {
+	// A partial [from,to] is ambiguous: silently falling back to window/the API default
+	// would return data outside the requested interval, so reject it up front.
+	if (from > 0) != (to > 0) {
+		return "", nil, fmt.Errorf("from and to must be given together (a partial time range is ambiguous)")
+	}
 	q := url.Values{}
 	q.Set("target", target)
 	if vantage != "" {
