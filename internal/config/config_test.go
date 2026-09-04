@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -16,6 +17,27 @@ import (
 	_ "github.com/seitzbg/heliograph/internal/probe/httpprobe"
 	_ "github.com/seitzbg/heliograph/internal/probe/tcpconnect"
 )
+
+// TestDurationJSONRoundTrip guards the MarshalJSON/UnmarshalJSON symmetry that the MCP
+// staging buffer's mutateDoc relies on (it re-parses a config doc via encoding/json on every
+// staged mutation): a Duration marshaled to JSON must decode back to the same value.
+func TestDurationJSONRoundTrip(t *testing.T) {
+	want := Duration(45 * time.Second)
+	b, err := json.Marshal(want)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if string(b) != `"45s"` {
+		t.Fatalf("Marshal: got %s, want \"45s\"", b)
+	}
+	var got Duration
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if got != want {
+		t.Fatalf("round-trip mismatch: got %v, want %v", got, want)
+	}
+}
 
 const sample = `
 database:

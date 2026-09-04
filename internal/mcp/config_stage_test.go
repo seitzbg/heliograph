@@ -211,6 +211,51 @@ func TestStageEditTargetBadStepIsRejected(t *testing.T) {
 	}
 }
 
+// TestStageMutationSurvivesAPreviouslyStagedStep is a regression test for a bug found while
+// implementing the Step field above: config.Duration had a MarshalJSON (emits "30s") but no
+// UnmarshalJSON, so once a target's step was staged, the doc's "step" field was a JSON
+// string with no way back into the Duration (int64) field. mutateDoc parses the CURRENT
+// working doc via encoding/json on every stage call (including through staging.mutate), so
+// ANY staging mutation performed after a step was staged — not just another step edit —
+// would fail to even parse the doc, wrapped in ErrConfigInvalid. This isn't a Step-specific
+// edge case: it breaks staging entirely for a config that has any per-target step at all,
+// including one seeded from a real DB config with steps already set.
+func TestStageMutationSurvivesAPreviouslyStagedStep(t *testing.T) {
+	c, st := stagedClient(t, `{"targets":{"children":{}}}`)
+	if err := st.ensure(context.Background(), c); err != nil {
+		t.Fatal(err)
+	}
+	if err := stageAddTarget(st, addTargetIn{GroupPath: "G", Name: "a", Host: "1.1.1.1", Probe: "Ping", Step: "45s"}); err != nil {
+		t.Fatalf("stageAddTarget with step: %v", err)
+	}
+
+	// A second, unrelated staging mutation must succeed — this is where the bug bites: the
+	// working doc now carries a "step" field the JSON decoder can't turn back into a Duration.
+	if err := stageAddTarget(st, addTargetIn{GroupPath: "G", Name: "b", Host: "2.2.2.2", Probe: "Ping"}); err != nil {
+		t.Fatalf("second stageAddTarget failed to parse a working doc with a staged step: %v", err)
+	}
+
+	// The first target's step must have survived the round-trip.
+	var root struct {
+		Targets struct {
+			Children map[string]struct {
+				Children map[string]struct {
+					Step string `json:"step"`
+				} `json:"children"`
+			} `json:"children"`
+		} `json:"targets"`
+	}
+	if err := json.Unmarshal(st.working(), &root); err != nil {
+		t.Fatalf("decode working doc: %v", err)
+	}
+	if got := root.Targets.Children["G"].Children["a"].Step; got != "45s" {
+		t.Fatalf("step did not survive the round-trip: got %q", got)
+	}
+	if _, ok := root.Targets.Children["G"].Children["b"]; !ok {
+		t.Fatalf("second target b did not land: %+v", root.Targets.Children["G"].Children)
+	}
+}
+
 // TestStageReplaceAcceptsYAML proves stageReplace parses a YAML doc (JSON is valid YAML,
 // so this also covers JSON input), replaces the whole working doc, mints ids, and validates
 // via setDoc -- the raw-doc escape hatch for anything the typed stage_* tools don't cover.
