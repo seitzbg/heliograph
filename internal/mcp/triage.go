@@ -150,17 +150,37 @@ func registerTriage(s *sdk.Server, c *Client) {
 	})
 }
 
+// countHealthy counts targets that are healthy from every vantage that measures
+// them: no down/degraded reading anywhere, and at least one healthy reading.
+// It aggregates ALL of a target's rows across byV (order-independent booleans,
+// not first-wins) so the result does not depend on Go's randomized map
+// iteration order. A target that is only ever no_data is neither healthy nor a
+// problem, so it is excluded here too.
 func countHealthy(byV map[string][]Target) int {
-	seen, healthy := map[string]bool{}, 0
+	type agg struct {
+		hasBad     bool
+		hasHealthy bool
+	}
+	m := map[string]*agg{}
 	for _, rows := range byV {
 		for _, t := range rows {
-			if seen[t.ID] {
-				continue
+			a := m[t.ID]
+			if a == nil {
+				a = &agg{}
+				m[t.ID] = a
 			}
-			seen[t.ID] = true
-			if classify(t) == "healthy" {
-				healthy++
+			switch classify(t) {
+			case "down", "degraded":
+				a.hasBad = true
+			case "healthy":
+				a.hasHealthy = true
 			}
+		}
+	}
+	healthy := 0
+	for _, a := range m {
+		if !a.hasBad && a.hasHealthy {
+			healthy++
 		}
 	}
 	return healthy
