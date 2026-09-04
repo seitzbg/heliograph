@@ -84,7 +84,7 @@ func applyStaged(ctx context.Context, c *Client, st *staging) (int, error) {
 	// for a concurrent config_discard's st.reset() to land in between, PUTting a doc that no
 	// longer corresponds to an active staging session (or pairing a stale version with a
 	// doc from a session that was already discarded and restarted).
-	doc, version, ok := st.snapshotForApply()
+	doc, version, seq, ok := st.snapshotForApply()
 	if !ok {
 		return 0, fmt.Errorf("nothing staged")
 	}
@@ -92,7 +92,9 @@ func applyStaged(ctx context.Context, c *Client, st *staging) (int, error) {
 	if err != nil {
 		return 0, err // ErrConfigInvalid / ErrConfigConflict surfaced verbatim; buffer kept
 	}
-	st.reset()
+	// Reset only if no stage/discard landed during the PUT: resetIfUnchanged preserves a
+	// newer staged edit (a different session revision) instead of wiping it.
+	st.resetIfUnchanged(seq)
 	return newVer, nil
 }
 

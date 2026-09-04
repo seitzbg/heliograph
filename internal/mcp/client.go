@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
@@ -45,8 +46,25 @@ func NewClient(cfg Config) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("bad URL %q: %w", cfg.BaseURL, err)
 	}
+	// Refuse to send credentials over cleartext (CWE-319): Basic Auth and the admin
+	// password would otherwise ride an http:// request unencrypted. Loopback is
+	// exempted so local development against a plain-HTTP dev hub still works.
+	if (cfg.BasicUser != "" || cfg.AdminPass != "") && u.Scheme != "https" && !isLoopbackHost(u.Hostname()) {
+		return nil, fmt.Errorf("refusing to send credentials to a non-HTTPS URL (%q): use an https:// URL so Basic Auth and the admin password are not transmitted in cleartext (loopback is exempt)", cfg.BaseURL)
+	}
 	jar, _ := cookiejar.New(nil)
 	return &Client{cfg: cfg, base: u, http: &http.Client{Jar: jar, Timeout: 30 * time.Second}}, nil
+}
+
+// isLoopbackHost reports whether host is localhost or a loopback IP literal.
+func isLoopbackHost(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
 }
 
 func (c *Client) url(path string, q url.Values) string {

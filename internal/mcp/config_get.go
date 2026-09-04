@@ -16,6 +16,12 @@ func fetchConfig(ctx context.Context, c *Client, source, format string) (string,
 	if format == "" {
 		format = "yaml"
 	}
+	if source != "db" && source != "effective" {
+		return "", 0, fmt.Errorf("invalid source %q: want \"db\" or \"effective\"", source)
+	}
+	if format != "yaml" && format != "json" {
+		return "", 0, fmt.Errorf("invalid format %q: want \"yaml\" or \"json\"", format)
+	}
 	if format == "yaml" {
 		q := url.Values{}
 		q.Set("source", source)
