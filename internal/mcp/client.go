@@ -58,29 +58,46 @@ func (c *Client) url(path string, q url.Values) string {
 	return u.String()
 }
 
-// do sends req with Basic Auth (when configured). On a 401 for an /api/admin path,
-// it logs in once and retries — the session cookie may have expired.
-func (c *Client) do(req *http.Request) (*http.Response, error) {
+// setBasicAuth attaches the configured proxy Basic Auth credentials, when set.
+func (c *Client) setBasicAuth(req *http.Request) {
 	if c.cfg.BasicUser != "" {
 		req.SetBasicAuth(c.cfg.BasicUser, c.cfg.BasicPass)
 	}
+}
+
+// do sends req with Basic Auth (when configured). On a 401 for an /api/admin path,
+// it logs in once and retries — the session cookie may have expired. A body-less
+// request (e.g. GET) is always retryable; a request with a body is only retryable
+// if it carries a GetBody so the body can be replayed.
+func (c *Client) do(req *http.Request) (*http.Response, error) {
+	c.setBasicAuth(req)
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, err
 	}
-	if resp.StatusCode == http.StatusUnauthorized && strings.HasPrefix(req.URL.Path, "/api/admin") && c.cfg.AdminPass != "" && req.GetBody != nil {
-		resp.Body.Close()
-		if err := c.login(req.Context(), true); err != nil {
+	if resp.StatusCode != http.StatusUnauthorized ||
+		!strings.HasPrefix(req.URL.Path, "/api/admin") ||
+		c.cfg.AdminPass == "" ||
+		!(req.Body == nil || req.GetBody != nil) {
+		return resp, nil
+	}
+	resp.Body.Close()
+	if err := c.login(req.Context(), true); err != nil {
+		return nil, err
+	}
+	if req.GetBody != nil {
+		body, err := req.GetBody()
+		if err != nil {
 			return nil, err
 		}
-		body, _ := req.GetBody()
 		req.Body = body
-		if c.cfg.BasicUser != "" {
-			req.SetBasicAuth(c.cfg.BasicUser, c.cfg.BasicPass)
-		}
-		return c.http.Do(req)
 	}
-	return resp, nil
+	// http.Client.Do appends cookies from the jar rather than replacing them, so
+	// reusing req without clearing the header would send the stale cookie the first
+	// attempt attached ahead of the fresh one the login above just stored.
+	req.Header.Del("Cookie")
+	c.setBasicAuth(req)
+	return c.http.Do(req)
 }
 
 // login posts the admin password and stores the session cookie in the jar. force
@@ -100,9 +117,7 @@ func (c *Client) login(ctx context.Context, force bool) error {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if c.cfg.BasicUser != "" {
-		req.SetBasicAuth(c.cfg.BasicUser, c.cfg.BasicPass)
-	}
+	c.setBasicAuth(req)
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return err
@@ -208,6 +223,3 @@ func serverError(body []byte) string {
 	}
 	return strings.TrimSpace(string(body))
 }
-
-// errorsIsWrap lets the test's shim delegate to errors.Is without importing it there.
-func errorsIsWrap(err, target error) bool { return errors.Is(err, target) }

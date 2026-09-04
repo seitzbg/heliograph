@@ -3,8 +3,11 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 )
 
@@ -83,13 +86,58 @@ func TestPutConfigMapsStatusToSentinels(t *testing.T) {
 			http.Error(w, tc.body, tc.code)
 		}))
 		_, err := c.putConfig(context.Background(), json.RawMessage(`{"targets":{}}`), 1)
-		if err == nil || !errorsIs(err, tc.want) {
+		if err == nil || !errors.Is(err, tc.want) {
 			t.Fatalf("code %d: got err %v, want wrap of %v", tc.code, err, tc.want)
 		}
 	}
 }
 
-// errorsIs is a tiny local shim so the test reads clearly.
-func errorsIs(err, target error) bool {
-	return err != nil && (err == target || errorsIsWrap(err, target))
+// TestAdminGETRetriesOnExpiredSession proves getBytes/getConfigDoc recover from an
+// admin session cookie the server no longer honors: the client is already marked
+// logged in (so getBytes's preemptive login is a no-op) and its cookie jar holds a
+// stale token, so the first GET must 401, and do() must re-login once and retry with
+// the fresh cookie rather than treating the retry guard (built for the PUT-with-body
+// case) as unconditionally false for a body-less GET.
+func TestAdminGETRetriesOnExpiredSession(t *testing.T) {
+	var logins int
+	var currentToken string
+	c, srv := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/admin/login":
+			logins++
+			currentToken = fmt.Sprintf("tok%d", logins)
+			http.SetCookie(w, &http.Cookie{Name: "smoked_admin", Value: currentToken, Path: "/api/admin"})
+			w.WriteHeader(http.StatusNoContent)
+		case "/api/admin/config":
+			ck, err := r.Cookie("smoked_admin")
+			if err != nil || ck.Value != currentToken {
+				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"version": 3, "doc": json.RawMessage(`{"targets":{}}`)})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+
+	// Simulate a previously-established session that the server has since expired:
+	// mark the client logged in (skips getBytes's preemptive login) and seed the
+	// jar with a token the server will reject.
+	c.loggedIn = true
+	u, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("url.Parse: %v", err)
+	}
+	c.http.Jar.SetCookies(u, []*http.Cookie{{Name: "smoked_admin", Value: "stale", Path: "/api/admin"}})
+
+	_, version, err := c.getConfigDoc(context.Background(), "")
+	if err != nil {
+		t.Fatalf("getConfigDoc: %v", err)
+	}
+	if version != 3 {
+		t.Fatalf("version = %d, want 3", version)
+	}
+	if logins != 1 {
+		t.Fatalf("expected exactly one re-login, got %d", logins)
+	}
 }
