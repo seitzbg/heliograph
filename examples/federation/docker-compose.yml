@@ -39,7 +39,7 @@ services:
       retries: 10
 
   smoked:
-    image: ghcr.io/seitzbg/heliograph:latest   # pin a release (e.g. :v2.0.0) for production
+    image: ghcr.io/seitzbg/heliograph:latest   # pin a release (e.g. :v2.1.0) for production
     # Adds the mTLS agent listener to the image's default command (-serve -addr :8087
     # -webdir /web). -agent-addr requires -dsn, which is already supplied below via
     # SMOKED_DSN (the -dsn flag defaults to $SMOKED_DSN), so it needn't be repeated here.

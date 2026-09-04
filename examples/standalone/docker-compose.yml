@@ -32,7 +32,7 @@ services:
       retries: 10
 
   smoked:
-    image: ghcr.io/seitzbg/heliograph:latest   # pin a release (e.g. :v2.0.0) for production
+    image: ghcr.io/seitzbg/heliograph:latest   # pin a release (e.g. :v2.1.0) for production
     depends_on:
       timescaledb:
         condition: service_healthy
