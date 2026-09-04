@@ -197,7 +197,6 @@ func stageEditTarget(st *staging, in editTargetIn) error {
 		}
 		// move/rename: detach then reattach (keeps ID → stable identity)
 		if in.NewName != "" || in.NewGroupPath != "" {
-			delete(parent.Children, name)
 			dstName := name
 			if in.NewName != "" {
 				dstName = in.NewName
@@ -206,6 +205,16 @@ func stageEditTarget(st *staging, in editTargetIn) error {
 			if in.NewGroupPath != "" {
 				dst = ensureGroup(root, in.NewGroupPath)
 			}
+			// Guard the destination slot: a no-op rename/move (the slot already holds
+			// this same node) is fine, but landing on a DIFFERENT target's name would
+			// silently overwrite it — its whole subtree and stable ID — with nothing
+			// downstream catching it (validateDoc/Monitors only ever see the survivor).
+			// Check before mutating anything so a rejected move leaves the working doc
+			// untouched (the error propagates out of mutateDoc before setDoc is called).
+			if existing, ok := dst.Children[dstName]; ok && existing != node {
+				return fmt.Errorf("%w: cannot move/rename %q: %q already exists in the destination group", ErrConfigInvalid, in.Target, dstName)
+			}
+			delete(parent.Children, name)
 			if dst.Children == nil {
 				dst.Children = map[string]*config.Node{}
 			}

@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"testing"
 )
@@ -62,5 +63,105 @@ func TestStageRemoveTargetPrunesEmptyGroup(t *testing.T) {
 	_ = json.Unmarshal(st.working(), &root)
 	if _, ok := root.Targets.Children["g"]; ok {
 		t.Fatalf("empty group g was not pruned")
+	}
+}
+
+// TestStageEditTargetRejectsCollisionMoveOntoAnotherTarget guards against the data-loss bug
+// found in code review: moving/renaming a target onto a name already held by a DIFFERENT
+// target must be rejected, not silently overwrite the occupant (its whole subtree + stable
+// ID) with no downstream check ever catching it.
+func TestStageEditTargetRejectsCollisionMoveOntoAnotherTarget(t *testing.T) {
+	c, st := stagedClient(t, `{"targets":{"children":{"g":{"children":{"a":{"host":"1.1.1.1","probe":"Ping"},"b":{"host":"2.2.2.2","probe":"Ping"}}}}}}`)
+	if err := st.ensure(context.Background(), c); err != nil {
+		t.Fatal(err)
+	}
+	before := st.working()
+
+	err := stageEditTarget(st, editTargetIn{Target: "g/a", NewName: "b"})
+	if err == nil {
+		t.Fatal("expected a collision error, got nil")
+	}
+	if !errors.Is(err, ErrConfigInvalid) {
+		t.Fatalf("expected error to wrap ErrConfigInvalid, got: %v", err)
+	}
+	if string(st.working()) != string(before) {
+		t.Fatalf("working doc changed after a rejected move:\nbefore: %s\nafter:  %s", before, st.working())
+	}
+
+	f, _ := flatten(st.working())
+	if _, ok := f["g/a"]; !ok {
+		t.Fatalf("a was removed by the rejected move: %v", keysOf(f))
+	}
+	bNode, ok := f["g/b"]
+	if !ok {
+		t.Fatalf("b was clobbered by the rejected move: %v", keysOf(f))
+	}
+	var n map[string]any
+	_ = json.Unmarshal(bNode, &n)
+	if n["host"] != "2.2.2.2" {
+		t.Fatalf("b's data was overwritten: %v", n)
+	}
+}
+
+// TestStageEditTargetUpdatesHost is the happy-path field-edit case: stageEditTarget was
+// otherwise untested, which is how the collision bug above went unnoticed.
+func TestStageEditTargetUpdatesHost(t *testing.T) {
+	c, st := stagedClient(t, `{"targets":{"children":{"g":{"children":{"a":{"host":"1.1.1.1","probe":"Ping"}}}}}}`)
+	if err := st.ensure(context.Background(), c); err != nil {
+		t.Fatal(err)
+	}
+	if err := stageEditTarget(st, editTargetIn{Target: "g/a", Host: "9.9.9.9"}); err != nil {
+		t.Fatalf("stageEditTarget: %v", err)
+	}
+	f, _ := flatten(st.working())
+	node, ok := f["g/a"]
+	if !ok {
+		t.Fatalf("target missing after edit: %v", keysOf(f))
+	}
+	var n map[string]any
+	_ = json.Unmarshal(node, &n)
+	if n["host"] != "9.9.9.9" {
+		t.Fatalf("host not updated: %v", n)
+	}
+}
+
+// TestStageEditTargetMoveKeepsID moves a target to a FREE name/group (no collision) and
+// asserts its stable id survives the move — the whole point of detach-then-reattach on the
+// same *config.Node instead of delete+recreate.
+func TestStageEditTargetMoveKeepsID(t *testing.T) {
+	c, st := stagedClient(t, `{"targets":{"children":{}}}`)
+	if err := st.ensure(context.Background(), c); err != nil {
+		t.Fatal(err)
+	}
+	if err := stageAddTarget(st, addTargetIn{GroupPath: "Websites", Name: "example", Host: "example.com", Probe: "Ping"}); err != nil {
+		t.Fatalf("stageAddTarget: %v", err)
+	}
+	f, _ := flatten(st.working())
+	before, ok := f["Websites/example"]
+	if !ok {
+		t.Fatalf("target not added: %v", keysOf(f))
+	}
+	var beforeN map[string]any
+	_ = json.Unmarshal(before, &beforeN)
+	id, _ := beforeN["id"].(string)
+	if id == "" {
+		t.Fatalf("id not minted: %v", beforeN)
+	}
+
+	if err := stageEditTarget(st, editTargetIn{Target: "Websites/example", NewGroupPath: "Other", NewName: "moved"}); err != nil {
+		t.Fatalf("stageEditTarget move: %v", err)
+	}
+	f2, _ := flatten(st.working())
+	if _, ok := f2["Websites/example"]; ok {
+		t.Fatalf("old path still present after move: %v", keysOf(f2))
+	}
+	after, ok := f2["Other/moved"]
+	if !ok {
+		t.Fatalf("target not found at new path: %v", keysOf(f2))
+	}
+	var afterN map[string]any
+	_ = json.Unmarshal(after, &afterN)
+	if afterN["id"] != id {
+		t.Fatalf("id changed across move: before=%q after=%v", id, afterN["id"])
 	}
 }
