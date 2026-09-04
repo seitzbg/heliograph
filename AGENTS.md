@@ -111,6 +111,7 @@ Most flags also read a `SMOKED_*` env var (`SMOKED_DSN`, `SMOKED_CONFIG`, `SMOKE
 smoked vantage add|ls|revoke ...   # per-vantage mTLS registry + self-bootstrapped CA (needs -dsn)
 smoked config import ...           # import a YAML tree into the DB config store
 smoked import smokeping ...        # import an existing SmokePing install (config; --history for RRD backfill)
+smoked mcp -url ... ...            # stdio MCP server: diagnosis + config staging/apply (README#mcp-server)
 ```
 
 **Verifying a change:** a green `go test` is necessary but not sufficient for behavior changes —
@@ -135,12 +136,14 @@ anything beyond localhost.
 
 See the **Layout** section of [`README.md`](README.md#layout) for the annotated tree. Orientation:
 
-- `cmd/smoked/` — hub/collector binary (serve, `vantage`, `config`/`import` subcommands).
+- `cmd/smoked/` — hub/collector binary (serve, `vantage`, `config`/`import`, `mcp` subcommands).
 - `cmd/smoke-agent/` — remote-vantage collector binary.
 - `internal/probe/` — the `Probe` plugin contract; each probe self-registers via `init()` in its
   subpackage (`fping`, `pingprobe`, `tcpconnect`, `dns`, `httpprobe`, `sshprobe`, `irttprobe`,
   `ntpprobe`). Both binaries pull in the full set through `internal/probe/allprobes` (blank-imported
   by `smoked` and `smoke-agent`), so the hub and vantage agent can't drift to different probe sets.
+- `internal/mcp/` — the `smoked mcp` stdio MCP server: diagnosis tools + a local stage/review/apply
+  config-write flow, all client calls onto the same HTTP API the dashboard uses.
 - `internal/sample/` — median / loss / centered-smoke-array math (the smoke-graph input).
 - `internal/scheduler/` — parallel worker pool with per-target timeouts.
 - `internal/store/` + `internal/store/pgstore/` — `store.Store` interface, in-memory + TimescaleDB.

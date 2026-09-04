@@ -47,6 +47,23 @@ func (d *Duration) UnmarshalYAML(n *yaml.Node) error {
 // round-trip through decode (which reads JSON as a YAML subset) reads it back.
 func (d Duration) MarshalJSON() ([]byte, error) { return json.Marshal(time.Duration(d).String()) }
 
+// UnmarshalJSON mirrors UnmarshalYAML: it makes the JSON round-trip symmetric with
+// MarshalJSON above. Without it, a doc previously marshaled through MarshalJSON (e.g. the MCP
+// staging buffer's mutateDoc, which re-parses its working doc via encoding/json on every
+// staged mutation) fails to decode a "step" field back into a Duration.
+func (d *Duration) UnmarshalJSON(b []byte) error {
+	var s string
+	if err := json.Unmarshal(b, &s); err != nil {
+		return err
+	}
+	v, err := time.ParseDuration(s)
+	if err != nil {
+		return fmt.Errorf("invalid duration %q: %w", s, err)
+	}
+	*d = Duration(v)
+	return nil
+}
+
 type Config struct {
 	Database Database                     `yaml:"database" json:"database,omitempty"`
 	Probes   map[string]map[string]string `yaml:"probes" json:"probes,omitempty"` // probe kind -> probe-level params

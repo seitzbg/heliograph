@@ -71,6 +71,11 @@ federation vantages — both behind the admin password:
   `/api/charts`, `/api/sla`, `/api/probes/schema`, …), and `smoked import smokeping` brings over an
   existing install's targets; add `--history` (with a DSN and `rrdtool`) to also backfill its RRD
   history.
+- **MCP server for AI-assisted diagnosis and config.** `smoked mcp` exposes Heliograph over the
+  [Model Context Protocol](https://modelcontextprotocol.io/) — 13 tools covering triage/status/SLA/
+  series/vantages, config reads, and a stage → review → apply flow for config edits — so an
+  MCP-aware assistant can investigate and, with an admin password, safely propose changes. See
+  [MCP server](#mcp-server).
 
 ## Probes
 
@@ -326,6 +331,137 @@ Google TCP :443                        TCPConnect    8.93ms    0/10
 Unreachable :9 (TCP, expect loss)      TCPConnect        --   10/10  err: context deadline exceeded
 ```
 
+## MCP server
+
+`smoked mcp` runs a stdio [Model Context Protocol](https://modelcontextprotocol.io/) server that
+wraps Heliograph's own HTTP API, so an MCP-aware assistant (Claude Code, Claude Desktop, etc.) can
+diagnose your network and — with an admin password — stage and apply config changes, without ever
+touching the database or the raw API directly. It's a thin client: every tool call maps onto the
+same `/api/*` endpoints the dashboard uses; there's no separate auth model or separate state.
+
+### Env / flags
+
+| Flag | Env var | Required | Meaning |
+|------|---------|----------|---------|
+| `-url` | `HELIOGRAPH_URL` | yes | Hub base URL, e.g. `https://heliograph.example` |
+| `-basic-user` | `HELIOGRAPH_BASIC_USER` | no | Reverse-proxy Basic Auth username, if the hub sits behind one |
+| `-basic-pass` | `HELIOGRAPH_BASIC_PASS` | no | Reverse-proxy Basic Auth password |
+| `-admin-pass` | `HELIOGRAPH_ADMIN_PASS` | no | Admin password — required only for `config_apply` (the tool that actually writes to the hub) and for unredacted admin reads. `config_stage_*`, `config_review`, and `config_discard` work locally without it. Omit it to run read-only. |
+
+Point `-url` at the hub's **root** (e.g. `https://heliograph.example`), not a sub-path mount — the
+client's admin-route detection matches `/api/admin` at the start of the request path, and a base
+URL with a sub-path prefix (`https://heliograph.example/some/path`) shifts every `/api/admin/...`
+request past that prefix, breaking it.
+
+### Tools
+
+13 tools, grouped by what they touch:
+
+**Diagnosis (read-only)**
+
+| Tool | What it does |
+|------|--------------|
+| `heliograph_status` | Current per-target snapshot: probe, median latency, loss %, recent loss %, NTP offset/stratum, and which vantages measure it. |
+| `heliograph_sla` | Per-target availability over a window (worst-first): availability %, rounds up/measured, coverage, average loss. |
+| `heliograph_series` | Per-round latency/loss history for one target; compact by default (`t`/median/loss/pings), `detail=true` adds per-ping `rtts_ms`. |
+| `heliograph_triage` | Classifies every target healthy/degraded/down/no-data across vantages, splits GLOBAL problems (bad from every vantage → a target issue) from VANTAGE-SPECIFIC ones (bad from one vantage → a path/ISP issue), and flags stale collectors. Start here for an open-ended "what's wrong?" question. |
+| `heliograph_vantages` | Lists measurement vantages: name, created, last-seen, target count, and whether the hub's federation agent listener is up. |
+
+**Config read**
+
+| Tool | What it does |
+|------|--------------|
+| `heliograph_config_get` | Reads the monitoring config — `source=db` (the editable DB fragment, with a version for optimistic-concurrency writes) or `source=effective` (the read-only file+DB merged config the collector actually runs); `format` yaml (default) or json. |
+
+**Config write (stage → review → apply)**
+
+| Tool | What it does |
+|------|--------------|
+| `config_stage_add_target` | Stage adding a target (group path, host, probe, params, step, pings, NTP `measure`, vantages). Mints a stable id. |
+| `config_stage_edit_target` | Stage an edit to an existing target, including moving/renaming it (identity-preserving). |
+| `config_stage_remove_target` | Stage removing a target by id or path; empty groups are pruned. |
+| `config_stage_replace` | Stage a wholesale YAML/JSON replacement of the DB config fragment — the escape hatch for shapes the typed tools above don't cover (alert routing, probe defaults, …). |
+| `config_review` | Show the currently staged diff (added/removed/changed targets), the full working config, and whether the live config has drifted since staging. |
+| `config_apply` | **Commit the staged changes to the live hub** (`PUT /api/admin/config`). |
+| `config_discard` | Discard all staged changes and reset the staging buffer. |
+
+`config_stage_replace` mints a fresh id for any host node without one, so a hand-authored replacement
+doc that omits an existing target's `id` orphans that target's history on apply. To preserve
+identity, base the replacement on `heliograph_config_get source=db format=json` — its output
+includes each target's `id`.
+
+### Safety model: staging is local, only `config_apply` writes
+
+Every `config_stage_*` tool, `config_review`, and `config_discard` operates on an **in-process,
+per-server-instance staging buffer** — nothing reaches the hub. `config_stage_*` validates the
+staged document locally using the daemon's own config parser and validator (`internal/config`), so
+most structural and probe-param mistakes surface immediately, before anything is sent anywhere.
+
+`config_apply` is the **only** tool that writes to the live hub: it `PUT`s the staged document to
+`/api/admin/config` with the config version it was staged against (optimistic concurrency). The
+hub's own validation is authoritative — the local pass runs against a defaults-only base and can
+miss something the real merged config (with the hub's file-defined targets) would catch, and the
+server's error is surfaced verbatim if it rejects the apply. A version conflict (someone else
+changed the config since you staged) comes back as an error; `config_review`'s `drifted: true`
+flags that before you even try.
+
+`GET /api/admin/config[.yaml]` is an open, unauthenticated read (only the `PUT` is admin-gated), so
+`config_stage_*`, `config_review`, and `config_discard` all work locally without `-admin-pass` /
+`HELIOGRAPH_ADMIN_PASS` — you can build up and inspect a full staged change with no admin password
+configured. `-admin-pass` / `HELIOGRAPH_ADMIN_PASS` is required for exactly one thing: `config_apply`,
+which returns an error without it.
+
+### `claude mcp add`
+
+```sh
+claude mcp add heliograph -- \
+  smoked mcp -url https://heliograph.example \
+  -basic-user "$HELIO_USER" -basic-pass "$HELIO_PASS" \
+  -admin-pass "$HELIO_ADMIN"
+```
+
+Equivalent JSON client config (e.g. `.mcp.json`, or Claude Desktop's `claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "heliograph": {
+      "command": "smoked",
+      "args": ["mcp", "-url", "https://heliograph.example"],
+      "env": {
+        "HELIOGRAPH_BASIC_USER": "your-proxy-user",
+        "HELIOGRAPH_BASIC_PASS": "your-proxy-pass",
+        "HELIOGRAPH_ADMIN_PASS": "your-admin-password"
+      }
+    }
+  }
+}
+```
+
+Drop the Basic Auth / admin-pass entries for a hub with no reverse-proxy auth or no admin GUI
+enabled. Omitting `-admin-pass`/`HELIOGRAPH_ADMIN_PASS` leaves diagnosis, config-read, and
+`config_stage_*`/`config_review`/`config_discard` all working (they only ever read the open
+`GET /api/admin/config` endpoint); only `config_apply` — the tool that writes to the live hub —
+errors without it.
+
+A minimal, copy-pasteable version of this config lives in [`examples/mcp/`](examples/mcp/).
+
+### Manual smoke
+
+No automated test in this repo drives `smoked mcp` against a live network — `internal/mcp`'s test
+suite runs against an in-process `httptest` server, not a real hub. To confirm the real thing works
+end to end, run it against a real hub and call a couple of tools by hand — for example with the
+[MCP Inspector](https://modelcontextprotocol.io/legacy/tools/inspector):
+
+```sh
+npx @modelcontextprotocol/inspector smoked mcp -url https://heliograph.example -admin-pass "$HELIO_ADMIN"
+```
+
+Call `heliograph_status` and `heliograph_triage` from the Inspector's tool panel and confirm the
+response matches your hub's actual targets and their current health (cross-check against the
+dashboard). If you've already `claude mcp add`'d it, the same check works by asking the assistant
+to run those two tools.
+
 ## Layout
 
 ```
@@ -349,6 +485,8 @@ internal/
     pgstore/     TimescaleDB implementation (samples hypertable, raw sample arrays)
   configstore/   versioned DB config fragment (config-in-DB, optimistic concurrency)
   api/           JSON HTTP API + agent + admin endpoints + static file serving
+  mcp/           MCP server (stdio) — diagnosis tools + a stage/review/apply config-write flow
+                 over the same HTTP API, for AI-assisted operation (+ tests)
   federation/    per-vantage assignment builder + measurement fingerprint
   vantage/        per-vantage registry + self-bootstrapped CA (mTLS client-cert auth; revoke by
                   removing the name)
@@ -356,7 +494,7 @@ internal/
   agent/         smoke-agent buffer + on-disk spool + hub client
   importer/
     smokeping/   SmokePing Targets/Probes/RRD import (config + history backfill)
-cmd/smoked/      the hub/collector binary (serve, vantage, config/smokeping import)
+cmd/smoked/      the hub/collector binary (serve, vantage, config/smokeping import, mcp)
 cmd/smoke-agent/ the remote-vantage collector binary
 web/
   dashboard.js   the single-page dashboard (overview, graphs, config, vantages)

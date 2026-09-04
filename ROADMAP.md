@@ -171,6 +171,14 @@ Phase-6 items all ship in the single **v1.0** line.
   1.0 line (the earlier "single-node v1.0 / federation v2.0" split was collapsed, since nothing had
   been released yet). Version constants bumped off `0.1.0`, CHANGELOG `[Unreleased]` promoted to
   `[1.0.0]`, and an annotated `v1.0.0` git tag + GitLab release carry the notes.
+- ✅ **MCP server** — `smoked mcp` (`internal/mcp`) runs a stdio Model Context Protocol server over
+  Heliograph's own HTTP API: 5 read-only diagnosis tools (status/SLA/series/triage/vantages), a
+  config-read tool, and 7 config-write tools built around a local stage → review → apply flow
+  (`config_stage_add_target`/`edit_target`/`remove_target`/`replace`, `config_review`,
+  `config_apply`, `config_discard`) — only `config_apply` ever writes to the live hub, and staged
+  edits are validated locally with the daemon's own config parser first. Lets an MCP-aware
+  assistant (Claude Code, Claude Desktop, …) triage the network and safely propose config changes.
+  See the [README's MCP server section](README.md#mcp-server).
 
 ## Known limitations / follow-ups (from the 2026-08-04 code review)
 - ✅ **Per-target polling intervals** — while serving, each target fires on its own `step`
