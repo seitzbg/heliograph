@@ -463,3 +463,87 @@ jobs:
             -v "$PWD/.trivyignore.yaml:/.trivyignore.yaml:ro" -e TRIVY_IGNOREFILE=/.trivyignore.yaml \
             aquasec/trivy:0.58.1@sha256:ab70a02200597efa04748f210f793936eb647cbcdb0ea69cc30b226d6f5a22c7 image --scanners vuln --severity HIGH,CRITICAL \
             --ignore-unfixed --exit-code 1 heliograph-caddy:ci
+
+  # Real-FreeBSD runtime coverage. Both binaries are pure Go and cross-compile for FreeBSD, but a
+  # cross-compile only proves it BUILDS. This boots an actual FreeBSD VM on the Linux runner and runs
+  # the full test suite (and syntax-checks the rc.d scripts) so FreeBSD stays a *tested* target. The
+  # VM runs as root, so the raw-socket Ping path is reachable there. Independent of the image pipeline
+  # (the published image is Linux-only), so a FreeBSD VM hiccup never blocks an image release — add
+  # freebsd-test as a required status check to gate merges on FreeBSD.
+  freebsd-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30   # the vmactions VM boot + pkg install is the slow part; the suite itself is ~min
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Test on FreeBSD
+        uses: vmactions/freebsd-vm@f0552d3b69211736abd97f02ff3d4674c56b73b1 # v1.5.5
+        with:
+          usesh: true
+          # go: the toolchain (GOTOOLCHAIN=auto fetches go.mod's exact version if the pkg is older).
+          # fping: the FPing probe shells out to it, so its tests need the binary present.
+          prepare: |
+            pkg install -y go fping
+          run: |
+            set -e
+            go version
+            # The rc.d service scripts ship in the repo; catch a shell-syntax slip on real FreeBSD sh.
+            sh -n contrib/freebsd/smoke_agent
+            sh -n contrib/freebsd/smoked
+            go build ./...
+            # DB / rrdtool integration tests self-skip without SMOKE_TEST_DSN / rrdtool (not installed here).
+            go test ./...
+
+  # Attach native FreeBSD binaries to each GitHub Release. The published container image is Linux-only,
+  # so FreeBSD hosts run a native binary; this builds, packages, and uploads them. Tag-only (v*),
+  # independent of the image pipeline. Pure-Go cross-compile (CGO_ENABLED=0) for freebsd amd64 + arm64;
+  # gated on the test suites (incl. freebsd-test) so a red build never ships binaries.
+  release-binaries:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [go-test, frontend, govulncheck, db-test, layout-test, freebsd-test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write   # create/update the tag's Release and upload assets
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          fetch-depth: 0   # tags, so main.version bakes the release version
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+      - name: Build + package FreeBSD binaries
+        env:
+          VERSION: ${{ github.ref_name }}   # the tag, e.g. v2.2.0 — matches `git describe` on the tag commit
+        run: |
+          set -eu
+          ver="${VERSION#v}"                 # strip the leading v for artifact filenames (X.Y.Z)
+          out=dist
+          mkdir -p "$out"
+          for arch in amd64 arm64; do
+            name="heliograph_${ver}_freebsd_${arch}"
+            work="$out/$name"
+            mkdir -p "$work"
+            GOOS=freebsd GOARCH="$arch" CGO_ENABLED=0 \
+              go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o "$work/smoked"      ./cmd/smoked
+            GOOS=freebsd GOARCH="$arch" CGO_ENABLED=0 \
+              go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o "$work/smoke-agent" ./cmd/smoke-agent
+            cp -R web "$work/web"                       # smoked serves the dashboard from here
+            cp -R contrib "$work/contrib"               # contrib/freebsd rc.d scripts + notes
+            cp config.example.yaml LICENSE "$work/"
+            tar -C "$out" -czf "$out/${name}.tar.gz" "$name"
+            rm -rf "$work"
+          done
+          ( cd "$out" && sha256sum ./*.tar.gz > SHA256SUMS )
+          ls -l "$out"
+      - name: Attach to release
+        # Uploads assets to the tag's Release, creating it if the manual release step hasn't yet.
+        # No `body` is set, so an existing release's notes are left untouched.
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
+          fail_on_unmatched_files: true

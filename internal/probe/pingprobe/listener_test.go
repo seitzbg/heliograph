@@ -47,9 +47,10 @@ func TestOpenListenerFallbackOrder(t *testing.T) {
 }
 
 // TestOpenListenerAllFailMentionsBothRemedies verifies the error returned when every attempt fails
-// names both operator remedies: the sysctl for unprivileged datagram sockets and the capability for
-// raw sockets. An operator hitting this error should not have to go read source code to know what to
-// try next.
+// names both operator remedies portably — unprivileged datagram sockets and raw sockets — and does
+// not present the Linux sysctl as the only fix. An operator hitting this on Linux, macOS, or FreeBSD
+// should learn what to try next without reading source code. FreeBSD in particular has no
+// unprivileged ICMP datagram socket, so its remedy (privileged mode / the FPing probe) must appear.
 func TestOpenListenerAllFailMentionsBothRemedies(t *testing.T) {
 	ln := func(network, addr string) (*icmp.PacketConn, error) {
 		return nil, errors.New("permission denied")
@@ -59,11 +60,17 @@ func TestOpenListenerAllFailMentionsBothRemedies(t *testing.T) {
 		t.Fatal("want error when all attempts fail")
 	}
 	msg := err.Error()
+	// Unprivileged-datagram remedy, with the Linux sysctl as a hint (not the only fix).
 	if !strings.Contains(msg, "ping_group_range") {
 		t.Errorf("error %q does not mention ping_group_range", msg)
 	}
+	// Raw-socket remedy.
 	if !strings.Contains(msg, "CAP_NET_RAW") {
 		t.Errorf("error %q does not mention CAP_NET_RAW", msg)
+	}
+	// OS-aware: FreeBSD's remedy differs (no unprivileged ICMP), so it must be named.
+	if !strings.Contains(msg, "FreeBSD") {
+		t.Errorf("error %q is not OS-aware: does not name the FreeBSD remedy", msg)
 	}
 	if !strings.Contains(msg, "permission denied") {
 		t.Errorf("error %q does not include last underlying error", msg)
