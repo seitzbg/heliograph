@@ -6,6 +6,8 @@ All notable changes to **Heliograph** are recorded here. The format follows
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-09-05
+
 ### Added
 - **FreeBSD support.** Both binaries are pure Go and already run on FreeBSD (`amd64`/`arm64`) with no
   code changes; this makes it a first-class, tested target. Each [GitHub Release](https://github.com/seitzbg/heliograph/releases)
@@ -1658,7 +1660,8 @@ the smoke-graph look, a fast/parallel poller, and probes as plugins.
 - Full re-implementation reference / code map maintained outside the repo at
   `~/.claude/plans/smokeping-codemap/`.
 
-[Unreleased]: https://github.com/seitzbg/heliograph/compare/v2.1.0...main
+[Unreleased]: https://github.com/seitzbg/heliograph/compare/v2.2.0...main
+[2.2.0]: https://github.com/seitzbg/heliograph/compare/v2.1.0...v2.2.0
 [2.1.0]: https://github.com/seitzbg/heliograph/compare/v2.0.0...v2.1.0
 [2.0.0]: https://github.com/seitzbg/heliograph/compare/v1.0.16...v2.0.0
 [1.0.16]: https://github.com/seitzbg/heliograph/compare/v1.0.15...v1.0.16
