@@ -46,7 +46,9 @@ func openListener(ln listenFunc, mode string, isV6 bool) (conn *icmp.PacketConn,
 		lastErr = e
 	}
 	return nil, "", fmt.Errorf(
-		"pingprobe: no ICMP listener available (mode=%s): tried and failed; to fix, either set "+
-			"net.ipv4.ping_group_range to allow unprivileged datagram sockets, or grant this "+
-			"process CAP_NET_RAW for raw sockets: %w", mode, lastErr)
+		"pingprobe: no ICMP listener available (mode=%s): tried and failed. To fix, either enable "+
+			"unprivileged ICMP datagram sockets (Linux: sysctl net.ipv4.ping_group_range; macOS: enabled "+
+			"by default; FreeBSD: unsupported — run as root with mode=privileged, or use the FPing probe), "+
+			"or grant this process raw-socket privilege (Linux: CAP_NET_RAW; otherwise run as root): %w",
+		mode, lastErr)
 }

@@ -1,0 +1,61 @@
+#!/bin/sh
+#
+# PROVIDE: smoke_agent
+# REQUIRE: NETWORKING DAEMON
+# KEYWORD: shutdown
+#
+# FreeBSD rc.d script for the Heliograph vantage agent (smoke-agent). It measures
+# targets from this host and pushes results to the hub over mutual TLS. Install to
+# /usr/local/etc/rc.d/smoke_agent and enable in /etc/rc.conf:
+#
+#   smoke_agent_enable="YES"
+#   smoke_agent_config="/usr/local/etc/heliograph/agent.yaml"   # from the vantage bundle
+#
+# Optional overrides (defaults shown):
+#   smoke_agent_bin="/usr/local/bin/smoke-agent"
+#   smoke_agent_user="smoke"                 # service account (created separately)
+#   smoke_agent_spool="/var/db/smoke-agent/spool"   # set "" to disable the on-disk spool
+#   smoke_agent_flags=""                     # extra flags appended to the command line
+#
+# ICMP note: the native Ping probe needs a raw socket (run as root, mode=privileged);
+# the FPing probe works unprivileged via `pkg install fping`. See contrib/freebsd/README.md.
+
+. /etc/rc.subr
+
+name="smoke_agent"
+desc="Heliograph vantage agent"
+rcvar="smoke_agent_enable"
+
+load_rc_config "$name"
+
+: ${smoke_agent_enable:="NO"}
+: ${smoke_agent_bin:="/usr/local/bin/smoke-agent"}
+: ${smoke_agent_config:="/usr/local/etc/heliograph/agent.yaml"}
+: ${smoke_agent_user:="smoke"}
+: ${smoke_agent_spool:="/var/db/smoke-agent/spool"}
+: ${smoke_agent_flags:=""}
+
+pidfile="/var/run/${name}.pid"
+
+# Assemble the child command. Pass -spool-dir EXPLICITLY (as -spool-dir=<value>), even when
+# empty: smoke-agent only clears a config file's spool_dir on an explicit empty flag — omitting
+# it keeps the file's value — so an empty smoke_agent_spool must send `-spool-dir=` to actually
+# select in-memory mode, matching this knob's documented "set '' to disable" behavior.
+_child_args="-config ${smoke_agent_config} -spool-dir=${smoke_agent_spool}"
+_child_args="${_child_args} ${smoke_agent_flags}"
+
+# Supervise with daemon(8): -r restarts the child if it exits, -S sends its stdout/stderr
+# to syslog (daemon facility), -P tracks the supervisor's pid, -u drops to the service user.
+command="/usr/sbin/daemon"
+command_args="-r -S -P ${pidfile} -t ${desc} -u ${smoke_agent_user} ${smoke_agent_bin} ${_child_args}"
+
+start_precmd="smoke_agent_precmd"
+smoke_agent_precmd()
+{
+	if [ -n "${smoke_agent_spool}" ]; then
+		install -d -o "${smoke_agent_user}" -m 0750 "${smoke_agent_spool}" || return 1
+	fi
+	return 0
+}
+
+run_rc_command "$1"

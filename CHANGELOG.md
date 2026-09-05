@@ -6,6 +6,22 @@ All notable changes to **Heliograph** are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **FreeBSD support.** Both binaries are pure Go and already run on FreeBSD (`amd64`/`arm64`) with no
+  code changes; this makes it a first-class, tested target. Each [GitHub Release](https://github.com/seitzbg/heliograph/releases)
+  now attaches native FreeBSD binaries (`heliograph_<version>_freebsd_<arch>.tar.gz` + `SHA256SUMS`),
+  built by a new tag-only `release-binaries` CI job. A new `freebsd-test` CI job runs the full
+  `go test ./...` suite inside a real FreeBSD VM on every push, so FreeBSD stays green. Added
+  [`contrib/freebsd/`](contrib/freebsd/) with `rc.d` service scripts for `smoke-agent` and `smoked`,
+  and a **Native binary (FreeBSD & other Unix)** section to the README covering the ICMP privilege
+  model (native `Ping` needs root; `FPing` works via `pkg install fping`).
+
+### Changed
+- **The native `Ping` probe's "no ICMP listener available" error is now OS-aware.** It previously
+  named only Linux's `net.ipv4.ping_group_range` sysctl as the fix, which is misleading on macOS and
+  FreeBSD. It now spells out the remedy per OS — including FreeBSD, which has no unprivileged ICMP
+  datagram socket (run as root with `mode: privileged`, or use the `FPing` probe).
+
 ## [2.1.0] - 2026-09-04
 
 ### Added

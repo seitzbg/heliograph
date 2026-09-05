@@ -133,6 +133,43 @@ docker run --rm -p 127.0.0.1:8087:8087 ghcr.io/seitzbg/heliograph:latest \
 #   -> open http://localhost:8087/
 ```
 
+### Native binary (FreeBSD & other Unix)
+
+The Docker image is Linux-only, so hosts that don't run Linux containers — **FreeBSD** in
+particular — run a native binary instead. Both binaries are pure Go (`CGO_ENABLED=0`), so they
+cross-compile and run on FreeBSD (`amd64` and `arm64`) with no code changes.
+
+**Get a binary.** Prebuilt FreeBSD binaries are attached to each
+[GitHub Release](https://github.com/seitzbg/heliograph/releases) as
+`heliograph_<version>_freebsd_<arch>.tar.gz` (each with a `SHA256SUMS` file). Or build from source —
+cross-compile from any host:
+
+```sh
+GOOS=freebsd GOARCH=amd64 CGO_ENABLED=0 go build -o smoke-agent ./cmd/smoke-agent
+GOOS=freebsd GOARCH=amd64 CGO_ENABLED=0 go build -o smoked      ./cmd/smoked
+# …or natively on the FreeBSD box: pkg install go && go build ./cmd/smoke-agent
+```
+
+**Which binary.** The common FreeBSD case is a **vantage** — run `smoke-agent`, which measures
+targets and pushes results to an existing hub over mutual TLS (see
+[Federation deployment](#federation-deployment-reverse-proxy) for onboarding; the `<name>-vantage.tar.gz`
+bundle's `agent.yaml` works unchanged, just run the native `smoke-agent -config agent.yaml` instead of
+the bundled Compose). To run the whole hub natively, run `smoked` — it needs a reachable
+Postgres/TimescaleDB (`-dsn …`).
+
+**ICMP on FreeBSD.** Unlike Linux, FreeBSD has no unprivileged ICMP datagram socket (there is no
+`net.ipv4.ping_group_range` equivalent), so the two ICMP probes behave differently:
+
+- **`FPing` probe** — works without running as root: `pkg install fping` installs a setuid-root
+  `fping(8)`. This is the recommended ICMP probe on FreeBSD.
+- **`Ping` probe** (native, no fping) — needs a raw socket, so it only works when `smoke-agent`/
+  `smoked` runs **as root**; set the probe's `mode: privileged`.
+
+Non-ICMP probes (`DNS`, `HTTP`, `TCPConnect`, `NTP`, …) need no special privilege.
+
+**Run it as a service.** [`contrib/freebsd/`](contrib/freebsd/) ships `rc.d` scripts and install
+notes for running `smoke-agent` (and `smoked`) under FreeBSD's service manager.
+
 ### Docker Compose
 
 A minimal two-service stack (collector + TimescaleDB) using the **prebuilt GHCR image** — no clone
