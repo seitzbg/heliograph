@@ -15,13 +15,16 @@
 # Optional overrides (defaults shown):
 #   smoked_bin="/usr/local/bin/smoked"
 #   smoked_user="smoke"                                  # service account (created separately)
-#   smoked_addr=":8087"                                  # dashboard + read/admin API listen address
+#   smoked_addr="127.0.0.1:8087"                         # dashboard + read/admin API listen address (loopback by default)
 #   smoked_webdir="/usr/local/share/heliograph/web"      # static web assets (from the release tarball)
 #   smoked_config=""                                     # path to a YAML config file/dir; "" = built-in demo targets
 #   smoked_flags="-downsample"                           # extra flags (e.g. -agent-addr :8443 -agent-hostname host)
 #
-# The dashboard/API is UNAUTHENTICATED — bind loopback (smoked_addr="127.0.0.1:8087") or
-# front it with a TLS + Basic-Auth reverse proxy. See the README's Federation section.
+# The dashboard/API is UNAUTHENTICATED, so smoked_addr defaults to loopback. To reach it beyond
+# localhost, set smoked_addr (e.g. ":8087") and front it with a TLS + Basic-Auth reverse proxy —
+# never expose it directly. See the README's Federation section.
+# If the database is on another host, use an encrypted DSN (sslmode=require or verify-full) rather
+# than sslmode=disable.
 
 . /etc/rc.subr
 
@@ -34,7 +37,7 @@ load_rc_config "$name"
 : ${smoked_enable:="NO"}
 : ${smoked_bin:="/usr/local/bin/smoked"}
 : ${smoked_user:="smoke"}
-: ${smoked_addr:=":8087"}
+: ${smoked_addr:="127.0.0.1:8087"}
 : ${smoked_webdir:="/usr/local/share/heliograph/web"}
 : ${smoked_config:=""}
 : ${smoked_dsn:=""}
@@ -42,11 +45,14 @@ load_rc_config "$name"
 
 pidfile="/var/run/${name}.pid"
 
+# Pass the DB DSN through the environment (smoked reads SMOKED_DSN), NOT on the command line,
+# so the password never shows up in `ps`/argv. daemon(8) and the child inherit this export.
+if [ -n "${smoked_dsn}" ]; then
+	export SMOKED_DSN="${smoked_dsn}"
+fi
+
 # Assemble the child command. -serve runs the daemon forever.
 _child_args="-serve -addr ${smoked_addr} -webdir ${smoked_webdir}"
-if [ -n "${smoked_dsn}" ]; then
-	_child_args="${_child_args} -dsn ${smoked_dsn}"
-fi
 if [ -n "${smoked_config}" ]; then
 	_child_args="${_child_args} -config ${smoked_config}"
 fi

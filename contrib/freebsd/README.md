@@ -26,7 +26,10 @@ pw useradd smoke -c "Heliograph" -d /nonexistent -s /usr/sbin/nologin -w no   # 
 
 ICMP: the native `Ping` probe needs a raw socket (run as root with `mode: privileged`); the
 `FPing` probe works unprivileged — `pkg install fping` installs a setuid-root `fping(8)`. Other
-probes (`DNS`, `HTTP`, `TCPConnect`, `NTP`, …) need no special privilege.
+probes (`DNS`, `HTTP`, `TCPConnect`, `NTP`, …) need no special privilege. **To use the native
+`Ping` probe under these services, also set `smoke_agent_user="root"` (or `smoked_user="root"`)** —
+the scripts default to the unprivileged `smoke` account and pass `-u smoke` to `daemon(8)`, and
+`mode: privileged` alone does not grant raw-socket access. The `FPing` probe needs no such override.
 
 ## Vantage agent (`smoke_agent`)
 
@@ -68,8 +71,13 @@ sysrc smoked_dsn="postgres://smoke:smoke@db.example:5432/smoke?sslmode=disable"
 service smoked start
 ```
 
-The dashboard/API is **unauthenticated** — keep `smoked_addr` on loopback
-(`sysrc smoked_addr="127.0.0.1:8087"`) or front it with a TLS + Basic-Auth reverse proxy.
+The dashboard/API is **unauthenticated**, so `smoked_addr` defaults to loopback
+(`127.0.0.1:8087`). To reach it beyond localhost, set `smoked_addr` (e.g. `sysrc
+smoked_addr=":8087"`) and front it with a TLS + Basic-Auth reverse proxy — never expose it
+directly. The DSN is passed via the environment (`SMOKED_DSN`), so the password stays out of `ps`;
+if the database is on another host, use an encrypted DSN (`sslmode=require` or `verify-full`, with
+the appropriate root/verify cert) rather than the `sslmode=disable` shown above.
+
 Knobs: `smoked_bin`, `smoked_user`, `smoked_addr`, `smoked_webdir`
 (default `/usr/local/share/heliograph/web`), `smoked_config`, `smoked_flags`
 (default `-downsample`; add `-agent-addr :8443 -agent-hostname <host>` to accept remote vantages).

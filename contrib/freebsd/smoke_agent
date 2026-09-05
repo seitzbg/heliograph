@@ -37,11 +37,11 @@ load_rc_config "$name"
 
 pidfile="/var/run/${name}.pid"
 
-# Assemble the child command: config, optional on-disk spool, then any extra flags.
-_child_args="-config ${smoke_agent_config}"
-if [ -n "${smoke_agent_spool}" ]; then
-	_child_args="${_child_args} -spool-dir ${smoke_agent_spool}"
-fi
+# Assemble the child command. Pass -spool-dir EXPLICITLY (as -spool-dir=<value>), even when
+# empty: smoke-agent only clears a config file's spool_dir on an explicit empty flag — omitting
+# it keeps the file's value — so an empty smoke_agent_spool must send `-spool-dir=` to actually
+# select in-memory mode, matching this knob's documented "set '' to disable" behavior.
+_child_args="-config ${smoke_agent_config} -spool-dir=${smoke_agent_spool}"
 _child_args="${_child_args} ${smoke_agent_flags}"
 
 # Supervise with daemon(8): -r restarts the child if it exits, -S sends its stdout/stderr
