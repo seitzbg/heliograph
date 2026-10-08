@@ -19,7 +19,8 @@
 # exists yet to pick up a bump upstream), so four extra --with lines below force Go's
 # minimal-version-selection to the patched versions (CVE-2026-46600, CVE-2026-56852,
 # GHSA-hrxh-6v49-42gf, and — added 2026-09 after Trivy flagged the built binary — CVE-2026-56854, an
-# auth bypass in golang.org/x/crypto/ssh, plus CVE-2026-84304 in google.golang.org/grpc). Re-check
+# auth bypass in golang.org/x/crypto/ssh, plus CVE-2026-84304 in google.golang.org/grpc; the x/text
+# floor was raised to v0.42.0 in 2026-10 for GO-2026-6629, a precis panic fixed in v0.41.0). Re-check
 # these floors whenever Caddy releases a version that bundles the fix natively, and drop them then.
 FROM caddy:2.11-builder@sha256:c7ae80243a530d532d20062d56d6198b3ab161eb6971d28716ef7ec55599fea4 AS build
 RUN xcaddy build \
@@ -30,21 +31,23 @@ RUN xcaddy build \
 	--with github.com/caddy-dns/namecheap@v1.0.0 \
 	--with github.com/caddy-dns/gandi@v1.1.0 \
 	--with golang.org/x/net/http2@v0.56.0 \
-	--with golang.org/x/text/language@v0.39.0 \
+	--with golang.org/x/text/language@v0.42.0 \
 	--with golang.org/x/crypto/ssh@v0.56.0 \
 	--with google.golang.org/grpc@v1.83.2
 
 # Same digest as before (caddy:2.11-alpine hasn't been rebuilt upstream since 2026-06-24), so the
 # c-ares/curl/libcurl/openssl packages it ships are stale relative to the Alpine 3.23 apk repo. The
-# apk step below pins them forward to the patched versions already published on that same v3.23/main
-# branch (CVE-2026-33630, CVE-2026-5773, CVE-2026-6276, and CVE-2026-14456 — an openssl QUIC DoS; the
-# base still ships libcrypto3/libssl3 3.5.7-r0, verify with `apk policy libcrypto3`). Drop this RUN
-# once caddy:2.11-alpine (or a later minor) is rebuilt with these fixed already, and update the digest.
+# apk step below floors them at the first patched versions published on that same v3.23/main branch
+# (CVE-2026-33630, CVE-2026-5773, CVE-2026-6276, and CVE-2026-14456 — an openssl QUIC DoS; the base
+# still ships libcrypto3/libssl3 3.5.7-r0, verify with `apk policy libcrypto3`). These are `>=`
+# floors, not exact `=` pins: Alpine's repo carries only the newest revision of a package, so an exact
+# pin breaks every fresh build as soon as a newer revision is published. Drop this RUN once
+# caddy:2.11-alpine (or a later minor) is rebuilt with these fixed already, and update the digest.
 FROM caddy:2.11-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
 RUN apk update && apk add --no-cache --upgrade \
-	c-ares=1.34.8-r0 \
-	curl=8.20.0-r0 \
-	libcurl=8.20.0-r0 \
-	libcrypto3=3.5.8-r0 \
-	libssl3=3.5.8-r0
+	'c-ares>=1.34.8-r0' \
+	'curl>=8.20.0-r0' \
+	'libcurl>=8.20.0-r0' \
+	'libcrypto3>=3.5.8-r0' \
+	'libssl3>=3.5.8-r0'
 COPY --from=build /usr/bin/caddy /usr/bin/caddy
