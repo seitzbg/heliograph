@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // CA is the hub's federation certificate authority: a self-signed ECDSA P-256
@@ -62,6 +63,11 @@ func (s *Store) CA(ctx context.Context) (*CA, error) {
 // cert and key (each PEM-encoded) plus the CA's own cert PEM, so a caller
 // has everything needed to configure a vantage's mTLS client identity and
 // verify it against the hub's root.
+//
+// name must already be registered (ErrNotRegistered otherwise): the new
+// certificate's serial is recorded against the registration before the
+// certificate is returned, which is what IsActive authorizes. Certificates
+// issued earlier for the same registration stay valid; Revoke retires them all.
 func (s *Store) IssueClientCert(ctx context.Context, name string) (certPEM, keyPEM, caPEM []byte, err error) {
 	ca, err := s.CA(ctx)
 	if err != nil {
@@ -95,6 +101,17 @@ func (s *Store) IssueClientCert(ctx context.Context, name string) (certPEM, keyP
 	keyDER, err := x509.MarshalECPrivateKey(key)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("vantage: issue client cert: marshal key: %w", err)
+	}
+
+	// Record the serial last, so a certificate is never handed out unless it is authorized. The
+	// foreign key on vantages(name) fails the insert for an unregistered (or just-revoked) name.
+	if _, err := s.pool.Exec(ctx,
+		`INSERT INTO vantage_certs (name, serial) VALUES ($1, $2)`, name, serialKey(serial)); err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23503" { // foreign_key_violation
+			return nil, nil, nil, fmt.Errorf("vantage: issue client cert for %q: %w", name, ErrNotRegistered)
+		}
+		return nil, nil, nil, fmt.Errorf("vantage: issue client cert: record serial: %w", err)
 	}
 
 	certPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})

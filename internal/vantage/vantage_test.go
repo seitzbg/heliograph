@@ -2,6 +2,11 @@ package vantage
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/x509"
+	"encoding/pem"
+	"errors"
+	"math/big"
 	"os"
 	"testing"
 	"time"
@@ -20,10 +25,40 @@ func testStore(t *testing.T) *Store {
 		t.Fatalf("New: %v", err)
 	}
 	t.Cleanup(s.Close)
-	if _, err := s.pool.Exec(context.Background(), "TRUNCATE vantages"); err != nil {
+	if _, err := s.pool.Exec(context.Background(), "TRUNCATE vantages, vantage_certs"); err != nil {
 		t.Fatalf("truncate: %v", err)
 	}
 	return s
+}
+
+// issuedSerial mints a client certificate for name through IssueClientCert and returns its serial,
+// the value requireAgent passes to IsActive from a verified peer certificate.
+func issuedSerial(t *testing.T, s *Store, name string) *big.Int {
+	t.Helper()
+	certPEM, _, _, err := s.IssueClientCert(context.Background(), name)
+	if err != nil {
+		t.Fatalf("IssueClientCert(%s): %v", name, err)
+	}
+	block, _ := pem.Decode(certPEM)
+	if block == nil {
+		t.Fatal("IssueClientCert: certPEM is not valid PEM")
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatalf("parse issued cert: %v", err)
+	}
+	return cert.SerialNumber
+}
+
+// unissuedSerial is a serial no IssueClientCert call recorded — the serial of a certificate
+// deployed before serials were recorded, or of one minted outside the registry.
+func unissuedSerial(t *testing.T) *big.Int {
+	t.Helper()
+	n, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		t.Fatalf("rand serial: %v", err)
+	}
+	return n
 }
 
 func TestRegisterIsActiveListRevoke(t *testing.T) {
@@ -38,10 +73,23 @@ func TestRegisterIsActiveListRevoke(t *testing.T) {
 		t.Fatalf("re-Register: %v", err)
 	}
 
-	if active, err := s.IsActive(ctx, "nyc"); err != nil || !active {
+	serial := issuedSerial(t, s, "nyc")
+
+	// A serial never issued for this registration, or none at all, is refused and is not
+	// counted as the vantage being seen.
+	for _, bad := range []*big.Int{unissuedSerial(t), nil} {
+		if active, err := s.IsActive(ctx, "nyc", bad); err != nil || active {
+			t.Fatalf("IsActive(nyc, unissued %v) = (%v,%v), want (false,nil)", bad, active, err)
+		}
+	}
+	if infos, err := s.List(ctx); err != nil || len(infos) != 1 || !infos[0].LastSeen.IsZero() {
+		t.Fatalf("List after rejected IsActive = %v (err %v), want nyc with zero LastSeen", infos, err)
+	}
+
+	if active, err := s.IsActive(ctx, "nyc", serial); err != nil || !active {
 		t.Fatalf("IsActive(nyc) = (%v,%v), want (true,nil)", active, err)
 	}
-	if active, err := s.IsActive(ctx, "ghost"); err != nil || active {
+	if active, err := s.IsActive(ctx, "ghost", serial); err != nil || active {
 		t.Fatalf("IsActive(ghost) = (%v,%v), want (false,nil)", active, err)
 	}
 
@@ -57,7 +105,7 @@ func TestRegisterIsActiveListRevoke(t *testing.T) {
 	if removed, err := s.Revoke(ctx, "nyc"); err != nil || !removed {
 		t.Fatalf("Revoke = (%v,%v), want (true,nil)", removed, err)
 	}
-	if active, err := s.IsActive(ctx, "nyc"); err != nil || active {
+	if active, err := s.IsActive(ctx, "nyc", serial); err != nil || active {
 		t.Fatalf("IsActive(nyc) after Revoke = (%v,%v), want (false,nil)", active, err)
 	}
 	if removed, _ := s.Revoke(ctx, "nyc"); removed {
@@ -83,8 +131,8 @@ func TestMigratesLegacyVantageKeysTable(t *testing.T) {
 	}
 	defer pool.Close()
 
-	// Start from a clean slate for this test's two tables.
-	if _, err := pool.Exec(ctx, `DROP TABLE IF EXISTS vantages, vantage_keys`); err != nil {
+	// Start from a clean slate for this test's tables.
+	if _, err := pool.Exec(ctx, `DROP TABLE IF EXISTS vantage_certs, vantages, vantage_keys`); err != nil {
 		t.Fatalf("drop pre-existing tables: %v", err)
 	}
 	// Safety net: if New() below never runs (e.g. it fails before reaching the migration),
@@ -146,9 +194,142 @@ func TestMigratesLegacyVantageKeysTable(t *testing.T) {
 		t.Errorf("vantage_keys still exists after migration, to_regclass = %v", *regclass)
 	}
 
+	// A pre-mTLS vantage never held a certificate, so it is not a legacy registration: only a
+	// certificate issued by a later `vantage add` authorizes it.
+	if active, err := s.IsActive(ctx, "legacy-vantage", unissuedSerial(t)); err != nil || active {
+		t.Errorf("IsActive(migrated pre-mTLS vantage, unissued serial) = (%v,%v), want (false,nil)", active, err)
+	}
+
 	// Clean up the migrated row so it doesn't leak into other tests sharing "vantages".
 	if _, err := s.Revoke(ctx, "legacy-vantage"); err != nil {
 		t.Fatalf("cleanup Revoke: %v", err)
+	}
+}
+
+// TestUpgradeKeepsPreexistingVantageCertsUntilRevoked covers a hub upgrading from a release that
+// recorded no certificate serials. Its vantages are running with certificates whose serials the
+// registry never saw; they must keep authenticating with no operator action (each pre-existing
+// row becomes a legacy registration), but only until the vantage is revoked — a re-added name
+// accepts only certificates issued after the re-add. A vantage registered after the upgrade, and
+// a hub restart re-running the schema, must not widen any of this.
+func TestUpgradeKeepsPreexistingVantageCertsUntilRevoked(t *testing.T) {
+	ctx := context.Background()
+	dsn := os.Getenv("SMOKE_TEST_DSN")
+	if dsn == "" {
+		t.Skip("set SMOKE_TEST_DSN to run the TimescaleDB integration test")
+	}
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("pgxpool.New: %v", err)
+	}
+	defer pool.Close()
+
+	// The registry as the previous release left it: the vantages table without legacy_certs, and
+	// no vantage_certs table, holding one deployed vantage.
+	if _, err := pool.Exec(ctx, `DROP TABLE IF EXISTS vantage_certs, vantages`); err != nil {
+		t.Fatalf("drop registry tables: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		CREATE TABLE vantages (
+			name       text PRIMARY KEY,
+			created_at timestamptz NOT NULL DEFAULT now(),
+			last_seen  timestamptz
+		);
+		INSERT INTO vantages (name) VALUES ('deployed')`); err != nil {
+		t.Fatalf("create pre-upgrade registry: %v", err)
+	}
+	deployedCert := unissuedSerial(t) // its serial was never recorded
+
+	s, err := New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("New (upgrade): %v", err)
+	}
+	defer s.Close()
+	t.Cleanup(func() { _, _ = pool.Exec(context.Background(), `TRUNCATE vantages, vantage_certs`) })
+
+	active := func(name string, serial *big.Int) bool {
+		t.Helper()
+		ok, err := s.IsActive(ctx, name, serial)
+		if err != nil {
+			t.Fatalf("IsActive(%s): %v", name, err)
+		}
+		return ok
+	}
+	if !active("deployed", deployedCert) {
+		t.Fatal("pre-upgrade vantage's deployed certificate rejected after upgrade, want accepted")
+	}
+
+	// A vantage registered after the upgrade gets no such allowance, even across a restart.
+	if err := s.Register(ctx, "added-later"); err != nil {
+		t.Fatalf("Register(added-later): %v", err)
+	}
+	restarted, err := New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("New (restart): %v", err)
+	}
+	restarted.Close()
+	if active("added-later", unissuedSerial(t)) {
+		t.Error("vantage registered after the upgrade accepts an unissued certificate, want rejected")
+	}
+	if !active("deployed", deployedCert) {
+		t.Error("pre-upgrade vantage's deployed certificate rejected after a restart, want accepted")
+	}
+
+	// Revoke + re-add retires the pre-upgrade certificate like any other.
+	if _, err := s.Revoke(ctx, "deployed"); err != nil {
+		t.Fatalf("Revoke(deployed): %v", err)
+	}
+	if err := s.Register(ctx, "deployed"); err != nil {
+		t.Fatalf("re-Register(deployed): %v", err)
+	}
+	reissued := issuedSerial(t, s, "deployed")
+	if active("deployed", deployedCert) {
+		t.Error("pre-upgrade certificate accepted after revoke + re-add, want rejected")
+	}
+	if !active("deployed", reissued) {
+		t.Error("certificate issued by the re-add rejected, want accepted")
+	}
+}
+
+// TestSchemaRerunKeepsNewVantagesStrict covers the schema running on every startup of a hub that
+// was installed fresh (no upgrade): a vantage registered between runs must not come back as a
+// legacy registration that accepts certificates it never issued.
+func TestSchemaRerunKeepsNewVantagesStrict(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+	if _, err := s.pool.Exec(ctx, `DROP TABLE vantage_certs, vantages`); err != nil {
+		t.Fatalf("drop registry tables: %v", err)
+	}
+	fresh, err := New(ctx, os.Getenv("SMOKE_TEST_DSN"))
+	if err != nil {
+		t.Fatalf("New (fresh install): %v", err)
+	}
+	defer fresh.Close()
+	if err := fresh.Register(ctx, "nyc"); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	for i := 0; i < 2; i++ {
+		again, err := New(ctx, os.Getenv("SMOKE_TEST_DSN"))
+		if err != nil {
+			t.Fatalf("New (rerun %d): %v", i+1, err)
+		}
+		again.Close()
+	}
+	if active, err := fresh.IsActive(ctx, "nyc", unissuedSerial(t)); err != nil || active {
+		t.Errorf("IsActive(nyc, unissued) after schema reruns = (%v,%v), want (false,nil)", active, err)
+	}
+}
+
+// TestIssueClientCertRequiresRegisteredName covers minting for a name with no registry row: no
+// certificate is returned, so nothing unrecorded ever leaves the hub.
+func TestIssueClientCertRequiresRegisteredName(t *testing.T) {
+	s := testStore(t)
+	certPEM, keyPEM, _, err := s.IssueClientCert(context.Background(), "ghost")
+	if !errors.Is(err, ErrNotRegistered) {
+		t.Fatalf("IssueClientCert(unregistered) err = %v, want ErrNotRegistered", err)
+	}
+	if certPEM != nil || keyPEM != nil {
+		t.Error("IssueClientCert(unregistered) returned certificate material")
 	}
 }
 

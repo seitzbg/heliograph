@@ -119,7 +119,7 @@ type ReloadIdentity struct {
 	// here has its window and all alert state dropped.
 	ValidTarget map[string]bool
 	// SameTarget[t]: t's measurement identity (host/probe/params/...) is unchanged. If it
-	// changed, t's window and alert state are not inherited (t is seeded from history instead).
+	// changed, t's window and alert state are not inherited.
 	SameTarget map[string]bool
 	// Attached[t][name]: alert `name` is attached to target t in the NEW config. State for an
 	// alert not currently attached to t is never inherited — so detaching an alert and later

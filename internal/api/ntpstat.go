@@ -29,6 +29,9 @@ type remoteNTPVal struct {
 	// reader supplies the target's current identity and a stale reading whose key no longer matches
 	// is refused, so a same-host reconfiguration can't mislabel the new endpoint (M3).
 	ts time.Time // when the round was measured; an out-of-order older report can't roll it back (M3).
+	// cleared marks a tombstone: the round at ts carried no stat. It reads as absent, but keeps ts as
+	// the freshness watermark so a delayed older round can't bring back an obsolete reading.
+	cleared bool
 }
 
 // set records (or overwrites) a vantage's latest clock stat for a target, tagged with the
@@ -45,34 +48,40 @@ func (r *remoteNTPStats) set(vantage, target string, offsetSec float64, stratum 
 	if cur, ok := r.m[k]; ok && ts.Before(cur.ts) {
 		return
 	}
-	r.m[k] = remoteNTPVal{offsetSec, stratum, measure, key, ts}
+	r.m[k] = remoteNTPVal{offsetSec: offsetSec, stratum: stratum, measure: measure, key: key, ts: ts}
 }
 
 // clear drops a vantage's clock stat for a target — used when a round no longer carries one
 // (unsynchronized, unreachable, or an agent that does not report the stat), so a remote panel
 // stops showing a value that is no longer being measured rather than a stale one. Like set it is
-// freshness-gated: an older round's clear can't wipe a newer round's reading (M3).
+// freshness-gated: an older round's clear can't wipe a newer round's reading (M3). It leaves a
+// timestamped tombstone rather than deleting the entry, so the gate also holds the other way: a
+// store-and-forward replay of a round older than the clear can't resurrect an obsolete offset.
 func (r *remoteNTPStats) clear(vantage, target string, ts time.Time) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.m == nil {
+		r.m = make(map[remoteNTPKey]remoteNTPVal)
+	}
 	k := remoteNTPKey{vantage, target}
 	if cur, ok := r.m[k]; ok && ts.Before(cur.ts) {
 		return
 	}
-	delete(r.m, k)
+	r.m[k] = remoteNTPVal{ts: ts, cleared: true}
 }
 
 // lookupFor returns a per-target accessor bound to one vantage, matching Server.NTPStat's shape so
 // latestDTO consumes either the hub's local registry or a remote vantage's store uniformly. It
 // refuses a reading whose stored measurement identity differs from wantKey (the target's current
 // endpoint), so a remote panel never shows a superseded server's offset after the target is
-// repointed (M3). wantKey == "" skips the identity gate (parity with ntpprobe.LatestFor).
+// repointed (M3). wantKey == "" skips the identity gate (parity with ntpprobe.LatestFor). A cleared
+// entry (tombstone) reads as absent.
 func (r *remoteNTPStats) lookupFor(vantage string) func(target, wantKey string) (float64, uint8, string, bool) {
 	return func(target, wantKey string) (float64, uint8, string, bool) {
 		r.mu.RLock()
 		defer r.mu.RUnlock()
 		v, ok := r.m[remoteNTPKey{vantage, target}]
-		if !ok || (wantKey != "" && v.key != wantKey) {
+		if !ok || v.cleared || (wantKey != "" && v.key != wantKey) {
 			return 0, 0, "", false
 		}
 		return v.offsetSec, v.stratum, v.measure, true

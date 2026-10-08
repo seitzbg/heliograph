@@ -13,6 +13,7 @@ import (
 	"io"
 	"log/slog"
 	"math"
+	"math/big"
 	"net"
 	"net/http"
 	"sort"
@@ -35,13 +36,16 @@ type VantageAdmin interface {
 	Register(ctx context.Context, name string) error
 	List(ctx context.Context) ([]vantage.Info, error)
 	Revoke(ctx context.Context, name string) (removed bool, err error)
-	// IsActive reports whether name is a known, non-revoked vantage — the authorization check
-	// requireAgent runs against a client cert's CommonName (mTLS federation auth).
-	IsActive(ctx context.Context, name string) (bool, error)
+	// IsActive reports whether a client certificate (CommonName name, serial number serial) is a
+	// currently authorized credential: name is registered, not revoked, and the certificate was
+	// issued for this registration — the authorization check requireAgent runs (mTLS federation
+	// auth). A certificate issued before a revoke stays rejected after the name is re-added.
+	IsActive(ctx context.Context, name string, serial *big.Int) (bool, error)
 	// IssueClientCert mints a fresh mTLS client identity (leaf cert + key, each PEM-encoded) for
-	// name from the hub's federation CA, plus the CA's own cert PEM so the caller can verify the
-	// hub in turn. addVantage calls this immediately after Register so the one-click "add
-	// vantage" admin flow can hand back a ready-to-run onboarding bundle.
+	// the registered vantage name from the hub's federation CA, plus the CA's own cert PEM so the
+	// caller can verify the hub in turn, and records it as authorized for name. addVantage calls
+	// this immediately after Register so the one-click "add vantage" admin flow can hand back a
+	// ready-to-run onboarding bundle.
 	IssueClientCert(ctx context.Context, name string) (certPEM, keyPEM, caPEM []byte, err error)
 }
 
