@@ -109,9 +109,9 @@ name and it downloads a ready-to-run `<name>-vantage.tar.gz` — `agent.yaml`
 unpack it, and `docker compose up -d` — no key, ever. The panel also **list**s
 vantages (name, created, last-seen, target count), **regenerate**s one (issues
 and downloads a *fresh* certificate bundle for an existing name — the
-previously issued certificate keeps working, since there's no revocation list;
-to actually retire a credential, **revoke** the vantage and re-**add** it), and
-**revoke**s one (removes it from the registry — see Security model below).
+previously issued certificate keeps working too; to retire every earlier
+certificate, **revoke** the vantage and re-**add** it), and **revoke**s one
+(removes it from the registry — see Security model below).
 It's reached through the proxy (behind the dashboard's Basic Auth, then its
 own admin password) or on `http://localhost:8087/` on the hub.
 
@@ -152,11 +152,19 @@ revoked vantage "nyc"           # this CN is rejected on its very next request
 ```
 
 Revocation is by **removal from the registry**, not certificate expiry or a
-CRL: `requireAgent` looks up the presented certificate's CommonName against the
-active vantage list on every request, so a revoked vantage is locked out
-immediately even though its certificate itself remains cryptographically
-valid until it expires. Re-running `vantage add <name>` for a revoked name
-re-registers it and issues it a fresh certificate.
+CRL. The hub records the serial number of every certificate it issues, and on
+every request `requireAgent` checks that the presented certificate's CommonName
+is a registered vantage *and* that its serial was issued for that registration.
+Revoking deletes the vantage together with its recorded serials, so it is
+locked out immediately even though its certificates remain cryptographically
+valid until they expire. Re-running `vantage add <name>` for a revoked name
+re-registers it and issues a fresh certificate — and only that certificate is
+accepted; every certificate issued before the revoke stays rejected. In short:
+
+- **Regenerate** (dashboard, or `vantage add` for a registered name) adds a
+  certificate; the ones issued earlier keep working.
+- **Revoke, then re-add** retires every earlier certificate for the name; only
+  the new bundle works. This is how to retire a leaked or replaced credential.
 
 ## Step 3 — Run the agent at the vantage
 
@@ -248,12 +256,15 @@ spool_dir: /var/lib/smoke-agent/spool
   (`RequireAndVerifyClientCert`) before any request reaches a handler; a
   request presenting no certificate, or one not signed by the hub's CA, never
   gets that far. There is no bearer token to leak, forward, or accidentally log.
-- **Authorization is the certificate's CommonName**, checked against the active
-  (registered, not revoked) vantage list on *every* request — so revoking a
-  vantage takes effect on its very next request even though the certificate
-  itself remains cryptographically valid. A CN that isn't a currently active
-  vantage → `403`; no client certificate at all → the TLS handshake itself
-  fails before an HTTP status is ever produced.
+- **Authorization is the certificate's CommonName and serial number**, checked
+  on *every* request: the CN must be an active (registered, not revoked)
+  vantage, and the serial must be one the hub issued for that registration. So
+  revoking a vantage takes effect on its very next request even though the
+  certificate itself remains cryptographically valid, and re-adding the name
+  later does not revive it. A CN that isn't a currently active vantage, or a
+  certificate not issued for its current registration → `403`; no client
+  certificate at all → the TLS handshake itself fails before an HTTP status is
+  ever produced.
 - **The hub is authoritative** for each target's probe/host; the agent only sends
   raw round-trip times for its assigned targets. Unassigned or malformed results
   are dropped and counted.
@@ -288,6 +299,19 @@ retention window** — the raw rows behind them are already gone, so the long-ra
 (400-day) view keeps only the last ~30 days plus whatever accrues after. `smoked`
 logs a warning when this runs. If that history matters, snapshot the database
 before upgrading. New deployments are unaffected.
+
+### Certificate serial tracking
+
+Hubs at v2.2.0 and earlier did not record the serials of the certificates they
+issued. On the first start after upgrading, every vantage already in the
+registry is marked as a **legacy** registration: it keeps accepting any
+certificate signed by the hub's CA that bears its name, so its deployed agent
+keeps reporting with no action needed. Vantages added after the upgrade accept
+only certificates the hub recorded. A legacy vantage stays that way until it is
+revoked; to bring one under serial checking, revoke and re-add it and redeploy
+the new bundle — which also retires every certificate issued for it before.
+Mint certificates with the upgraded `smoked`: one minted by an older binary is
+not recorded, so a vantage registered after the upgrade rejects it.
 
 ### Agent fingerprint migration
 
@@ -348,8 +372,10 @@ a path reuse can pause data.
   vantage) to get a bundle matching the hub's current CA.
 - **Agent gets `403 unknown or revoked vantage`** — the certificate is valid
   and trusted, but its CommonName isn't a currently registered vantage (never
-  registered, or `vantage revoke`d). `vantage add <name>` (re-)registers it and
-  issues a fresh certificate; update the agent with the new bundle.
+  registered, or `vantage revoke`d), or the certificate was issued before the
+  vantage was last revoked (an old bundle still deployed after a revoke and
+  re-add). `vantage add <name>` (re-)registers it if needed and issues a fresh
+  certificate; update the agent with the new bundle.
 - **Vantage never appears / `LAST-SEEN never`** — the agent can't reach the hub
   on its mTLS port (DNS/firewall/`-agent-addr` not published), or no target lists
   that vantage. Check the agent log and that `vantages:` includes the name;

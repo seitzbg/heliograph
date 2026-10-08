@@ -271,10 +271,12 @@ vantage**: type a name and it downloads a ready-to-run `<name>-vantage.tar.gz` �
 to print the rendered `agent.yaml` to stdout, or pass `-json` for the raw PEMs). The panel also
 **list**s vantages and lets you **regenerate** one — issuing and downloading a fresh certificate
 bundle for an existing name, which does *not* invalidate the certificate already deployed there
-(there's no revocation list; both stay valid until the vantage is revoked). Revocation is by
-removal: `smoked vantage revoke <name>` deletes it from the registry, and any certificate bearing
-that name is rejected on its very next request even though the certificate itself remains
-cryptographically valid. To fully retire a credential, revoke the vantage and re-add it.
+(both stay valid until the vantage is revoked). Revocation is by removal: `smoked vantage revoke
+<name>` deletes it from the registry, and every certificate issued for that name is rejected on
+its very next request even though the certificate itself remains cryptographically valid. The hub
+records the serial of each certificate it issues and accepts only those issued for a vantage's
+current registration, so to fully retire a credential, revoke the vantage and re-add it: the
+re-add's fresh bundle works, and no certificate issued before the revoke is accepted again.
 
 **Bundled Caddy** (automatic Let's Encrypt, dashboard only) — opt-in via the `federation` compose
 profile:
@@ -529,8 +531,8 @@ internal/
   mcp/           MCP server (stdio) — diagnosis tools + a stage/review/apply config-write flow
                  over the same HTTP API, for AI-assisted operation (+ tests)
   federation/    per-vantage assignment builder + measurement fingerprint
-  vantage/        per-vantage registry + self-bootstrapped CA (mTLS client-cert auth; revoke by
-                  removing the name)
+  vantage/        per-vantage registry + self-bootstrapped CA (mTLS client-cert auth by name +
+                  issued serial; revoke by removing the name)
   agentwire/     shared hub<->agent wire types
   agent/         smoke-agent buffer + on-disk spool + hub client
   importer/
