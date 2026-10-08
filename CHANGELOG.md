@@ -6,6 +6,14 @@ All notable changes to **Heliograph** are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- **Fresh container image builds work again.** The collector `Dockerfile` and `Caddy.Dockerfile` pinned
+  security-patched Alpine packages (`libcrypto3`/`libssl3`, and in the Caddy image `curl`/`libcurl`/
+  `c-ares`) to exact revisions. Alpine's repository keeps only the newest revision of each package, so
+  once a newer revision was published (`libcrypto3`/`libssl3` 3.5.9-r0, `curl` 8.22.0-r0), the pinned ones
+  disappeared and every fresh build failed in the `apk` step. Those pins are now `>=` minimum
+  versions: the CVE fixes still can't regress, and newer revisions install without breaking the build.
+
 ### Security
 - **Revoking and re-adding a vantage now retires its earlier certificates.** Agent authorization
   checked only the client certificate's CommonName against the registry, so after
@@ -22,6 +30,11 @@ All notable changes to **Heliograph** are recorded here. The format follows
   new bundle) to bring it under serial checking. Certificates minted by an older `smoked` binary
   against an upgraded database are not recorded and are refused for vantages registered after the
   upgrade. See *Certificate serial tracking* in `docs/federation.md`.
+- **`golang.org/x/text` bumped from v0.39.0 to v0.42.0** for [GO-2026-6629](https://pkg.go.dev/vuln/GO-2026-6629)
+  (a panic in `x/text/secure/precis`, fixed in v0.41.0). `govulncheck` flagged it through `pgx`'s
+  SCRAM password handling. That path runs the operator-supplied database password through a
+  different precis profile from the one the advisory names, so no remote trigger is known; the bump
+  clears the scan. Caddy's `--with golang.org/x/text` floor is raised to match.
 
 ## [2.2.0] - 2026-09-05
 
