@@ -28,6 +28,16 @@ All notable changes to **Heliograph** are recorded here. The format follows
   measurement. A target that only gains an alert on reload is still warm-started. On a cold start,
   smoked has no record of a target's previous definition, so a target redefined while smoked was
   stopped can still be warm-started from its recent old rounds.
+- **`smoked import smokeping --history` now stores history where the target's graph reads it.**
+  `--apply` gives every imported target a new stable id, but `--history` stored each RRD's rows
+  under the SmokePing path, so the backfilled history never appeared on the configured target's
+  graph or in `/api/series`. `--history` now looks each target up by path in the DB config and, when
+  given, the YAML config passed with `--config`, and stores its rows under that target's id. A target
+  that matches no configured target, or more than one, is named on stderr, counted as `unresolved`
+  in the summary, and not imported; the run then exits `3`, the same as other partial failures.
+  With no `--config` and no targets in the DB config, rows are still keyed by SmokePing path, which
+  matches a YAML target that has no `id`, and the run says so. History already imported under
+  SmokePing paths is not moved; re-run `--history` to store it under the target ids.
 - **The FreeBSD `rc.d` scripts now actually start their services.** The v2.2.0 scripts in
   [`contrib/freebsd/`](contrib/freebsd/) built a `daemon(8)` command line that could never run, for
   three independent reasons: the unquoted two-word title (`-t Heliograph hub`) split, so `daemon(8)`
