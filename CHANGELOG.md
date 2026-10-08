@@ -54,6 +54,33 @@ All notable changes to **Heliograph** are recorded here. The format follows
   `smoked_args=""` now drops the default `-downsample`. The `freebsd-test` CI job now installs both
   scripts in its FreeBSD VM and drives start/status/restart/stop through `service(8)`, checking the
   service user, argv, environment and pidfile, plus smoked's API.
+- **`heliograph_triage` covers the hub's own `local` vantage and works on a single-host hub.** It
+  took its vantage list from the remote-vantage registry (`GET /api/admin/vantages`), which never
+  includes `local`. With a remote vantage registered, triage never read local measurements, so a
+  target at 100% loss from the hub but healthy from the remote was reported healthy, and
+  `vantage=local` was rejected as unknown. On a hub without the registry (no database or no admin
+  password, e.g. the memory-store demo), triage failed outright with a 404. It now reads the
+  vantages from each target's own vantage set in `/api/targets`, counts a target only at the
+  vantages that measure it, and uses the registry only for stale-collector detection when the hub
+  has one. Errors other than an absent registry (a 5xx, an auth failure) still fail the call.
+  `heliograph_vantages` on a hub without the registry now explains that instead of returning
+  "404 page not found".
+- **`config_stage_edit_target` no longer deletes a target moved into its own subtree.** Moving a
+  target to a group path at or below itself (e.g. `g/a` into `g/a/sub`) detached it into an
+  unreachable cycle, and the target vanished from the staged config with no error. The move is
+  now rejected and the staged config is left unchanged.
+- **MCP config change summaries report group-level changes.** The `config_stage_*` results and
+  `config_review` compared only host-bearing nodes, so changing a group's own settings (its `step`,
+  probe params, `vantages`, `alerts`) was summarized as no change at all, although it changes every
+  target beneath it. Summaries now list groups added, removed, or with changed settings, and count
+  a target as changed when a group above it changes a setting it inherits.
+- **MCP config staging validates against the hub's real file config.** Local validation composed
+  the staged DB fragment onto a defaults-only config, so a DB target that inherits its probe from
+  the hub's file config (valid on the hub, and allowed by the dashboard) failed with "no probe set",
+  and because every edit revalidates the whole fragment, one such target blocked all staging.
+  Staging now derives the hub's file config from its effective config and composes onto it as the
+  hub does. When that can't be reproduced locally, problems are reported as `warnings` instead of
+  blocking, and `config_apply`'s server-side validation stays authoritative.
 
 ### Security
 - **Revoking and re-adding a vantage now retires its earlier certificates.** Agent authorization
@@ -81,6 +108,12 @@ All notable changes to **Heliograph** are recorded here. The format follows
   mode, which is world-readable (`0644`) under the usual `022` umask. It is now created `0600`
   regardless of umask, and an existing file that `-out` overwrites is tightened to `0600` before any
   key material is written to it.
+- **`smoked mcp` no longer follows a redirect off the hub's origin.** The client already refused a
+  plaintext `http://` hub URL when Basic Auth or an admin password is set, but it followed
+  redirects: a `307` from the HTTPS login URL replayed the admin-password body to the redirect
+  target, and Go forwards the Basic Auth header to the same hostname even across an
+  `https://` → `http://` downgrade. Any redirect that leaves the configured scheme, host and port is
+  now refused for every request (login, retries, ordinary reads). The hub API never redirects.
 
 ## [2.2.0] - 2026-09-05
 

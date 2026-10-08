@@ -180,7 +180,8 @@ Phase-6 items all ship in the single **v1.0** line.
   config-read tool, and 7 config-write tools built around a local stage → review → apply flow
   (`config_stage_add_target`/`edit_target`/`remove_target`/`replace`, `config_review`,
   `config_apply`, `config_discard`) — only `config_apply` ever writes to the live hub, and staged
-  edits are validated locally with the daemon's own config parser first. Lets an MCP-aware
+  edits are validated locally first, with the daemon's own config parser composing them onto the
+  hub's file config. Lets an MCP-aware
   assistant (Claude Code, Claude Desktop, …) triage the network and safely propose config changes.
   See the [README's MCP server section](README.md#mcp-server).
 

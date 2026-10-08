@@ -93,6 +93,23 @@ func findNode(root *config.Node, ref string) (parent *config.Node, name string, 
 	return nil, "", nil, false
 }
 
+// groupPathEnters reports whether walking groupPath down from root passes through node (by
+// identity). Only existing segments are walked: ensureGroup would create the rest as fresh nodes,
+// which can't be node.
+func groupPathEnters(root *config.Node, groupPath string, node *config.Node) bool {
+	n := root
+	for _, seg := range strings.Split(groupPath, "/") {
+		n = n.Children[seg]
+		if n == nil {
+			return false
+		}
+		if n == node {
+			return true
+		}
+	}
+	return false
+}
+
 func pruneEmpty(root *config.Node) {
 	var clean func(n *config.Node)
 	clean = func(n *config.Node) {
@@ -167,6 +184,12 @@ func stageEditTarget(st *staging, in editTargetIn) error {
 		parent, name, node, ok := findNode(root, in.Target)
 		if !ok || node.Host == "" {
 			return fmt.Errorf("%w: target %q not found", ErrConfigInvalid, in.Target)
+		}
+		// A destination group that IS the target or lies beneath it would attach the target
+		// inside its own subtree and then detach it from the tree: an unreachable cycle, so
+		// the target would silently vanish. Reject it before touching anything.
+		if in.NewGroupPath != "" && groupPathEnters(root, in.NewGroupPath, node) {
+			return fmt.Errorf("%w: cannot move %q into its own subtree (%q)", ErrConfigInvalid, in.Target, in.NewGroupPath)
 		}
 		if in.Host != "" {
 			node.Host = in.Host
@@ -321,18 +344,52 @@ func registerConfigStage(s *sdk.Server, c *Client, st *staging) {
 	})
 }
 
+// stageResult is the change summary every config_stage_* tool returns: target paths added,
+// removed, and changed (including targets whose inherited group settings changed), the grouping
+// nodes added/removed/changed, and any advisory validation warnings.
 type stageResult struct {
-	Added   []string `json:"added"`
-	Removed []string `json:"removed"`
-	Changed []string `json:"changed"`
+	Added         []string `json:"added"`
+	Removed       []string `json:"removed"`
+	Changed       []string `json:"changed"`
+	GroupsAdded   []string `json:"groups_added,omitempty"`
+	GroupsRemoved []string `json:"groups_removed,omitempty"`
+	GroupsChanged []string `json:"groups_changed,omitempty"`
+	Warnings      []string `json:"warnings,omitempty"`
 }
 
 func stageResultFor(st *staging) (*sdk.CallToolResult, stageResult, error) {
-	added, removed, changed, err := st.diff()
+	cs, warnings, err := st.diff()
 	if err != nil {
 		return nil, stageResult{}, err
 	}
-	res := stageResult{Added: added, Removed: removed, Changed: changed}
-	msg := fmt.Sprintf("staged. added=%v removed=%v changed=%v — call config_review to inspect, config_apply to commit.", added, removed, changed)
-	return textResult(msg), res, nil
+	res := stageResult{
+		Added: cs.Added, Removed: cs.Removed, Changed: cs.Changed,
+		GroupsAdded: cs.GroupsAdded, GroupsRemoved: cs.GroupsRemoved, GroupsChanged: cs.GroupsChanged,
+		Warnings: warnings,
+	}
+	var b strings.Builder
+	b.WriteString("staged.\n")
+	writeChangeSet(&b, cs, warnings)
+	b.WriteString("Call config_review to inspect, config_apply to commit.\n")
+	return textResult(b.String()), res, nil
+}
+
+// writeChangeSet renders a change summary as text: the target lines always, group lines and
+// warnings only when present.
+func writeChangeSet(b *strings.Builder, cs changeSet, warnings []string) {
+	fmt.Fprintf(b, "added: %v\nremoved: %v\nchanged: %v\n", cs.Added, cs.Removed, cs.Changed)
+	for _, g := range []struct {
+		label string
+		paths []string
+	}{{"groups added", cs.GroupsAdded}, {"groups removed", cs.GroupsRemoved}, {"group settings changed (inherited by the targets beneath)", cs.GroupsChanged}} {
+		if len(g.paths) > 0 {
+			fmt.Fprintf(b, "%s: %v\n", g.label, g.paths)
+		}
+	}
+	if cs.empty() {
+		b.WriteString("(no differences from the live config)\n")
+	}
+	for _, w := range warnings {
+		fmt.Fprintf(b, "warning: %s\n", w)
+	}
 }

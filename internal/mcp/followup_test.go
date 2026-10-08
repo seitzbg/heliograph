@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"slices"
 	"testing"
 )
 
@@ -82,22 +83,28 @@ func TestAnalyzeTriageNoDataDowngradesGlobal(t *testing.T) {
 // --- Fix 5: an unmatched vantage filter errors instead of widening ---
 
 func TestTriageVantageNames(t *testing.T) {
-	vs := []Vantage{{Name: "a"}, {Name: "b"}}
+	rows := []Target{{ID: "x", Vantages: []string{"local", "a"}}, {ID: "y", Vantages: []string{"b"}}}
+	reg := []Vantage{{Name: "a"}, {Name: "b"}, {Name: "idle"}}
 
-	got, err := triageVantageNames(vs, "")
-	if err != nil || len(got) != 2 {
-		t.Fatalf("empty filter: got=%v err=%v", got, err)
+	got, err := triageVantageNames(rows, reg, "")
+	if err != nil || !slices.Equal(got, []string{"a", "b", "local"}) {
+		t.Fatalf("empty filter: got=%v err=%v, want every measuring vantage [a b local]", got, err)
 	}
-	got, err = triageVantageNames(vs, "a")
-	if err != nil || len(got) != 1 || got[0] != "a" {
-		t.Fatalf("filter=a: got=%v err=%v", got, err)
+	for _, filter := range []string{"a", "local", "idle"} {
+		got, err = triageVantageNames(rows, reg, filter)
+		if err != nil || !slices.Equal(got, []string{filter}) {
+			t.Errorf("filter=%s: got=%v err=%v", filter, got, err)
+		}
 	}
-	if _, err := triageVantageNames(vs, "zzz"); err == nil {
+	if _, err := triageVantageNames(rows, reg, "zzz"); err == nil {
 		t.Error("filter=zzz (unknown): expected error, got nil")
 	}
-	got, err = triageVantageNames(nil, "")
-	if err != nil || len(got) != 1 || got[0] != "" {
-		t.Fatalf("no vantages, no filter: got=%v err=%v", got, err)
+	// No vantage sets (a hub without a database) or no targets at all: one read of the local view.
+	for _, rows := range [][]Target{{{ID: "x"}}, nil} {
+		got, err = triageVantageNames(rows, nil, "")
+		if err != nil || !slices.Equal(got, []string{"local"}) {
+			t.Errorf("rows=%v: got=%v err=%v, want [local]", rows, got, err)
+		}
 	}
 }
 
