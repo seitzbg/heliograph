@@ -6,15 +6,13 @@ All notable changes to **Heliograph** are recorded here. The format follows
 
 ## [Unreleased]
 
-### Security
-- **`smoked mcp` no longer follows a redirect off the hub's origin.** The client already refused a
-  plaintext `http://` hub URL when Basic Auth or an admin password is set, but it followed
-  redirects: a `307` from the HTTPS login URL replayed the admin-password body to the redirect
-  target, and Go forwards the Basic Auth header to the same hostname even across an
-  `https://` → `http://` downgrade. Any redirect that leaves the configured scheme, host and port is
-  now refused for every request (login, retries, ordinary reads). The hub API never redirects.
-
 ### Fixed
+- **Fresh container image builds work again.** The collector `Dockerfile` and `Caddy.Dockerfile` pinned
+  security-patched Alpine packages (`libcrypto3`/`libssl3`, and in the Caddy image `curl`/`libcurl`/
+  `c-ares`) to exact revisions. Alpine's repository keeps only the newest revision of each package, so
+  once a newer revision was published (`libcrypto3`/`libssl3` 3.5.9-r0, `curl` 8.22.0-r0), the pinned ones
+  disappeared and every fresh build failed in the `apk` step. Those pins are now `>=` minimum
+  versions: the CVE fixes still can't regress, and newer revisions install without breaking the build.
 - **`heliograph_triage` covers the hub's own `local` vantage and works on a single-host hub.** It
   took its vantage list from the remote-vantage registry (`GET /api/admin/vantages`), which never
   includes `local`. With a remote vantage registered, triage never read local measurements, so a
@@ -42,6 +40,19 @@ All notable changes to **Heliograph** are recorded here. The format follows
   Staging now derives the hub's file config from its effective config and composes onto it as the
   hub does. When that can't be reproduced locally, problems are reported as `warnings` instead of
   blocking, and `config_apply`'s server-side validation stays authoritative.
+
+### Security
+- **`golang.org/x/text` bumped from v0.39.0 to v0.42.0** for [GO-2026-6629](https://pkg.go.dev/vuln/GO-2026-6629)
+  (a panic in `x/text/secure/precis`, fixed in v0.41.0). `govulncheck` flagged it through `pgx`'s
+  SCRAM password handling. That path runs the operator-supplied database password through a
+  different precis profile from the one the advisory names, so no remote trigger is known; the bump
+  clears the scan. Caddy's `--with golang.org/x/text` floor is raised to match.
+- **`smoked mcp` no longer follows a redirect off the hub's origin.** The client already refused a
+  plaintext `http://` hub URL when Basic Auth or an admin password is set, but it followed
+  redirects: a `307` from the HTTPS login URL replayed the admin-password body to the redirect
+  target, and Go forwards the Basic Auth header to the same hostname even across an
+  `https://` → `http://` downgrade. Any redirect that leaves the configured scheme, host and port is
+  now refused for every request (login, retries, ordinary reads). The hub API never redirects.
 
 ## [2.2.0] - 2026-09-05
 
