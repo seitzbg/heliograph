@@ -81,7 +81,8 @@ func (st *staging) ensure(ctx context.Context, c *Client) error {
 // those branches from the effective config yields the file config exactly.
 //
 // The returned advisory is empty when validation can be exact. It explains the gap otherwise:
-// the effective config is unreadable, or the live DB config does not validate locally against the
+// the effective config is unreadable, the running config wasn't composed from the stored DB
+// config (withoutFragmentBranches), or the live DB config does not validate locally against the
 // derived base (e.g. a hub newer than this binary, with probe kinds or settings it lacks).
 func hubFileConfig(ctx context.Context, c *Client, dbDoc json.RawMessage) (json.RawMessage, string) {
 	eff, _, err := c.getConfigDoc(ctx, "effective")
@@ -89,6 +90,9 @@ func hubFileConfig(ctx context.Context, c *Client, dbDoc json.RawMessage) (json.
 		return nil, fmt.Sprintf("the hub's effective config could not be read (%v)", err)
 	}
 	file, err := withoutFragmentBranches(eff, dbDoc)
+	if errors.Is(err, errSnapshotMismatch) {
+		return nil, err.Error()
+	}
 	if err != nil {
 		return nil, fmt.Sprintf("the hub's effective config could not be parsed (%v)", err)
 	}
@@ -98,8 +102,17 @@ func hubFileConfig(ctx context.Context, c *Client, dbDoc json.RawMessage) (json.
 	return file, ""
 }
 
+// errSnapshotMismatch: the effective config (the running runtime's snapshot) doesn't carry the
+// stored DB fragment's branches verbatim, so it wasn't composed from that fragment.
+var errSnapshotMismatch = errors.New("the hub's running config doesn't match its stored DB config " +
+	"(a reload is pending, or the hub rejected the stored fragment and kept the previous one)")
+
 // withoutFragmentBranches returns the effective config with the DB fragment's top-level target
-// branches removed.
+// branches removed. The effective config is the running snapshot while dbDoc is the stored
+// fragment, which can differ (e.g. `smoked config import` persisted a branch named like a
+// file-defined one; the hub rejects that on reload and keeps running the old fragment). Removing
+// such a branch would delete the file's own branch from the derived base, so each stored branch
+// must appear unchanged in the effective config, or errSnapshotMismatch is returned.
 func withoutFragmentBranches(effective, dbDoc json.RawMessage) (json.RawMessage, error) {
 	cfg, err := config.Parse(effective)
 	if err != nil {
@@ -109,8 +122,17 @@ func withoutFragmentBranches(effective, dbDoc json.RawMessage) (json.RawMessage,
 	if err != nil {
 		return nil, err
 	}
-	if cfg.Targets != nil && frag.Targets != nil {
-		for k := range frag.Targets.Children {
+	if frag.Targets != nil {
+		for k, branch := range frag.Targets.Children {
+			var running *config.Node
+			if cfg.Targets != nil {
+				running = cfg.Targets.Children[k]
+			}
+			want, _ := json.Marshal(branch)
+			got, _ := json.Marshal(running)
+			if running == nil || string(got) != string(want) {
+				return nil, errSnapshotMismatch
+			}
 			delete(cfg.Targets.Children, k)
 		}
 	}

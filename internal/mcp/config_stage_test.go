@@ -369,3 +369,36 @@ func TestStageWithoutHubConfigContextIsAdvisory(t *testing.T) {
 		t.Errorf("warnings=%v, want the unverifiable inherited-probe problem surfaced as a warning", staged.Warnings)
 	}
 }
+
+// TestStageAdvisoryWhenStoredDBDiffersFromRunning covers a stored DB fragment the running hub has
+// not loaded: `smoked config import` without -config persisted a branch named like a file-defined
+// one, which the hub rejects on reload and keeps running the old fragment. The effective config
+// then shows the FILE's branch under that name, so deriving the file config by removing the stored
+// fragment's branches would drop the real file branch and validate strictly against a base
+// missing it. Removing the conflicting DB target (the repair, which the hub accepts because its
+// file target remains) must not be blocked as an empty tree.
+func TestStageAdvisoryWhenStoredDBDiffersFromRunning(t *testing.T) {
+	const runningDB = `{"targets":{"children":{}}}`
+	const storedDB = `{"targets":{"children":{"file":{"id":"f-id","host":"10.0.0.1","probe":"Ping"}}}}`
+	hub := configHub(t, inheritedHubFile, runningDB)
+	c, _ := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/api/admin/config" && r.URL.Query().Get("source") != "effective" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"version": 8, "doc": json.RawMessage(storedDB)})
+			return
+		}
+		hub.ServeHTTP(w, r)
+	}))
+	cs := mcpSession(t, c)
+
+	var staged struct {
+		Removed  []string `json:"removed"`
+		Warnings []string `json:"warnings"`
+	}
+	res := callTool(t, cs, "config_stage_remove_target", map[string]any{"target": "f-id"}, &staged)
+	if res.IsError {
+		t.Fatalf("removing the conflicting stored DB target was blocked: %s", resultText(res))
+	}
+	if len(staged.Removed) != 1 || staged.Removed[0] != "file" {
+		t.Errorf("removed=%v, want [file]", staged.Removed)
+	}
+}
