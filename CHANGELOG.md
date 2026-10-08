@@ -6,14 +6,13 @@ All notable changes to **Heliograph** are recorded here. The format follows
 
 ## [Unreleased]
 
-### Security
-- **`smoked vantage add -out` writes the onboarding bundle owner-only.** The `.tar.gz` embeds the
-  vantage's client private key in `agent.yaml`, but was created with the default `0666`-minus-umask
-  mode, which is world-readable (`0644`) under the usual `022` umask. It is now created `0600`
-  regardless of umask, and an existing file that `-out` overwrites is tightened to `0600` before any
-  key material is written to it.
-
 ### Fixed
+- **Fresh container image builds work again.** The collector `Dockerfile` and `Caddy.Dockerfile` pinned
+  security-patched Alpine packages (`libcrypto3`/`libssl3`, and in the Caddy image `curl`/`libcurl`/
+  `c-ares`) to exact revisions. Alpine's repository keeps only the newest revision of each package, so
+  once a newer revision was published (`libcrypto3`/`libssl3` 3.5.9-r0, `curl` 8.22.0-r0), the pinned ones
+  disappeared and every fresh build failed in the `apk` step. Those pins are now `>=` minimum
+  versions: the CVE fixes still can't regress, and newer revisions install without breaking the build.
 - **A delayed NTP round no longer brings back an obsolete clock offset after it was cleared.** When a
   remote vantage reports an unsynchronized round, the hub clears that vantage's clock stat for the
   target, but the clear also dropped the stat's freshness timestamp. A store-and-forward replay of an
@@ -29,6 +28,18 @@ All notable changes to **Heliograph** are recorded here. The format follows
   measurement. A target that only gains an alert on reload is still warm-started. On a cold start,
   smoked has no record of a target's previous definition, so a target redefined while smoked was
   stopped can still be warm-started from its recent old rounds.
+
+### Security
+- **`golang.org/x/text` bumped from v0.39.0 to v0.42.0** for [GO-2026-6629](https://pkg.go.dev/vuln/GO-2026-6629)
+  (a panic in `x/text/secure/precis`, fixed in v0.41.0). `govulncheck` flagged it through `pgx`'s
+  SCRAM password handling. That path runs the operator-supplied database password through a
+  different precis profile from the one the advisory names, so no remote trigger is known; the bump
+  clears the scan. Caddy's `--with golang.org/x/text` floor is raised to match.
+- **`smoked vantage add -out` writes the onboarding bundle owner-only.** The `.tar.gz` embeds the
+  vantage's client private key in `agent.yaml`, but was created with the default `0666`-minus-umask
+  mode, which is world-readable (`0644`) under the usual `022` umask. It is now created `0600`
+  regardless of umask, and an existing file that `-out` overwrites is tightened to `0600` before any
+  key material is written to it.
 
 ## [2.2.0] - 2026-09-05
 
