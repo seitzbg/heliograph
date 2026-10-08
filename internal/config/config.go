@@ -608,12 +608,8 @@ func (c *Config) Monitors() ([]model.Monitor, error) {
 			vantages: vantages,
 		}
 		if n.Host != "" {
-			id := n.ID
-			if id == "" {
-				id = path
-			}
 			m := model.Monitor{
-				Name: path, ID: id, Title: n.Title, ProbeKind: eff.probe, Host: n.Host, IP: n.IP,
+				Name: path, ID: storageID(n, path), Title: n.Title, ProbeKind: eff.probe, Host: n.Host, IP: n.IP,
 				Pings: eff.pings, Step: eff.step, Params: eff.params,
 				Alerts: eff.alerts, Alertee: eff.alertee, Vantages: eff.vantages,
 			}
@@ -645,10 +641,7 @@ func (c *Config) Monitors() ([]model.Monitor, error) {
 			}
 		}
 		for _, key := range orderedChildren(n.Children) {
-			child := path + "/" + key
-			if path == "" {
-				child = key
-			}
+			child := childPath(path, key)
 			// The browser config tree uses slash-delimited paths, and the flattened path is the
 			// scheduler/store identity. Reject a slash in EVERY node key (including a grouping-only
 			// node), not merely the ambiguous cases that happen to collide with another monitor.
@@ -691,6 +684,57 @@ func (c *Config) Monitors() ([]model.Monitor, error) {
 		return out, fmt.Errorf("config: %d invalid target(s):\n  - %s", len(problems), strings.Join(problems, "\n  - "))
 	}
 	return out, nil
+}
+
+// childPath is the flattened path of the node at key under the node at parent: a top-level
+// key is bare, and each level below appends "/<key>". This is model.Monitor.Name.
+func childPath(parent, key string) string {
+	if parent == "" {
+		return key
+	}
+	return parent + "/" + key
+}
+
+// storageID is a host node's storage identity (model.Monitor.ID): its explicit id, or its
+// flattened path when it has none (pre-id behavior).
+func storageID(n *Node, path string) string {
+	if n.ID != "" {
+		return n.ID
+	}
+	return path
+}
+
+// TargetIdentity is where one host-bearing node's samples are stored: Path is its flattened
+// path (model.Monitor.Name) and ID its storage identity (model.Monitor.ID).
+type TargetIdentity struct {
+	Path, ID string
+}
+
+// TargetIdentities lists the path and storage id of every host-bearing node, named exactly as
+// Monitors names them. Unlike Monitors it applies no inheritance and no validation, so it also
+// works on a DB fragment on its own, whose leaves may inherit their probe from a default.yaml
+// the caller does not have. Invalid nodes are listed too; Monitors is what rejects them.
+func (c *Config) TargetIdentities() []TargetIdentity {
+	if c.Targets == nil {
+		return nil
+	}
+	var out []TargetIdentity
+	var walk func(path string, n *Node)
+	walk = func(path string, n *Node) {
+		for _, key := range orderedChildren(n.Children) {
+			child := n.Children[key]
+			if child == nil {
+				continue
+			}
+			p := childPath(path, key)
+			if child.Host != "" {
+				out = append(out, TargetIdentity{Path: p, ID: storageID(child, p)})
+			}
+			walk(p, child)
+		}
+	}
+	walk("", c.Targets)
+	return out
 }
 
 // MaxPings bounds the per-round sample count. The store persists pings as a

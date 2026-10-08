@@ -245,6 +245,33 @@ SMOKE_TEST_DSN='postgres://smoke:smoke@127.0.0.1:5433/smoke?sslmode=disable' \
 
 The schema (one `samples` hypertable) is created automatically on first connect.
 
+### Migrating from SmokePing
+
+`smoked import smokeping <config-dir>` converts a SmokePing `Targets`/`Probes`/`Database` config
+into a Heliograph target tree. Import the config first, then the RRD history:
+
+```sh
+DSN='postgres://user:pass@host:5432/smoke?sslmode=disable'
+smoked import smokeping /etc/smokeping/config --out smokeping.yaml   # review the converted tree
+smoked import smokeping /etc/smokeping/config --apply --dsn "$DSN"   # merge it into the DB config
+smoked import smokeping /etc/smokeping/config --report               # dry run: which targets have .rrd files
+smoked import smokeping /etc/smokeping/config --history --dsn "$DSN" # backfill the RRD history
+```
+
+`--history` needs `rrdtool` and a database where downsampling is already on (`smoked -downsample`).
+It reads the RRD files from `<config-dir>/../data` or `<config-dir>/data`; pass `--data` to point
+elsewhere. Each SmokePing target's history is stored under the id of the configured target at the
+same path, so it shows on that target's graph. `--apply` gives every imported target a new id, so
+run `--history` after `--apply`. If you put the converted tree in your YAML config instead (for
+example as a `conf.d/` file), pass that config with `--config` so explicit `id`s there are honored.
+With no `--config` and no targets in the DB config, history is stored under the SmokePing path,
+which is the id of a YAML target with no `id`.
+
+`--history` skips a target and names it on stderr when no configured target has its path (renamed
+or moved since the config import) or when more than one does. It also skips a target whose ping
+count can't be resolved or whose RRD can't be read. The other targets are still imported, and the
+run exits `3` if any target was skipped for one of these reasons.
+
 ### Federation deployment (reverse proxy)
 
 Remote **vantages** (the `smoke-agent` collector) reach the hub over two independent surfaces

@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,9 +17,11 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/seitzbg/heliograph/internal/api"
 	"github.com/seitzbg/heliograph/internal/config"
 	"github.com/seitzbg/heliograph/internal/configstore"
 	"github.com/seitzbg/heliograph/internal/importer/smokeping"
+	"github.com/seitzbg/heliograph/internal/model"
 	"github.com/seitzbg/heliograph/internal/store/pgstore"
 )
 
@@ -164,6 +168,13 @@ func writeFile(t *testing.T, path, contents string) {
 func resetConfigFragmentRow(t *testing.T, dsn string) {
 	t.Helper()
 	ctx := context.Background()
+	// configstore.New creates config_fragment if it doesn't exist yet, so the reset also works
+	// on a fresh test database.
+	cs, err := configstore.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs.Close()
 	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
 		t.Fatal(err)
@@ -609,13 +620,13 @@ func TestRefreshWindowForPadsNarrowRange(t *testing.T) {
 // either way, but the summary must say so rather than overclaim.
 func TestPrintHistorySummaryPartialRefreshWording(t *testing.T) {
 	var full bytes.Buffer
-	printHistorySummary(&full, 3, 100, 0, 0, 0, true, true, false)
+	printHistorySummary(&full, historyCounts{backfilled: 3, rows: 100}, true, true, false)
 	if !strings.Contains(full.String(), "aggregate refresh: done") || strings.Contains(full.String(), "most recent") {
 		t.Errorf("fully-covered refresh should report a plain \"done\", got:\n%s", full.String())
 	}
 
 	var partial bytes.Buffer
-	printHistorySummary(&partial, 3, 100, 0, 0, 0, true, true, true)
+	printHistorySummary(&partial, historyCounts{backfilled: 3, rows: 100}, true, true, true)
 	s := partial.String()
 	if !strings.Contains(s, "most recent") || !strings.Contains(s, "background refresh policy") {
 		t.Errorf("partially-covered refresh should note the trailing gap and the background policy, got:\n%s", s)
@@ -627,7 +638,7 @@ func TestPrintHistorySummaryPartialRefreshWording(t *testing.T) {
 // how config-only/orphan counts are already surfaced.
 func TestPrintHistorySummaryReportsFailed(t *testing.T) {
 	var buf bytes.Buffer
-	printHistorySummary(&buf, 2, 50, 0, 0, 1, true, true, false)
+	printHistorySummary(&buf, historyCounts{backfilled: 2, rows: 50, failed: 1}, true, true, false)
 	if !strings.Contains(buf.String(), "1 failed") {
 		t.Errorf("summary should report the failed-target count, got:\n%s", buf.String())
 	}
@@ -695,6 +706,9 @@ func TestImportCmdHistoryE2E(t *testing.T) {
 	}
 	deleteImpHistRows()
 	t.Cleanup(deleteImpHistRows)
+	// No --config and an empty DB config: --history keys rows by SmokePing path (its no-config
+	// fallback), which is what this test reads back. Another test may have left a DB config.
+	resetConfigFragmentRow(t, dsn)
 
 	root := t.TempDir()
 	configDir := filepath.Join(root, "config")
@@ -730,6 +744,9 @@ func TestImportCmdHistoryE2E(t *testing.T) {
 	})
 	if code != 0 {
 		t.Fatalf("importCmd --history exit code = %d, want 0\nstdout:\n%s", code, first)
+	}
+	if !strings.Contains(first, "SmokePing path") {
+		t.Errorf("with no config to consult, --history should say it keys rows by SmokePing path, got:\n%s", first)
 	}
 
 	hist, err := s.HistoryVantage(ctx, nameA, "local")
@@ -796,6 +813,9 @@ func TestImportCmdHistoryPartialFailureMissingPings(t *testing.T) {
 	}
 	deleteRows()
 	t.Cleanup(deleteRows)
+	// No --config and an empty DB config: --history keys rows by SmokePing path (its no-config
+	// fallback), which is what this test reads back. Another test may have left a DB config.
+	resetConfigFragmentRow(t, dsn)
 
 	root := t.TempDir()
 	configDir := filepath.Join(root, "config")
@@ -898,6 +918,9 @@ func TestImportCmdHistoryPartialFailureCorruptRRD(t *testing.T) {
 	}
 	deleteRows()
 	t.Cleanup(deleteRows)
+	// No --config and an empty DB config: --history keys rows by SmokePing path (its no-config
+	// fallback), which is what this test reads back. Another test may have left a DB config.
+	resetConfigFragmentRow(t, dsn)
 
 	root := t.TempDir()
 	configDir := filepath.Join(root, "config")
@@ -1099,6 +1122,9 @@ func TestImportCmdHistoryMaterializesOldHistoryIntoDailyAggregate(t *testing.T) 
 	}
 	deleteRows()
 	t.Cleanup(deleteRows)
+	// No --config and an empty DB config: --history keys rows by SmokePing path (its no-config
+	// fallback), which is what this test reads back. Another test may have left a DB config.
+	resetConfigFragmentRow(t, dsn)
 
 	root := t.TempDir()
 	configDir := filepath.Join(root, "config")
@@ -1145,5 +1171,287 @@ func TestImportCmdHistoryMaterializesOldHistoryIntoDailyAggregate(t *testing.T) 
 	}
 	if bucketAge < 30*24*time.Hour {
 		t.Errorf("samples_daily bucket for %s is only %v old, want >30 days (fixture data must actually be OLD)", name, bucketAge)
+	}
+}
+
+// writeTestRRD creates a SmokePing-shaped RRD at path (median+loss, 5-minute step) holding
+// `rounds` consecutive rounds that start two hours ago.
+func writeTestRRD(t *testing.T, rrdtoolBin, path string, rounds int) {
+	t.Helper()
+	start := time.Now().Add(-2 * time.Hour).Truncate(300 * time.Second).Unix()
+	mustRunRRDTool(t, rrdtoolBin, "create", path, "--start", fmt.Sprint(start-300), "--step", "300",
+		"DS:median:GAUGE:600:0:180", "DS:loss:GAUGE:600:0:20", "RRA:AVERAGE:0.5:1:100")
+	for i := 0; i < rounds; i++ {
+		mustRunRRDTool(t, rrdtoolBin, "update", path, fmt.Sprintf("%d:%f:%d", start+int64(i)*300, 0.010+float64(i)*0.001, i%3))
+	}
+}
+
+// newHistoryDestinations decides where --history writes each SmokePing target. With no config
+// at all it returns nil (the caller keys rows by SmokePing path); otherwise a target resolves to
+// the id of the one configured target at its path, and anything else is an error naming why.
+func TestHistoryDestinationsResolve(t *testing.T) {
+	none, err := newHistoryDestinations(nil, "", nil)
+	if err != nil || none != nil {
+		t.Fatalf("no --config and no DB config: got %+v, %v; want nil (path-keyed fallback)", none, err)
+	}
+
+	db := []byte(`{"targets":{"children":{"Grp":{"children":{"leaf":{"host":"a.example","id":"uuid-leaf"}}},` +
+		`"Both":{"host":"b.example","id":"db-both"},"Legacy":{"host":"c.example"}}}}`)
+	dbOnly, err := newHistoryDestinations(nil, "", db)
+	if err != nil || dbOnly == nil {
+		t.Fatalf("DB config only: got %+v, %v", dbOnly, err)
+	}
+	for name, want := range map[string]string{"Grp/leaf": "uuid-leaf", "Legacy": "Legacy"} {
+		if got, err := dbOnly.resolve(name); err != nil || got != want {
+			t.Errorf("resolve(%q) = %q, %v; want %q", name, got, err, want)
+		}
+	}
+	if _, err := dbOnly.resolve("Gone"); err == nil || !strings.Contains(err.Error(), "--config") {
+		t.Errorf("resolve(unknown) without --config should fail and suggest --config, got %v", err)
+	}
+
+	file, err := config.Parse([]byte("targets:\n  children:\n    Both: {host: b.example, id: file-both}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	both, err := newHistoryDestinations(file, "the YAML config hub.yaml", db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := both.resolve("Both"); err == nil || !strings.Contains(err.Error(), "file-both") || !strings.Contains(err.Error(), "db-both") {
+		t.Errorf("a path defined in both configs must be ambiguous and name both ids, got %v", err)
+	}
+	if _, err := both.resolve("Gone"); err == nil || strings.Contains(err.Error(), "pass that config with --config") {
+		t.Errorf("resolve(unknown) with --config given should fail without the --config hint, got %v", err)
+	}
+
+	emptyFile, err := config.Parse(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d, err := newHistoryDestinations(emptyFile, "the YAML config empty.yaml", nil); err != nil || d == nil {
+		t.Errorf("an explicit --config with no targets must still be consulted (not the path fallback), got %+v, %v", d, err)
+	}
+}
+
+// TestImportCmdHistoryStoresUnderAppliedTargetID is the DB+rrdtool-gated regression for the
+// review finding that `--history` stored rows under the SmokePing path while `--apply` gives
+// each imported target a minted UUID, so the backfilled history never appeared on the target's
+// graph. It runs the real flow — `import smokeping --apply`, then `--history`, then the hub's
+// runtime composition and the /api/series handler for the configured target — and requires the
+// imported rounds to come back. The target is nested to cover the folder/leaf path mapping.
+func TestImportCmdHistoryStoresUnderAppliedTargetID(t *testing.T) {
+	dsn := os.Getenv("SMOKE_TEST_DSN")
+	if dsn == "" {
+		t.Skip("SMOKE_TEST_DSN not set")
+	}
+	rrdtoolBin, err := exec.LookPath("rrdtool")
+	if err != nil {
+		t.Skip("rrdtool not on PATH")
+	}
+	ctx := context.Background()
+	s, err := pgstore.New(ctx, dsn, 100, func(error) {})
+	if err != nil {
+		t.Fatalf("pgstore.New: %v", err)
+	}
+	defer s.Close()
+	if err := s.EnableDownsampling(ctx); err != nil {
+		t.Fatalf("EnableDownsampling: %v", err)
+	}
+	resetConfigFragmentRow(t, dsn)
+	t.Cleanup(func() { resetConfigFragmentRow(t, dsn) })
+
+	root := t.TempDir()
+	configDir := filepath.Join(root, "config")
+	dataDir := filepath.Join(root, "data")
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	group := "ImpID" + suffix
+	name := group + "/leaf"
+	mkdir(t, configDir)
+	mkdir(t, filepath.Join(dataDir, group))
+	writeFile(t, filepath.Join(configDir, "Targets"), "*** Targets ***\nprobe = FPing\n+ "+group+"\n++ leaf\nhost = localhost\n")
+	writeFile(t, filepath.Join(configDir, "Probes"), "*** Probes ***\n+ FPing\nbinary = /usr/sbin/fping\n")
+	writeFile(t, filepath.Join(configDir, "Database"), "*** Database ***\nstep = 300\npings = 20\n")
+	writeTestRRD(t, rrdtoolBin, filepath.Join(dataDir, name+".rrd"), 10)
+
+	var code int
+	out := captureStdout(t, func() { code = importCmd([]string{"smokeping", configDir, "--apply", "--dsn", dsn}) })
+	if code != 0 {
+		t.Fatalf("import --apply exit = %d\n%s", code, out)
+	}
+
+	// The hub's view of the config: a YAML base plus the DB fragment --apply just wrote.
+	baseFile := filepath.Join(root, "hub.yaml")
+	writeFile(t, baseFile, "targets:\n  children:\n    file:\n      probe: Ping\n      host: localhost\n")
+	dbFragment := func() ([]byte, error) {
+		cs, err := configstore.New(ctx, dsn)
+		if err != nil {
+			return nil, err
+		}
+		defer cs.Close()
+		doc, _, err := cs.Get(ctx)
+		return doc, err
+	}
+	rt, err := buildRuntime(baseFile, 20, time.Minute, time.Second, false, nil, dbFragment)
+	if err != nil {
+		t.Fatalf("buildRuntime: %v", err)
+	}
+	var mon model.Monitor
+	for _, m := range rt.monitors {
+		if m.Name == name {
+			mon = m
+		}
+	}
+	if mon.ID == "" || mon.ID == name {
+		t.Fatalf("--apply should have minted an id for %s distinct from its path, got %+v", name, mon)
+	}
+	t.Cleanup(func() {
+		pool, err := pgxpool.New(context.Background(), dsn)
+		if err != nil {
+			t.Errorf("cleanup: connect: %v", err)
+			return
+		}
+		defer pool.Close()
+		if _, err := pool.Exec(context.Background(), "DELETE FROM samples WHERE target = $1 OR target = $2", mon.ID, name); err != nil {
+			t.Errorf("cleanup: delete rows: %v", err)
+		}
+	})
+
+	stdout, stderr := captureOutput(t, func() {
+		code = importCmd([]string{"smokeping", configDir, "--history", "--dsn", dsn, "--rrdtool", rrdtoolBin})
+	})
+	if code != 0 {
+		t.Fatalf("import --history exit = %d, want 0\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+
+	srv := api.New(s, "")
+	srv.Configured = func() []model.Monitor { return rt.monitors }
+	srv.EffectiveMetric = func(target string) string { return rt.metricByName[target] }
+	w := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(w, httptest.NewRequest("GET", "/api/series?target="+url.QueryEscape(mon.ID)+"&window=24h", nil))
+	if w.Code != 200 {
+		t.Fatalf("/api/series = %d %s", w.Code, w.Body.String())
+	}
+	var series struct {
+		Target string            `json:"target"`
+		Rounds []json.RawMessage `json:"rounds"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &series); err != nil {
+		t.Fatalf("decode /api/series: %v\n%s", err, w.Body.String())
+	}
+	if series.Target != mon.ID || len(series.Rounds) != 10 {
+		t.Fatalf("/api/series for the configured target %s returned %d round(s) for %q, want the 10 imported rounds\n"+
+			"importer stdout:\n%s", mon.ID, len(series.Rounds), series.Target, stdout)
+	}
+}
+
+// TestImportCmdHistoryReportsUnresolvedTargets is the DB+rrdtool-gated test for SmokePing
+// targets --history can't place: one whose path no configured target has (renamed after the
+// config import, or never imported) and one whose path two configured targets claim (a branch
+// in both the --config YAML and the DB config, which the hub refuses to load). Neither may be
+// written under any key — rows under a key nothing reads would be invisible and look imported —
+// and the run must count them and exit exitPartialFailure, while targets with exactly one
+// destination still import under their id from whichever config defines them.
+func TestImportCmdHistoryReportsUnresolvedTargets(t *testing.T) {
+	dsn := os.Getenv("SMOKE_TEST_DSN")
+	if dsn == "" {
+		t.Skip("SMOKE_TEST_DSN not set")
+	}
+	rrdtoolBin, err := exec.LookPath("rrdtool")
+	if err != nil {
+		t.Skip("rrdtool not on PATH")
+	}
+	ctx := context.Background()
+	s, err := pgstore.New(ctx, dsn, 8, func(error) {})
+	if err != nil {
+		t.Fatalf("pgstore.New: %v", err)
+	}
+	defer s.Close()
+	if err := s.EnableDownsampling(ctx); err != nil {
+		t.Fatalf("EnableDownsampling: %v", err)
+	}
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	deleteRows := func() {
+		if _, err := pool.Exec(ctx, "DELETE FROM samples WHERE target LIKE 'ImpUnr%'"); err != nil {
+			t.Fatalf("cleanup: delete ImpUnr* rows: %v", err)
+		}
+	}
+	deleteRows()
+	t.Cleanup(deleteRows)
+	resetConfigFragmentRow(t, dsn)
+	t.Cleanup(func() { resetConfigFragmentRow(t, dsn) })
+
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	group, dup, inFile, gone := "ImpUnrGrp"+suffix, "ImpUnrDup"+suffix, "ImpUnrFile"+suffix, "ImpUnrGone"+suffix
+	dbLeafID, fileID := "ImpUnr-db-leaf-"+suffix, "ImpUnr-file-"+suffix
+
+	cs, err := configstore.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dbDoc := fmt.Sprintf(`{"targets":{"children":{%q:{"children":{"leaf":{"probe":"FPing","host":"a.example","id":%q}}},`+
+		`%q:{"probe":"FPing","host":"d.example","id":"ImpUnr-db-dup-%s"}}}}`, group, dbLeafID, dup, suffix)
+	err = cs.Set(ctx, json.RawMessage(dbDoc), 0)
+	cs.Close()
+	if err != nil {
+		t.Fatalf("seed DB config: %v", err)
+	}
+
+	root := t.TempDir()
+	hubConfig := filepath.Join(root, "hub.yaml")
+	writeFile(t, hubConfig, fmt.Sprintf("targets:\n  children:\n    %s: {probe: FPing, host: d.example, id: ImpUnr-file-dup-%s}\n"+
+		"    %s: {probe: FPing, host: f.example, id: %s}\n", dup, suffix, inFile, fileID))
+
+	configDir := filepath.Join(root, "config")
+	dataDir := filepath.Join(root, "data")
+	mkdir(t, configDir)
+	mkdir(t, filepath.Join(dataDir, group))
+	writeFile(t, filepath.Join(configDir, "Targets"), fmt.Sprintf("*** Targets ***\nprobe = FPing\n"+
+		"+ %s\n++ leaf\nhost = a.example\n+ %s\nhost = d.example\n+ %s\nhost = f.example\n+ %s\nhost = g.example\n",
+		group, dup, inFile, gone))
+	writeFile(t, filepath.Join(configDir, "Probes"), "*** Probes ***\n+ FPing\nbinary = /usr/sbin/fping\n")
+	writeFile(t, filepath.Join(configDir, "Database"), "*** Database ***\nstep = 300\npings = 20\n")
+	for _, n := range []string{group + "/leaf", dup, inFile, gone} {
+		writeTestRRD(t, rrdtoolBin, filepath.Join(dataDir, n+".rrd"), 5)
+	}
+
+	var code int
+	stdout, stderr := captureOutput(t, func() {
+		code = importCmd([]string{"smokeping", configDir, "--history", "--dsn", dsn, "--rrdtool", rrdtoolBin, "--config", hubConfig})
+	})
+	if code != exitPartialFailure {
+		t.Fatalf("exit = %d, want %d (partial failure)\nstdout:\n%s\nstderr:\n%s", code, exitPartialFailure, stdout, stderr)
+	}
+	if !strings.Contains(stdout, "2 target(s) backfilled") || !strings.Contains(stdout, "2 unresolved") {
+		t.Errorf("summary should report 2 backfilled and 2 unresolved, got:\n%s", stdout)
+	}
+	for _, want := range []string{gone + ": not imported: no configured target", dup + ": not imported: path"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr should contain %q, got:\n%s", want, stderr)
+		}
+	}
+
+	rows, err := pool.Query(ctx, "SELECT target, count(*) FROM samples WHERE target LIKE 'ImpUnr%' GROUP BY target")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]int{}
+	for rows.Next() {
+		var target string
+		var n int
+		if err := rows.Scan(&target, &n); err != nil {
+			t.Fatal(err)
+		}
+		got[target] = n
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[dbLeafID] != 5 || got[fileID] != 5 {
+		t.Errorf("stored rows by target = %v, want 5 each under only %s (DB config) and %s (YAML config)", got, dbLeafID, fileID)
 	}
 }

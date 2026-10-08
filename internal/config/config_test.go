@@ -1076,3 +1076,50 @@ targets:
 		t.Fatal("expected duplicate-id error, got nil")
 	}
 }
+
+// TargetIdentities is how `smoked import smokeping --history` finds the storage id a configured
+// target's samples belong under, so it must name every target exactly as Monitors does (path and
+// id), and must also work on a DB fragment alone, whose leaves inherit their probe from a
+// default.yaml that isn't part of it.
+func TestTargetIdentitiesMatchMonitors(t *testing.T) {
+	c, err := Parse([]byte(`
+database: {pings: 1, step: 1s}
+targets:
+  probe: FPing
+  children:
+    Resolvers:
+      children:
+        dns1: {host: 192.168.1.5, id: "frozen-id-1"}
+        dns2: {host: 192.168.1.6}
+    web: {host: web.example, children: {api: {host: api.example, id: "api-id"}}}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ms, err := c.Monitors()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{}
+	for _, m := range ms {
+		want[m.Name] = m.ID
+	}
+	got := map[string]string{}
+	for _, ti := range c.TargetIdentities() {
+		got[ti.Path] = ti.ID
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("TargetIdentities = %v, want the Monitors names/ids %v", got, want)
+	}
+
+	// The same tree as a DB fragment, without the base config's tree-wide probe: Monitors can't
+	// resolve these leaves on their own, but their identities are still known.
+	frag := &Config{}
+	if err := AppendDBFragment(frag, []byte(`{"targets":{"children":{"Resolvers":{"children":{"dns2":{"host":"192.168.1.6"}}}}}}`)); err != nil {
+		t.Fatal(err)
+	}
+	ids := frag.TargetIdentities()
+	if len(ids) != 1 || ids[0] != (TargetIdentity{Path: "Resolvers/dns2", ID: "Resolvers/dns2"}) {
+		t.Errorf("fragment TargetIdentities = %+v, want [{Resolvers/dns2 Resolvers/dns2}]", ids)
+	}
+}
