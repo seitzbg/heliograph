@@ -18,13 +18,15 @@ func vantageFrom(r *http.Request) string {
 	return v
 }
 
-// requireAgent authorizes a federation agent by the CommonName of its mTLS client certificate.
-// It does not perform the TLS handshake itself: the mTLS listener (wired separately, a later
-// task) already requires a CA-signed client cert before a request ever reaches a handler here —
-// this layer only authorizes the identity that cert presented, the same shape as requireAdmin
-// authorizing an admin session. A CN must belong to a currently active (registered, not
-// revoked) vantage; on success it is stamped onto the request context via vantageCtxKey exactly
-// as the old Bearer-key auth did, so vantageFrom/agentAssignment/agentResults need no changes.
+// requireAgent authorizes a federation agent by its mTLS client certificate. It does not perform
+// the TLS handshake itself: the mTLS listener (AgentTLSConfig) already requires a CA-signed
+// client cert before a request ever reaches a handler here — this layer only authorizes the
+// identity that cert presented, the same shape as requireAdmin authorizing an admin session. The
+// CN must belong to a currently active (registered, not revoked) vantage AND the certificate's
+// serial must be one issued for that registration (Vantages.IsActive), so a certificate minted
+// before a revoke stays rejected after the same name is re-added. On success the CN is stamped
+// onto the request context via vantageCtxKey, so vantageFrom/agentAssignment/agentResults need
+// no changes.
 //
 // SAFE ONLY behind a listener whose tls.Config sets ClientAuth: tls.RequireAndVerifyClientCert
 // (the config AgentTLSConfig, in agentmtls.go, produces). A weaker ClientAuthType such as
@@ -43,8 +45,9 @@ func (srv *Server) requireAgent(next http.HandlerFunc) http.HandlerFunc {
 			http.Error(w, `{"error":"vantage store unavailable"}`, http.StatusInternalServerError)
 			return
 		}
-		cn := r.TLS.PeerCertificates[0].Subject.CommonName
-		active, err := srv.Vantages.IsActive(r.Context(), cn)
+		leaf := r.TLS.PeerCertificates[0]
+		cn := leaf.Subject.CommonName
+		active, err := srv.Vantages.IsActive(r.Context(), cn, leaf.SerialNumber)
 		if err != nil {
 			http.Error(w, `{"error":"store unavailable"}`, http.StatusServiceUnavailable)
 			return
