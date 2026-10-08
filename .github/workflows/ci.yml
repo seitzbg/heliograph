@@ -465,8 +465,9 @@ jobs:
             --ignore-unfixed --exit-code 1 heliograph-caddy:ci
 
   # Real-FreeBSD runtime coverage. Both binaries are pure Go and cross-compile for FreeBSD, but a
-  # cross-compile only proves it BUILDS. This boots an actual FreeBSD VM on the Linux runner and runs
-  # the full test suite (and syntax-checks the rc.d scripts) so FreeBSD stays a *tested* target. The
+  # cross-compile only proves it BUILDS. This boots an actual FreeBSD VM on the Linux runner, runs
+  # the full test suite, then installs the contrib/freebsd rc.d scripts and drives both services
+  # through service(8) as the unprivileged `smoke` account, so FreeBSD stays a *tested* target. The
   # VM runs as root, so the raw-socket Ping path is reachable there. Independent of the image pipeline
   # (the published image is Linux-only), so a FreeBSD VM hiccup never blocks an image release — add
   # freebsd-test as a required status check to gate merges on FreeBSD.
@@ -494,6 +495,9 @@ jobs:
             go build ./...
             # DB / rrdtool integration tests self-skip without SMOKE_TEST_DSN / rrdtool (not installed here).
             go test ./...
+            # The rc.d scripts for real: install both services, then start/status/restart/stop them
+            # via service(8) as `smoke`, probe smoked's API, and check users, argv, env and pidfiles.
+            sh .github/scripts/freebsd-rc-test.sh
 
   # Attach native FreeBSD binaries to each GitHub Release. The published container image is Linux-only,
   # so FreeBSD hosts run a native binary; this builds, packages, and uploads them. Tag-only (v*),

@@ -6,6 +6,24 @@ All notable changes to **Heliograph** are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- **The FreeBSD `rc.d` scripts now actually start their services.** The v2.2.0 scripts in
+  [`contrib/freebsd/`](contrib/freebsd/) built a `daemon(8)` command line that could never run, for
+  three independent reasons: the unquoted two-word title (`-t Heliograph hub`) split, so `daemon(8)`
+  tried to run `hub` / `vantage` as the program; rc.subr hands `${name}_flags` to `$command`, so
+  `smoked_flags` (default `-downsample`) went to `daemon(8)`, which rejected it; and rc.subr started
+  `daemon(8)` through `su` as `smoke`, which then could not create `/var/run/<name>.pid` (and was also
+  given `-u smoke`). The scripts now follow the FreeBSD ports convention: rc.subr runs `daemon(8)` as
+  `${name}_user` with no `-u`, the pidfile lives in a `/var/run/<name>/` directory that user owns,
+  and the process title and syslog tag are the service name, so output is logged as `smoked` /
+  `smoke_agent` rather than `daemon`. **Knob rename:** extra flags move from `smoked_flags` /
+  `smoke_agent_flags` to `smoked_args` / `smoke_agent_args`. A leftover `_flags` value is still used,
+  with a warning. Also fixed: `smoke_agent_spool=""` now disables the on-disk spool as documented
+  (the old default assignment replaced an empty value, so the agent always spooled), and
+  `smoked_args=""` now drops the default `-downsample`. The `freebsd-test` CI job now installs both
+  scripts in its FreeBSD VM and drives start/status/restart/stop through `service(8)`, checking the
+  service user, argv, environment and pidfile, plus smoked's API.
+
 ## [2.2.0] - 2026-09-05
 
 ### Added

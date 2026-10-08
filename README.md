@@ -168,7 +168,9 @@ Postgres/TimescaleDB (`-dsn …`).
 Non-ICMP probes (`DNS`, `HTTP`, `TCPConnect`, `NTP`, …) need no special privilege.
 
 **Run it as a service.** [`contrib/freebsd/`](contrib/freebsd/) ships `rc.d` scripts and install
-notes for running `smoke-agent` (and `smoked`) under FreeBSD's service manager.
+notes for running `smoke-agent` (and `smoked`) under FreeBSD's service manager, supervised by
+`daemon(8)` as an unprivileged `smoke` account (set `smoke_agent_user=root` or `smoked_user=root`
+for the native `Ping` probe). Extra flags go in `smoke_agent_args` / `smoked_args`.
 
 ### Docker Compose
 
