@@ -19,19 +19,23 @@ type reviewOut struct {
 	Added         []string `json:"added"`
 	Removed       []string `json:"removed"`
 	Changed       []string `json:"changed"`
+	GroupsAdded   []string `json:"groups_added,omitempty"`
+	GroupsRemoved []string `json:"groups_removed,omitempty"`
+	GroupsChanged []string `json:"groups_changed,omitempty"`
+	Warnings      []string `json:"warnings,omitempty"`
 	WorkingConfig string   `json:"working_config"`
 }
 
 func registerConfigReview(s *sdk.Server, c *Client, st *staging) {
 	sdk.AddTool(s, &sdk.Tool{
 		Name:        "config_review",
-		Description: "Show the currently staged config changes: which targets were added/removed/changed, the working config, and whether the live config version has drifted since staging (a pending conflict). Local-only; nothing is written. Call config_apply to commit.",
+		Description: "Show the currently staged config changes: which targets were added/removed/changed (a target counts as changed when its own settings change or when a group above it changes a setting it inherits), which groups were added/removed or had their own settings changed, any advisory validation warnings, the working config, and whether the live config version has drifted since staging (a pending conflict). Local-only; nothing is written. Call config_apply to commit.",
 		Annotations: &sdk.ToolAnnotations{ReadOnlyHint: true},
 	}, func(ctx context.Context, _ *sdk.CallToolRequest, _ struct{}) (*sdk.CallToolResult, reviewOut, error) {
 		if !st.isActive() {
 			return textResult("no staged changes"), reviewOut{Staged: false}, nil
 		}
-		added, removed, changed, err := st.diff()
+		cs, warnings, err := st.diff()
 		if err != nil {
 			return nil, reviewOut{}, err
 		}
@@ -42,12 +46,13 @@ func registerConfigReview(s *sdk.Server, c *Client, st *staging) {
 		work := string(st.working())
 		out := reviewOut{
 			Staged: true, BaseVersion: st.baseVersion(), LiveVersion: liveVer,
-			Drifted: liveVer != st.baseVersion(), Added: added, Removed: removed, Changed: changed,
-			WorkingConfig: work,
+			Drifted: liveVer != st.baseVersion(), Added: cs.Added, Removed: cs.Removed, Changed: cs.Changed,
+			GroupsAdded: cs.GroupsAdded, GroupsRemoved: cs.GroupsRemoved, GroupsChanged: cs.GroupsChanged,
+			Warnings: warnings, WorkingConfig: work,
 		}
 		var b strings.Builder
-		fmt.Fprintf(&b, "staged (base v%d, live v%d%s)\nadded: %v\nremoved: %v\nchanged: %v\n",
-			out.BaseVersion, out.LiveVersion, driftNote(out.Drifted), added, removed, changed)
+		fmt.Fprintf(&b, "staged (base v%d, live v%d%s)\n", out.BaseVersion, out.LiveVersion, driftNote(out.Drifted))
+		writeChangeSet(&b, cs, warnings)
 		return textResult(b.String()), out, nil
 	})
 }

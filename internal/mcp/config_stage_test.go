@@ -5,18 +5,18 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 )
 
+// fileTargetHub is a hub file config defining one target, like a typical running hub (a hub whose
+// whole tree is empty fails its own validation and can't run).
+const fileTargetHub = "targets:\n  children:\n    file:\n      host: localhost\n      probe: Ping\n"
+
+// stagedClient returns a client for a hub whose DB config fragment is initial, plus a fresh
+// staging buffer.
 func stagedClient(t *testing.T, initial string) (*Client, *staging) {
-	c, _ := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/admin/login" {
-			http.SetCookie(w, &http.Cookie{Name: "smoked_admin", Value: "t", Path: "/api/admin"})
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"version": 3, "doc": json.RawMessage(initial)})
-	}))
+	c, _ := newTestClient(t, configHub(t, fileTargetHub, initial))
 	return c, newStaging()
 }
 
@@ -271,5 +271,101 @@ func TestStageReplaceAcceptsYAML(t *testing.T) {
 	f, _ := flatten(st.working())
 	if _, ok := f["Sites/ex"]; !ok {
 		t.Fatalf("replace did not take: %v", keysOf(f))
+	}
+}
+
+// TestStageEditTargetRejectsMoveIntoOwnSubtree is the regression test for a move that silently
+// deleted its target: moving a node into itself or one of its descendants detached the subtree
+// into an unreachable cycle, so the target vanished from the staged doc with no error. Both moves
+// must be rejected and leave the working doc exactly as it was.
+func TestStageEditTargetRejectsMoveIntoOwnSubtree(t *testing.T) {
+	for _, dest := range []string{"g/a", "g/a/sub", "g/a/child/deeper"} {
+		t.Run(dest, func(t *testing.T) {
+			c, st := stagedClient(t, `{"targets":{"children":{"g":{"children":{"a":{"id":"a-id","host":"1.1.1.1","probe":"Ping","children":{"child":{"id":"c-id","host":"2.2.2.2"}}}}}}}}`)
+			if err := st.ensure(context.Background(), c); err != nil {
+				t.Fatal(err)
+			}
+			before := string(st.working())
+
+			err := stageEditTarget(st, editTargetIn{Target: "g/a", NewGroupPath: dest})
+			if !errors.Is(err, ErrConfigInvalid) {
+				t.Fatalf("move g/a into %s: err=%v, want ErrConfigInvalid", dest, err)
+			}
+			if got := string(st.working()); got != before {
+				t.Fatalf("working doc changed after a rejected move:\nbefore: %s\nafter:  %s", before, got)
+			}
+		})
+	}
+}
+
+// inheritedHubFile is a hub file config whose tree root sets the probe, so a DB leaf without its
+// own probe inherits Ping — valid on the hub, which composes the DB fragment onto this file.
+const inheritedHubFile = "targets:\n  probe: Ping\n  children:\n    file:\n      host: localhost\n"
+
+// inheritedDB is a DB fragment holding one such probe-less leaf plus an ordinary target.
+const inheritedDB = `{"targets":{"children":{"db":{"id":"db-id","host":"127.0.0.1"},"g":{"children":{"a":{"id":"a-id","host":"1.1.1.1","probe":"Ping"}}}}}}`
+
+// TestStageAcceptsLeafInheritingFromHubFileConfig is the regression test for local validation that
+// ignored the hub's file config: a DB leaf inheriting its probe from the file root is valid on the
+// hub, but the MCP validated against defaults only, rejected it as "no probe set", and — since
+// every mutation revalidates the whole fragment — refused every edit to any other target.
+// Validation now composes onto the hub's real file config, so the edit stages cleanly while
+// genuine errors (an unknown probe param, a branch colliding with a file-defined one) still fail.
+func TestStageAcceptsLeafInheritingFromHubFileConfig(t *testing.T) {
+	c, _ := newTestClient(t, configHub(t, inheritedHubFile, inheritedDB))
+	cs := mcpSession(t, c)
+
+	var staged struct {
+		Changed  []string `json:"changed"`
+		Warnings []string `json:"warnings"`
+	}
+	res := callTool(t, cs, "config_stage_edit_target", map[string]any{"target": "g/a", "host": "9.9.9.9"}, &staged)
+	if res.IsError {
+		t.Fatalf("edit beside an inherited leaf was rejected: %s", resultText(res))
+	}
+	if len(staged.Changed) != 1 || staged.Changed[0] != "g/a" {
+		t.Errorf("changed=%v, want [g/a]", staged.Changed)
+	}
+	if len(staged.Warnings) != 0 {
+		t.Errorf("validation against the hub's own composition should be exact, got warnings %v", staged.Warnings)
+	}
+
+	if res := callTool(t, cs, "config_stage_add_target", map[string]any{"group_path": "S", "name": "x", "host": "h", "probe": "Ping", "params": map[string]any{"bogus_param": "1"}}, nil); !res.IsError {
+		t.Error("an unknown probe param staged; want a validation error")
+	}
+	res = callTool(t, cs, "config_stage_add_target", map[string]any{"group_path": "file", "name": "x", "host": "h", "probe": "Ping"}, nil)
+	if !res.IsError || !strings.Contains(resultText(res), "duplicate top-level target") {
+		t.Errorf("a DB branch colliding with the file-defined %q branch staged (or failed for another reason): %s", "file", resultText(res))
+	}
+}
+
+// TestStageWithoutHubConfigContextIsAdvisory covers a hub whose effective config can't be read:
+// local validation can't see the file config the fragment inherits from, so a composition error
+// becomes a warning in the stage result instead of blocking the edit (config_apply's server-side
+// validation stays authoritative).
+func TestStageWithoutHubConfigContextIsAdvisory(t *testing.T) {
+	hub := configHub(t, inheritedHubFile, inheritedDB)
+	c, _ := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("source") == "effective" {
+			http.Error(w, `{"error":"effective config unavailable"}`, http.StatusServiceUnavailable)
+			return
+		}
+		hub.ServeHTTP(w, r)
+	}))
+	cs := mcpSession(t, c)
+
+	var staged struct {
+		Changed  []string `json:"changed"`
+		Warnings []string `json:"warnings"`
+	}
+	res := callTool(t, cs, "config_stage_edit_target", map[string]any{"target": "g/a", "host": "9.9.9.9"}, &staged)
+	if res.IsError {
+		t.Fatalf("edit was blocked by a check that needs the hub's file config: %s", resultText(res))
+	}
+	if len(staged.Changed) != 1 || staged.Changed[0] != "g/a" {
+		t.Errorf("changed=%v, want [g/a]", staged.Changed)
+	}
+	if !strings.Contains(strings.Join(staged.Warnings, "\n"), "no probe set") {
+		t.Errorf("warnings=%v, want the unverifiable inherited-probe problem surfaced as a warning", staged.Warnings)
 	}
 }

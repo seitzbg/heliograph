@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
@@ -106,68 +107,137 @@ func displayNameOf(t Target) string {
 	return t.ID
 }
 
-// triageVantageNames resolves which vantages to query. An empty filter selects all known
-// vantages (or a single unfiltered read when none are configured). A non-empty filter that
-// matches no known vantage is an error rather than a silent widening to all vantages.
-func triageVantageNames(vs []Vantage, filter string) ([]string, error) {
-	names := []string{}
-	for _, v := range vs {
-		if filter == "" || v.Name == filter {
-			names = append(names, v.Name)
+// localVantage is the hub's built-in vantage — the one an unfiltered /api/targets read reports,
+// and the implicit vantage of a target with no vantage set. It is never in the remote registry.
+const localVantage = "local"
+
+// measuredFrom reports whether a target row is measured from vantage v. A row without a vantage
+// set is measured only from the hub itself (the config default; a hub without a database does not
+// publish vantage sets), mirroring the API's own scoping of the Overview boards.
+func measuredFrom(t Target, v string) bool {
+	if len(t.Vantages) == 0 {
+		return v == localVantage
+	}
+	return slices.Contains(t.Vantages, v)
+}
+
+// measuringVantages returns, sorted, every vantage that measures at least one of rows.
+func measuringVantages(rows []Target) []string {
+	set := map[string]bool{}
+	for _, t := range rows {
+		if len(t.Vantages) == 0 {
+			set[localVantage] = true
+		}
+		for _, v := range t.Vantages {
+			set[v] = true
 		}
 	}
-	if filter != "" && len(names) == 0 {
-		return nil, fmt.Errorf("unknown vantage %q", filter)
+	out := make([]string, 0, len(set))
+	for v := range set {
+		out = append(out, v)
 	}
-	if len(names) == 0 { // no vantages configured and no filter → single unfiltered read
-		names = []string{""}
+	sort.Strings(out)
+	return out
+}
+
+// triageVantageNames resolves which vantages to read, from the targets' own vantage sets in the
+// public /api/targets catalog (rows) — which covers the hub's "local" vantage and every remote one
+// that measures something — plus the optional remote registry (reg) for an explicit filter. An
+// empty filter selects every measuring vantage (just "local" when the catalog carries no vantage
+// sets or no targets). A filter naming no known vantage is an error rather than a silent widening.
+func triageVantageNames(rows []Target, reg []Vantage, filter string) ([]string, error) {
+	measuring := measuringVantages(rows)
+	if filter == "" {
+		if len(measuring) == 0 {
+			return []string{localVantage}, nil
+		}
+		return measuring, nil
 	}
-	return names, nil
+	known := map[string]bool{localVantage: true}
+	for _, v := range measuring {
+		known[v] = true
+	}
+	for _, v := range reg {
+		known[v.Name] = true
+	}
+	if !known[filter] {
+		names := make([]string, 0, len(known))
+		for v := range known {
+			names = append(names, v)
+		}
+		sort.Strings(names)
+		return nil, fmt.Errorf("unknown vantage %q (known: %s)", filter, strings.Join(names, ", "))
+	}
+	return []string{filter}, nil
 }
 
 type triageIn struct {
-	Vantage string `json:"vantage,omitempty" jsonschema:"restrict triage to a single vantage (default: all vantages)"`
+	Vantage string `json:"vantage,omitempty" jsonschema:"restrict triage to a single vantage, e.g. local (default: every vantage that measures a target)"`
 }
 type triageOut struct {
-	Problems   []Problem `json:"problems"`
-	StaleVants []string  `json:"stale_vantages"`
-	Healthy    int       `json:"healthy_targets"`
+	Problems          []Problem `json:"problems"`
+	StaleVants        []string  `json:"stale_vantages"`
+	Healthy           int       `json:"healthy_targets"`
+	VantagesChecked   []string  `json:"vantages_checked"`
+	RegistryAvailable bool      `json:"registry_available"`
 }
 
 func registerTriage(s *sdk.Server, c *Client) {
 	sdk.AddTool(s, &sdk.Tool{
 		Name:        "heliograph_triage",
-		Description: "Fast network health triage: classifies every target across vantages (healthy/degraded/down/no-data), separates GLOBAL problems (bad from every vantage that returned a reading → target issue) from VANTAGE-SPECIFIC ones (bad from some vantages but healthy or no-data from others → path/ISP issue), and flags stale collectors. Start here for an open-ended 'what's wrong?' investigation.",
+		Description: "Fast network health triage: classifies every target from each vantage that measures it — the hub's own \"local\" vantage and any remote ones — as healthy/degraded/down/no-data, separates GLOBAL problems (bad from every measuring vantage that returned a reading → target issue) from VANTAGE-SPECIFIC ones (bad from some vantages but healthy or no-data from others → path/ISP issue), and flags stale remote collectors when the hub has a vantage registry. Start here for an open-ended 'what's wrong?' investigation.",
 		Annotations: &sdk.ToolAnnotations{ReadOnlyHint: true},
 	}, func(ctx context.Context, _ *sdk.CallToolRequest, in triageIn) (*sdk.CallToolResult, triageOut, error) {
-		vs, _, err := fetchVantages(ctx, c)
+		// The unfiltered read is the local vantage's view, and its rows carry each target's
+		// vantage set — the catalog the vantages to read are derived from.
+		localRows, err := fetchStatus(ctx, c, "")
 		if err != nil {
 			return nil, triageOut{}, err
 		}
-		names, err := triageVantageNames(vs, in.Vantage)
+		// The registry only adds stale-collector detection; a hub without it (404) still triages.
+		reg, _, regOK, err := fetchVantages(ctx, c)
+		if err != nil {
+			return nil, triageOut{}, err
+		}
+		names, err := triageVantageNames(localRows, reg, in.Vantage)
 		if err != nil {
 			return nil, triageOut{}, err
 		}
 		byV := map[string][]Target{}
 		for _, n := range names {
-			rows, err := fetchStatus(ctx, c, n)
-			if err != nil {
-				return nil, triageOut{}, err
+			rows := localRows
+			if n != localVantage {
+				if rows, err = fetchStatus(ctx, c, n); err != nil {
+					return nil, triageOut{}, err
+				}
 			}
-			byV[n] = rows
+			// Every /api/targets read lists the whole catalog; a target a vantage doesn't measure
+			// shows there as no-data, which would wrongly downgrade a global problem.
+			var measured []Target
+			for _, t := range rows {
+				if measuredFrom(t, n) {
+					measured = append(measured, t)
+				}
+			}
+			byV[n] = measured
 		}
 		probs := analyzeTriage(byV)
-		stale := staleVantages(vs)
+		stale := staleVantages(reg)
 		healthy := countHealthy(byV)
 		var b strings.Builder
-		fmt.Fprintf(&b, "%d problem target(s), %d healthy; %d stale vantage(s)\n", len(probs), healthy, len(stale))
+		fmt.Fprintf(&b, "%d problem target(s), %d healthy, from vantage(s) %s", len(probs), healthy, strings.Join(names, ","))
+		if regOK {
+			fmt.Fprintf(&b, "; %d stale vantage(s)\n", len(stale))
+		} else {
+			b.WriteString("; stale-collector check skipped (this hub has no remote-vantage registry)\n")
+		}
 		for _, p := range probs {
 			fmt.Fprintf(&b, "- [%s/%s] %s (vantages: %s)\n", p.Status, p.Scope, p.Target, strings.Join(p.Vantages, ","))
 		}
 		if len(stale) > 0 {
 			fmt.Fprintf(&b, "stale collectors: %s\n", strings.Join(stale, ","))
 		}
-		return textResult(b.String()), triageOut{Problems: probs, StaleVants: stale, Healthy: healthy}, nil
+		return textResult(b.String()), triageOut{Problems: probs, StaleVants: stale, Healthy: healthy, VantagesChecked: names, RegistryAvailable: regOK}, nil
 	})
 }
 

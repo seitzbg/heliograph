@@ -37,16 +37,12 @@ func TestApplyPutsAndResets(t *testing.T) {
 // The safety contract: a locally-invalid staged change never reaches the network.
 func TestInvalidStageNeverPuts(t *testing.T) {
 	var puts int32
+	hub := configHub(t, fileTargetHub, `{"targets":{"children":{}}}`)
 	c, _ := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPut {
 			atomic.AddInt32(&puts, 1)
 		}
-		if r.URL.Path == "/api/admin/login" {
-			http.SetCookie(w, &http.Cookie{Name: "smoked_admin", Value: "t", Path: "/api/admin"})
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"version": 1, "doc": json.RawMessage(`{"targets":{"children":{}}}`)})
+		hub.ServeHTTP(w, r)
 	}))
 	st := newStaging()
 	_ = st.ensure(context.Background(), c)

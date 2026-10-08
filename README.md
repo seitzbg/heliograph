@@ -392,7 +392,10 @@ request past that prefix, breaking it.
 
 Use an **`https://`** URL whenever Basic Auth or an admin password is configured: the client
 refuses a plaintext `http://` base URL when credentials are set, so they are never transmitted in
-cleartext (loopback hosts are exempt for local development).
+cleartext (loopback hosts are exempt for local development). It also refuses to follow a redirect
+that leaves the hub's origin (scheme, host and port), including an `https://` → `http://`
+downgrade: the hub API never redirects, and following one would replay the Basic Auth header, the
+admin session cookie or the admin password to the redirect target.
 
 ### Tools
 
@@ -405,8 +408,8 @@ cleartext (loopback hosts are exempt for local development).
 | `heliograph_status` | Current per-target snapshot: probe, median latency, loss %, recent loss %, NTP offset/stratum, and which vantages measure it. |
 | `heliograph_sla` | Per-target availability over a window (worst-first): availability %, rounds up/measured, coverage, average loss. |
 | `heliograph_series` | Per-round latency/loss history for one target; compact by default (`t`/median/loss/pings), `detail=true` adds per-ping `rtts_ms`. |
-| `heliograph_triage` | Classifies every target healthy/degraded/down/no-data across vantages, splits GLOBAL problems (bad from every vantage that returned a reading → a target issue) from VANTAGE-SPECIFIC ones (bad from some vantages but healthy or no-data from others → a path/ISP issue), and flags stale collectors. Start here for an open-ended "what's wrong?" question. |
-| `heliograph_vantages` | Lists measurement vantages: name, created, last-seen, target count, and whether the hub's federation agent listener is up. |
+| `heliograph_triage` | Classifies every target healthy/degraded/down/no-data from each vantage that measures it (the hub's built-in `local` vantage and any remote ones, taken from each target's vantage set), splits GLOBAL problems (bad from every measuring vantage that returned a reading → a target issue) from VANTAGE-SPECIFIC ones (bad from some vantages but healthy or no-data from others → a path/ISP issue), and, when the hub has a vantage registry, flags stale collectors. Works on a single-host hub too. `vantage=local` (or a remote name) narrows it to one vantage. Start here for an open-ended "what's wrong?" question. |
+| `heliograph_vantages` | Lists the hub's registered remote vantages: name, created, last-seen, target count, and whether the hub's federation agent listener is up. The built-in `local` vantage is not a registry entry. A hub without federation (no database or no admin password) has no registry; the tool says so and returns `registry_available: false`. |
 
 **Config read**
 
@@ -419,10 +422,10 @@ cleartext (loopback hosts are exempt for local development).
 | Tool | What it does |
 |------|--------------|
 | `config_stage_add_target` | Stage adding a target (group path, host, probe, params, step, pings, NTP `measure`, vantages). Mints a stable id. |
-| `config_stage_edit_target` | Stage an edit to an existing target, including moving/renaming it (identity-preserving). |
+| `config_stage_edit_target` | Stage an edit to an existing target, including moving/renaming it (identity-preserving). A move into the target's own subtree is rejected. |
 | `config_stage_remove_target` | Stage removing a target by id or path; empty groups are pruned. |
 | `config_stage_replace` | Stage a wholesale YAML/JSON replacement of the DB config fragment — the escape hatch for shapes the typed tools above don't cover (alert routing, probe defaults, …). |
-| `config_review` | Show the currently staged diff (added/removed/changed targets), the full working config, and whether the live config has drifted since staging. |
+| `config_review` | Show the currently staged diff, the full working config, and whether the live config has drifted since staging. The diff lists targets added/removed/changed (a target also counts as changed when a group above it changes a setting it inherits, such as `step`), groups added/removed or with changed settings, and any advisory validation warnings. The `config_stage_*` results carry the same summary. |
 | `config_apply` | **Commit the staged changes to the live hub** (`PUT /api/admin/config`). |
 | `config_discard` | Discard all staged changes and reset the staging buffer. |
 
@@ -435,16 +438,25 @@ includes each target's `id`.
 
 Every `config_stage_*` tool, `config_review`, and `config_discard` operates on an **in-process,
 per-server-instance staging buffer** — nothing reaches the hub. `config_stage_*` validates the
-staged document locally using the daemon's own config parser and validator (`internal/config`), so
-most structural and probe-param mistakes surface immediately, before anything is sent anywhere.
+staged document locally using the daemon's own config parser and validator (`internal/config`),
+composed onto the hub's own file config the way the hub composes it, so most structural and
+probe-param mistakes surface immediately, before anything is sent anywhere. The file config is
+derived when staging starts from the hub's effective config (`GET /api/admin/config?source=effective`)
+minus the DB fragment's branches, so a DB target that inherits its probe or other settings from the
+file config validates the same way it does on the hub.
+
+When that composition can't be reproduced locally (the effective config can't be read or parsed,
+or the live config fails local validation, e.g. on a hub that knows probe kinds or config settings
+this binary doesn't), validation becomes advisory. Structural errors in the fragment still block
+the stage; other problems come back as `warnings` in the stage result and in `config_review`, and
+the hub decides at apply time.
 
 `config_apply` is the **only** tool that writes to the live hub: it `PUT`s the staged document to
 `/api/admin/config` with the config version it was staged against (optimistic concurrency). The
-hub's own validation is authoritative — the local pass runs against a defaults-only base and can
-miss something the real merged config (with the hub's file-defined targets) would catch, and the
-server's error is surfaced verbatim if it rejects the apply. A version conflict (someone else
-changed the config since you staged) comes back as an error; `config_review`'s `drifted: true`
-flags that before you even try.
+hub's own validation is authoritative — the local pass can still disagree with it (for example
+when the hub's file config changed after staging began), and the server's error is surfaced
+verbatim if it rejects the apply. A version conflict (someone else changed the config since you
+staged) comes back as an error; `config_review`'s `drifted: true` flags that before you even try.
 
 `GET /api/admin/config[.yaml]` is an open, unauthenticated read (only the `PUT` is admin-gated), so
 `config_stage_*`, `config_review`, and `config_discard` all work locally without `-admin-pass` /

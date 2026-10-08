@@ -30,8 +30,8 @@ func TestVantagesReadsFederationReady(t *testing.T) {
 			"vantages":         []map[string]any{{"name": "local", "created": "2026-01-01T00:00:00Z", "last_seen": nil}},
 		})
 	}))
-	vs, ready, err := fetchVantages(context.Background(), c)
-	if err != nil || !ready || len(vs) != 1 || vs[0].Name != "local" {
-		t.Fatalf("fetchVantages: vs=%+v ready=%v err=%v", vs, ready, err)
+	vs, ready, ok, err := fetchVantages(context.Background(), c)
+	if err != nil || !ok || !ready || len(vs) != 1 || vs[0].Name != "local" {
+		t.Fatalf("fetchVantages: vs=%+v ready=%v ok=%v err=%v", vs, ready, ok, err)
 	}
 }

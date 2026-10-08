@@ -53,7 +53,44 @@ func NewClient(cfg Config) (*Client, error) {
 		return nil, fmt.Errorf("refusing to send credentials to a non-HTTPS URL (%q): use an https:// URL so Basic Auth and the admin password are not transmitted in cleartext (loopback is exempt)", cfg.BaseURL)
 	}
 	jar, _ := cookiejar.New(nil)
-	return &Client{cfg: cfg, base: u, http: &http.Client{Jar: jar, Timeout: 30 * time.Second}}, nil
+	c := &Client{cfg: cfg, base: u}
+	c.http = &http.Client{Jar: jar, Timeout: 30 * time.Second, CheckRedirect: c.checkRedirect}
+	return c, nil
+}
+
+// maxRedirects mirrors net/http's default redirect limit.
+const maxRedirects = 10
+
+// checkRedirect keeps every request on the configured hub origin (scheme, host and port). The hub
+// API never redirects, and the requests this client sends carry credentials: the proxy Basic Auth
+// header, the admin session cookie, and — on login — the admin password in the body. net/http
+// would otherwise replay a 307/308 login body to any destination and forward the Authorization
+// header to the same hostname even across an https -> http downgrade, defeating NewClient's
+// refusal of a cleartext base URL. A redirect within the origin is followed as usual.
+func (c *Client) checkRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= maxRedirects {
+		return fmt.Errorf("stopped after %d redirects", maxRedirects)
+	}
+	if origin(req.URL) != origin(c.base) {
+		return fmt.Errorf("refusing to follow a redirect to %s: it leaves the configured hub origin %s, and the request carries hub credentials", req.URL.Redacted(), origin(c.base))
+	}
+	return nil
+}
+
+// origin returns u's scheme://host:port with the scheme's default port made explicit, so
+// https://hub and https://hub:443 compare equal.
+func origin(u *url.URL) string {
+	scheme := strings.ToLower(u.Scheme)
+	port := u.Port()
+	if port == "" {
+		switch scheme {
+		case "https":
+			port = "443"
+		case "http":
+			port = "80"
+		}
+	}
+	return scheme + "://" + net.JoinHostPort(strings.ToLower(u.Hostname()), port)
 }
 
 // isLoopbackHost reports whether host is localhost or a loopback IP literal.
@@ -172,9 +209,27 @@ func (c *Client) getBytes(ctx context.Context, path string, q url.Values) ([]byt
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("GET %s: %s: %s", path, resp.Status, serverError(body))
+		return nil, &httpError{method: http.MethodGet, path: path, code: resp.StatusCode, status: resp.Status, msg: serverError(body)}
 	}
 	return body, nil
+}
+
+// httpError is a non-200 answer from the hub, kept typed so a caller can tell an absent optional
+// endpoint (404) from a real failure.
+type httpError struct {
+	method, path string
+	code         int
+	status, msg  string
+}
+
+func (e *httpError) Error() string {
+	return fmt.Sprintf("%s %s: %s: %s", e.method, e.path, e.status, e.msg)
+}
+
+// isNotFound reports whether err is the hub answering 404 — the route is not registered.
+func isNotFound(err error) bool {
+	var he *httpError
+	return errors.As(err, &he) && he.code == http.StatusNotFound
 }
 
 func (c *Client) getConfigDoc(ctx context.Context, source string) (json.RawMessage, int, error) {
