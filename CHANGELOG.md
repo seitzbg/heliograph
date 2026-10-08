@@ -13,6 +13,21 @@ All notable changes to **Heliograph** are recorded here. The format follows
   once a newer revision was published (`libcrypto3`/`libssl3` 3.5.9-r0, `curl` 8.22.0-r0), the pinned ones
   disappeared and every fresh build failed in the `apk` step. Those pins are now `>=` minimum
   versions: the CVE fixes still can't regress, and newer revisions install without breaking the build.
+- **A delayed NTP round no longer brings back an obsolete clock offset after it was cleared.** When a
+  remote vantage reports an unsynchronized round, the hub clears that vantage's clock stat for the
+  target, but the clear also dropped the stat's freshness timestamp. A store-and-forward replay of an
+  *older* synchronized round could then re-set the offset, so `/api/targets?vantage=…` and the
+  dashboard showed an out-of-date offset next to the newer round. The clear now keeps its timestamp,
+  so only a round newer than it can set the stat again.
+- **A config reload no longer pre-fills a redefined target's alert window with its old measurement.**
+  On a reload (SIGHUP or a config apply), alert windows are warm-started from stored history, which
+  was matched only by host, probe, metric and step. Changing what a target measures without changing
+  those, such as a `TCPConnect` port from `443` to `22`, re-imported the old port's rounds, so a
+  `CheckLoss(x=3)` alert fired on the *first* failure of the new port. A target whose measurement
+  identity changed in a reload is no longer warm-started: its alerts wait for `x` rounds of the new
+  measurement. A target that only gains an alert on reload is still warm-started. On a cold start,
+  smoked has no record of a target's previous definition, so a target redefined while smoked was
+  stopped can still be warm-started from its recent old rounds.
 - **`heliograph_triage` covers the hub's own `local` vantage and works on a single-host hub.** It
   took its vantage list from the remote-vantage registry (`GET /api/admin/vantages`), which never
   includes `local`. With a remote vantage registered, triage never read local measurements, so a
@@ -42,11 +57,31 @@ All notable changes to **Heliograph** are recorded here. The format follows
   blocking, and `config_apply`'s server-side validation stays authoritative.
 
 ### Security
+- **Revoking and re-adding a vantage now retires its earlier certificates.** Agent authorization
+  checked only the client certificate's CommonName against the registry, so after
+  `smoked vantage revoke <name>` followed by `vantage add <name>` — the documented way to retire a
+  credential — every certificate ever issued for that name (CA-signed, valid for ten years)
+  authenticated again. The hub now records the serial of every certificate it issues and accepts a
+  certificate only if its serial was issued for the vantage's current registration; revoking drops
+  the recorded serials, so a re-added name accepts only certificates issued after the re-add.
+  Regenerate (the dashboard's **Regenerate**, or `vantage add` for a registered name) is unchanged:
+  earlier certificates keep working alongside the new one. **Upgrade:** vantages registered before
+  this release have no recorded serials, so on the first start they become *legacy* registrations
+  that keep accepting any hub-CA certificate bearing their name — deployed agents keep reporting
+  with no action — until they are revoked. Revoke and re-add such a vantage once (and redeploy its
+  new bundle) to bring it under serial checking. Certificates minted by an older `smoked` binary
+  against an upgraded database are not recorded and are refused for vantages registered after the
+  upgrade. See *Certificate serial tracking* in `docs/federation.md`.
 - **`golang.org/x/text` bumped from v0.39.0 to v0.42.0** for [GO-2026-6629](https://pkg.go.dev/vuln/GO-2026-6629)
   (a panic in `x/text/secure/precis`, fixed in v0.41.0). `govulncheck` flagged it through `pgx`'s
   SCRAM password handling. That path runs the operator-supplied database password through a
   different precis profile from the one the advisory names, so no remote trigger is known; the bump
   clears the scan. Caddy's `--with golang.org/x/text` floor is raised to match.
+- **`smoked vantage add -out` writes the onboarding bundle owner-only.** The `.tar.gz` embeds the
+  vantage's client private key in `agent.yaml`, but was created with the default `0666`-minus-umask
+  mode, which is world-readable (`0644`) under the usual `022` umask. It is now created `0600`
+  regardless of umask, and an existing file that `-out` overwrites is tightened to `0600` before any
+  key material is written to it.
 - **`smoked mcp` no longer follows a redirect off the hub's origin.** The client already refused a
   plaintext `http://` hub URL when Basic Auth or an admin password is set, but it followed
   redirects: a `307` from the HTTPS login URL replayed the admin-password body to the redirect

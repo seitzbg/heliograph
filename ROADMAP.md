@@ -52,9 +52,10 @@ password-gated admin API, both of which mint the client certificate. Federation 
 - ✅ Per-round vantage dimension in the store (the hub probes as `local`)
 - ✅ `vantages:` config (inherited down the tree) + a pure per-vantage assignment builder + a
   content-version hash for the `304` check
-- ✅ Vantage registry + a self-bootstrapped CA (mTLS client-cert auth by CommonName;
-  revoke-by-removal — deleting a vantage rejects its certificate on the next request even though
-  the certificate itself remains valid) + `smoked vantage add/ls/revoke` CLI + a password-gated
+- ✅ Vantage registry + a self-bootstrapped CA (mTLS client-cert auth by CommonName + issued
+  serial; revoke-by-removal — deleting a vantage rejects its certificates on the next request even
+  though they remain valid, and re-adding the name accepts only newly issued ones) + `smoked vantage
+  add/ls/revoke` CLI + a password-gated
   `/api/admin/vantages` API with a session login
 - ✅ Agent-facing endpoints: `GET /agent/v1/assignment` (304-aware, carries effective probe-level
   config) + `POST /agent/v1/results` (mutual-TLS client-certificate auth, validated + idempotent

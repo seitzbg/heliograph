@@ -8,6 +8,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"io"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -37,7 +38,7 @@ func (f *fakeKeys) Revoke(_ context.Context, name string) (bool, error) {
 	f.revoked = append(f.revoked, name)
 	return name == "nyc", nil
 }
-func (f *fakeKeys) IsActive(_ context.Context, name string) (bool, error) {
+func (f *fakeKeys) IsActive(_ context.Context, name string, _ *big.Int) (bool, error) {
 	return name == "nyc", nil // mirrors List(), which only knows about "nyc"
 }
 
