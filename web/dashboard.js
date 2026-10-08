@@ -1967,10 +1967,11 @@
     }
     // mintVantage POSTs a name; the store registers it (no-op if already registered) and always
     // issues a FRESH client certificate for it (regenerate == re-POST the same name). There is no
-    // CRL and no per-certificate revocation: the hub authorizes purely by the presented
-    // certificate's CommonName against the active vantage registry (requireAgent), so a
-    // regenerate does NOT invalidate any certificate issued earlier for the same name — both
-    // remain valid until the vantage itself is revoked (removed from the registry). The hub mints
+    // CRL: the hub records the serial of every certificate it issues and authorizes the presented
+    // certificate by its CommonName and serial against the active vantage registry (requireAgent),
+    // so a regenerate does NOT invalidate any certificate issued earlier for the same name — all
+    // remain valid until the vantage itself is revoked (removed from the registry together with
+    // its recorded serials; a later re-add accepts only newly issued certificates). The hub mints
     // the vantage's mTLS client identity server-side and, via `?format=bundle` +
     // `Accept: application/gzip`, hands back a ready-to-run tar.gz (agent.yaml +
     // docker-compose.yml + README) instead of the old copy-paste key reveal — there is no

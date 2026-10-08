@@ -6,6 +6,23 @@ All notable changes to **Heliograph** are recorded here. The format follows
 
 ## [Unreleased]
 
+### Security
+- **Revoking and re-adding a vantage now retires its earlier certificates.** Agent authorization
+  checked only the client certificate's CommonName against the registry, so after
+  `smoked vantage revoke <name>` followed by `vantage add <name>` — the documented way to retire a
+  credential — every certificate ever issued for that name (CA-signed, valid for ten years)
+  authenticated again. The hub now records the serial of every certificate it issues and accepts a
+  certificate only if its serial was issued for the vantage's current registration; revoking drops
+  the recorded serials, so a re-added name accepts only certificates issued after the re-add.
+  Regenerate (the dashboard's **Regenerate**, or `vantage add` for a registered name) is unchanged:
+  earlier certificates keep working alongside the new one. **Upgrade:** vantages registered before
+  this release have no recorded serials, so on the first start they become *legacy* registrations
+  that keep accepting any hub-CA certificate bearing their name — deployed agents keep reporting
+  with no action — until they are revoked. Revoke and re-add such a vantage once (and redeploy its
+  new bundle) to bring it under serial checking. Certificates minted by an older `smoked` binary
+  against an upgraded database are not recorded and are refused for vantages registered after the
+  upgrade. See *Certificate serial tracking* in `docs/federation.md`.
+
 ## [2.2.0] - 2026-09-05
 
 ### Added
