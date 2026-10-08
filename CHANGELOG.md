@@ -13,6 +13,14 @@ All notable changes to **Heliograph** are recorded here. The format follows
   regardless of umask, and an existing file that `-out` overwrites is tightened to `0600` before any
   key material is written to it.
 
+### Fixed
+- **A delayed NTP round no longer brings back an obsolete clock offset after it was cleared.** When a
+  remote vantage reports an unsynchronized round, the hub clears that vantage's clock stat for the
+  target, but the clear also dropped the stat's freshness timestamp. A store-and-forward replay of an
+  *older* synchronized round could then re-set the offset, so `/api/targets?vantage=…` and the
+  dashboard showed an out-of-date offset next to the newer round. The clear now keeps its timestamp,
+  so only a round newer than it can set the stat again.
+
 ## [2.2.0] - 2026-09-05
 
 ### Added
