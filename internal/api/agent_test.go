@@ -767,6 +767,47 @@ func TestRemoteNTPStatKeepsNewestAcrossOutOfOrderDelivery(t *testing.T) {
 	}
 }
 
+// A no-stat round clears the remote clock stat, and that clear is a reading in its own right: a
+// store-and-forward replay delivering an OLDER synchronized round afterwards must not bring an
+// obsolete offset back next to the newer, unsynchronized round. Rounds at T0 < T1 < T2 arrive as
+// T0 (synced), T2 (no stat), then the delayed T1 (synced).
+func TestRemoteNTPStatClearHoldsAgainstOlderReplay(t *testing.T) {
+	m := model.Monitor{Name: "clock", ID: "clock", ProbeKind: "NTP", Host: "h", Pings: 2, Step: time.Minute, Vantages: []string{"nyc"}}
+	srv := &Server{
+		store: store.NewMem(10),
+		Assignment: func(v string) ([]model.Monitor, map[string]map[string]string, string) {
+			return []model.Monitor{m}, nil, "sha256:v1"
+		},
+		Active:         func() map[string]bool { return map[string]bool{"clock": true} },
+		Configured:     func() []model.Monitor { return []model.Monitor{m} },
+		TargetVantages: func() map[string][]string { return map[string][]string{"clock": {"nyc"}} },
+	}
+	now := time.Now().UTC()
+	post := func(ts time.Time, stat string) {
+		t.Helper()
+		if w := postResults(t, srv, fmt.Sprintf(
+			`{"results":[{"target":"clock","ts":%q,"pings":2,"rtts":[0.001,0.002]%s}]}`, ts.Format(time.RFC3339Nano), stat)); w.Code != 200 {
+			t.Fatalf("ingest status=%d body=%s", w.Code, w.Body)
+		}
+	}
+
+	post(now.Add(-3*time.Minute), `,"ntp_offset_ms":-0.9,"stratum":2`) // T0: synced
+	post(now.Add(-1*time.Minute), "")                                  // T2: unsynchronized
+	if off := offsetForClock(t, srv, "/api/targets?vantage=nyc"); off != nil {
+		t.Fatalf("the newer no-stat round must clear the offset, got %v", *off)
+	}
+	post(now.Add(-2*time.Minute), `,"ntp_offset_ms":-0.5,"stratum":2`) // T1: delayed replay
+	if off := offsetForClock(t, srv, "/api/targets?vantage=nyc"); off != nil {
+		t.Fatalf("a replayed round older than the clear resurrected an obsolete offset: got %v, want none", *off)
+	}
+
+	// A round newer than the clear still shows its stat.
+	post(now, `,"ntp_offset_ms":-0.7,"stratum":2`)
+	if off := offsetForClock(t, srv, "/api/targets?vantage=nyc"); off == nil || *off != -0.7 {
+		t.Fatalf("a round newer than the clear must show its offset, got %v, want -0.7", off)
+	}
+}
+
 // After a target keeps its stable id but is repointed to a different endpoint on the SAME host (a new
 // port), the previously measured offset/stratum must not decorate the new panel (CODE_REVIEW M3).
 func TestRemoteNTPStatRefusedAfterSameHostPortChange(t *testing.T) {
