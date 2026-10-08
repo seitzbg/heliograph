@@ -6,6 +6,8 @@ All notable changes to **Heliograph** are recorded here. The format follows
 
 ## [Unreleased]
 
+## [2.3.0] - 2026-10-08
+
 ### Fixed
 - **Fresh container image builds work again.** The collector `Dockerfile` and `Caddy.Dockerfile` pinned
   security-patched Alpine packages (`libcrypto3`/`libssl3`, and in the Caddy image `curl`/`libcurl`/
@@ -1769,7 +1771,8 @@ the smoke-graph look, a fast/parallel poller, and probes as plugins.
 - Full re-implementation reference / code map maintained outside the repo at
   `~/.claude/plans/smokeping-codemap/`.
 
-[Unreleased]: https://github.com/seitzbg/heliograph/compare/v2.2.0...main
+[Unreleased]: https://github.com/seitzbg/heliograph/compare/v2.3.0...main
+[2.3.0]: https://github.com/seitzbg/heliograph/compare/v2.2.0...v2.3.0
 [2.2.0]: https://github.com/seitzbg/heliograph/compare/v2.1.0...v2.2.0
 [2.1.0]: https://github.com/seitzbg/heliograph/compare/v2.0.0...v2.1.0
 [2.0.0]: https://github.com/seitzbg/heliograph/compare/v1.0.16...v2.0.0
