@@ -18,6 +18,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -72,9 +73,9 @@ func stripNulls(v any) {
 }
 
 // importCmd implements `smoked import smokeping <dir> [--out FILE] [--apply] [--dsn DSN]
-// [--report] [--history] [--rrdtool PATH] [--data DIR]`.
+// [--config PATH] [--report] [--history] [--rrdtool PATH] [--data DIR]`.
 func importCmd(args []string) int {
-	const usage = "usage: smoked import smokeping <dir> [--out FILE] [--apply] [--dsn DSN] [--config DIR] " +
+	const usage = "usage: smoked import smokeping <dir> [--out FILE] [--apply] [--dsn DSN] [--config PATH] " +
 		"[--report] [--history] [--rrdtool PATH] [--data DIR]"
 	if len(args) < 1 || args[0] != "smokeping" {
 		fmt.Fprintln(os.Stderr, usage)
@@ -90,9 +91,10 @@ func importCmd(args []string) int {
 	out := fs.String("out", "", "write config YAML to this file (default: stdout)")
 	apply := fs.Bool("apply", false, "also merge into the DB config fragment (needs --dsn)")
 	dsn := fs.String("dsn", os.Getenv("SMOKED_DSN"), "TimescaleDB DSN (or set SMOKED_DSN)")
-	configDir := fs.String("config", "", "with --apply, effective-validate the merged fragment against this base "+
-		"config (default.yaml + conf.d) before persisting, instead of relying on the daemon's next reload to "+
-		"catch a leaf whose inherited probe/params/alerts don't resolve")
+	configDir := fs.String("config", "", "the hub's YAML config (file, or dir with default.yaml + conf.d). With --apply, "+
+		"effective-validate the merged fragment against it before persisting, instead of relying on the daemon's "+
+		"next reload to catch a leaf whose inherited probe/params/alerts don't resolve. With --history, also look "+
+		"up targets defined there (alongside the DB config) to find the id their history is stored under")
 	report := fs.Bool("report", false, "reconcile config targets against the RRD data dir and print counts (dry run, no writes)")
 	history := fs.Bool("history", false, "backfill each matched target's RRD history into samples/aggregates (needs --dsn/SMOKED_DSN and rrdtool)")
 	rrdtoolFlag := fs.String("rrdtool", "", "path to the rrdtool binary (default: PATH lookup)")
@@ -106,7 +108,7 @@ func importCmd(args []string) int {
 	// --history (which itself reconciles and reports the same counts as part
 	// of its summary) wins.
 	if *history {
-		return runHistory(dir, *dataFlag, *rrdtoolFlag, *dsn)
+		return runHistory(dir, *dataFlag, *rrdtoolFlag, *dsn, *configDir)
 	}
 	if *report {
 		return runReport(dir, *dataFlag)
@@ -348,13 +350,115 @@ func printReconciliationSummary(w io.Writer, total int, rec smokeping.Reconcilia
 }
 
 // exitPartialFailure is runHistory's exit code when the run completed but at least one
-// matched target could not be safely imported (e.g. an unresolvable ping count) — as
-// opposed to 0 (every matched target imported cleanly) or 1 (a hard error, such as a DB
-// insert failure, that aborts the whole run outright). The other targets in a
-// partial-failure run were still imported; this distinct code exists so a script driving
-// the importer can tell "some targets need attention" apart from both a clean run and a
-// total failure.
+// matched target could not be safely imported (an unresolvable ping count, an unreadable
+// RRD, or no single configured target to store its history under) — as opposed to 0
+// (every matched target imported cleanly) or 1 (a hard error, such as a DB insert
+// failure, that aborts the whole run outright). The other targets in a partial-failure
+// run were still imported; this distinct code exists so a script driving the importer can
+// tell "some targets need attention" apart from both a clean run and a total failure.
 const exitPartialFailure = 3
+
+// dbConfigLabel names the DB config fragment as a destination source in --history output.
+const dbConfigLabel = "the database config"
+
+// historyDest is one configured target a SmokePing target's history could be written to:
+// the storage id the hub keys its samples by, and the config source that defines it.
+type historyDest struct {
+	id, source string
+}
+
+// historyDestinations maps each SmokePing target to the configured target the hub will
+// show its history under. The hub composes its targets from the YAML config (-config) plus
+// the DB config fragment and keys every target's samples by its stable id (config.Node.ID,
+// or its flattened path when it has none). `import smokeping --apply` merges the SmokePing
+// tree into the DB fragment verbatim (top-level sections become top-level branches, nested
+// sections become children) and mints a UUID onto every imported host, so a SmokePing
+// target named "A/B" (smokeping.ImportTarget.Name) is the configured target whose flattened
+// path is "A/B", and its history belongs under that target's id, not under "A/B".
+type historyDestinations struct {
+	byPath    map[string][]historyDest
+	consulted []string // every config source looked in, for messages
+	haveFile  bool     // a --config YAML config was among them
+}
+
+// newHistoryDestinations indexes the targets defined by fileCfg (the --config YAML, nil when
+// not given; fileLabel names it in messages) and by the DB config fragment dbDoc, by
+// flattened path. The two sources are indexed separately rather than composed: a path
+// defined in both (a top-level branch the hub would refuse to load twice) or twice within one
+// (a node key containing "/") then shows up as ambiguous for just the targets under it.
+//
+// It returns nil when there is no --config and the DB fragment defines no targets: with no
+// config to consult, the caller falls back to keying history by SmokePing path, which is the
+// storage id of a YAML target that has no explicit id.
+func newHistoryDestinations(fileCfg *config.Config, fileLabel string, dbDoc []byte) (*historyDestinations, error) {
+	d := &historyDestinations{byPath: map[string][]historyDest{}}
+	add := func(label string, ids []config.TargetIdentity) {
+		d.consulted = append(d.consulted, label)
+		for _, ti := range ids {
+			d.byPath[ti.Path] = append(d.byPath[ti.Path], historyDest{id: ti.ID, source: label})
+		}
+	}
+	if fileCfg != nil {
+		d.haveFile = true
+		add(fileLabel, fileCfg.TargetIdentities())
+	}
+	dbCfg := &config.Config{}
+	if err := config.AppendDBFragment(dbCfg, dbDoc); err != nil {
+		return nil, err
+	}
+	add(dbConfigLabel, dbCfg.TargetIdentities())
+	if !d.haveFile && len(d.byPath) == 0 {
+		return nil, nil
+	}
+	return d, nil
+}
+
+// resolve returns the storage id for the SmokePing target named name, or an error saying why
+// there is no single configured target to store its history under.
+func (d *historyDestinations) resolve(name string) (string, error) {
+	dests := d.byPath[name]
+	switch len(dests) {
+	case 1:
+		return dests[0].id, nil
+	case 0:
+		hint := "was it renamed or moved after the config import?"
+		if !d.haveFile {
+			hint += " If it is defined in a YAML config, pass that config with --config."
+		}
+		return "", fmt.Errorf("no configured target at path %q in %s, so no graph would show its history (%s)",
+			name, strings.Join(d.consulted, " or "), hint)
+	default:
+		where := make([]string, len(dests))
+		for i, dst := range dests {
+			where[i] = fmt.Sprintf("id %q in %s", dst.id, dst.source)
+		}
+		return "", fmt.Errorf("path %q matches %d configured targets (%s); the hub cannot load a config that "+
+			"defines a target twice, so fix the config and re-run", name, len(dests), strings.Join(where, ", "))
+	}
+}
+
+// loadHistoryDestinations reads the --history destination config: the YAML config at
+// configPath (when given) and the DB config fragment. A nil result means neither defines any
+// target (see newHistoryDestinations).
+func loadHistoryDestinations(ctx context.Context, dsn, configPath string) (*historyDestinations, error) {
+	var fileCfg *config.Config
+	if configPath != "" {
+		var err error
+		if fileCfg, err = config.LoadPath(configPath); err != nil {
+			return nil, fmt.Errorf("loading --config %s: %w", configPath, err)
+		}
+	}
+	cs, err := configstore.New(ctx, dsn)
+	if err != nil {
+		return nil, err
+	}
+	defer cs.Close()
+	doc, _, err := cs.Get(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return newHistoryDestinations(fileCfg, "the YAML config "+configPath, doc)
+}
 
 // validTargetPings reports whether t's resolved ping count is safe to import: it must be
 // strictly positive and no more than config.MaxPings. A missing/unreadable Database file
@@ -395,14 +499,18 @@ func validLossSamples(samples []smokeping.RRDSample, pings int) ([]smokeping.RRD
 // runHistory implements --history: resolve rrdtool and the data dir,
 // reconcile config against it, then for each matched target extract its RRD
 // history and backfill it into the DB's samples table (and, once done, the
-// hourly/daily continuous aggregates over the imported range). A target whose
-// resolved ping count doesn't validate (validTargetPings) or whose extract
-// fails is logged and skipped (its RRD may be corrupt, missing an expected
-// DS, etc. — no reason to abort a whole backfill over one bad target), and
-// the run exits non-zero (exitPartialFailure) if any target was skipped for
-// an invalid ping count; a DB insert failure still aborts the whole run,
-// since a partial/uncertain write state is worse than stopping.
-func runHistory(dir, dataFlag, rrdtoolFlag, dsn string) int {
+// hourly/daily continuous aggregates over the imported range). Each target's
+// rows are stored under the id of the configured target the hub shows it as,
+// looked up in the YAML config at configPath (when given) and the DB config
+// fragment (see historyDestinations); with neither defining any target, rows
+// are keyed by SmokePing path, as before ids existed. A target with no single
+// configured destination, whose resolved ping count doesn't validate
+// (validTargetPings), or whose extract fails is logged and skipped (its RRD
+// may be corrupt, missing an expected DS, etc. — no reason to abort a whole
+// backfill over one bad target), and the run exits exitPartialFailure; a DB
+// insert failure still aborts the whole run, since a partial/uncertain write
+// state is worse than stopping.
+func runHistory(dir, dataFlag, rrdtoolFlag, dsn, configPath string) int {
 	if dsn == "" {
 		fmt.Fprintln(os.Stderr, "import: --history requires --dsn (or SMOKED_DSN)")
 		return 2
@@ -468,12 +576,40 @@ func runHistory(dir, dataFlag, rrdtoolFlag, dsn string) int {
 		return 1
 	}
 
+	dests, err := loadHistoryDestinations(ctx, dsn, configPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "import: finding the configured targets to store history under: %v. No rows were imported.\n", err)
+		return 1
+	}
+	if dests == nil {
+		fmt.Println("note: no --config given and the database config defines no targets, so history is stored under")
+		fmt.Println("      each target's SmokePing path. That is the id of a YAML-config target with no explicit `id`;")
+		fmt.Println("      if these targets are in a YAML config, pass it with --config so explicit ids are honored.")
+	} else {
+		fmt.Printf("storing history under the ids of the matching targets in %s\n", strings.Join(dests.consulted, " and "))
+	}
+
 	now := time.Now()
 	var totalRows int64
 	var minTS, maxTS time.Time
 	backfilled := 0
 	failed := 0
+	unresolved := 0
 	for i, t := range rec.Matched {
+		// Find the configured target this history belongs to before reading the RRD: rows
+		// stored under any other key are invisible to every graph and API read (the hub
+		// resolves a target to its stable id), so a target with no single destination is
+		// reported and skipped rather than imported under its SmokePing path.
+		key := t.Name
+		if dests != nil {
+			id, err := dests.resolve(t.Name)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "import: [%d/%d] %s: not imported: %v\n", i+1, len(rec.Matched), t.Name, err)
+				unresolved++
+				continue
+			}
+			key = id
+		}
 		// Validate BEFORE extracting/inserting: a target whose resolved ping count can't
 		// be trusted (e.g. 0 from a missing Database file — Finding #5) must never reach
 		// an insert. It's reported as a failed target and counted toward the run's
@@ -502,7 +638,7 @@ func runHistory(dir, dataFlag, rrdtoolFlag, dsn string) int {
 		for j, s := range samples {
 			rows[j] = pgstore.ImportRow{
 				TS:            s.TS,
-				Target:        t.Name,
+				Target:        key,
 				Probe:         t.Probe,
 				Host:          t.Host,
 				Pings:         t.Pings,
@@ -517,7 +653,11 @@ func runHistory(dir, dataFlag, rrdtoolFlag, dsn string) int {
 		}
 		totalRows += n
 		backfilled++
-		fmt.Fprintf(os.Stdout, "[%d/%d] %s: %d rows\n", i+1, len(rec.Matched), t.Name, n)
+		if key == t.Name {
+			fmt.Fprintf(os.Stdout, "[%d/%d] %s: %d rows\n", i+1, len(rec.Matched), t.Name, n)
+		} else {
+			fmt.Fprintf(os.Stdout, "[%d/%d] %s (id %s): %d rows\n", i+1, len(rec.Matched), t.Name, key, n)
+		}
 		if len(samples) > 0 {
 			if minTS.IsZero() || samples[0].TS.Before(minTS) {
 				minTS = samples[0].TS
@@ -549,8 +689,11 @@ func runHistory(dir, dataFlag, rrdtoolFlag, dsn string) int {
 		partialRefresh = maxTS.After(refreshUntil)
 	}
 
-	printHistorySummary(os.Stdout, backfilled, totalRows, len(rec.ConfigOnly), len(rec.Orphans), failed, hasCaggs, refreshed, partialRefresh)
-	if failed > 0 {
+	printHistorySummary(os.Stdout, historyCounts{
+		backfilled: backfilled, rows: totalRows, configOnly: len(rec.ConfigOnly), orphans: len(rec.Orphans),
+		unresolved: unresolved, failed: failed,
+	}, hasCaggs, refreshed, partialRefresh)
+	if failed > 0 || unresolved > 0 {
 		return exitPartialFailure
 	}
 	return 0
@@ -591,23 +734,38 @@ func refreshWindowFor(minTS, maxTS, now time.Time) (time.Time, time.Time) {
 	return from, until
 }
 
+// historyCounts are the per-target outcomes of a --history run, for printHistorySummary.
+type historyCounts struct {
+	backfilled int
+	rows       int64
+	configOnly int
+	orphans    int
+	unresolved int // matched, but no single configured target to store the history under
+	failed     int // matched, but invalid pings or an unreadable RRD
+}
+
 // printHistorySummary reports what --history did: how many matched targets
 // it backfilled, the total rows actually inserted (0 on a re-run — see
 // ImportSamples' ON CONFLICT DO NOTHING), how many config-only targets
 // and orphan .rrds it left untouched (matching printReconciliationSummary's
 // counts so --report's preview and --history's outcome read the same way),
-// and how many matched targets failed validation (an unresolvable ping
-// count — Finding #5) and so were skipped with no rows written; a non-zero
-// failed count is also why the run's exit code is exitPartialFailure rather
-// than 0. The aggregate-refresh line is deliberately not a flat "done":
+// how many matched targets had no single configured target to store their
+// history under (unresolved), and how many failed validation (an
+// unresolvable ping count — Finding #5 — or an unreadable RRD); both were
+// skipped with no rows written, and either being non-zero is why the run's
+// exit code is exitPartialFailure rather than 0. The aggregate-refresh line
+// is deliberately not a flat "done":
 // partialRefresh means RefreshAggregates' own now()-1h cap left the newest
 // imported samples (from a still-live SmokePing source) outside the
 // refreshed range — raw data is never lost, but claiming an unqualified
 // "done" there would overstate what's actually queryable via the
 // hourly/daily views right now.
-func printHistorySummary(w io.Writer, backfilled int, rows int64, configOnly, orphans, failed int, hasCaggs, refreshed, partialRefresh bool) {
-	fmt.Fprintf(w, "smokeping history: %d target(s) backfilled, %d row(s) inserted, %d config-only skipped, %d orphan(s) skipped, %d failed\n",
-		backfilled, rows, configOnly, orphans, failed)
+func printHistorySummary(w io.Writer, c historyCounts, hasCaggs, refreshed, partialRefresh bool) {
+	fmt.Fprintf(w, "smokeping history: %d target(s) backfilled, %d row(s) inserted, %d config-only skipped, %d orphan(s) skipped, %d unresolved, %d failed\n",
+		c.backfilled, c.rows, c.configOnly, c.orphans, c.unresolved, c.failed)
+	if c.unresolved > 0 {
+		fmt.Fprintf(w, "unresolved: %d target(s) have no single configured target to store their history under; nothing was imported for them (reasons above)\n", c.unresolved)
+	}
 	switch {
 	case !hasCaggs:
 		fmt.Fprintln(w, "aggregate refresh: skipped (no continuous aggregates — run `smoked -downsample` first)")
