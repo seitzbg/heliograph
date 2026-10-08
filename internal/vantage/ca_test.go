@@ -35,6 +35,9 @@ func TestCA(t *testing.T) {
 func TestIssueClientCert(t *testing.T) {
 	ctx := context.Background()
 	s := testStore(t)
+	if err := s.Register(ctx, "nyc"); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
 
 	certPEM, keyPEM, caPEM, err := s.IssueClientCert(ctx, "nyc")
 	if err != nil {
