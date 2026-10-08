@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"math/big"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -85,7 +86,7 @@ type registry struct{ infos []vantage.Info }
 func (r registry) Register(context.Context, string) error         { return nil }
 func (r registry) List(context.Context) ([]vantage.Info, error)   { return r.infos, nil }
 func (r registry) Revoke(context.Context, string) (bool, error)   { return false, nil }
-func (r registry) IsActive(context.Context, string) (bool, error) { return true, nil }
+func (r registry) IsActive(context.Context, string, *big.Int) (bool, error) { return true, nil }
 func (r registry) IssueClientCert(context.Context, string) ([]byte, []byte, []byte, error) {
 	return nil, nil, nil, nil
 }
