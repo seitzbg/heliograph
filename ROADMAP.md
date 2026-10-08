@@ -156,7 +156,10 @@ Phase-6 items all ship in the single **v1.0** line.
     `data` subdir); `--history` extracts each matched target's full RRD history via `rrdtool` and
     backfills median/loss into `samples` + the hourly/daily aggregates, idempotently. Requires the
     continuous aggregates already enabled (`smoked -downsample`) — refuses to import (no rows
-    written) otherwise, so old history is never left unmaterialized ahead of raw retention
+    written) otherwise, so old history is never left unmaterialized ahead of raw retention.
+    Rows are stored under the stable id of the configured target at the same path (DB config,
+    plus the YAML config given with `--config`); a target with no single match is reported and
+    skipped (Unreleased)
 - ✅ **Native ICMP probe** — a new `Ping` probe kind (`internal/probe/pingprobe`) speaks ICMP
   echo itself via `golang.org/x/net/icmp`: datagram socket first (unprivileged, needs the
   `net.ipv4.ping_group_range` sysctl), raw-socket fallback (`CAP_NET_RAW`). Ships alongside

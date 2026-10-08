@@ -6,6 +6,18 @@ All notable changes to **Heliograph** are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- **`smoked import smokeping --history` now stores history where the target's graph reads it.**
+  `--apply` gives every imported target a new stable id, but `--history` stored each RRD's rows
+  under the SmokePing path, so the backfilled history never appeared on the configured target's
+  graph or in `/api/series`. `--history` now looks each target up by path in the DB config and, when
+  given, the YAML config passed with `--config`, and stores its rows under that target's id. A target
+  that matches no configured target, or more than one, is named on stderr, counted as `unresolved`
+  in the summary, and not imported; the run then exits `3`, the same as other partial failures.
+  With no `--config` and no targets in the DB config, rows are still keyed by SmokePing path, which
+  matches a YAML target that has no `id`, and the run says so. History already imported under
+  SmokePing paths is not moved; re-run `--history` to store it under the target ids.
+
 ## [2.2.0] - 2026-09-05
 
 ### Added
