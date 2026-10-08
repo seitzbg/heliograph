@@ -72,13 +72,15 @@ if [ -n "${smoked_config}" ]; then
 fi
 _child_args="${_child_args} ${smoked_args}"
 
-# Supervise with daemon(8): -r restarts the child if it exits, -T sends its output to syslog
+# Supervise with daemon(8): -f detaches the supervisor from the caller's stdin/stdout/stderr
+# (without it daemon(8) keeps them open, so whatever ran `service smoked start` would wait on
+# them), -r restarts the child if it exits, -T sends its output to syslog
 # tagged with the service name, -P records the SUPERVISOR's pid so `service smoked stop` signals
 # daemon (which stops the child and does not restart it), and -t titles the supervisor
 # "daemon: smoked[<child pid>]". rc.subr evals this line, so every word here must be a single
 # shell word. The default procname (/usr/sbin/daemon) matches that title for status/stop.
 command="/usr/sbin/daemon"
-command_args="-r -T ${name} -t ${name} -P ${pidfile} ${smoked_bin} ${_child_args}"
+command_args="-f -r -T ${name} -t ${name} -P ${pidfile} ${smoked_bin} ${_child_args}"
 
 start_precmd="smoked_precmd"
 smoked_precmd()

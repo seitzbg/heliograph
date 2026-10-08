@@ -57,13 +57,15 @@ pidfile="/var/run/${name}/${name}.pid"
 _child_args="-config ${smoke_agent_config} -spool-dir=${smoke_agent_spool}"
 _child_args="${_child_args} ${smoke_agent_args}"
 
-# Supervise with daemon(8): -r restarts the child if it exits, -T sends its output to syslog
+# Supervise with daemon(8): -f detaches the supervisor from the caller's stdin/stdout/stderr
+# (without it daemon(8) keeps them open, so whatever ran `service smoke_agent start` would wait on
+# them), -r restarts the child if it exits, -T sends its output to syslog
 # tagged with the service name, -P records the SUPERVISOR's pid so `service smoke_agent stop`
 # signals daemon (which stops the child and does not restart it), and -t titles the supervisor
 # "daemon: smoke_agent[<child pid>]". rc.subr evals this line, so every word here must be a
 # single shell word. The default procname (/usr/sbin/daemon) matches that title for status/stop.
 command="/usr/sbin/daemon"
-command_args="-r -T ${name} -t ${name} -P ${pidfile} ${smoke_agent_bin} ${_child_args}"
+command_args="-f -r -T ${name} -t ${name} -P ${pidfile} ${smoke_agent_bin} ${_child_args}"
 
 start_precmd="smoke_agent_precmd"
 smoke_agent_precmd()
