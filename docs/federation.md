@@ -130,7 +130,10 @@ $ smoked vantage add nyc -dsn "$SMOKED_DSN" -hub https://your-hub.example:8443 -
 wrote bundle nyc-vantage.tar.gz for vantage "nyc"
 ```
 
-That tar.gz is the same onboarding bundle the GUI downloads. Omit `-out` to
+That tar.gz is the same onboarding bundle the GUI downloads. It holds the
+vantage's private key, so `-out` writes it readable by its owner only (mode
+`0600`, whatever your umask), and tightens an existing file it overwrites to
+`0600` too. Omit `-out` to
 print the rendered `agent.yaml` to stdout instead (handy for `scp`-ing just the
 file), or pass `-json` to emit the raw PEMs as JSON. `-dsn` defaults to
 `$SMOKED_DSN`. Running `vantage add nyc` again for an **already-registered**

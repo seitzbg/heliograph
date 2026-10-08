@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -1077,5 +1078,45 @@ func TestVantageAddEmitsOnboardingBundle(t *testing.T) {
 	}
 	if len(data) < 2 || data[0] != 0x1f || data[1] != 0x8b {
 		t.Fatalf("bundle file is not gzip (first bytes %x)", data[:min(2, len(data))])
+	}
+}
+
+// The `vantage add -out` bundle embeds the agent's client private key, so it must be readable by
+// its owner only: under the common 022 umask (where a default-created file is 0644), and also when
+// -out overwrites an existing file that was created world-readable.
+func TestVantageAddBundleIsOwnerOnly(t *testing.T) {
+	dsn := os.Getenv("SMOKE_TEST_DSN")
+	if dsn == "" {
+		t.Skip("set SMOKE_TEST_DSN to run vantage add test")
+	}
+	defer syscall.Umask(syscall.Umask(0o022))
+
+	dir := t.TempDir()
+	existing := filepath.Join(dir, "existing.tar.gz")
+	if err := os.WriteFile(existing, []byte("old bundle"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct{ vantage, path string }{
+		{"perm-new", filepath.Join(dir, "new.tar.gz")},
+		{"perm-existing", existing},
+	} {
+		t.Cleanup(func() { vantageCmd([]string{"revoke", c.vantage, "-dsn", dsn}) })
+		if rc := vantageCmd([]string{"add", c.vantage, "-dsn", dsn, "-hub", "https://hub.example:8443", "-out", c.path}); rc != 0 {
+			t.Fatalf("%s: vantage add -out rc=%d", c.vantage, rc)
+		}
+		fi, err := os.Stat(c.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if perm := fi.Mode().Perm(); perm != 0o600 {
+			t.Errorf("%s: bundle holding the client private key has mode %04o, want 0600", c.vantage, perm)
+		}
+		data, err := os.ReadFile(c.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(data) < 2 || data[0] != 0x1f || data[1] != 0x8b {
+			t.Errorf("%s: bundle file is not gzip (first bytes %x)", c.vantage, data[:min(2, len(data))])
+		}
 	}
 }

@@ -6,6 +6,13 @@ All notable changes to **Heliograph** are recorded here. The format follows
 
 ## [Unreleased]
 
+### Security
+- **`smoked vantage add -out` writes the onboarding bundle owner-only.** The `.tar.gz` embeds the
+  vantage's client private key in `agent.yaml`, but was created with the default `0666`-minus-umask
+  mode, which is world-readable (`0644`) under the usual `022` umask. It is now created `0600`
+  regardless of umask, and an existing file that `-out` overwrites is tightened to `0600` before any
+  key material is written to it.
+
 ## [2.2.0] - 2026-09-05
 
 ### Added

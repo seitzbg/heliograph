@@ -822,6 +822,27 @@ func main() {
 	}
 }
 
+// createOwnerOnly opens path for writing (created or truncated) readable by its owner only, for a
+// file that will hold a secret. A new file is created 0600 whatever the umask; an existing regular
+// file with any group/other permission bits is tightened to 0600 before the caller writes to it, so
+// overwriting a world-readable file can't leave the secret world-readable. A non-regular path (a
+// FIFO, /dev/stdout) is left alone: its mode isn't this file's to change.
+func createOwnerOnly(path string) (*os.File, error) {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	fi, err := f.Stat()
+	if err == nil && fi.Mode().IsRegular() && fi.Mode().Perm()&0o077 != 0 {
+		err = f.Chmod(0o600)
+	}
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	return f, nil
+}
+
 // vantageCmd implements `smoked vantage <add NAME|ls|revoke NAME> [-dsn DSN]` — provisioning
 // against the same TimescaleDB the daemon uses. The subcommand and the vantage NAME are
 // positional (git-style), so flags may follow them: `vantage add nyc -dsn X`. -dsn defaults
@@ -886,7 +907,8 @@ func vantageCmd(args []string) int {
 
 		switch {
 		case *out != "":
-			f, err := os.Create(*out)
+			// The bundle embeds the client private key: owner-only, never os.Create's 0666-umask.
+			f, err := createOwnerOnly(*out)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "vantage add: %v\n", err)
 				return 1
