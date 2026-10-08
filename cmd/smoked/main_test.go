@@ -567,8 +567,7 @@ func TestSwapRuntimeSeedsNewlyAlertedTarget(t *testing.T) {
 		engine:   alert.NewEngine(alertDef, map[string]alert.Notifier{"cap": cap}),
 		monitors: []model.Monitor{monAlerted}, alertsByTarget: map[string][]string{"t": {"loss"}}, targetFP: map[string]string{"t": "fp"},
 	}
-	seed := func(r *runtime) { warmStartAlerts(context.Background(), r.engine, r.monitors, r.metricByName, st, now) }
-	swapRuntime(&current, &mu, nrt, seed)
+	swapRuntime(&current, &mu, nrt, historySeed(context.Background(), st))
 
 	// Window seeded with the 1 prior breaching round; one more now meets X=2 → fires immediately.
 	current.Load().eval([]scheduler.Outcome{{
@@ -577,6 +576,56 @@ func TestSwapRuntimeSeedsNewlyAlertedTarget(t *testing.T) {
 	}})
 	if cap.n != 1 {
 		t.Fatalf("newly-alerted target should fire immediately from seeded history, got %d events", cap.n)
+	}
+}
+
+// A reload that redefines what a target measures must not warm-start its alert window from rounds
+// of the old measurement. Moving a TCPConnect target from port 443 to 22 on the same host, with two
+// recent failing port-443 rounds in the store, a three-round loss alert must still need three
+// failing port-22 rounds, not fire on the first.
+func TestReloadDoesNotSeedRedefinedTargetFromOldMeasurement(t *testing.T) {
+	st := store.NewMem(16)
+	cap := &capNotify{}
+	alertDef := map[string]*alert.Alert{"loss": {Name: "loss", Matcher: alert.CheckLoss{L: 50, X: 3}, To: []string{"cap"}}}
+	newRT := func(m model.Monitor) *runtime {
+		return &runtime{
+			engine:         alert.NewEngine(alertDef, map[string]alert.Notifier{"cap": cap}),
+			monitors:       []model.Monitor{m},
+			alertsByTarget: map[string][]string{"t": {"loss"}},
+			targetFP:       map[string]string{"t": federation.Fingerprint(m, nil)},
+		}
+	}
+	failedRound := func(m model.Monitor, when time.Time) scheduler.Outcome {
+		return scheduler.Outcome{
+			Target:    probe.Target{ID: m.ID, Name: m.Name, Host: m.Host, Params: m.Params},
+			ProbeName: m.ProbeKind, Fingerprint: federation.Fingerprint(m, nil),
+			Computed: sample.Compute(1, nil), When: when,
+		}
+	}
+
+	port443 := model.Monitor{ID: "t", Name: "t", Host: "h", ProbeKind: "TCPConnect", Params: map[string]string{"port": "443"},
+		Pings: 1, Step: time.Minute, Alerts: []string{"loss"}, Vantages: []string{store.DefaultVantage}}
+	port22 := port443
+	port22.Params = map[string]string{"port": "22"}
+
+	var current atomic.Pointer[runtime]
+	current.Store(newRT(port443))
+	var mu sync.Mutex
+	now := time.Now()
+	for _, ago := range []time.Duration{90 * time.Second, 30 * time.Second} {
+		current.Load().storeLocal(st, []scheduler.Outcome{failedRound(port443, now.Add(-ago))})
+	}
+	if cap.n != 0 {
+		t.Fatalf("two failures must not fire a three-round alert, got %d events", cap.n)
+	}
+
+	swapRuntime(&current, &mu, newRT(port22), historySeed(context.Background(), st))
+
+	for i := 1; i <= 3; i++ {
+		current.Load().storeLocal(st, []scheduler.Outcome{failedRound(port22, now.Add(time.Duration(i)*time.Minute))})
+		if want := map[bool]int{true: 1, false: 0}[i == 3]; cap.n != want {
+			t.Fatalf("after %d failing port-22 round(s): %d notification(s), want %d", i, cap.n, want)
+		}
 	}
 }
 

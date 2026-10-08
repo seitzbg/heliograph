@@ -310,11 +310,13 @@ func main() {
 	// evalMu (inside swapRuntime) only guards the swap; applyMu is strictly outside it.
 	var applyMu sync.Mutex
 	// seedFn seeds a freshly built engine's alert windows from durable history on a reload,
-	// so a target that is newly alerted or redefined isn't left dark until X fresh samples
-	// arrive (CODE_REVIEW #4). Assigned once the store exists (below); the SIGHUP goroutine and
-	// the API apply both pass it into swapRuntime. It reads the store, so swapRuntime runs it
-	// before taking evalMu. nil until assigned — an early reload simply skips seeding.
-	var seedFn func(*runtime)
+	// so a target with no live window to inherit (e.g. one that just gained an alert) isn't
+	// left dark until X fresh samples arrive (CODE_REVIEW #4). swapRuntime picks which targets
+	// it may seed (reloadSeedTargets). Assigned once the store exists (below); the SIGHUP
+	// goroutine and the API apply both pass it into swapRuntime. It reads the store, so
+	// swapRuntime runs it before taking evalMu. nil until assigned — an early reload simply
+	// skips seeding.
+	var seedFn func(*runtime, []model.Monitor)
 	if *configPath != "" {
 		fmt.Printf("config: %d targets from %s\n", len(rt.jobs), *configPath)
 	}
@@ -347,11 +349,11 @@ func main() {
 	}
 
 	// Now that the store exists, wire the reload seed: on a config reload, swapRuntime seeds
-	// the new engine from durable history for targets it can't inherit (redefined or newly
-	// alerted), then InheritStateFrom overwrites the seed for same-identity targets (#4).
-	seedFn = func(nrt *runtime) {
-		warmStartAlerts(ctx, nrt.engine, nrt.monitors, nrt.metricByName, st, time.Now())
-	}
+	// the new engine from durable history for every target whose measurement identity is
+	// unchanged, then InheritStateFrom overwrites the seed with the live window where one
+	// exists, so the seed only fills windows the running engine doesn't have, e.g. a newly
+	// alerted target's (#4).
+	seedFn = historySeed(ctx, st)
 
 	// SIGHUP reloads the config; on error the running config is kept (a bad edit can't take the
 	// collector down). Alert firing state and sample windows carry over from the running engine
@@ -385,7 +387,10 @@ func main() {
 	// that is already breaching at startup fires on its first new round instead of
 	// waiting X fresh samples (the durable-store replacement for SmokePing's S sentinel).
 	// Boot uses this directly; a SIGHUP/API reload runs the same seed via seedFn inside
-	// swapRuntime and then carries unchanged windows/state via InheritStateFrom.
+	// swapRuntime and then carries unchanged windows/state via InheritStateFrom. Unlike a
+	// reload, boot has no previous fingerprint to compare (the store keeps none), so a target
+	// redefined while smoked was down can still be seeded from its old measurement's rounds
+	// if they are recent enough to pass recentContiguous.
 	if rt := current.Load(); rt.engine != nil {
 		warmStartAlerts(ctx, rt.engine, rt.monitors, rt.metricByName, st, time.Now())
 	}
@@ -1279,16 +1284,17 @@ func (rt *runtime) commitRemote(ctx context.Context, ing store.ResultIngester, o
 // state + sample windows over from the running engine (so a reload/apply doesn't
 // re-fire alerts already firing or drop hysteresis history). Serialized against a
 // round's alert eval via evalMu. Shared by the SIGHUP reload and the config-apply API.
-func swapRuntime(current *atomic.Pointer[runtime], evalMu *sync.Mutex, nrt *runtime, seed func(*runtime)) {
+func swapRuntime(current *atomic.Pointer[runtime], evalMu *sync.Mutex, nrt *runtime, seed func(nrt *runtime, monitors []model.Monitor)) {
 	// Seed the new engine's windows from durable history BEFORE the swap and OUTSIDE evalMu.
-	// A target whose measurement identity changed, or one that just gained its first alert,
-	// won't inherit a window below — without seeding it would start dark and fire late
-	// (CODE_REVIEW #4). recentContiguous filters the seed to the current host/probe, so a
-	// redefined target pulls nothing stale. nrt.engine isn't live yet, so this needs no lock,
-	// keeping the store read off the evalMu critical path. Inherit then overwrites the seed for
-	// same-identity targets with their live window.
+	// A target that just gained its first alert has no window to inherit below — without
+	// seeding it would start dark and fire late (CODE_REVIEW #4). A target whose measurement
+	// identity changed is not seeded at all (reloadSeedTargets): its stored rounds measured the
+	// old definition. nrt.engine isn't live yet, so this needs no lock, keeping the store read
+	// off the evalMu critical path. Inherit then overwrites the seed for same-identity targets
+	// with their live window. Reading current here, outside evalMu, is safe because every caller
+	// holds applyMu, so no other swap can land before the locked Load below.
 	if seed != nil && nrt.engine != nil {
-		seed(nrt)
+		seed(nrt, reloadSeedTargets(current.Load(), nrt))
 	}
 	evalMu.Lock()
 	old := current.Load()
@@ -1297,6 +1303,26 @@ func swapRuntime(current *atomic.Pointer[runtime], evalMu *sync.Mutex, nrt *runt
 	}
 	current.Store(nrt)
 	evalMu.Unlock()
+}
+
+// reloadSeedTargets returns the monitors a reload may warm-start from durable history: all of
+// nrt's except a target whose measurement identity (targetFP) changed since old. The store keeps
+// no fingerprint and warmStartAlerts matches history only on host/probe/metric/cadence, so the
+// recent rounds it would find for a redefined target were measured under the old definition:
+// moving a TCPConnect target from port 443 to 22 would count port-443 failures toward the port-22
+// consecutive-loss matcher and fire it early. A redefined target starts with an empty window and
+// waits for X rounds of its new measurement. A same-identity target stays seedable (it inherits
+// its live window over the seed, or needs the seed if it just gained an alert), and so does a
+// target absent from old, which has no previous identity to compare (as at boot).
+func reloadSeedTargets(old, nrt *runtime) []model.Monitor {
+	out := make([]model.Monitor, 0, len(nrt.monitors))
+	for _, m := range nrt.monitors {
+		if was, ok := old.targetFP[m.ID]; ok && was != nrt.targetFP[m.ID] {
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
 }
 
 // reloadIdentity builds the per-target/per-alert identity InheritStateFrom uses to decide what
@@ -1347,8 +1373,9 @@ func sameStringSet(x, y []string) bool {
 // the old and new runtime, using the same federation.Fingerprint (probe/host/params/pings/
 // probe-config) the ingest and in-flight-drop paths key on — so the reload inherit-gate can't
 // disagree with them. A target that is new, removed, or redefined in ANY of those fields is
-// absent (false), so InheritStateFrom carries neither its window nor its firing/visible state;
-// it is seeded fresh from durable history instead (CODE_REVIEW #4).
+// absent (false), so InheritStateFrom carries neither its window nor its firing/visible state
+// (CODE_REVIEW #4). A new target is seeded from durable history; a redefined one is not
+// (reloadSeedTargets), since that history measured its old definition.
 func sameTargetIdentity(old, nrt *runtime) map[string]bool {
 	same := make(map[string]bool, len(nrt.targetFP))
 	for name, fp := range nrt.targetFP {
@@ -1364,7 +1391,7 @@ func sameTargetIdentity(old, nrt *runtime) map[string]bool {
 // runtime in. Validate → persist → swap: an invalid doc never persists, a stale
 // version never swaps. Returns api.ErrConfigInvalid / api.ErrConfigConflict.
 func applyConfig(cfgStore *configstore.Store, current *atomic.Pointer[runtime], evalMu *sync.Mutex,
-	build func(dbFragment func() ([]byte, error)) (*runtime, error), doc json.RawMessage, expectedVersion int, seed func(*runtime)) error {
+	build func(dbFragment func() ([]byte, error)) (*runtime, error), doc json.RawMessage, expectedVersion int, seed func(*runtime, []model.Monitor)) error {
 	nrt, berr := build(func() ([]byte, error) { return doc, nil })
 	if berr != nil {
 		return fmt.Errorf("%w: %v", api.ErrConfigInvalid, berr)
@@ -1398,6 +1425,14 @@ func alertRTT(o scheduler.Outcome) float64 {
 		return math.NaN()
 	}
 	return o.Computed.Median
+}
+
+// historySeed returns the reload seed swapRuntime runs: it warm-starts the given monitors' alert
+// windows in nrt's not-yet-live engine from st's durable history, as of when it runs.
+func historySeed(ctx context.Context, st store.Store) func(nrt *runtime, monitors []model.Monitor) {
+	return func(nrt *runtime, monitors []model.Monitor) {
+		warmStartAlerts(ctx, nrt.engine, monitors, nrt.metricByName, st, time.Now())
+	}
 }
 
 // warmStartLookback bounds how far back a remote vantage's warm-start history read goes.

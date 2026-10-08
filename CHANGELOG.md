@@ -20,6 +20,15 @@ All notable changes to **Heliograph** are recorded here. The format follows
   *older* synchronized round could then re-set the offset, so `/api/targets?vantage=…` and the
   dashboard showed an out-of-date offset next to the newer round. The clear now keeps its timestamp,
   so only a round newer than it can set the stat again.
+- **A config reload no longer pre-fills a redefined target's alert window with its old measurement.**
+  On a reload (SIGHUP or a config apply), alert windows are warm-started from stored history, which
+  was matched only by host, probe, metric and step. Changing what a target measures without changing
+  those, such as a `TCPConnect` port from `443` to `22`, re-imported the old port's rounds, so a
+  `CheckLoss(x=3)` alert fired on the *first* failure of the new port. A target whose measurement
+  identity changed in a reload is no longer warm-started: its alerts wait for `x` rounds of the new
+  measurement. A target that only gains an alert on reload is still warm-started. On a cold start,
+  smoked has no record of a target's previous definition, so a target redefined while smoked was
+  stopped can still be warm-started from its recent old rounds.
 
 ## [2.2.0] - 2026-09-05
 
