@@ -62,6 +62,11 @@ go build -o smoked ./cmd/smoked
 SMOKED_BIN=./smoked node web/layout.test.mjs
 ```
 
+The CI `freebsd-test` job also runs `go test ./...` inside a FreeBSD VM, then
+`.github/scripts/freebsd-rc-test.sh`, which installs the `contrib/freebsd` rc.d scripts and drives both
+services through `service(8)`. That script changes the host it runs on (installs binaries, adds a user,
+edits `/etc/rc.conf`), so run it only as root on a throwaway FreeBSD VM, from the repo root.
+
 ### Integration tests (real TimescaleDB)
 
 The `pgstore` / `vantage` / `api` / `configstore` / `cmd/smoked --history` tests are **skipped

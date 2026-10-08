@@ -13,9 +13,12 @@
 #
 # Optional overrides (defaults shown):
 #   smoke_agent_bin="/usr/local/bin/smoke-agent"
-#   smoke_agent_user="smoke"                 # service account (created separately)
+#   smoke_agent_user="smoke"                 # account smoke-agent runs as (created separately)
 #   smoke_agent_spool="/var/db/smoke-agent/spool"   # set "" to disable the on-disk spool
-#   smoke_agent_flags=""                     # extra flags appended to the command line
+#   smoke_agent_args=""                      # extra smoke-agent flags appended to the command line
+#
+# Do not use smoke_agent_flags: rc.subr hands ${name}_flags to daemon(8), not to smoke-agent.
+# A value left over from v2.2.0 is moved to smoke_agent_args with a warning.
 #
 # ICMP note: the native Ping probe needs a raw socket (run as root, mode=privileged);
 # the FPing probe works unprivileged via `pkg install fping`. See contrib/freebsd/README.md.
@@ -28,30 +31,46 @@ rcvar="smoke_agent_enable"
 
 load_rc_config "$name"
 
-: ${smoke_agent_enable:="NO"}
-: ${smoke_agent_bin:="/usr/local/bin/smoke-agent"}
-: ${smoke_agent_config:="/usr/local/etc/heliograph/agent.yaml"}
-: ${smoke_agent_user:="smoke"}
-: ${smoke_agent_spool:="/var/db/smoke-agent/spool"}
-: ${smoke_agent_flags:=""}
+if [ -n "${smoke_agent_flags}" ]; then
+	warn "smoke_agent_flags is passed to daemon(8), not smoke-agent; using it as smoke_agent_args. Rename it to smoke_agent_args."
+	: "${smoke_agent_args=${smoke_agent_flags}}"
+	smoke_agent_flags=""
+fi
 
-pidfile="/var/run/${name}.pid"
+: "${smoke_agent_enable:=NO}"
+: "${smoke_agent_bin:=/usr/local/bin/smoke-agent}"
+: "${smoke_agent_config:=/usr/local/etc/heliograph/agent.yaml}"
+: "${smoke_agent_user:=smoke}"
+: "${smoke_agent_spool=/var/db/smoke-agent/spool}"	# no colon: an explicit "" must survive
+: "${smoke_agent_args:=}"
+
+# Privileges: rc.subr starts $command through `su -m ${smoke_agent_user}` (the standard
+# ${name}_user knob, as in the node_exporter and prometheus ports), so both daemon(8) and
+# smoke-agent run unprivileged and daemon needs no -u. The pidfile therefore lives in a directory
+# that user owns (made in start_precmd), so the supervisor can create it and remove it on exit.
+pidfile="/var/run/${name}/${name}.pid"
 
 # Assemble the child command. Pass -spool-dir EXPLICITLY (as -spool-dir=<value>), even when
 # empty: smoke-agent only clears a config file's spool_dir on an explicit empty flag — omitting
 # it keeps the file's value — so an empty smoke_agent_spool must send `-spool-dir=` to actually
 # select in-memory mode, matching this knob's documented "set '' to disable" behavior.
 _child_args="-config ${smoke_agent_config} -spool-dir=${smoke_agent_spool}"
-_child_args="${_child_args} ${smoke_agent_flags}"
+_child_args="${_child_args} ${smoke_agent_args}"
 
-# Supervise with daemon(8): -r restarts the child if it exits, -S sends its stdout/stderr
-# to syslog (daemon facility), -P tracks the supervisor's pid, -u drops to the service user.
+# Supervise with daemon(8): -f detaches the supervisor from the caller's stdin/stdout/stderr
+# (without it daemon(8) keeps them open, so whatever ran `service smoke_agent start` would wait on
+# them), -r restarts the child if it exits, -T sends its output to syslog
+# tagged with the service name, -P records the SUPERVISOR's pid so `service smoke_agent stop`
+# signals daemon (which stops the child and does not restart it), and -t titles the supervisor
+# "daemon: smoke_agent[<child pid>]". rc.subr evals this line, so every word here must be a
+# single shell word. The default procname (/usr/sbin/daemon) matches that title for status/stop.
 command="/usr/sbin/daemon"
-command_args="-r -S -P ${pidfile} -t ${desc} -u ${smoke_agent_user} ${smoke_agent_bin} ${_child_args}"
+command_args="-f -r -T ${name} -t ${name} -P ${pidfile} ${smoke_agent_bin} ${_child_args}"
 
 start_precmd="smoke_agent_precmd"
 smoke_agent_precmd()
 {
+	install -d -o "${smoke_agent_user}" -m 0755 "${pidfile%/*}" || return 1
 	if [ -n "${smoke_agent_spool}" ]; then
 		install -d -o "${smoke_agent_user}" -m 0750 "${smoke_agent_spool}" || return 1
 	fi

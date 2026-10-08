@@ -6,19 +6,22 @@
 #
 # FreeBSD rc.d script for the Heliograph hub (smoked) run natively — the dashboard,
 # JSON/admin API, and (optionally) the mTLS federation agent API. Needs a reachable
-# PostgreSQL/TimescaleDB. Install to /usr/local/etc/rc.d/smoked and enable in
-# /etc/rc.conf:
+# PostgreSQL/TimescaleDB for persistence (without smoked_dsn it serves the built-in demo
+# targets from memory). Install to /usr/local/etc/rc.d/smoked and enable in /etc/rc.conf:
 #
 #   smoked_enable="YES"
 #   smoked_dsn="postgres://smoke:smoke@db.example:5432/smoke?sslmode=disable"
 #
 # Optional overrides (defaults shown):
 #   smoked_bin="/usr/local/bin/smoked"
-#   smoked_user="smoke"                                  # service account (created separately)
+#   smoked_user="smoke"                                  # account smoked runs as (created separately)
 #   smoked_addr="127.0.0.1:8087"                         # dashboard + read/admin API listen address (loopback by default)
 #   smoked_webdir="/usr/local/share/heliograph/web"      # static web assets (from the release tarball)
 #   smoked_config=""                                     # path to a YAML config file/dir; "" = built-in demo targets
-#   smoked_flags="-downsample"                           # extra flags (e.g. -agent-addr :8443 -agent-hostname host)
+#   smoked_args="-downsample"                            # extra smoked flags (e.g. -agent-addr :8443 -agent-hostname host); "" for none
+#
+# Do not use smoked_flags: rc.subr hands ${name}_flags to daemon(8), not to smoked. A value
+# left over from v2.2.0 is moved to smoked_args with a warning.
 #
 # The dashboard/API is UNAUTHENTICATED, so smoked_addr defaults to loopback. To reach it beyond
 # localhost, set smoked_addr (e.g. ":8087") and front it with a TLS + Basic-Auth reverse proxy —
@@ -34,19 +37,30 @@ rcvar="smoked_enable"
 
 load_rc_config "$name"
 
-: ${smoked_enable:="NO"}
-: ${smoked_bin:="/usr/local/bin/smoked"}
-: ${smoked_user:="smoke"}
-: ${smoked_addr:="127.0.0.1:8087"}
-: ${smoked_webdir:="/usr/local/share/heliograph/web"}
-: ${smoked_config:=""}
-: ${smoked_dsn:=""}
-: ${smoked_flags:="-downsample"}
+if [ -n "${smoked_flags}" ]; then
+	warn "smoked_flags is passed to daemon(8), not smoked; using it as smoked_args. Rename it to smoked_args."
+	: "${smoked_args=${smoked_flags}}"
+	smoked_flags=""
+fi
 
-pidfile="/var/run/${name}.pid"
+: "${smoked_enable:=NO}"
+: "${smoked_bin:=/usr/local/bin/smoked}"
+: "${smoked_user:=smoke}"
+: "${smoked_addr:=127.0.0.1:8087}"
+: "${smoked_webdir:=/usr/local/share/heliograph/web}"
+: "${smoked_config:=}"
+: "${smoked_dsn:=}"
+: "${smoked_args=-downsample}"	# no colon: an explicit "" means no extra flags
+
+# Privileges: rc.subr starts $command through `su -m ${smoked_user}` (the standard ${name}_user
+# knob, as in the node_exporter and prometheus ports), so both daemon(8) and smoked run
+# unprivileged and daemon needs no -u. The pidfile therefore lives in a directory that user owns
+# (made in start_precmd), so the supervisor can create it and remove it on exit.
+pidfile="/var/run/${name}/${name}.pid"
 
 # Pass the DB DSN through the environment (smoked reads SMOKED_DSN), NOT on the command line,
-# so the password never shows up in `ps`/argv. daemon(8) and the child inherit this export.
+# so the password never shows up in `ps`/argv. su -m keeps the environment, so daemon(8) and the
+# child inherit this export.
 if [ -n "${smoked_dsn}" ]; then
 	export SMOKED_DSN="${smoked_dsn}"
 fi
@@ -56,11 +70,22 @@ _child_args="-serve -addr ${smoked_addr} -webdir ${smoked_webdir}"
 if [ -n "${smoked_config}" ]; then
 	_child_args="${_child_args} -config ${smoked_config}"
 fi
-_child_args="${_child_args} ${smoked_flags}"
+_child_args="${_child_args} ${smoked_args}"
 
-# Supervise with daemon(8): -r restarts on exit, -S routes output to syslog,
-# -P tracks the supervisor pid, -u drops to the service user.
+# Supervise with daemon(8): -f detaches the supervisor from the caller's stdin/stdout/stderr
+# (without it daemon(8) keeps them open, so whatever ran `service smoked start` would wait on
+# them), -r restarts the child if it exits, -T sends its output to syslog
+# tagged with the service name, -P records the SUPERVISOR's pid so `service smoked stop` signals
+# daemon (which stops the child and does not restart it), and -t titles the supervisor
+# "daemon: smoked[<child pid>]". rc.subr evals this line, so every word here must be a single
+# shell word. The default procname (/usr/sbin/daemon) matches that title for status/stop.
 command="/usr/sbin/daemon"
-command_args="-r -S -P ${pidfile} -t ${desc} -u ${smoked_user} ${smoked_bin} ${_child_args}"
+command_args="-f -r -T ${name} -t ${name} -P ${pidfile} ${smoked_bin} ${_child_args}"
+
+start_precmd="smoked_precmd"
+smoked_precmd()
+{
+	install -d -o "${smoked_user}" -m 0755 "${pidfile%/*}"
+}
 
 run_rc_command "$1"
