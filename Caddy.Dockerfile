@@ -11,18 +11,14 @@
 # builds of the same source. Bump tags + digests + plugin versions together on a refresh (Renovate
 # tracks them — see renovate.json). caddy:2.11-builder / caddy:2.11-alpine. CODE_REVIEW M4/L7.
 #
-# The builder digest below (refreshed 2026-08) carries Go 1.26.6, clearing the stdlib
-# net/http+x/net/idna and x/net/dns/dnsmessage CVEs (CVE-2026-39821, CVE-2026-46600) that the
-# prior pin's Go 1.26.5 toolchain had. Caddy 2.11.4's own go.sum still pins vulnerable
-# golang.org/x/net, golang.org/x/text, golang.org/x/crypto and google.golang.org/grpc versions
-# (they're Caddy's compiled-in deps, not something a base-image bump alone fixes — no 2.12 release
-# exists yet to pick up a bump upstream), so four extra --with lines below force Go's
-# minimal-version-selection to the patched versions (CVE-2026-46600, CVE-2026-56852,
-# GHSA-hrxh-6v49-42gf, and — added 2026-09 after Trivy flagged the built binary — CVE-2026-56854, an
-# auth bypass in golang.org/x/crypto/ssh, plus CVE-2026-84304 in google.golang.org/grpc; the x/text
-# floor was raised to v0.42.0 in 2026-10 for GO-2026-6629, a precis panic fixed in v0.41.0). Re-check
-# these floors whenever Caddy releases a version that bundles the fix natively, and drop them then.
-FROM caddy:2.11-builder@sha256:c7ae80243a530d532d20062d56d6198b3ab161eb6971d28716ef7ec55599fea4 AS build
+# The builder digest below (refreshed 2026-10) carries Go 1.27.2 and Caddy v2.11.7, clearing the
+# stdlib net/http and crypto/tls CVEs (CVE-2026-78667, CVE-2026-78669, CVE-2026-97031) that the prior
+# pin's Go 1.26.6 toolchain had. Caddy 2.11.7 itself now requires the patched golang.org/x/text,
+# golang.org/x/crypto and google.golang.org/grpc versions that earlier --with floors forced, so those
+# floors are gone. Its go.mod still requires golang.org/x/net v0.59.0, so the one --with line below
+# forces Go's minimal-version-selection to v0.60.0 (CVE-2026-78669). Re-check that floor whenever
+# Caddy releases a version that requires x/net v0.60.0 or later itself, and drop it then.
+FROM caddy:2.11-builder@sha256:b25f47453fa02f7e66c0828b4b1343658808b9000950b6825c4a1cb0c988f5f8 AS build
 RUN xcaddy build \
 	--with github.com/caddy-dns/cloudflare@v0.2.4 \
 	--with github.com/caddy-dns/route53@v1.6.2 \
@@ -30,10 +26,7 @@ RUN xcaddy build \
 	--with github.com/caddy-dns/duckdns@v0.5.0 \
 	--with github.com/caddy-dns/namecheap@v1.0.0 \
 	--with github.com/caddy-dns/gandi@v1.1.0 \
-	--with golang.org/x/net/http2@v0.56.0 \
-	--with golang.org/x/text/language@v0.42.0 \
-	--with golang.org/x/crypto/ssh@v0.56.0 \
-	--with google.golang.org/grpc@v1.83.2
+	--with golang.org/x/net/http2@v0.60.0
 
 # Same digest as before (caddy:2.11-alpine hasn't been rebuilt upstream since 2026-06-24), so the
 # c-ares/curl/libcurl/openssl packages it ships are stale relative to the Alpine 3.23 apk repo. The

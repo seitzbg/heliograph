@@ -6,7 +6,7 @@
 # Build image pinned by digest for reproducibility. Bump the tag + digest together on a refresh
 # (Renovate keeps these current — see renovate.json); a pinned Go toolchain trades automatic patch
 # uptake for a reviewable, reproducible build. CODE_REVIEW M4/L7.
-FROM golang:1.26-alpine@sha256:70b46548e42db77e0966aaf3619fd068734dc6c77584d526b91126504fd95816 AS build
+FROM golang:1.26-alpine@sha256:3082400e369fa24d5fc60bca20edab3f6d604e0c5a690ec66b295eff4dd87ade AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
