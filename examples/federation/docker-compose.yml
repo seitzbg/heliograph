@@ -56,6 +56,7 @@ services:
       SMOKED_DOWNSAMPLE: "1"
       SMOKED_RESOLVE_IPS: "1"
       SMOKED_ABSOLUTE_TIME: ${SMOKED_ABSOLUTE_TIME:-1}
+      SMOKED_Y_FIT: ${SMOKED_Y_FIT:-peaks}
       # Enable the admin GUI so you can onboard/list/revoke vantages and edit DB targets from the
       # browser. Required to provision vantages without the CLI. See .env.example.
       SMOKED_ADMIN_PASSWORD: ${SMOKED_ADMIN_PASSWORD:-}

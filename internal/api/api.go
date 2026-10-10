@@ -67,6 +67,11 @@ type Server struct {
 	// (true, the default) or relative -3h/now labels. Surfaced at GET /api/version; set from
 	// -absolute-time / SMOKED_ABSOLUTE_TIME. Applies uniformly to every graph (grid, stack, zoom).
 	AbsoluteTime bool
+	// YFit is the dashboard's default graph y-axis fit: "peaks" (scale so every median peak and
+	// most of the smoke fit) or "typical" (scale to the 98th percentile of the median line, so rare
+	// spikes clip at the top frame, SmokePing-style). A viewer's own choice in the Graphs toolbar
+	// overrides it. Surfaced at GET /api/version; set from -y-fit / SMOKED_Y_FIT; empty = "peaks".
+	YFit string
 	// Rounds, if set, adds collector round-level metrics (duration, size, error
 	// count) to /metrics. Optional; nil in tests and pure-API use.
 	Rounds *RoundStats
@@ -362,7 +367,11 @@ func (srv *Server) version(w http.ResponseWriter, _ *http.Request) {
 	if v == "" {
 		v = "dev"
 	}
-	writeJSON(w, map[string]any{"version": v, "absolute_time": srv.AbsoluteTime})
+	fit := srv.YFit
+	if fit == "" {
+		fit = "peaks"
+	}
+	writeJSON(w, map[string]any{"version": v, "absolute_time": srv.AbsoluteTime, "y_fit": fit})
 }
 
 // probeSchema emits each probe's config variables as JSON Schema (draft 2020-12),

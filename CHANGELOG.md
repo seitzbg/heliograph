@@ -6,6 +6,17 @@ All notable changes to **Heliograph** are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **A y-axis fit option for the graphs.** The Graphs toolbar has a new **Fit** control. **Peaks**
+  (the default, unchanged) scales each graph so every median spike fits. **Typical** scales to the
+  98th percentile of the median line and ignores the smoke, the way SmokePing scales to its median:
+  a few rare spikes clip at the top frame instead of squeezing the usual latency into the bottom of
+  the plot. This matters most on a short step (60 s by default), which can catch more brief stalls
+  as median spikes than SmokePing's 300 s rounds. The choice applies to the grid, the four-range view,
+  zoom and the unison scale, and each browser remembers it. `-y-fit` / `SMOKED_Y_FIT=typical` sets
+  the default for viewers who haven't chosen; an unknown value stops `smoked` at startup.
+  `/api/version` reports it as `y_fit`.
+
 ### Security
 - **Go toolchain bumped 1.26.6 → 1.26.9 and `golang.org/x/net` v0.58.0 → v0.60.0** for the
   standard-library fixes in GO-2026-6603, GO-2026-6605, GO-2026-6607 to GO-2026-6613 and GO-2026-6617

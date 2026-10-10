@@ -84,6 +84,7 @@ services:
       SMOKED_DOWNSAMPLE: "1"                        # hourly continuous aggregate for the UI's Hourly mode
       SMOKED_RESOLVE_IPS: "1"                       # show each target's IP in the graph title (pinned/literal/resolved)
       SMOKED_ABSOLUTE_TIME: ${SMOKED_ABSOLUTE_TIME:-1}   # graph x-axes: 1 (default) = absolute clock time; 0 = relative -3h/now (set in .env)
+      SMOKED_Y_FIT: ${SMOKED_Y_FIT:-peaks}           # default graph y-axis fit: peaks | typical (SmokePing-like); viewers can override (set in .env)
     ports:
       # Published on localhost only: the API is unauthenticated and query-heavy, so it
       # must not be reachable on all host interfaces. For access beyond this host, run a

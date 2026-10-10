@@ -50,6 +50,7 @@ services:
       SMOKED_DOWNSAMPLE: "1"                          # hourly/daily aggregates for the UI
       SMOKED_RESOLVE_IPS: "1"                         # show each target's IP in the graph title
       SMOKED_ABSOLUTE_TIME: ${SMOKED_ABSOLUTE_TIME:-1}   # graph x-axes: 1 = absolute clock time; 0 = relative -3h/now
+      SMOKED_Y_FIT: ${SMOKED_Y_FIT:-peaks}           # default graph y-axis fit: peaks | typical (SmokePing-like)
       # Optional admin GUI (Config + Vantages tabs). Empty = disabled (fail-closed). See .env.example.
       SMOKED_ADMIN_PASSWORD: ${SMOKED_ADMIN_PASSWORD:-}
       SMOKED_ADMIN_SESSION_KEY: ${SMOKED_ADMIN_SESSION_KEY:-}

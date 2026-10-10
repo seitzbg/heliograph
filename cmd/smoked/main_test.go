@@ -758,6 +758,29 @@ func TestValidateAgentFlags(t *testing.T) {
 	}
 }
 
+// TestParseYFit: -y-fit / SMOKED_Y_FIT accepts the two dashboard fit modes (case-insensitive,
+// empty = the default "peaks") and rejects anything else at startup rather than letting the
+// dashboard silently fall back.
+func TestParseYFit(t *testing.T) {
+	cases := []struct {
+		in, want string
+		wantErr  bool
+	}{
+		{"", "peaks", false},
+		{"peaks", "peaks", false},
+		{"typical", "typical", false},
+		{" Typical ", "typical", false},
+		{"median", "", true},
+		{"max", "", true},
+	}
+	for _, c := range cases {
+		got, err := parseYFit(c.in)
+		if (err != nil) != c.wantErr || got != c.want {
+			t.Errorf("parseYFit(%q) = %q, %v; want %q, wantErr=%v", c.in, got, err, c.want, c.wantErr)
+		}
+	}
+}
+
 // TestApplyMuSerializesRuntimeSwaps models CODE_REVIEW #1: a slow "SIGHUP" build (A)
 // racing an "API apply" (B) that starts later. When both hold applyMu across their whole
 // build+swap, A cannot swap a stale runtime AFTER B: B blocks on the lock until A finishes,
