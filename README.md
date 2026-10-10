@@ -34,6 +34,13 @@ click a graph to zoom):
 
 ![Heliograph per-target graph grid](docs/img/dashboard-graphs-dark.png)
 
+The **Fit** control in the Graphs toolbar sets how every graph picks its y-axis top. **Peaks** (the
+default) fits every median spike plus most of the smoke. **Typical** scales to the 98th percentile of
+the median line and ignores the smoke, the way SmokePing scales to its median, so a few rare spikes
+clip at the top frame and a shift in the usual latency fills the plot instead of hugging the bottom.
+The stat row above each graph still shows the true median max. Each browser remembers its own
+choice; `-y-fit` / `SMOKED_Y_FIT=typical` sets the default for viewers who haven't picked one.
+
 Every graph can **overlay a median line per federation vantage**, so you read one target from
 several networks at once — here `github.com` from the hub plus two remote uplinks (Comcast and
 FiOS), each vantage a distinct line over its own smoke band:
@@ -268,6 +275,11 @@ run `--history` after `--apply`. If you put the converted tree in your YAML conf
 example as a `conf.d/` file), pass that config with `--config` so explicit `id`s there are honored.
 With no `--config` and no targets in the DB config, history is stored under the SmokePing path,
 which is the id of a YAML target with no `id`.
+
+SmokePing scales each graph to its median line. Set `SMOKED_Y_FIT=typical` to make that the
+dashboard's default y-axis fit (see the Fit control above). This matters most if you also shorten
+the step: rounds every 60 s can catch more brief spikes than SmokePing's 300 s, and under the
+default fit the highest spike sets the scale.
 
 `--history` skips a target and names it on stderr when no configured target has its path (renamed
 or moved since the config import) or when more than one does. It also skips a target whose ping

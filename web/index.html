@@ -121,7 +121,7 @@
   .swatch i { width:12px; height:12px; border-radius:3px; display:inline-block; box-shadow:inset 0 0 0 1px rgba(0,0,0,.12); }
   .smoke-key { display:inline-flex; } .smoke-key i { width:9px; height:15px; }
   /* Graphs toolbar (cleaned up): a quiet reference KEY (jitter + a compact loss color strip) on the
-     left, a divider, then the interactive CONTROLS (vantages/cols/unison) right-aligned. The strip
+     left, a divider, then the interactive CONTROLS (vantages/cols/fit/unison) right-aligned. The strip
      replaces the old 8 labeled loss chips; the divider drops on narrow screens where the zones wrap. */
   .legend-key { display:inline-flex; align-items:center; gap:8px 14px; flex-wrap:wrap; }
   .legend-key .lbl { color:var(--ink-faint); }
@@ -400,6 +400,11 @@
               <button type="button" data-cols="3" aria-pressed="false">3</button>
               <button type="button" data-cols="4" aria-pressed="false">4</button>
               <button type="button" data-cols="6" aria-pressed="false">6</button>
+            </div>
+            <span class="lbl">Fit</span>
+            <div class="seg" id="fitSeg" role="group" aria-label="Y-axis fit" title="Y-axis fit — Peaks: every median spike fits; Typical: scale to the usual median line, rare spikes clip at the top (SmokePing-style)">
+              <button type="button" data-fit="peaks" aria-pressed="true">Peaks</button>
+              <button type="button" data-fit="typical" aria-pressed="false">Typical</button>
             </div>
             <label class="lbl" style="cursor:pointer; display:inline-flex; align-items:center; gap:5px" title="Share one Y-axis across all graphs so they're comparable"><input type="checkbox" id="unisonToggle"> unison scale</label>
           </div>

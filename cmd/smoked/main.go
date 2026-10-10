@@ -90,6 +90,20 @@ func validateAgentFlags(agentAddr, dsn string, serve bool) error {
 	return nil
 }
 
+// parseYFit normalizes -y-fit / SMOKED_Y_FIT to one of the dashboard's graph fit modes ("peaks",
+// the default, or "typical"), rejecting anything else so a typo fails startup instead of the
+// dashboard silently ignoring it.
+func parseYFit(s string) (string, error) {
+	switch v := strings.ToLower(strings.TrimSpace(s)); v {
+	case "", "peaks":
+		return "peaks", nil
+	case "typical":
+		return v, nil
+	default:
+		return "", fmt.Errorf("-y-fit must be peaks or typical, got %q", s)
+	}
+}
+
 // envBool reads a boolean flag default from the environment, so a Compose/K8s deployment can drive
 // it via `environment:` rather than the command list. Follows strconv.ParseBool; empty or
 // unparseable = false.
@@ -139,6 +153,7 @@ func main() {
 	downsample := flag.Bool("downsample", envBool("SMOKED_DOWNSAMPLE"), "with -dsn: enable the hourly continuous aggregate + retention policies (or set SMOKED_DOWNSAMPLE=1)")
 	resolveIPs := flag.Bool("resolve-ips", envBool("SMOKED_RESOLVE_IPS"), "show each target's IP in the graph title (or set SMOKED_RESOLVE_IPS=1): a pinned `ip:`, else a literal-IP host, else the resolved hostname (best-effort, refreshed on reload)")
 	absoluteTime := flag.Bool("absolute-time", envBoolOr("SMOKED_ABSOLUTE_TIME", true), "label graph x-axes with absolute clock time (default); set SMOKED_ABSOLUTE_TIME=0 (or -absolute-time=false) for relative -3h/now labels")
+	yFitFlag := flag.String("y-fit", os.Getenv("SMOKED_Y_FIT"), "default graph y-axis fit (or set SMOKED_Y_FIT): peaks (default) fits every median peak; typical scales to the 98th percentile of the median line so rare spikes clip, SmokePing-style. Viewers can override it in the Graphs toolbar")
 	requireFingerprint := flag.Bool("require-fingerprint", false, "reject agent results that carry no measurement fingerprint (strict mode); default accepts them for pre-fingerprint agents. Flip on once every vantage's agent is upgraded (watch heliograph_agent_missing_fingerprint_total)")
 	agentAddr := flag.String("agent-addr", os.Getenv("SMOKED_AGENT_ADDR"), "listen address for the opt-in mTLS federation agent API, e.g. :8443; unset = single-host (no agent API)")
 	agentHostname := flag.String("agent-hostname", os.Getenv("SMOKED_AGENT_HOSTNAME"), "comma-separated SAN host[,IP] for smoked's CA-issued agent-API server cert (required when -agent-addr is set)")
@@ -167,6 +182,10 @@ func main() {
 		fatal("invalid flags", err)
 	}
 	if err := validateAgentFlags(*agentAddr, *dsn, *serve); err != nil {
+		fatal("invalid flags", err)
+	}
+	yFit, err := parseYFit(*yFitFlag)
+	if err != nil {
 		fatal("invalid flags", err)
 	}
 
@@ -436,6 +455,7 @@ func main() {
 		srv := api.New(st, *webdir)
 		srv.Version = version
 		srv.AbsoluteTime = *absoluteTime
+		srv.YFit = yFit
 		srv.Rounds = roundStats
 		// Expose extra operational counters on /metrics so they are scrapeable, not
 		// merely logged: the store's persistent-write failures, and the webhook delivery

@@ -147,6 +147,23 @@ check('sharedYMax is the max robustMax over panels with data', () => {
   assert.equal(D.sharedYMax([{ buckets: [] }, null]), undefined); // no data anywhere
   assert.equal(D.sharedYMax([]), undefined);
 });
+check('sharedYMax scales each panel under the selected y-axis fit', () => {
+  globalThis.Smoke = { robustMax: (s, fit) => (fit === 'typical' ? s.buckets[0].typ : s.buckets[0].m) };
+  const s = (m, typ) => ({ buckets: [{ m, typ }] });
+  assert.equal(D.sharedYMax([s(120, 12), s(30, 25)], 'typical'), 25);
+  assert.equal(D.sharedYMax([s(120, 12), s(30, 25)]), 120);
+});
+
+// resolveYFit: the viewer's own Graphs-toolbar choice (localStorage) beats the server's
+// SMOKED_Y_FIT default, which beats "peaks"; an unknown value at either level is skipped.
+check('resolveYFit: stored choice > server default > peaks', () => {
+  assert.equal(D.resolveYFit('typical', 'peaks'), 'typical');
+  assert.equal(D.resolveYFit('peaks', 'typical'), 'peaks');
+  assert.equal(D.resolveYFit(null, 'typical'), 'typical');
+  assert.equal(D.resolveYFit('bogus', 'typical'), 'typical');
+  assert.equal(D.resolveYFit(null, undefined), 'peaks');
+  assert.equal(D.resolveYFit(null, 'bogus'), 'peaks');
+});
 
 // fetchJSON (#2): a non-2xx response must reject (so callers keep last-known state
 // instead of decoding an error body as empty data and wiping the view). 2xx returns JSON.

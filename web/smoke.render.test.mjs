@@ -419,5 +419,66 @@ check('robustRange still trims a lone outlier SAMPLE so the band scale is not bl
   assert.ok(hi < 100, `a single 5000ms sample must be trimmed, not set the scale, got hi=${hi}`);
 });
 
+// --- y-axis fit "typical": scale to the bulk of the median line (98th percentile of the
+// per-bucket medians, ignoring the smoke) so rare spikes clip at the top frame instead of
+// flattening the baseline — the SmokePing-like view. "peaks" (the default) is the #112 rule above. ---
+const medBucket = (m, samples) => ({ centered: samples, samples, lost: 0, median: m, pings: samples.length });
+// 200 rounds at a 10ms median plus two 99ms median spikes: the reported 30h shape (7ms baseline,
+// one 98.9ms median max) in miniature.
+function spikySeries() {
+  const buckets = Array.from({ length: 200 }, () => medBucket(10, [9, 10, 11, 12]));
+  buckets.push(medBucket(99, [98, 99, 100, 101]), medBucket(99, [98, 99, 100, 101]));
+  return { buckets, N: 4 };
+}
+const near = (a, b) => Math.abs(a - b) < 1e-9;
+check('typical fit: rare median spikes do not set the scale', () => {
+  // p98 of 202 medians is the 198th-smallest (index 197) = 10 -> top 10 * 1.18 = 11.8.
+  const [lo, hi] = Smoke.robustRange(spikySeries(), false, 'typical');
+  assert.equal(lo, 0, 'latency axis stays 0-based');
+  assert.ok(near(hi, 11.8), `typical top should be 11.8 (baseline-fitted), got ${hi}`);
+  const [, peaksHi] = Smoke.robustRange(spikySeries(), false, 'peaks');
+  assert.ok(near(peaksHi, 99 * 1.18), `peaks top should still fit the 99ms spike, got ${peaksHi}`);
+});
+check('typical fit ignores the smoke tail (scales to the median line only)', () => {
+  // Every round's median is 10 but a quarter of its pings sit at 40ms: peaks scales to the
+  // 96.5th-percentile ping (40 -> 47.2); typical, like SmokePing, only to the median line.
+  const buckets = Array.from({ length: 50 }, () => medBucket(10, [8, 10, 10, 40]));
+  const [, hi] = Smoke.robustRange({ buckets, N: 4 }, false, 'typical');
+  assert.ok(near(hi, 11.8), `typical must ignore the 40ms smoke tail, got ${hi}`);
+});
+check('typical fit on a short series fits the highest median (SmokePing max-median rule)', () => {
+  // 10 buckets: the 98th percentile IS the max, so the top is 14 * 1.18 = 16.52 (each round's
+  // +20ms ping tail would lift peaks to 34 * 1.18).
+  const buckets = Array.from({ length: 10 }, (_, i) => medBucket(5 + i, [5 + i, 25 + i]));
+  const [, hi] = Smoke.robustRange({ buckets, N: 2 }, false, 'typical');
+  assert.ok(near(hi, 14 * 1.18), `got ${hi}`);
+});
+check('typical fit keeps the 1ms floor for a sub-millisecond latency series', () => {
+  const buckets = Array.from({ length: 20 }, () => medBucket(0.2, [0.1, 0.2, 5]));
+  assert.equal(Smoke.robustRange({ buckets, N: 3 }, false, 'typical')[1], 1);
+});
+check('typical fit leaves a signed (NTP offset) axis on its own range', () => {
+  assert.deepEqual(Smoke.robustRange(signedSeries(), true, 'typical'), Smoke.robustRange(signedSeries(), true));
+});
+check('render honors opts.fit (and returns the fitted top)', () => {
+  const { canvas } = recordingCanvas();
+  const top = Smoke.render(canvas, spikySeries(), { height: 200, fit: 'typical' });
+  assert.ok(near(top, 11.8), `render with fit=typical should top out at 11.8, got ${top}`);
+  const { canvas: c2 } = recordingCanvas();
+  assert.ok(near(Smoke.render(c2, spikySeries(), { height: 200 }), 99 * 1.18), 'render defaults to peaks');
+});
+check('typical fit applies to overlaid vantages too', () => {
+  // The focused series is flat at 10ms; an overlay vantage carries the spikes. Under typical the
+  // overlay's rare spikes must not widen the shared scale either.
+  const flat = { buckets: Array.from({ length: 202 }, () => medBucket(10, [9, 10, 11, 12])), N: 4 };
+  const { canvas } = recordingCanvas();
+  const top = Smoke.render(canvas, flat, { height: 200, fit: 'typical', overlays: [{ series: spikySeries() }] });
+  assert.ok(near(top, 11.8), `overlay spikes widened the typical scale to ${top}`);
+});
+check('robustMax (unison grid) follows the fit', () => {
+  assert.ok(near(Smoke.robustMax(spikySeries(), 'typical'), 11.8));
+  assert.ok(near(Smoke.robustMax(spikySeries()), 99 * 1.18));
+});
+
 if (failed) { console.error(`\n${failed} test(s) failed`); process.exit(1); }
 console.log('\nall smoke.render tests passed');

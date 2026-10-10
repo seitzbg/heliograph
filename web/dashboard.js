@@ -187,13 +187,25 @@
   // sharedYMax is the Graphs grid's unison Y-axis: the largest per-panel robustMax across
   // every panel that holds data, so a 5ms target and a 500ms target are drawn to the same
   // scale and are visually comparable. undefined when nothing has data yet — callers then
-  // fall back to per-panel auto-scaling.
-  function sharedYMax(seriesList) {
+  // fall back to per-panel auto-scaling. fit is the y-axis fit mode (resolveYFit), so a shared
+  // scale under "typical" is the largest per-panel typical top, not the largest spike.
+  function sharedYMax(seriesList, fit) {
     let m = 0;
     for (const s of seriesList) {
-      if (s && s.buckets && s.buckets.length) m = Math.max(m, Smoke.robustMax(s));
+      if (s && s.buckets && s.buckets.length) m = Math.max(m, Smoke.robustMax(s, fit));
     }
     return m > 0 ? m : undefined;
+  }
+
+  // Graph y-axis fit modes (smoke.js robustRange): "peaks" scales so every median peak fits;
+  // "typical" scales to the 98th percentile of the median line so rare spikes clip, SmokePing-style.
+  const Y_FITS = new Set(['peaks', 'typical']);
+  // resolveYFit picks the fit to draw with: the viewer's own Graphs-toolbar choice (persisted in
+  // localStorage) wins, else the server default (SMOKED_Y_FIT via /api/version), else "peaks".
+  function resolveYFit(stored, server) {
+    if (Y_FITS.has(stored)) return stored;
+    if (Y_FITS.has(server)) return server;
+    return 'peaks';
   }
 
   // buildTree turns the flat target-name list from /api/targets into the config-tree menu
@@ -888,7 +900,7 @@
     return (!vantage || vantage === 'local') ? local : remote;
   }
 
-  window.Dash = { RANGES, RANGE_ORDER, parseRoute, mergeSeries, gridSince, gridTemplateFor, maxColumnsFor, rangeLabels, fetchWithTimeout, fetchJSON, zoomResolution, pixelToTime, sharedYMax, nextGridSeries, buildTree, underPath, targetStatus, pickSeries, vantageList, orderVantages, defaultFocus, keepFocus, vantageColorVar, worstStatus, statusFor, availableVantages, toggleGridVantage, vantageControlChips, bandVantageFor, bandOwnerHint, gridShowsTarget, adminMode, adminSessionState, createAdminStateController, statusProbeOwnsView, relTime, listTargets, addTarget, editTarget, removeTarget, buildTargetNode, buildGroupNode, labelHTML, collectingNote, vantageBundleFilename, cfgTree, reweightSiblings, reorderSiblings, editNodeAtPath, removeNodeAtPath, renameNodeAtPath, addNodeAtPath, moveNode, moveInList, cfgDropDestination, cfgVisibleRows, cfgTreeKey, tkey, ntpStatHtml, ntpStatOf, ntpStatSelect };
+  window.Dash = { RANGES, RANGE_ORDER, parseRoute, mergeSeries, gridSince, gridTemplateFor, maxColumnsFor, rangeLabels, fetchWithTimeout, fetchJSON, zoomResolution, pixelToTime, sharedYMax, resolveYFit, nextGridSeries, buildTree, underPath, targetStatus, pickSeries, vantageList, orderVantages, defaultFocus, keepFocus, vantageColorVar, worstStatus, statusFor, availableVantages, toggleGridVantage, vantageControlChips, bandVantageFor, bandOwnerHint, gridShowsTarget, adminMode, adminSessionState, createAdminStateController, statusProbeOwnsView, relTime, listTargets, addTarget, editTarget, removeTarget, buildTargetNode, buildGroupNode, labelHTML, collectingNote, vantageBundleFilename, cfgTree, reweightSiblings, reorderSiblings, editNodeAtPath, removeNodeAtPath, renameNodeAtPath, addNodeAtPath, moveNode, moveInList, cfgDropDestination, cfgVisibleRows, cfgTreeKey, tkey, ntpStatHtml, ntpStatOf, ntpStatSelect };
 
   // ---------------------------------------------------------------- init (DOM) --
   function init() {
@@ -945,7 +957,7 @@
       // Relative labels (each range's static xl, e.g. -3h/now) by default; absolute wall-clock
       // (rangeLabels) when the Graphs "absolute time" toggle is on and we have a real window.
       const xlabels = timeAbsolute && t0 != null ? rangeLabels(t0, t1) : R.xl;
-      Smoke.render(canvas, s, { height, band: R.mode === 'band', xlabels, t0, t1: t0 == null ? undefined : t1, yMax, overlays, signed });
+      Smoke.render(canvas, s, { height, band: R.mode === 'band', xlabels, t0, t1: t0 == null ? undefined : t1, yMax, overlays, signed, fit: yFit });
     }
     // An NTP target graphing clock offset needs the signed (zero-centered, no-floor) y-axis. The
     // metric comes from /api/targets' config-derived `metric` (metricByName), NOT the live offset
@@ -1388,6 +1400,13 @@
     // drag-zoom is always absolute regardless. Server-configured (SMOKED_ABSOLUTE_TIME, default
     // true) and applied uniformly — the value arrives with the /api/version boot fetch below.
     let timeAbsolute = true;
+    // Graph y-axis fit ("peaks" | "typical", see resolveYFit): the viewer's stored Graphs-toolbar
+    // choice, else the server default that arrives with the /api/version boot fetch below. Applies
+    // to every graph (grid, stack, zoom) and to the unison scale.
+    let storedYFit = null;
+    try { storedYFit = localStorage.getItem('yFit'); } catch (e) {}
+    let yFit = resolveYFit(storedYFit);
+    function reflectYFit() { document.querySelectorAll('#fitSeg button').forEach((x) => x.setAttribute('aria-pressed', String(x.dataset.fit === yFit))); }
     // Graphs-per-row: 'auto' fits as many as the min width allows; a fixed N caps columns but never
     // shrinks a graph below the minimum (wraps to fewer instead). The minimum is expressed in rem
     // (font-relative) so graphs scale with the user's text size, not a fixed pixel count; graphMinPx
@@ -1489,7 +1508,7 @@
           if (p.series) scaleSeries.push(p.series);
           (overlaysFor(p) || []).forEach((o) => o && o.series && scaleSeries.push(o.series));
         }
-        yMax = sharedYMax(scaleSeries);
+        yMax = sharedYMax(scaleSeries, yFit);
       }
       for (const p of vis) renderInto(p.canvas, p.series, RANGES['3h'], 170, yMax, overlaysFor(p), ntpSigned(p.el.dataset.target));
       updateColsPicker(); // the grid now has a measurable width (e.g. first paint on view entry)
@@ -1761,7 +1780,7 @@
       // A custom drag-zoom range always shows absolute times (z.xlabels is already rangeLabels).
       // A fixed range honors the "absolute time" toggle, same as the grid/stack via renderInto.
       const xlabels = !z.custom && timeAbsolute && z.t0 != null ? rangeLabels(z.t0, z.t1) : z.xlabels;
-      Smoke.render(z.canvas, z.series, { height: 360, band: z.band, xlabels, t0: z.t0, t1: z.t1, overlays, signed: ntpSigned(curTarget) });
+      Smoke.render(z.canvas, z.series, { height: 360, band: z.band, xlabels, t0: z.t0, t1: z.t1, overlays, signed: ntpSigned(curTarget), fit: yFit });
     }
     // renderZoomChips renders (or clears) the #zoomVantages legend/selector from the
     // currently-open zoomState's byV (no refetch — mirrors renderStackChips).
@@ -2785,6 +2804,8 @@
       refreshGrid();
     });
     $('colsSeg').addEventListener('click', (e) => { const b = e.target.closest('button'); if (!b) return; gridCols = b.dataset.cols; try { localStorage.setItem('graphCols', gridCols); } catch (err) {} document.querySelectorAll('#colsSeg button').forEach((x) => x.setAttribute('aria-pressed', String(x === b))); applyGridCols(); });
+    $('fitSeg').addEventListener('click', (e) => { const b = e.target.closest('button'); if (!b) return; yFit = storedYFit = b.dataset.fit; try { localStorage.setItem('yFit', yFit); } catch (err) {} reflectYFit(); rerender(); });
+    reflectYFit();
     // reflect the persisted columns choice on load, then apply it to the grid
     document.querySelectorAll('#colsSeg button').forEach((x) => x.setAttribute('aria-pressed', String(x.dataset.cols === gridCols)));
     applyGridCols();
@@ -2798,10 +2819,15 @@
         const boot = await fetchJSON('/api/version');
         // Absolute vs relative time labels is server-configured; apply it uniformly and re-render
         // the current view if it differs from the default we assumed before the fetch landed.
+        let changed = false;
         if (typeof boot.absolute_time === 'boolean' && boot.absolute_time !== timeAbsolute) {
           timeAbsolute = boot.absolute_time;
-          rerender();
+          changed = true;
         }
+        // The server's y-axis fit default applies only when this viewer hasn't chosen one.
+        const fit = resolveYFit(storedYFit, boot.y_fit);
+        if (fit !== yFit) { yFit = fit; reflectYFit(); changed = true; }
+        if (changed) rerender();
         const v = boot.version;
         if (!v) return;
         // Link the version to its source: the exact commit for a git-describe build
@@ -2810,7 +2836,7 @@
         const sha = (v.match(/-g([0-9a-f]+)$/) || [])[1];
         const href = sha ? repo + '/commit/' + sha : (/^v[0-9]/.test(v) ? repo + '/releases/tag/' + encodeURIComponent(v) : repo);
         $('appFooter').innerHTML = 'Heliograph <a href="' + href + '" target="_blank" rel="noopener noreferrer">' + esc(v) + '</a>';
-      } catch (e) { /* leave the default footer + assumed absolute-time default */ }
+      } catch (e) { /* leave the default footer + assumed absolute-time / y-fit defaults */ }
     })();
 
     // ---- config-tree menu events ----

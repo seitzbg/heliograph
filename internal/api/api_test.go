@@ -72,6 +72,7 @@ func TestVersionEndpoint(t *testing.T) {
 	srv := New(store.NewMem(10), "")
 	srv.Version = "v1.0.3-5-gabc1234"
 	srv.AbsoluteTime = true
+	srv.YFit = "typical"
 	rec := httptest.NewRecorder()
 	srv.Routes().ServeHTTP(rec, httptest.NewRequest("GET", "/api/version", nil))
 	if rec.Code != http.StatusOK {
@@ -80,6 +81,7 @@ func TestVersionEndpoint(t *testing.T) {
 	var got struct {
 		Version      string `json:"version"`
 		AbsoluteTime bool   `json:"absolute_time"`
+		YFit         string `json:"y_fit"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatalf("decode: %v", err)
@@ -90,6 +92,9 @@ func TestVersionEndpoint(t *testing.T) {
 	if !got.AbsoluteTime {
 		t.Errorf("absolute_time = %v, want the configured true", got.AbsoluteTime)
 	}
+	if got.YFit != "typical" {
+		t.Errorf("y_fit = %q, want the configured \"typical\"", got.YFit)
+	}
 
 	// An unversioned build (empty Version) falls back to "dev" rather than an empty string.
 	srv2 := New(store.NewMem(10), "")
@@ -98,6 +103,10 @@ func TestVersionEndpoint(t *testing.T) {
 	_ = json.Unmarshal(rec2.Body.Bytes(), &got)
 	if got.Version != "dev" {
 		t.Errorf("unset version = %q, want \"dev\"", got.Version)
+	}
+	// An unset fit reports the dashboard's default rather than an empty string.
+	if got.YFit != "peaks" {
+		t.Errorf("unset y_fit = %q, want \"peaks\"", got.YFit)
 	}
 }
 

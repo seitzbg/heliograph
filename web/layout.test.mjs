@@ -82,10 +82,12 @@ function cleanupTmpBin() {
   if (tmpBinDir) { rmSync(tmpBinDir, { recursive: true, force: true }); tmpBinDir = null; }
 }
 
-// Start the collector serving the demo target set (in-memory store, no -dsn).
+// Start the collector serving the demo target set (in-memory store, no -dsn). SMOKED_Y_FIT=typical
+// makes the operator's y-axis fit default observable (the y-fit check below); the other checks are
+// fit-agnostic.
 function startSmoked(bin) {
   const args = ['-serve', '-addr', `:${PORT}`, '-webdir', 'web'];
-  const proc = spawn(bin, args, { stdio: ['ignore', 'inherit', 'inherit'] });
+  const proc = spawn(bin, args, { stdio: ['ignore', 'inherit', 'inherit'], env: { ...process.env, SMOKED_Y_FIT: 'typical' } });
   proc.on('error', (e) => { console.error('failed to start smoked:', e.message); process.exit(1); });
   proc.on('exit', (code, signal) => { if (!stopping) childExit = { code, signal }; });
   return proc;
@@ -251,6 +253,31 @@ try {
       throw new Error(`aria-label should state it wraps to ${pick.effectiveCols}; got "${pick.ariaLabel}"`);
     }
   });
+
+  // y-axis fit: a first-time viewer gets the operator default (SMOKED_Y_FIT=typical on the spawned
+  // collector, delivered by the /api/version boot fetch), and a viewer's own toolbar choice persists
+  // across a reload and beats that default.
+  died();
+  const pressedFit = () => page.evaluate(() => {
+    const b = document.querySelector('#fitSeg button[aria-pressed="true"]');
+    return b ? b.dataset.fit : null;
+  });
+  const bootLanded = () => page.waitForSelector('#appFooter a', { timeout: 15_000 }); // footer links once /api/version lands
+  await page.evaluate(() => localStorage.removeItem('yFit'));
+  await page.reload({ waitUntil: 'load' });
+  await bootLanded();
+  const fitFirst = await pressedFit();
+  check('a first-time viewer sees the server y-fit default (SMOKED_Y_FIT=typical)', () => {
+    if (fitFirst !== 'typical') throw new Error(`pressed fit = ${fitFirst}, want typical`);
+  });
+  await page.click('#fitSeg button[data-fit="peaks"]');
+  await page.reload({ waitUntil: 'load' });
+  await bootLanded();
+  const fitStored = await pressedFit();
+  check("a viewer's fit choice survives a reload and overrides the server default", () => {
+    if (fitStored !== 'peaks') throw new Error(`pressed fit after choosing peaks + reload = ${fitStored}, want peaks`);
+  });
+  await page.evaluate(() => localStorage.removeItem('yFit'));
 
   // Count a canvas's non-transparent pixels — a painted graph has many; a blanked "collecting data…"
   // canvas has almost none. The ratio (during/before) tells a preserved graph from a blanked one

@@ -49,8 +49,8 @@ window.Smoke = (function () {
   }
 
   // robustMax is the y-axis top for the unison (shared-scale) grid — the same range robustRange
-  // computes for a single latency panel, so a median peak is never clipped there either.
-  function robustMax(s) { return robustRange(s, false)[1]; }
+  // computes for a single latency panel under the same fit.
+  function robustMax(s, fit) { return robustRange(s, false, fit)[1]; }
 
   // robustRange returns the [yMin, yMax] the y-axis should span. A latency series (signed=false) is
   // 0-based and floored at 1ms. A SIGNED series (NTP clock offset; explicitly flagged by the caller,
@@ -62,20 +62,32 @@ window.Smoke = (function () {
   // spike's few samples fall in that trimmed top-tail, yet its per-round median is real and robust
   // (one wild ping can't move a median). So fold the median extremes into the range — the spike
   // shows, while the sample percentiles still keep a lone outlier ping from blowing up the band
-  // scale. (Reported symptom: graph peaks getting cut off at the top frame.)
-  function robustRange(s, signed) {
-    const all = [];
+  // scale. (Reported symptom: graph peaks getting cut off at the top frame.) That is fit 'peaks',
+  // the default.
+  //
+  // Fit 'typical' (latency only) instead scales to the 98th percentile of the per-bucket medians
+  // and ignores the smoke, like SmokePing's 1.2 × max-median: the rare median spikes a short-step
+  // target catches clip at the top frame rather than squashing the baseline into the bottom
+  // sliver. On a short series the 98th percentile is the max, so nothing clips there.
+  function robustRange(s, signed, fit) {
+    const all = [], meds = [];
     let medLo = Infinity, medHi = -Infinity;
     for (const b of s.buckets) {
       for (const v of b.samples) all.push(v);
       if (b.median != null && !isNaN(b.median)) {
+        meds.push(b.median);
         if (b.median < medLo) medLo = b.median;
         if (b.median > medHi) medHi = b.median;
       }
     }
     if (!all.length) return signed ? [-1e-3, 1e-3] : [0, 1];
+    const pct = (arr, f) => arr[Math.min(arr.length - 1, Math.max(0, Math.floor(arr.length * f)))];
+    if (fit === 'typical' && !signed && meds.length) {
+      meds.sort((a, b) => a - b);
+      return [0, Math.max(1, pct(meds, 0.98) * 1.18)];
+    }
     all.sort((a, b) => a - b);
-    const q = (f) => all[Math.min(all.length - 1, Math.max(0, Math.floor(all.length * f)))];
+    const q = (f) => pct(all, f);
     let hi = q(0.965), lo = q(0.035);
     if (medHi > -Infinity) { hi = Math.max(hi, medHi); lo = Math.min(lo, medLo); }
     if (!signed) return [0, Math.max(1, hi * 1.18)]; // latency: 0-based, 1ms floor
@@ -165,12 +177,12 @@ window.Smoke = (function () {
     // zero-centered range with a baseline. A pinned yMax (unison grid) is honored only for
     // non-negative data — a signed series always uses its own range so negatives aren't clipped.
     const signed = !!opts.signed;
-    let [yMin, yMax] = robustRange(s, signed);
+    let [yMin, yMax] = robustRange(s, signed, opts.fit);
     if (opts.yMax != null && !signed) { yMin = 0; yMax = opts.yMax; }
     // widen for overlaid vantages (unless a pinned latency max already fixed the scale)
     if (!(opts.yMax != null && !signed) && opts.overlays && opts.overlays.length) {
       for (const o of opts.overlays) if (o && o.series) {
-        const [oLo, oHi] = robustRange(o.series, signed);
+        const [oLo, oHi] = robustRange(o.series, signed, opts.fit);
         yMin = Math.min(yMin, oLo); yMax = Math.max(yMax, oHi);
       }
     }

@@ -100,7 +100,8 @@ password-gated admin API, both of which mint the client certificate. Federation 
   as runtime validation)
 - 🚧 Overview (small multiples) + multi-range detail (3h/30h/10d/400d) done ✅ (Overview
   tab + per-target 3h/30h/10d/400d drill-down); unison scaling done ✅ (shared Y-axis
-  across the Graphs grid, toggle in the legend)
+  across the Graphs grid, toggle in the legend); y-axis fit done ✅ (Peaks / Typical toolbar
+  control, operator default `SMOKED_Y_FIT`; Typical scales to the median line like SmokePing)
 - 🚧 Top-N "charts" (worst by loss/median/stddev) done ✅ (`/api/charts` + dashboard
   "Worst targets" panel); config-tree menu done ✅ (Graphs-view left nav built from the
   target name paths: collapsible folders with worst-child status dots + subtree counts,
