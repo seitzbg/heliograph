@@ -6,6 +6,18 @@ All notable changes to **Heliograph** are recorded here. The format follows
 
 ## [Unreleased]
 
+### Security
+- **Go toolchain bumped 1.26.6 → 1.26.9 and `golang.org/x/net` v0.58.0 → v0.60.0** for the
+  standard-library fixes in GO-2026-6603, GO-2026-6605, GO-2026-6607 to GO-2026-6613 and GO-2026-6617
+  (`net/http`, `net/textproto`, `crypto/tls`; five of them are also fixed in `x/net`), which govulncheck
+  flagged as reachable from the collector's HTTP server and API, the agent client, the HTTP and DNS
+  probes, the alert notifiers and `smoked mcp`. The collector image's Go build stage moves to the
+  matching `golang:1.26-alpine` digest. No source changes.
+- **Bundled Caddy image rebuilt on Go 1.27.2 and Caddy v2.11.7** (from Go 1.26.6 and v2.11.4), clearing
+  the same `net/http`/`crypto/tls` CVEs in the Caddy binary (CVE-2026-78667, CVE-2026-78669,
+  CVE-2026-97031). Caddy 2.11.7 already requires the patched `x/text`, `x/crypto` and `grpc` versions, so
+  those build-time floors are dropped; the `golang.org/x/net` floor moves to v0.60.0.
+
 ## [2.3.0] - 2026-10-08
 
 ### Fixed
