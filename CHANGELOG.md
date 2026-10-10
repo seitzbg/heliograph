@@ -13,6 +13,10 @@ All notable changes to **Heliograph** are recorded here. The format follows
   flagged as reachable from the collector's HTTP server and API, the agent client, the HTTP and DNS
   probes, the alert notifiers and `smoked mcp`. The collector image's Go build stage moves to the
   matching `golang:1.26-alpine` digest. No source changes.
+- **Bundled Caddy image rebuilt on Go 1.27.2 and Caddy v2.11.7** (from Go 1.26.6 and v2.11.4), clearing
+  the same `net/http`/`crypto/tls` CVEs in the Caddy binary (CVE-2026-78667, CVE-2026-78669,
+  CVE-2026-97031). Caddy 2.11.7 already requires the patched `x/text`, `x/crypto` and `grpc` versions, so
+  those build-time floors are dropped; the `golang.org/x/net` floor moves to v0.60.0.
 
 ## [2.3.0] - 2026-10-08
 
