@@ -6,6 +6,8 @@ All notable changes to **Heliograph** are recorded here. The format follows
 
 ## [Unreleased]
 
+## [2.4.0] - 2026-10-10
+
 ### Added
 - **A y-axis fit option for the graphs.** The Graphs toolbar has a new **Fit** control. **Peaks**
   (the default, unchanged) scales each graph so every median spike fits. **Typical** scales to the
@@ -1794,7 +1796,8 @@ the smoke-graph look, a fast/parallel poller, and probes as plugins.
 - Full re-implementation reference / code map maintained outside the repo at
   `~/.claude/plans/smokeping-codemap/`.
 
-[Unreleased]: https://github.com/seitzbg/heliograph/compare/v2.3.0...main
+[Unreleased]: https://github.com/seitzbg/heliograph/compare/v2.4.0...main
+[2.4.0]: https://github.com/seitzbg/heliograph/compare/v2.3.0...v2.4.0
 [2.3.0]: https://github.com/seitzbg/heliograph/compare/v2.2.0...v2.3.0
 [2.2.0]: https://github.com/seitzbg/heliograph/compare/v2.1.0...v2.2.0
 [2.1.0]: https://github.com/seitzbg/heliograph/compare/v2.0.0...v2.1.0
